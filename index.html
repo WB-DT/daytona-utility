@@ -354,12 +354,67 @@
         // --- 2. CORE FUNCTIONS (DEFINITIVE GLOBAL HOISTING FIX) ---
         // ====================================================================
         
-        // --- Global Utilities (Defined with `function` or `const` at top-level scope) ---
+        // --- Global Utilities ---
         const getVal = (obj, key, defaultVal = '') => (obj && obj[key] != null) ? obj[key] : defaultVal;
         const escapeHTML = (str) => { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'})[m]); };
         function getElementValue(id) { const el=document.getElementById(id); if(!el){return null;} return el.value?.trim()??el.textContent?.trim()??null; }
         
-        // --- UI/Pop-up Functions (Used in onclick and callbacks) ---
+        // --- Authentication & App Lifecycle ---
+
+        function login() {
+            document.getElementById('login-button').disabled = true;
+            document.getElementById('login-button').textContent = "Signing in...";
+            
+            msalInstance.loginPopup({ scopes: ["User.Read"] })
+                .then(handleMsalResponse)
+                .catch(err => {
+                    console.error("MSAL login error:", err);
+                    showLoginError("Login failed. Please try again.");
+                });
+        }
+        
+        function handleMsalResponse(response) {
+            if (response && response.account) {
+                msalAccount = response.account;
+                currentUserRepName = msalAccount.name;
+                initializeAppUI();
+            } else {
+                const accounts = msalInstance.getAllAccounts();
+                if (accounts.length > 0) {
+                    msalAccount = accounts[0];
+                    currentUserRepName = msalAccount.name;
+                    initializeAppUI();
+                } else {
+                     console.log("DEBUG: handleMsalResponse called without a valid account in response.");
+                }
+            }
+        }
+        
+        function initializeAppUI() {
+            console.log(`DEBUG: Initializing main app for ${currentUserRepName}`);
+            document.getElementById('login-container').classList.add('hidden');
+            document.getElementById('main-app-container').classList.remove('hidden');
+
+            const welcomeMsg = document.getElementById('welcome-message');
+            if (welcomeMsg) {
+                const firstName = currentUserRepName ? currentUserRepName.split(' ')[0] : 'User';
+                welcomeMsg.textContent = `Welcome, ${firstName}`;
+                welcomeMsg.classList.remove('hidden');
+            }
+
+            updateFormDisplayMode(); 
+            showFormContent(false); 
+            setInitialAnnouncementState(); 
+            resetSalesDisplay(); 
+            startClock();
+
+            // Auto-load records: This is the desired behavior on app load/init.
+            loadRecords(); 
+
+            console.log("DEBUG: App UI Initialized.");
+        }
+        
+        // --- UI Display Helpers ---
 
         function showNotification(title, message) { 
             const m = document.getElementById('notification-modal'); 
@@ -455,19 +510,19 @@
             document.getElementById('manager-feedback-modal').classList.add('hidden');
         }
 
-        function showImportantInfo() {
-            if (!currentSelectedRecord) return;
-            const impInfo = getVal(currentSelectedRecord, 'cr714_importantaccountinformation', 'No important account information provided.');
-            document.getElementById('important-info-content').textContent = impInfo;
-            document.getElementById('important-info-modal').classList.remove('hidden');
-        }
-
         function closeImportantInfo() {
             if (!currentSelectedRecord) return;
             const impInfo = getVal(currentSelectedRecord, 'cr714_importantaccountinformation', '');
             if (impInfo) {
                 document.getElementById('important-info-modal').classList.add('hidden');
             }
+        }
+
+        function showImportantInfo() {
+            if (!currentSelectedRecord) return;
+            const impInfo = getVal(currentSelectedRecord, 'cr714_importantaccountinformation', 'No important account information provided.');
+            document.getElementById('important-info-content').textContent = impInfo;
+            document.getElementById('important-info-modal').classList.remove('hidden');
         }
 
         function showHelp() {
@@ -548,6 +603,69 @@
                 console.error("Error populating action filter:", e);
                 dropdown.innerHTML = '<option value="">Filter Error</option>';
                 dropdown.disabled = true;
+            }
+        }
+        
+        function filterAndSortGallery() {
+            console.log("LIVE: filterAndSort.");
+            const searchValue = getElementValue('search-bar')?.toLowerCase() || '';
+            const sortValue = getElementValue('sort-dropdown') || 'company-asc';
+            const filterValue = getElementValue('filter-action-dropdown') || ''; 
+            const filterFollowUp = document.getElementById('filter-followup')?.checked || false;
+            const filterNoNotes = document.getElementById('filter-nonotes')?.checked || false;
+            const filterRequests = document.getElementById('filter-requests')?.checked || false;
+            
+            if (!Array.isArray(allRecords)) {
+                renderGallery([]);
+                return;
+            }
+            
+            let filtered = allRecords.filter(record => {
+                const isSearchMatch = filterRecordPredicate(record, searchValue);
+                const isActionMatch = filterValue === '' || getVal(record, 'cr714_action') === filterValue;
+                
+                const isFollowUpMatch = !filterFollowUp || (getVal(record, 'cr714_followup') || '').trim() !== '';
+                const isNoNotesMatch = !filterNoNotes || (getVal(record, 'cr714_qbnotes', '') || '').replace(QB_NOTES_TEMPLATE.trim(), '').trim() === '';
+                const isRequestMatch = !filterRequests || ['Help', 'Help - No Opp', 'Help - Close Account Button'].includes((getVal(record, 'cr714_recordviability', '') || '').trim());
+
+                return isSearchMatch && isActionMatch && isFollowUpMatch && isNoNotesMatch && isRequestMatch;
+            });
+            
+            filtered.sort((a, b) => {
+                const cA = getVal(a, 'cr714_company', '').toLowerCase();
+                const cB = getVal(b, 'cr714_company', '').toLowerCase();
+                const dA = parseInt(getVal(a, 'cr714_dayssincelastorder', 9999), 10);
+                const dB = parseInt(getVal(b, 'cr714_dayssincelastorder', 9999), 10);
+                const repA = String(getVal(a, 'cr714_accountrep') || getVal(a, 'cr714_retentionrep', '')).toLowerCase();
+                const repB = String(getVal(b, 'cr714_accountrep') || getVal(b, 'cr714_retentionrep', '')).toLowerCase();
+                const classA = String(getVal(a, 'cr714_customerclassification', '')).toLowerCase();
+                const classB = String(getVal(b, 'cr714_customerclassification', '')).toLowerCase();
+                
+                const followA = getVal(a, 'cr714_followup');
+                const followB = getVal(b, 'cr714_followup');
+                const dateA_val = followA ? new Date(followA).getTime() : Infinity;
+                const dateB_val = followB ? new Date(followB).getTime() : Infinity;
+
+                switch (sortValue) {
+                    case 'company-asc': default: return cA.localeCompare(cB);
+                    case 'company-desc': return cB.localeCompare(cA);
+                    case 'days-asc': return dA - dB;
+                    case 'days-desc': return dB - dA;
+                    case 'rep-asc': return repA.localeCompare(repB);
+                    case 'rep-desc': return repB.localeCompare(repA);
+                    case 'classification-asc': return classA.localeCompare(classB);
+                    case 'classification-desc': return classB.localeCompare(classA);
+                    case 'followup-asc': return dateA_val - dateB_val;
+                    case 'followup-desc': return dateB_val - dateA_val; 
+                }
+            });
+            
+            renderGallery(filtered);
+            const pinnedRecord = allRecords.find(r => String(getVal(r, 'cr714_id')) === currentRecordId);
+            if (!pinnedRecord || !filtered.find(r => String(getVal(r, 'cr714_id')) === currentRecordId)) {
+                 selectRecord(null);
+            } else if(currentRecordId) {
+                selectRecord(currentRecordId);
             }
         }
         
@@ -687,52 +805,21 @@
             updateNotesPreview();
         }
 
-        // --- Data Loading/Saving Functions ---
+        // --- FORM ACTIONS ---
+        function toggleEditMode() {
+            if (!currentSelectedRecord) return;
+            isEditMode = !isEditMode;
+            updateFormDisplayMode();
+        }
 
-        async function loadRecords() {
-            console.log(`LIVE: loadRecords called for ${currentUserRepName}`);
-            
-            showGalleryLoader(true);
-            allRecords = [];
-            currentSelectedRecord = null;
-            currentRecordId = null;
-            showFormContent(false);
-            resetSalesDisplay();
-            
-            try {
-                const response = await fetch(GET_MY_RECORDS_FLOW_URL, { 
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ repName: currentUserRepName })
-                });
-
-                if (!response.ok) {
-                    throw new Error(`Flow Error: ${response.status} ${response.statusText}`);
-                }
-                
-                const responseText = await response.text();
-                if (!responseText.trim()) {
-                    allRecords = []; 
-                } else {
-                    try {
-                        allRecords = JSON.parse(responseText); 
-                    } catch (e) {
-                        console.error("Failed to parse JSON response:", e, "Raw Text:", responseText.substring(0, 500) + '...');
-                        showNotification("Data Error", "Received invalid data from the Flow. Please ensure the Flow's final 'Response' action returns a valid JSON array.");
-                        allRecords = [];
-                    }
-                }
-
-                console.log(`LIVE: Loaded ${allRecords.length} records.`);
-                filterAndSortGallery();
-                populateActionFilter(allRecords, 'filter-action-dropdown');
-            } catch (e) {
-                console.error("LIVE: Error loading records:", e);
-                const galleryList = document.getElementById('record-gallery-list');
-                if (galleryList) galleryList.innerHTML = `<div class="loader-container"><p class="text-red-600 italic">Error loading records. Check console.</p></div>`;
-                showNotification("Data Error", `Failed to load records: ${e.message}.`);
-            } finally {
-                showGalleryLoader(false);
+        function handleCustomReset() {
+            if (currentSelectedRecord) {
+                populateForm(currentSelectedRecord);
+                showNotification("Reset", "Changes discarded.");
+                isEditMode = false;
+                updateFormDisplayMode();
+            } else {
+                showNotification("Info", "No record selected.");
             }
         }
 
@@ -799,7 +886,6 @@
                 isEditMode = false;
                 updateFormDisplayMode();
                 
-                // Update local record (Live Note Update Fix)
                 const index = allRecords.findIndex(r => String(getVal(r, 'cr714_id')) === currentRecordId);
                 if (index !== -1 && updatedRecord) {
                     Object.assign(allRecords[index], updatedRecord); 
@@ -899,7 +985,7 @@
                 const updatedRecord = await response.json(); 
                 showNotification("Action Logged", `${actionType} request logged and notes saved.`);
                 
-                const index = allRecords.findIndex(r => String(getVal(r, 'cr714_id')) === accountId);
+                const index = allRecords.findIndex(r => String(getVal(r, 'cr714_id')) === currentRecordId);
                 if (index !== -1 && updatedRecord) {
                     Object.assign(allRecords[index], updatedRecord); 
                     allRecords[index].cr714_qbnotes = getVal(updatedRecord, 'cr714_qbnotes', allRecords[index].cr714_qbnotes);
@@ -1112,6 +1198,62 @@
             const timeStr = `${now.toLocaleDateString([], {weekday: 'short', year: 'numeric', month: 'short', day: 'numeric'})} ${now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}`;
             if (clockEl) clockEl.textContent = timeStr;
         }
+
+        // --- AI Summary Logic (Local Placeholder) ---
+        
+        function generateAiSummary(record) {
+            if (!record) {
+                 return "<p class='text-gray-400 italic text-center text-sm mt-4'>Select a record to see AI Summary.</p>";
+            }
+
+            const notes = getVal(record, 'cr714_qbnotes', '').trim();
+            const mgrNotes = getVal(record, 'cr714_managernotes', '').trim();
+            const impInfo = getVal(record, 'cr714_importantaccountinformation', '').trim();
+            
+            let summaryHtml = "";
+            let summaryFound = false;
+
+            if (impInfo) {
+                summaryFound = true;
+                summaryHtml += `
+                    <div style="background-color:#fee2e2; padding:8px; border-radius:4px; margin-bottom:6px;">
+                        <h4 style="font-weight: 700; color: #b91c1c; margin-bottom: 4px;"><i class="fas fa-exclamation-triangle"></i> IMPORTANT INFO:</h4>
+                        <pre style="font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; color: #b91c1c;">${escapeHTML(impInfo)}</pre>
+                    </div>
+                `;
+            }
+            
+            if (mgrNotes) {
+                summaryFound = true;
+                summaryHtml += `
+                    <div style="background-color:#dcfce7; padding:8px; border-radius:4px; margin-bottom:6px;">
+                        <h4 style="font-weight: 700; color: #16a34a; margin-bottom: 4px;"><i class="fas fa-user-tie"></i> MANAGER FEEDBACK:</h4>
+                        <pre style="font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; color: #16a34a;">${escapeHTML(mgrNotes)}</pre>
+                    </div>
+                `;
+            }
+
+            if (notes) {
+                const qbLines = notes.split('\n').filter(line => line.trim() !== '------------------------------' && line.trim() !== '');
+                if (qbLines.length > 0) {
+                    summaryFound = true;
+                    const effectiveSummary = qbLines.slice(0, 10).join('\n'); 
+                    summaryHtml += `
+                        <div style="background-color:#f8fafc; padding:8px; border-radius:4px; border: 1px solid #eee;">
+                            <h4 style="font-weight: 700; font-size: 0.8rem; margin-bottom: 4px; color: #2563eb;">KEY ACCOUNT DATA/PREVIOUS NOTES:</h4>
+                            <pre style="font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; color: #374151;">${escapeHTML(effectiveSummary)}</pre>
+                        </div>
+                    `;
+                }
+            }
+            
+            if (!summaryFound) {
+                 return "<p class='text-gray-400 italic text-center text-sm mt-4'>No previous notes or external feedback found.</p>";
+            }
+
+            return summaryHtml;
+        }
+
 
         // ====================================================================
         // --- 3. MAIN APP ENTRY POINT (Initiates MSAL and App Flow) ---
