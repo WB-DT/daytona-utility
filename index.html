@@ -165,7 +165,7 @@
                 <div id="gallery-section" class="card p-3 flex flex-col min-h-0">
                     <h3 class="text-sm font-semibold text-gray-600 mb-2 pb-1 border-b border-gray-200 flex-shrink-0 whitespace-nowrap">Account List</h3>
                     <div id="record-gallery-list" class="record-gallery-list flex-grow min-h-0">
-                        <div id="gallery-loader" class="loader-container"><span class="italic text-gray-500">Click "Load My Records"</span></div>
+                        <div id="gallery-loader" class="loader-container"><span class="italic text-gray-500">Loading records automatically...</span></div>
                     </div>
                 </div>
                 
@@ -328,13 +328,47 @@
         const ACTION_BUTTON_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/a2fa2c69f1d24a85a980599d21631808/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=aSQ1J4-BFNxrOURAp3-8tCQwunP0JITYHZfWV5BbDYI";
 
         // ====================================================================
-        // --- HELPER/UTILITY FUNCTIONS (Moved to top for scoping fix) ---
+        // --- CORE UTILITY FUNCTIONS (Moved to top to prevent ReferenceError) ---
         // ====================================================================
         
         const getVal = (obj, key, defaultVal = '') => (obj && obj[key] != null) ? obj[key] : defaultVal;
         const escapeHTML = (str) => { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'})[m]); };
         function getElementValue(id) { const el=document.getElementById(id); if(!el){return null;} return el.value?.trim()??el.textContent?.trim()??null; }
         async function getFlowToken() { return null; }
+        
+        function showNotification(title, message) { 
+            const m = document.getElementById('notification-modal'); 
+            const t = document.getElementById('notification-title'); 
+            const msg = document.getElementById('notification-message'); 
+            if (m && t && msg) { 
+                t.textContent = title; 
+                msg.innerHTML = message; 
+                m.classList.remove('hidden'); 
+                if (title !== "Saving...") {
+                    setTimeout(closeNotification, 5000);
+                }
+            } else { 
+                console.log("NOTIFICATION:", title, message);
+            } 
+        }
+        
+        function closeNotification() { 
+            const m = document.getElementById('notification-modal'); 
+            if (m) m.classList.add('hidden'); 
+        }
+
+        function showLoginError(message) {
+            const errorEl = document.getElementById('login-error');
+            if (errorEl) {
+                errorEl.textContent = message;
+                errorEl.classList.remove('hidden');
+            }
+            const loginBtn = document.getElementById('login-button');
+            if (loginBtn) {
+                loginBtn.disabled = false;
+                loginBtn.innerHTML = '<i class="fab fa-microsoft mr-3"></i> Sign in with Microsoft';
+            }
+        }
         
         function updateFormDisplayMode() {
             const editButton = document.getElementById('editModeButton');
@@ -384,6 +418,8 @@
                 if (ctrl.id !== 'editModeButton') ctrl.disabled = true;
             });
         }
+
+        // --- AUTHENTICATION & INITIALIZATION ---
         
         function initializeAppUI() {
             console.log(`DEBUG: Initializing main app for ${currentUserRepName}`);
@@ -408,21 +444,20 @@
             console.log("DEBUG: App UI Initialized.");
         }
         
-        // --- AUTHENTICATION FUNCTIONS ---
         function handleMsalResponse(response) {
-            if (response !== null && response.account) {
+            if (response && response.account) {
                 msalAccount = response.account;
                 currentUserRepName = msalAccount.name;
                 initializeAppUI();
             } else {
-                // Check if an account is already active in cache
+                // If response is null or has no account (e.g., failed to fetch cached token), check accounts directly.
                 const accounts = msalInstance.getAllAccounts();
                 if (accounts.length > 0) {
                     msalAccount = accounts[0];
                     currentUserRepName = msalAccount.name;
                     initializeAppUI();
                 } else {
-                     console.log("DEBUG: No account found after redirect. Waiting for user to click login.");
+                     console.log("DEBUG: No account found. Waiting for user to click login.");
                 }
             }
         }
@@ -431,31 +466,16 @@
             document.getElementById('login-button').disabled = true;
             document.getElementById('login-button').textContent = "Signing in...";
             
-            // Initiate login and call handleMsalResponse on success
             msalInstance.loginPopup({ scopes: ["User.Read"] })
-                .then(response => {
-                    handleMsalResponse(response);
-                })
+                .then(handleMsalResponse)
                 .catch(err => {
                     console.error("MSAL login error:", err);
                     showLoginError("Login failed. Please try again.");
                 });
         }
-        
-        function showLoginError(message) {
-            const errorEl = document.getElementById('login-error');
-            if (errorEl) {
-                errorEl.textContent = message;
-                errorEl.classList.remove('hidden');
-            }
-            const loginBtn = document.getElementById('login-button');
-            if (loginBtn) {
-                loginBtn.disabled = false;
-                loginBtn.innerHTML = '<i class="fab fa-microsoft mr-3"></i> Sign in with Microsoft';
-            }
-        }
 
-        // --- DATA LOADING & GALLERY (Live Data) ---
+        // --- DATA LOADING & RENDERING ---
+
         async function loadRecords() {
             console.log(`LIVE: loadRecords called for ${currentUserRepName}`);
             
@@ -737,7 +757,24 @@
         }
 
         // --- FORM ACTIONS ---
-        function handleCustomSave() {
+        function toggleEditMode() {
+            if (!currentSelectedRecord) return;
+            isEditMode = !isEditMode;
+            updateFormDisplayMode();
+        }
+
+        function handleCustomReset() {
+            if (currentSelectedRecord) {
+                populateForm(currentSelectedRecord);
+                showNotification("Reset", "Changes discarded.");
+                isEditMode = false;
+                updateFormDisplayMode();
+            } else {
+                showNotification("Info", "No record selected.");
+            }
+        }
+
+        async function handleCustomSave() {
             console.log("LIVE: handleCustomSave.");
             if (!currentSelectedRecord || !isEditMode) return;
             
@@ -800,18 +837,17 @@
                 isEditMode = false;
                 updateFormDisplayMode();
                 
-                // --- START LIVE NOTE UPDATE FIX ---
+                // Update local record (Live Note Update Fix)
                 const index = allRecords.findIndex(r => String(getVal(r, 'cr714_id')) === currentRecordId);
                 if (index !== -1 && updatedRecord) {
                     Object.assign(allRecords[index], updatedRecord); 
                     allRecords[index].cr714_qbnotes = getVal(updatedRecord, 'cr714_qbnotes', allRecords[index].cr714_qbnotes);
                     currentSelectedRecord = allRecords[index];
                     filterAndSortGallery();
-                    populateForm(currentSelectedRecord); // This re-sets the UI and calls updateNotesPreview()
+                    populateForm(currentSelectedRecord);
                 } else {
-                     await loadRecords(); // Fallback
+                    await loadRecords();
                 }
-                // --- END LIVE NOTE UPDATE FIX ---
                 
             } catch (e) {
                 console.error("LIVE: Error saving record:", e);
@@ -889,6 +925,7 @@
             
             // 3. Flow Call to log action/update status
             try {
+                showNotification("Action Submitting...", "Please wait. Logging action and saving notes.");
                 const response = await fetch(ACTION_BUTTON_FLOW_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -929,6 +966,73 @@
         }
 
 
+        // --- SALES DATA (Simplified Placeholder) ---
+        function resetSalesDisplay() {
+            const placeholder = document.getElementById('sales-placeholder');
+            const content = document.getElementById('sales-content');
+            const loader = document.getElementById('sales-loader');
+            if (placeholder) {
+                placeholder.style.display = 'block';
+                placeholder.textContent = 'Select an account';
+                placeholder.classList.remove('text-red-600');
+            }
+            if (content) content.style.display = 'none';
+            if (loader) loader.style.display = 'none';
+            ['sales-ytd', 'sales-total-orders', 'sales-last-order'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = '--';
+            });
+            const categoryList = document.getElementById('sales-category-list');
+            if (categoryList) categoryList.innerHTML = '<li class="sales-category-item italic text-gray-400">No data</li>';
+        }
+
+        function displaySalesData(data) {
+            const placeholder = document.getElementById('sales-placeholder');
+            const content = document.getElementById('sales-content');
+            if (placeholder) placeholder.style.display = 'none';
+            if (content) content.style.display = 'block';
+            
+            document.getElementById('sales-ytd').textContent = getVal(data, 'ytdSales', '$1,234.56');
+            document.getElementById('sales-total-orders').textContent = getVal(data, 'orderCount', '12');
+            document.getElementById('sales-last-order').textContent = getVal(data, 'lastOrderDate', '2025-10-15');
+            
+            const categories = getVal(data, 'categories', [ { categoryName: "Janitorial", categorySales: "$500.10" }, { categoryName: "Coffee", categorySales: "$734.46" } ]);
+            const categoryList = document.getElementById('sales-category-list');
+            if (categoryList) {
+                categoryList.innerHTML = '';
+                categories.forEach(cat => {
+                    const li = document.createElement('li');
+                    li.className = 'sales-category-item';
+                    li.innerHTML = `<span class="sales-category-name truncate pr-2" title="${escapeHTML(getVal(cat, 'categoryName'))}">${escapeHTML(getVal(cat, 'categoryName', 'N/A'))}</span><span class="sales-category-amount">${escapeHTML(getVal(cat, 'categorySales', '--'))}</span>`;
+                    categoryList.appendChild(li);
+                });
+            }
+        }
+
+        async function loadSalesData(recordId) {
+            if (!recordId) { resetSalesDisplay(); return; }
+            const loader = document.getElementById('sales-loader');
+            const placeholder = document.getElementById('sales-placeholder');
+
+            if (placeholder) placeholder.style.display = 'none';
+            if (loader) loader.style.display = 'flex';
+
+            try {
+                // Placeholder: Simulate a response.
+                await new Promise(r => setTimeout(r, 500)); 
+                const mockData = { ytdSales: "$1,234.56", orderCount: "12", lastOrderDate: "2025-10-15", categories: [ { categoryName: "Janitorial", categorySales: "$500.10" }, { categoryName: "Coffee", categorySales: "$734.46" } ] };
+                displaySalesData(mockData);
+            } catch (e) {
+                if (placeholder) {
+                    placeholder.style.display = 'block';
+                    placeholder.textContent = 'Error loading sales data.';
+                    placeholder.classList.add('text-red-600');
+                }
+            } finally {
+                if (loader) loader.style.display = 'none';
+            }
+        }
+
         // --- MAIN APP INIT ---
         document.addEventListener('DOMContentLoaded', () => {
             console.log("DEBUG: DOM Loaded. v4.0 (Standalone).");
@@ -957,7 +1061,8 @@
                 })
                 .catch(err => {
                     console.error("MSAL redirect/silent error:", err);
-                    showLoginError("Error during session check. Please try logging in.");
+                    // This error is usually fatal for silent auth, so we just let the user see the login screen.
+                    // The error handler in the promise chain is sufficient.
                 });
         });
     </script>
