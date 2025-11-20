@@ -343,16 +343,70 @@
         const ACTION_BUTTON_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/a2fa2c69f1d24a85a980599d21631808/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=aSQ1J4-BFNxrOURAp3-8tCQwunP0JITYHZfWV5BbDYI";
 
         // ====================================================================
-        // --- 2. CORE FUNCTIONS (Must be defined via 'function' or const assignment) ---
+        // --- 2. CORE FUNCTIONS (Top-level declarations to ensure hoisting) ---
         // ====================================================================
         
-        // --- Small Utilities ---
+        // --- Global Utilities (const assignments are fine here) ---
         const getVal = (obj, key, defaultVal = '') => (obj && obj[key] != null) ? obj[key] : defaultVal;
         const escapeHTML = (str) => { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'})[m]); };
         const getElementValue = (id) => { const el=document.getElementById(id); if(!el){return null;} return el.value?.trim()??el.textContent?.trim()??null; };
         const getFlowToken = async () => null;
         
-        // --- Status/UI Helpers ---
+        // --- UI & Lifecycle Functions (Must use function keyword or be defined here) ---
+        
+        function login() {
+            document.getElementById('login-button').disabled = true;
+            document.getElementById('login-button').textContent = "Signing in...";
+            
+            msalInstance.loginPopup({ scopes: ["User.Read"] })
+                .then(handleMsalResponse)
+                .catch(err => {
+                    console.error("MSAL login error:", err);
+                    showLoginError("Login failed. Please try again.");
+                });
+        }
+        
+        function handleMsalResponse(response) {
+            if (response && response.account) {
+                msalAccount = response.account;
+                currentUserRepName = msalAccount.name;
+                initializeAppUI();
+            } else {
+                const accounts = msalInstance.getAllAccounts();
+                if (accounts.length > 0) {
+                    msalAccount = accounts[0];
+                    currentUserRepName = msalAccount.name;
+                    initializeAppUI();
+                } else {
+                     console.log("DEBUG: handleMsalResponse called without a valid account.");
+                }
+            }
+        }
+        
+        function initializeAppUI() {
+            console.log(`DEBUG: Initializing main app for ${currentUserRepName}`);
+            document.getElementById('login-container').classList.add('hidden');
+            document.getElementById('main-app-container').classList.remove('hidden');
+
+            const welcomeMsg = document.getElementById('welcome-message');
+            if (welcomeMsg) {
+                welcomeMsg.textContent = `Welcome, ${currentUserRepName.split(' ')[0]}`;
+                welcomeMsg.classList.remove('hidden');
+            }
+
+            updateFormDisplayMode(); 
+            showFormContent(false); 
+            setInitialAnnouncementState(); 
+            resetSalesDisplay(); 
+            startClock();
+
+            loadRecords(); 
+
+            console.log("DEBUG: App UI Initialized.");
+        }
+        
+        // --- Data Loading/Rendering Core (Must be defined after UI init helpers) ---
+        
         function showNotification(title, message) { 
             const m = document.getElementById('notification-modal'); 
             const t = document.getElementById('notification-title'); 
@@ -435,8 +489,6 @@
                 }
             });
         }
-        
-        // --- Data Filtering/Rendering Helpers ---
 
         function filterRecordPredicate(record, searchValue) {
             if (!searchValue) return true;
@@ -608,21 +660,52 @@
             updateNotesPreview();
         }
 
-        // --- FORM ACTIONS ---
-        function toggleEditMode() {
-            if (!currentSelectedRecord) return;
-            isEditMode = !isEditMode;
-            updateFormDisplayMode();
-        }
+        // --- FORM ACTIONS (Asynchronous) ---
 
-        function handleCustomReset() {
-            if (currentSelectedRecord) {
-                populateForm(currentSelectedRecord);
-                showNotification("Reset", "Changes discarded.");
-                isEditMode = false;
-                updateFormDisplayMode();
-            } else {
-                showNotification("Info", "No record selected.");
+        async function loadRecords() {
+            console.log(`LIVE: loadRecords called for ${currentUserRepName}`);
+            
+            showGalleryLoader(true);
+            allRecords = [];
+            currentSelectedRecord = null;
+            currentRecordId = null;
+            showFormContent(false);
+            resetSalesDisplay();
+            
+            try {
+                const response = await fetch(GET_MY_RECORDS_FLOW_URL, { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repName: currentUserRepName })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Flow Error: ${response.status} ${response.statusText}`);
+                }
+                
+                const responseText = await response.text();
+                if (!responseText.trim()) {
+                    allRecords = []; 
+                } else {
+                    try {
+                        allRecords = JSON.parse(responseText); 
+                    } catch (e) {
+                        console.error("Failed to parse JSON response:", e, "Raw Text:", responseText.substring(0, 500) + '...');
+                        showNotification("Data Error", "Received invalid data from the Flow. Please ensure the Flow's final 'Response' action returns a valid JSON array.");
+                        allRecords = [];
+                    }
+                }
+
+                console.log(`LIVE: Loaded ${allRecords.length} records.`);
+                filterAndSortGallery();
+                populateActionFilter(allRecords, 'filter-action-dropdown');
+            } catch (e) {
+                console.error("LIVE: Error loading records:", e);
+                const galleryList = document.getElementById('record-gallery-list');
+                if (galleryList) galleryList.innerHTML = `<div class="loader-container"><p class="text-red-600 italic">Error loading records. Check console.</p></div>`;
+                showNotification("Data Error", `Failed to load records: ${e.message}.`);
+            } finally {
+                showGalleryLoader(false);
             }
         }
 
@@ -1019,7 +1102,8 @@
         document.addEventListener('DOMContentLoaded', () => {
             console.log("DEBUG: DOM Loaded. v4.0 (Standalone).");
             
-            const initializeAuth = async () => {
+            // IIFE (Immediately Invoked Function Expression) to handle async logic
+            (async () => {
                 try {
                     // 1. Handle redirect promise (if user just signed in via popup)
                     let response = await msalInstance.handleRedirectPromise();
@@ -1045,9 +1129,7 @@
                 } catch (err) {
                     console.error("MSAL initialization failed:", err);
                 }
-            };
-
-            initializeAuth();
+            })();
         });
     </script>
 </body>
