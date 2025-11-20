@@ -60,8 +60,8 @@
         .record-gallery-list { 
             max-height: 250px; 
             overflow-y: auto;
-            display: flex;
-            flex-direction: column;
+            display: flex; /* FIX: Maintain vertical stack */
+            flex-direction: column; /* FIX: Maintain vertical stack */
             gap: 0.3rem; 
             padding-right: 2px;
         }
@@ -107,7 +107,7 @@
         
         /* FIX: Ensure sales category list scrolls correctly */
         #sales-category-list {
-            max-height: 15rem; /* Set max height for sales categories */
+            max-height: 15rem; 
             overflow-y: auto;
         }
     </style>
@@ -311,7 +311,10 @@
     </div>
 
     <script>
-        // --- MSAL CONFIG ---
+        // ====================================================================
+        // --- 1. GLOBAL CONFIG & STATE ---
+        // ====================================================================
+
         const msalConfig = {
             auth: {
                 clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
@@ -324,7 +327,6 @@
         let msalAccount = null; 
         let msalToken = null; 
 
-        // --- GLOBAL APP STATE ---
         let isEditMode = false;
         let allRecords = [];
         let currentSelectedRecord = null;
@@ -341,135 +343,172 @@
         const ACTION_BUTTON_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/a2fa2c69f1d24a85a980599d21631808/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=aSQ1J4-BFNxrOURAp3-8tCQwunP0JITYHZfWV5BbDYI";
 
         // ====================================================================
-        // --- CORE UTILITY FUNCTIONS (Defined first for Scoping/Hoisting) ---
+        // --- 2. CORE FUNCTIONS (Must be defined using 'function' keyword) ---
         // ====================================================================
-        
-        const getVal = (obj, key, defaultVal = '') => (obj && obj[key] != null) ? obj[key] : defaultVal;
-        const escapeHTML = (str) => { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'})[m]); };
-        function getElementValue(id) { const el=document.getElementById(id); if(!el){return null;} return el.value?.trim()??el.textContent?.trim()??null; }
-        async function getFlowToken() { return null; }
-        
-        function showNotification(title, message) { 
-            const m = document.getElementById('notification-modal'); 
-            const t = document.getElementById('notification-title'); 
-            const msg = document.getElementById('notification-message'); 
-            if (m && t && msg) { 
-                t.textContent = title; 
-                msg.innerHTML = message; 
-                m.classList.remove('hidden'); 
-                if (title !== "Saving...") {
-                    setTimeout(closeNotification, 5000);
-                }
-            } else { 
-                console.log("NOTIFICATION:", title, message);
-            } 
-        }
-        
-        function closeNotification() { 
-            const m = document.getElementById('notification-modal'); 
-            if (m) m.classList.add('hidden'); 
-        }
 
-        function showLoginError(message) {
-            const errorEl = document.getElementById('login-error');
-            if (errorEl) {
-                errorEl.textContent = message;
-                errorEl.classList.remove('hidden');
-            }
-            const loginBtn = document.getElementById('login-button');
-            if (loginBtn) {
-                loginBtn.disabled = false;
-                loginBtn.innerHTML = '<i class="fab fa-microsoft mr-3"></i> Sign in with Microsoft';
+        function login() {
+            document.getElementById('login-button').disabled = true;
+            document.getElementById('login-button').textContent = "Signing in...";
+            
+            msalInstance.loginPopup({ scopes: ["User.Read"] })
+                .then(handleMsalResponse)
+                .catch(err => {
+                    console.error("MSAL login error:", err);
+                    showLoginError("Login failed. Please try again.");
+                });
+        }
+        
+        function handleMsalResponse(response) {
+            if (response && response.account) {
+                msalAccount = response.account;
+                currentUserRepName = msalAccount.name;
+                initializeAppUI();
+            } else {
+                // This path should only be taken if the redirect promise fails to find an account
+                // but another check is triggered. We rely on the initial check in DOMContentLoaded.
+                console.log("DEBUG: handleMsalResponse called without a valid account in response.");
             }
         }
         
-        function showGalleryLoader(isLoading) {
-            const loader = document.getElementById('gallery-loader');
-            const galleryList = document.getElementById('record-gallery-list');
-            if (loader) loader.style.display = isLoading ? 'flex' : 'none';
-            if (galleryList) galleryList.style.display = isLoading ? 'none' : 'flex';
-            if (isLoading && galleryList) galleryList.innerHTML = '';
-        }
+        function initializeAppUI() {
+            console.log(`DEBUG: Initializing main app for ${currentUserRepName}`);
+            document.getElementById('login-container').classList.add('hidden');
+            document.getElementById('main-app-container').classList.remove('hidden');
 
-        function showFormContent(show) {
-            const container = document.getElementById('right-column-container');
-            const editButton = document.getElementById('editModeButton');
-            const controls = document.querySelectorAll('#save-button, #reset-button, #launch-email-button, #email-template-dropdown, #help-button, #noopp-button, #close-button');
-
-            if (container) container.style.visibility = show ? 'visible' : 'hidden';
-            if (!show) { isEditMode = false; updateFormDisplayMode(); }
-            if (editButton) editButton.disabled = !show;
-            
-            controls.forEach(ctrl => {
-                if (ctrl.id !== 'editModeButton') ctrl.disabled = true;
-            });
-        }
-        
-        function updateFormDisplayMode() {
-            const editButton = document.getElementById('editModeButton');
-            const inputs = document.querySelectorAll('#profile-card .editable-field, #follow-up-date, #follow-up-time, #qb-notes-input');
-            const actionButtons = document.querySelectorAll('#save-button, #reset-button, #launch-email-button, #email-template-dropdown, #help-button, #noopp-button, #close-button');
-            
-            if (editButton) {
-                if (isEditMode) {
-                    editButton.innerHTML = '<i class="fas fa-eye mr-1"></i> View Profile';
-                    editButton.classList.remove('bg-gray-200', 'text-gray-700', 'hover:bg-gray-300');
-                    editButton.classList.add('bg-yellow-500', 'hover:bg-yellow-600', 'text-white');
-                } else {
-                    editButton.innerHTML = '<i class="fas fa-pencil-alt mr-1"></i> Edit Profile';
-                    editButton.classList.remove('bg-yellow-500', 'hover:bg-yellow-600', 'text-white');
-                    editButton.classList.add('bg-gray-200', 'text-gray-700', 'hover:bg-gray-300');
-                }
-                editButton.disabled = !currentSelectedRecord;
+            const welcomeMsg = document.getElementById('welcome-message');
+            if (welcomeMsg) {
+                welcomeMsg.textContent = `Welcome, ${currentUserRepName.split(' ')[0]}`;
+                welcomeMsg.classList.remove('hidden');
             }
+
+            updateFormDisplayMode(); 
+            showFormContent(false); 
+            setInitialAnnouncementState(); 
+            resetSalesDisplay(); 
+            startClock();
+
+            // Auto-load records immediately after initialization 
+            loadRecords(); 
+
+            console.log("DEBUG: App UI Initialized.");
+        }
+
+        // --- DATA LOADING/RENDERING CORE ---
+
+        async function loadRecords() {
+            console.log(`LIVE: loadRecords called for ${currentUserRepName}`);
             
-            actionButtons.forEach(btn => { btn.disabled = !isEditMode; });
-            inputs.forEach(input => {
-                if (input) {
-                    input.disabled = !isEditMode;
-                    input.classList.toggle('is-editable', isEditMode);
-                }
-            });
-        }
-
-        function filterRecordPredicate(record, searchValue) {
-            if (!searchValue) return true;
-            const fieldsToSearch = [
-                'cr714_id', 'cr714_company', 'cr714_namelatest', 'cr714_namemost',
-                'cr714_emailmost', 'cr714_emaillatest', 'cr714_accountrep', 'cr714_retentionrep'
-            ];
-            return fieldsToSearch.some(key => String(getVal(record, key)).toLowerCase().includes(searchValue));
-        }
-
-        function populateActionFilter(records, dropdownId) {
-            const dropdown = document.getElementById(dropdownId);
-            if (!dropdown) return;
-
+            showGalleryLoader(true);
+            allRecords = [];
+            currentSelectedRecord = null;
+            currentRecordId = null;
+            showFormContent(false);
+            resetSalesDisplay();
+            
             try {
-                const rawActions = records.map(r => getVal(r, 'cr714_action')).filter(Boolean);
-                const uniqueActions = [...new Set(rawActions.map(a => a.trim()))].sort();
-                
-                if (uniqueActions.length > 0) {
-                    dropdown.innerHTML = '<option value="">Filter: All Actions</option>';
-                    uniqueActions.forEach(action => {
-                        dropdown.innerHTML += `<option value="${escapeHTML(action)}">${escapeHTML(action)}</option>`;
-                    });
-                    dropdown.disabled = false;
-                } else {
-                    dropdown.innerHTML = '<option value="">No Actions to Filter</option>';
-                    dropdown.disabled = true;
+                const response = await fetch(GET_MY_RECORDS_FLOW_URL, { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repName: currentUserRepName })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Flow Error: ${response.status} ${response.statusText}`);
                 }
+                
+                const responseText = await response.text();
+                if (!responseText.trim()) {
+                    allRecords = []; 
+                } else {
+                    try {
+                        allRecords = JSON.parse(responseText); 
+                    } catch (e) {
+                        console.error("Failed to parse JSON response:", e, "Raw Text:", responseText.substring(0, 500) + '...');
+                        showNotification("Data Error", "Received invalid data from the Flow. Please ensure the Flow's final 'Response' action returns a valid JSON array.");
+                        allRecords = [];
+                    }
+                }
+
+                console.log(`LIVE: Loaded ${allRecords.length} records.`);
+                filterAndSortGallery();
+                populateActionFilter(allRecords, 'filter-action-dropdown');
             } catch (e) {
-                console.error("Error populating action filter:", e);
-                dropdown.innerHTML = '<option value="">Filter Error</option>';
-                dropdown.disabled = true;
+                console.error("LIVE: Error loading records:", e);
+                const galleryList = document.getElementById('record-gallery-list');
+                if (galleryList) galleryList.innerHTML = `<div class="loader-container"><p class="text-red-600 italic">Error loading records. Check console.</p></div>`;
+                showNotification("Data Error", `Failed to load records: ${e.message}.`);
+            } finally {
+                showGalleryLoader(false);
+            }
+        }
+        
+        function filterAndSortGallery() {
+            console.log("LIVE: filterAndSort.");
+            const searchValue = getElementValue('search-bar')?.toLowerCase() || '';
+            const sortValue = getElementValue('sort-dropdown') || 'company-asc';
+            const filterValue = getElementValue('filter-action-dropdown') || ''; 
+            const filterFollowUp = document.getElementById('filter-followup')?.checked || false;
+            const filterNoNotes = document.getElementById('filter-nonotes')?.checked || false;
+            const filterRequests = document.getElementById('filter-requests')?.checked || false;
+            
+            if (!Array.isArray(allRecords)) {
+                renderGallery([]);
+                return;
+            }
+            
+            let filtered = allRecords.filter(record => {
+                const isSearchMatch = filterRecordPredicate(record, searchValue);
+                const isActionMatch = filterValue === '' || getVal(record, 'cr714_action') === filterValue;
+                
+                const isFollowUpMatch = !filterFollowUp || (getVal(record, 'cr714_followup') || '').trim() !== '';
+                const isNoNotesMatch = !filterNoNotes || (getVal(record, 'cr714_qbnotes', '') || '').replace(QB_NOTES_TEMPLATE.trim(), '').trim() === '';
+                const isRequestMatch = !filterRequests || ['Help', 'Help - No Opp', 'Help - Close Account Button'].includes((getVal(record, 'cr714_recordviability', '') || '').trim());
+
+                return isSearchMatch && isActionMatch && isFollowUpMatch && isNoNotesMatch && isRequestMatch;
+            });
+            
+            filtered.sort((a, b) => {
+                const cA = getVal(a, 'cr714_company', '').toLowerCase();
+                const cB = getVal(b, 'cr714_company', '').toLowerCase();
+                const dA = parseInt(getVal(a, 'cr714_dayssincelastorder', 9999), 10);
+                const dB = parseInt(getVal(b, 'cr714_dayssincelastorder', 9999), 10);
+                const repA = String(getVal(a, 'cr714_accountrep') || getVal(a, 'cr714_retentionrep', '')).toLowerCase();
+                const repB = String(getVal(b, 'cr714_accountrep') || getVal(b, 'cr714_retentionrep', '')).toLowerCase();
+                const classA = String(getVal(a, 'cr714_customerclassification', '')).toLowerCase();
+                const classB = String(getVal(b, 'cr714_customerclassification', '')).toLowerCase();
+                
+                const followA = getVal(a, 'cr714_followup');
+                const followB = getVal(b, 'cr714_followup');
+                const dateA_val = followA ? new Date(followA).getTime() : Infinity;
+                const dateB_val = followB ? new Date(followB).getTime() : Infinity;
+
+                switch (sortValue) {
+                    case 'company-asc': default: return cA.localeCompare(cB);
+                    case 'company-desc': return cB.localeCompare(cA);
+                    case 'days-asc': return dA - dB;
+                    case 'days-desc': return dB - dA;
+                    case 'rep-asc': return repA.localeCompare(repB);
+                    case 'rep-desc': return repB.localeCompare(repA);
+                    case 'classification-asc': return classA.localeCompare(classB);
+                    case 'classification-desc': return classB.localeCompare(classA);
+                    case 'followup-asc': return dateA_val - dateB_val;
+                    case 'followup-desc': return dateB_val - dateA_val; 
+                }
+            });
+            
+            renderGallery(filtered);
+            const pinnedRecord = allRecords.find(r => String(getVal(r, 'cr714_id')) === currentRecordId);
+            if (!pinnedRecord || !filtered.find(r => String(getVal(r, 'cr714_id')) === currentRecordId)) {
+                 selectRecord(null);
+            } else if(currentRecordId) {
+                selectRecord(currentRecordId);
             }
         }
         
         function renderGallery(recordsToRender) {
             console.log(`LIVE: renderGallery called with ${recordsToRender?.length ?? 0} records.`);
             const galleryList = document.getElementById('record-gallery-list');
-            if (!galleryList) { console.error("LIVE: CRITICAL - Gallery list container not found!"); return; }
+            if (!galleryList) { console.error("CRITICAL - Gallery list container not found!"); return; }
             galleryList.innerHTML = ''; 
             try {
                 if (!Array.isArray(recordsToRender) || recordsToRender.length === 0) {
@@ -838,7 +877,7 @@
 
             // 1. New Note Preview
             if (showNew && strippedNewNotes) {
-                const content = `<pre style="white-space: pre-wrap; margin: 0; font-size: 0.8rem;">${escapeHTML(strippedNewNotes)}</pre>`;
+                const content = `<pre style="white-space: pre-wrap; margin: 0; font-family: monospace; font-size: 0.8rem;">${escapeHTML(strippedNewNotes)}</pre>`;
                 html += `<div class="note-preview-item" style="background-color:#e6f7ff; padding:10px; border-radius:5px; margin-bottom:10px;">
                     <h4><i class="fas fa-pencil-alt text-blue-500"></i>New Note Preview (${escapeHTML(timestamp)} - ${escapeHTML(currentUserRepName || 'Current User')})</h4>
                     ${content}
@@ -850,7 +889,7 @@
             if (showPrev && prevNotes.trim()) {
                 html += `<div class="note-preview-item" style="background-color:#f9f9f9; padding:10px; border-radius:5px; margin-bottom:10px;">
                     <h4><i class="fas fa-history text-gray-500"></i>Previous QB Notes</h4>
-                    <pre style="white-space: pre-wrap; font-family: 'Inter', sans-serif; font-size: 0.8rem; color: #57534e;">${escapeHTML(prevNotes)}</pre>
+                    <pre style="white-space: pre-wrap; font-family: monospace; font-size: 0.8rem; color: #57534e;">${escapeHTML(prevNotes)}</pre>
                 </div>`;
                 hasContent = true;
             }
@@ -859,7 +898,7 @@
             if (showMgr && mgrNotes.trim()) {
                 html += `<div class="note-preview-item" style="background-color:#e8ffe8; padding:10px; border-radius:5px; margin-bottom:10px; border: 1px solid #bbf7d0;">
                     <h4><i class="fas fa-user-tie text-green-600"></i>Manager Notes</h4>
-                    <pre style="white-space: pre-wrap; font-family: 'Inter', sans-serif; font-size: 0.8rem; color: #064e3b;">${escapeHTML(mgrNotes)}</pre>
+                    <pre style="white-space: pre-wrap; font-family: monospace; font-size: 0.8rem; color: #064e3b;">${escapeHTML(mgrNotes)}</pre>
                 </div>`;
                 hasContent = true;
             }
@@ -868,7 +907,7 @@
             if (showImp && impInfo.trim()) {
                 html += `<div class="note-preview-item" style="background-color:#fff4e6; padding:10px; border-radius:5px; margin-bottom:10px; border: 1px solid #fde047;">
                     <h4><i class="fas fa-exclamation-triangle text-red-500"></i>Important Info</h4>
-                    <pre style="white-space: pre-wrap; font-family: 'Inter', sans-serif; font-size: 0.8rem; color: #9a3412;">${escapeHTML(impInfo)}</pre>
+                    <pre style="white-space: pre-wrap; font-family: monospace; font-size: 0.8rem; color: #9a3412;">${escapeHTML(impInfo)}</pre>
                 </div>`;
                 hasContent = true;
             }
@@ -944,6 +983,26 @@
             }
         }
         
+        // --- POPUP/MODAL FUNCTIONS ---
+        function showManagerFeedback() {
+            if (!currentSelectedRecord) return;
+            const mgrNotes = getVal(currentSelectedRecord, 'cr714_managernotes', 'No manager feedback available for this account.');
+            document.getElementById('manager-feedback-content').textContent = mgrNotes;
+            document.getElementById('manager-feedback-modal').classList.remove('hidden');
+        }
+
+        function closeManagerFeedback() {
+            document.getElementById('manager-feedback-modal').classList.add('hidden');
+        }
+
+        function closeImportantInfo() {
+            document.getElementById('important-info-modal').classList.add('hidden');
+        }
+
+        function showHelp() {
+            showNotification("Help", "This is the Help section. For Manager Feedback or Important Account Info, use the buttons above.");
+        }
+        
         // --- ANNOUNCEMENT/CLOCK FUNCTIONS ---
         function setInitialAnnouncementState() {
             const section = document.getElementById('announcements-section');
@@ -986,9 +1045,8 @@
             if (clockEl) clockEl.textContent = timeStr;
         }
 
-
         // ====================================================================
-        // --- MAIN APP ENTRY POINT ---
+        // --- 3. MAIN APP ENTRY POINT (Initiates MSAL and App Flow) ---
         // ====================================================================
         
         document.addEventListener('DOMContentLoaded', () => {
@@ -1018,8 +1076,9 @@
                     // 3. No active session found. Keep login screen visible.
                     console.log("DEBUG: No active session found. User must click log in.");
                 } catch (err) {
+                    // This catches errors from handleRedirectPromise or acquireTokenSilent, 
+                    // preventing the app from loading but keeping the user on the login screen.
                     console.error("MSAL initialization failed:", err);
-                    // If any step fails, we do nothing, leaving the login button visible.
                 }
             };
 
