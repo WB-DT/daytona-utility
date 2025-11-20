@@ -441,170 +441,28 @@
             return fieldsToSearch.some(key => String(getVal(record, key)).toLowerCase().includes(searchValue));
         }
 
-        // --- AUTHENTICATION & INITIALIZATION ---
-        
-        function initializeAppUI() {
-            console.log(`DEBUG: Initializing main app for ${currentUserRepName}`);
-            document.getElementById('login-container').classList.add('hidden');
-            document.getElementById('main-app-container').classList.remove('hidden');
+        function populateActionFilter(records, dropdownId) {
+            const dropdown = document.getElementById(dropdownId);
+            if (!dropdown) return;
 
-            const welcomeMsg = document.getElementById('welcome-message');
-            if (welcomeMsg) {
-                welcomeMsg.textContent = `Welcome, ${currentUserRepName.split(' ')[0]}`;
-                welcomeMsg.classList.remove('hidden');
-            }
-
-            updateFormDisplayMode(); 
-            showFormContent(false); 
-            setInitialAnnouncementState(); 
-            resetSalesDisplay(); 
-            startClock();
-
-            // Auto-load records immediately after initialization (Requested change)
-            loadRecords(); 
-
-            console.log("DEBUG: App UI Initialized.");
-        }
-        
-        function handleMsalResponse(response) {
-            if (response && response.account) {
-                msalAccount = response.account;
-                currentUserRepName = msalAccount.name;
-                initializeAppUI();
-            } else {
-                // If response is null or has no account (e.g., failed to fetch cached token), check accounts directly.
-                const accounts = msalInstance.getAllAccounts();
-                if (accounts.length > 0) {
-                    msalAccount = accounts[0];
-                    currentUserRepName = msalAccount.name;
-                    initializeAppUI();
-                } else {
-                     console.log("DEBUG: No account found. Waiting for user to click login.");
-                }
-            }
-        }
-        
-        function login() {
-            document.getElementById('login-button').disabled = true;
-            document.getElementById('login-button').textContent = "Signing in...";
-            
-            msalInstance.loginPopup({ scopes: ["User.Read"] })
-                .then(handleMsalResponse)
-                .catch(err => {
-                    console.error("MSAL login error:", err);
-                    showLoginError("Login failed. Please try again.");
-                });
-        }
-
-        // --- DATA LOADING & RENDERING (Depend on utilities above) ---
-        
-        async function loadRecords() {
-            console.log(`LIVE: loadRecords called for ${currentUserRepName}`);
-            
-            showGalleryLoader(true);
-            allRecords = [];
-            currentSelectedRecord = null;
-            currentRecordId = null;
-            showFormContent(false);
-            resetSalesDisplay();
-            
             try {
-                const response = await fetch(GET_MY_RECORDS_FLOW_URL, { 
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ repName: currentUserRepName })
-                });
-
-                if (!response.ok) {
-                    throw new Error(`Flow Error: ${response.status} ${response.statusText}`);
-                }
+                const rawActions = records.map(r => getVal(r, 'cr714_action')).filter(Boolean);
+                const uniqueActions = [...new Set(rawActions.map(a => a.trim()))].sort();
                 
-                const responseText = await response.text();
-                if (!responseText.trim()) {
-                    allRecords = []; 
+                if (uniqueActions.length > 0) {
+                    dropdown.innerHTML = '<option value="">Filter: All Actions</option>';
+                    uniqueActions.forEach(action => {
+                        dropdown.innerHTML += `<option value="${escapeHTML(action)}">${escapeHTML(action)}</option>`;
+                    });
+                    dropdown.disabled = false;
                 } else {
-                    try {
-                        allRecords = JSON.parse(responseText); 
-                    } catch (e) {
-                        console.error("Failed to parse JSON response:", e, "Raw Text:", responseText.substring(0, 500) + '...');
-                        showNotification("Data Error", "Received invalid data from the Flow. Please ensure the Flow's final 'Response' action returns a valid JSON array.");
-                        allRecords = [];
-                    }
+                    dropdown.innerHTML = '<option value="">No Actions to Filter</option>';
+                    dropdown.disabled = true;
                 }
-
-                console.log(`LIVE: Loaded ${allRecords.length} records.`);
-                filterAndSortGallery();
-                populateActionFilter(allRecords, 'filter-action-dropdown');
             } catch (e) {
-                console.error("LIVE: Error loading records:", e);
-                const galleryList = document.getElementById('record-gallery-list');
-                if (galleryList) galleryList.innerHTML = `<div class="loader-container"><p class="text-red-600 italic">Error loading records. Check console.</p></div>`;
-                showNotification("Data Error", `Failed to load records: ${e.message}.`);
-            } finally {
-                showGalleryLoader(false);
-            }
-        }
-        
-        function filterAndSortGallery() {
-            console.log("LIVE: filterAndSort.");
-            const searchValue = getElementValue('search-bar')?.toLowerCase() || '';
-            const sortValue = getElementValue('sort-dropdown') || 'company-asc';
-            const filterValue = getElementValue('filter-action-dropdown') || ''; 
-            const filterFollowUp = document.getElementById('filter-followup')?.checked || false;
-            const filterNoNotes = document.getElementById('filter-nonotes')?.checked || false;
-            const filterRequests = document.getElementById('filter-requests')?.checked || false;
-            
-            if (!Array.isArray(allRecords)) {
-                renderGallery([]);
-                return;
-            }
-            
-            let filtered = allRecords.filter(record => {
-                const isSearchMatch = filterRecordPredicate(record, searchValue);
-                const isActionMatch = filterValue === '' || getVal(record, 'cr714_action') === filterValue;
-                
-                const isFollowUpMatch = !filterFollowUp || (getVal(record, 'cr714_followup') || '').trim() !== '';
-                const isNoNotesMatch = !filterNoNotes || (getVal(record, 'cr714_qbnotes', '') || '').replace(QB_NOTES_TEMPLATE.trim(), '').trim() === '';
-                const isRequestMatch = !filterRequests || ['Help', 'Help - No Opp', 'Help - Close Account Button'].includes((getVal(record, 'cr714_recordviability', '') || '').trim());
-
-                return isSearchMatch && isActionMatch && isFollowUpMatch && isNoNotesMatch && isRequestMatch;
-            });
-            
-            filtered.sort((a, b) => {
-                const cA = getVal(a, 'cr714_company', '').toLowerCase();
-                const cB = getVal(b, 'cr714_company', '').toLowerCase();
-                const dA = parseInt(getVal(a, 'cr714_dayssincelastorder', 9999), 10);
-                const dB = parseInt(getVal(b, 'cr714_dayssincelastorder', 9999), 10);
-                const repA = String(getVal(a, 'cr714_accountrep') || getVal(a, 'cr714_retentionrep', '')).toLowerCase();
-                const repB = String(getVal(b, 'cr714_accountrep') || getVal(b, 'cr714_retentionrep', '')).toLowerCase();
-                const classA = String(getVal(a, 'cr714_customerclassification', '')).toLowerCase();
-                const classB = String(getVal(b, 'cr714_customerclassification', '')).toLowerCase();
-                
-                const followA = getVal(a, 'cr714_followup');
-                const followB = getVal(b, 'cr714_followup');
-                const dateA_val = followA ? new Date(followA).getTime() : Infinity;
-                const dateB_val = followB ? new Date(followB).getTime() : Infinity;
-
-                switch (sortValue) {
-                    case 'company-asc': default: return cA.localeCompare(cB);
-                    case 'company-desc': return cB.localeCompare(cA);
-                    case 'days-asc': return dA - dB;
-                    case 'days-desc': return dB - dA;
-                    case 'rep-asc': return repA.localeCompare(repB);
-                    case 'rep-desc': return repB.localeCompare(repA);
-                    case 'classification-asc': return classA.localeCompare(classB);
-                    case 'classification-desc': return classB.localeCompare(classA);
-                    case 'followup-asc': return dateA_val - dateB_val;
-                    case 'followup-desc': return dateB_val - dateA_val; 
-                }
-            });
-            
-            renderGallery(filtered);
-            const pinnedRecord = allRecords.find(r => String(getVal(r, 'cr714_id')) === currentRecordId);
-            if (!pinnedRecord || !filtered.find(r => String(getVal(r, 'cr714_id')) === currentRecordId)) {
-                 selectRecord(null);
-            } else if(currentRecordId) {
-                selectRecord(currentRecordId);
+                console.error("Error populating action filter:", e);
+                dropdown.innerHTML = '<option value="">Filter Error</option>';
+                dropdown.disabled = true;
             }
         }
         
