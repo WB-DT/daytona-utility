@@ -97,7 +97,12 @@
                     <button onclick="loadRecords()" id="load-records-button" class="py-1 px-3 text-sm rounded-md shadow transition-all duration-200 font-bold bg-green-600 text-white hover:bg-green-700 flex items-center">
                         <i class="fas fa-sync-alt mr-1.5"></i> Refresh
                     </button>
-                    <span id="welcome-message" class="text-sm font-medium text-gray-600 hidden"></span>
+                    <div class="flex items-center gap-2">
+                        <span id="welcome-message" class="text-sm font-medium text-gray-600 hidden"></span>
+                        <button onclick="promptAdminLogin()" class="text-gray-400 hover:text-blue-600 transition-colors" title="Admin Override">
+                            <i class="fas fa-user-lock"></i>
+                        </button>
+                    </div>
                 </div>
                 <div class="flex-grow min-w-[200px] max-w-xs relative">
                     <input type="text" id="search-bar" onkeyup="filterAndSortGallery()" placeholder="Search accounts..." class="pa-input pl-9 w-full text-sm" />
@@ -257,6 +262,22 @@
         <button onclick="dismissWelcome()" class="bg-blue-600 text-white text-xs font-bold py-1.5 rounded hover:bg-blue-700 transition-colors">Got it!</button>
     </div>
 
+    <div id="admin-modal" class="fixed inset-0 bg-black bg-opacity-70 z-[9999] flex items-center justify-center p-4 hidden">
+        <div class="bg-white rounded-lg shadow-xl p-6 max-w-sm w-full border-t-4 border-gray-700">
+            <h3 class="text-lg font-bold text-gray-800 mb-2">Admin Override</h3>
+            <p class="text-xs text-gray-500 mb-4">Enter admin password to override the active sales rep.</p>
+            <input type="password" id="admin-password" class="w-full border p-2 rounded mb-3 text-sm" placeholder="Password">
+            <div id="admin-rep-input" class="hidden mb-3">
+                <label class="block text-xs font-bold mb-1">Override Rep Name:</label>
+                <input type="text" id="override-rep-name" class="w-full border p-2 rounded text-sm" placeholder="e.g. John Doe">
+            </div>
+            <div class="flex gap-2 justify-end">
+                <button onclick="closeAdminModal()" class="text-gray-500 hover:text-gray-700 text-sm font-medium px-3">Cancel</button>
+                <button onclick="checkAdminPassword()" id="admin-action-btn" class="bg-gray-800 hover:bg-black text-white text-sm font-bold py-1.5 px-4 rounded">Authenticate</button>
+            </div>
+        </div>
+    </div>
+
     <div id="notification-modal" class="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4 hidden">
          <div class="bg-white rounded p-6 max-w-sm w-full shadow-2xl"> 
              <h3 id="notification-title" class="text-lg font-bold text-gray-800 mb-2">Message</h3> 
@@ -296,7 +317,7 @@
         const msalInstance = new msal.PublicClientApplication(msalConfig);
         let msalAccount = null;
         
-        // REAL FLOW URLS (RESTORED)
+        // SAS URLs
         const GET_MY_RECORDS_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/2d5cc7c0ffa34dcb87e6416df29b9acf/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=8qFD-lNiuxDgafyu31UYZ8zzePJMRJ4wpUzLzbb9bMs";
         const PATCH_RECORD_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/774bb53ee87542e5825b46958f5bd55d/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=EbaJTl1gKlG8rjTn3ZmoLwUiQ430Sju1kWZYZ6hr0zE";
         const SALES_DATA_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/4a6f98d7dcf0434fa630e691778901bf/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=me09n4bmICH84IIjEV0BDzCIeLfhoFdy5f7hB2AEDOw";
@@ -358,7 +379,6 @@
         function checkFirstRun() {
             const lastSeenDate = localStorage.getItem('hasSeenWelcome_v4');
             const now = new Date();
-            // Format: "YYYY-MM"
             const currentMonth = `${now.getFullYear()}-${now.getMonth() + 1}`;
 
             if (lastSeenDate !== currentMonth) {
@@ -565,10 +585,11 @@
             loader.classList.remove('hidden');
 
             try {
+                // Send both 'text' and 'accountId' to ensure Flow receives the parameter regardless of which key it uses
                 const res = await fetch(SALES_DATA_FLOW_URL, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ accountId: id })
+                    body: JSON.stringify({ text: id, accountId: id })
                 });
                 if(!res.ok) throw new Error("Sales API Error");
                 const data = await res.json();
@@ -622,7 +643,6 @@
             }
 
             if (notes) {
-                // Simple extraction of first 5 lines of QB notes
                 const qbLines = notes.split('\n').filter(line => line.trim() !== '------------------------------' && line.trim() !== '' && !line.includes('Modified On:') && !line.includes('Modified By:')).slice(0, 5);
                 if (qbLines.length > 0) {
                     summaryFound = true;
@@ -694,13 +714,27 @@
             const now = new Date();
             const timestamp = now.toLocaleString();
             
-            // Build new note string
-            const newEntry = strippedNewNotes ? `------------------------------\r\nModified On: ${timestamp}\r\nModified By: ${currentUserRepName}\r\n\r\n${strippedNewNotes}\r\n\r\n` : "";
+            let newEntry = '';
+            if (strippedNewNotes) {
+                 newEntry = `------------------------------\r\nModified On: ${timestamp}\r\nModified By: ${currentUserRepName}\r\n\r\n${strippedNewNotes}\r\n\r\n`;
+            }
+
             const existingNotes = getVal(currentSelectedRecord, 'cr714_qbnotes', '');
+            
+            let isoFollowUp = null;
+            const dateStr = getElementValue('follow-up-date');
+            const timeStr = getElementValue('follow-up-time');
+            if (dateStr) {
+                 let iso = dateStr;
+                 if(timeStr) iso += `T${timeStr}:00Z`;
+                 else iso += `T00:00:00Z`;
+                 isoFollowUp = iso;
+            }
             
             const dataToSave = {
                 recordId: currentRecordId,
                 qbNotes: newEntry + existingNotes,
+                followUp: isoFollowUp,
                 nameMost: getElementValue('contact-name-most'),
                 nameLatest: getElementValue('contact-name-latest'),
                 primaryPhone: getElementValue('contact-phone-primary'),
@@ -708,18 +742,6 @@
                 emailLatest: getElementValue('contact-email-latest'),
                 repName: currentUserRepName
             };
-            
-            // Follow up
-            const dEl = document.getElementById('follow-up-date');
-            const tEl = document.getElementById('follow-up-time');
-            if(dEl.value) {
-                 let iso = dEl.value;
-                 if(tEl.value) iso += `T${tEl.value}:00Z`;
-                 else iso += `T00:00:00Z`;
-                 dataToSave.followUp = iso;
-            } else {
-                 dataToSave.followUp = null;
-            }
 
             try {
                 const response = await fetch(PATCH_RECORD_FLOW_URL, {
@@ -731,8 +753,7 @@
                 if (!response.ok) throw new Error(`Flow Error: ${response.status}`);
                 showNotification("Success", "Record saved successfully.");
                 
-                // Update local
-                const idx = allRecords.findIndex(r => String(r.cr714_id) === currentRecordId);
+                const idx = allRecords.findIndex(r => String(getVal(r, 'cr714_id')) === currentRecordId);
                 if(idx !== -1) {
                      allRecords[idx].cr714_qbnotes = dataToSave.qbNotes;
                      allRecords[idx].cr714_followup = dataToSave.followUp;
@@ -792,41 +813,48 @@
                 document.getElementById('clock-display').innerText = now.toLocaleDateString() + ' ' + now.toLocaleTimeString();
             }, 1000);
         }
-
-        // --- 4. APP INITIALIZATION ---
-        function login() {
-            document.getElementById('login-button').disabled = true;
-            document.getElementById('login-button').textContent = "Signing in...";
-            msalInstance.loginPopup({ scopes: ["User.Read"] }).then(handleMsalResponse).catch(e => {
-                console.error(e);
-                document.getElementById('login-button').disabled = false;
-                document.getElementById('login-button').textContent = "Sign in";
-                showLoginError("Login failed.");
-            });
+        
+        // --- ADMIN FUNCTIONS ---
+        function promptAdminLogin() {
+            document.getElementById('admin-password').value = '';
+            document.getElementById('admin-rep-input').classList.add('hidden');
+            document.getElementById('admin-action-btn').textContent = 'Authenticate';
+            document.getElementById('admin-action-btn').onclick = checkAdminPassword;
+            document.getElementById('admin-modal').classList.remove('hidden');
         }
 
-        function handleMsalResponse(resp) {
-            if(resp && resp.account) {
-                msalAccount = resp.account;
-                currentUserRepName = msalAccount.name;
-                initializeAppUI();
+        function closeAdminModal() {
+            document.getElementById('admin-modal').classList.add('hidden');
+        }
+
+        function checkAdminPassword() {
+            const pw = document.getElementById('admin-password').value;
+            if (pw === "Jj#23242526") {
+                // Show the override input
+                document.getElementById('admin-rep-input').classList.remove('hidden');
+                document.getElementById('admin-action-btn').textContent = 'Set Rep';
+                document.getElementById('admin-action-btn').onclick = setAdminRep;
+            } else {
+                showNotification("Error", "Incorrect Password");
             }
         }
 
-        function initializeAppUI() {
-            document.getElementById('login-container').classList.add('hidden');
-            document.getElementById('main-app-container').classList.remove('hidden');
-            if(document.getElementById('welcome-message')) document.getElementById('welcome-message').textContent = `Welcome, ${currentUserRepName.split(' ')[0]}`;
-            
-            setInitialAnnouncementState();
-            updateFormDisplayMode();
-            showFormContent(false);
-            resetSalesDisplay();
-            startClock();
-            
-            loadRecords(); 
+        function setAdminRep() {
+            const newRep = document.getElementById('override-rep-name').value;
+            if (newRep) {
+                currentUserRepName = newRep;
+                const welcomeMsg = document.getElementById('welcome-message');
+                if(welcomeMsg) welcomeMsg.textContent = `Welcome, ${newRep} (Admin Mode)`;
+                
+                closeAdminModal();
+                loadRecords(); // Reload with new rep name
+                showNotification("Success", `Rep switched to: ${newRep}`);
+            } else {
+                showNotification("Error", "Please enter a Rep Name.");
+            }
         }
 
+        // --- INIT ---
         document.addEventListener('DOMContentLoaded', () => {
             checkFirstRun();
             msalInstance.handleRedirectPromise().then(handleMsalResponse).catch(console.error);
