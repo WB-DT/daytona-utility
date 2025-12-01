@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Account Utility v6.34 (Sync Fix)</title>
+    <title>Daytona Account Utility v6.35 (Manual Sales Fetch)</title>
     <script src="https://cdn.tailwindcss.com" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -199,7 +199,9 @@
                             <ul id="sales-category-list" class="text-xs space-y-1"></ul>
                         </div>
                     </div>
-                    <div id="sales-placeholder" class="text-xs text-center py-8 italic" style="color: var(--text-muted);">Select an account to view sales.</div>
+                    <div id="sales-placeholder" class="text-xs text-center py-8 flex flex-col items-center justify-center gap-2" style="color: var(--text-muted);">
+                        <span class="italic">Select an account to view sales.</span>
+                    </div>
                     <div class="text-center pt-2 border-t mt-auto text-xs" style="border-color: var(--border-color); color: var(--text-muted);"><span id="clock-display">--:-- --</span></div>
                 </div>
             </div>
@@ -364,9 +366,6 @@
 
         let currentThemeIdx=0, isEditMode=false, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentUserRepName=null, currentUserProfile=null;
         
-        // SYNC HELPER
-        let activeSalesFetchId = null;
-
         // --- HELPER FUNCTIONS (HOISTED) ---
         window.getVal = function(obj, k) { return (obj && obj[k] != null) ? obj[k] : ''; }
         window.escapeHTML = function(str) { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'})[m]); }
@@ -436,7 +435,6 @@
         window.safeJSONParse = function(str) {
             try {
                 const parsed = JSON.parse(str);
-                // Handle double encoding (stringified twice)
                 if (typeof parsed === 'string') return JSON.parse(parsed);
                 return parsed;
             } catch (e) {
@@ -502,40 +500,35 @@
             }
         }
 
-        // --- SALES LOGIC v6.34 (SYNC FIX & FLASH PREVENTION) ---
-        window.loadSalesData = async function(id) {
-            // 1. SETUP ASYNC TRACKER
-            const thisRequestId = id;
-            activeSalesFetchId = id;
+        // --- MANUAL SALES TRIGGER (NEW v6.35) ---
+        window.resetSalesUI = function() {
+            // Hide Content & Loader
+            document.getElementById('sales-content').classList.add('hidden');
+            document.getElementById('sales-loader').classList.add('hidden');
+            
+            // Show Placeholder with Button
+            const ph = document.getElementById('sales-placeholder');
+            ph.classList.remove('hidden');
+            ph.innerHTML = `<button onclick="window.loadSalesData('${currentRecordId}')" class="btn-primary text-xs shadow-lg animate-pulse">Get Sales Snapshot</button>`;
+        }
 
-            // 2. PREP UI - FORCE HIDDEN STATE
+        window.loadSalesData = async function(id) {
+            // 1. UI STATE: Loading
             const container = document.getElementById('sales-content');
             const loader = document.getElementById('sales-loader');
             const placeholder = document.getElementById('sales-placeholder');
-            const ytdEl = document.getElementById('sales-ytd');
-            const list = document.getElementById('sales-category-list');
             
-            // Explicitly reset values so they don't show old data if container flashes
-            ytdEl.innerText = "--";
-            list.innerHTML = "";
-
-            container.classList.add('hidden'); 
-            placeholder.classList.add('hidden'); 
-            loader.classList.remove('hidden');
-
+            placeholder.classList.add('hidden'); // Hide Button
+            loader.classList.remove('hidden');   // Show Spinner
+            
             try {
                 const res = await fetch(SALES_DATA_FLOW_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ text: id, accountId: id }) });
-                
-                // RACE CONDITION CHECK
-                if (activeSalesFetchId !== thisRequestId) return; 
-
                 if(!res.ok) throw new Error("Sales API Error");
                 const json = await res.json();
                 
-                // DATA EXTRACTION
                 const root = json.body ? json.body : json;
 
-                // PARSE SALES ARRAY
+                // 2. PARSING
                 let salesData = [];
                 if (root.salesByCategory) {
                     if (typeof root.salesByCategory === 'string') {
@@ -545,7 +538,6 @@
                     }
                 }
 
-                // PARSE CUSTOMERS (CONTACTS)
                 if (root.customers) {
                     let custData = [];
                     if (typeof root.customers === 'string') {
@@ -556,9 +548,7 @@
                     if (Array.isArray(custData) && custData.length > 0) {
                         const cust = custData[0];
                         const nameField = document.getElementById('contact-name-most');
-                        if (!nameField.value || nameField.value === 'Unknown Name') {
-                            nameField.value = cust['[FullName_most]'] || cust['[FullName_latest]'] || '';
-                        }
+                        if (!nameField.value || nameField.value === 'Unknown Name') nameField.value = cust['[FullName_most]'] || cust['[FullName_latest]'] || '';
                         const phoneField = document.getElementById('contact-phone-primary');
                         if (!phoneField.value) phoneField.value = cust['[Phone]'] || '';
                         const emailField = document.getElementById('contact-email-most');
@@ -566,8 +556,9 @@
                     }
                 }
                 
-                // RENDER SALES UI
+                // 3. RENDERING
                 let total = 0;
+                const list = document.getElementById('sales-category-list');
                 list.innerHTML = '';
                 
                 if (salesData.length > 0) {
@@ -584,7 +575,7 @@
                         list.innerHTML += `<li class="flex justify-between border-b py-1" style="border-color: var(--border-color)"><span class="text-muted">${window.escapeHTML(name)}</span><span class="font-bold text-brand">$${amt.toFixed(2)}</span></li>`;
                     });
                     
-                    ytdEl.innerText = `$${total.toFixed(2)}`;
+                    document.getElementById('sales-ytd').innerText = `$${total.toFixed(2)}`;
                     document.getElementById('sales-total-orders').innerText = '--';
                     
                     if (currentSelectedRecord && currentSelectedRecord.cr714_dayssincelastorder) {
@@ -594,20 +585,17 @@
                     }
                     container.classList.remove('hidden');
                 } else {
-                    ytdEl.innerText = "$0.00";
+                    document.getElementById('sales-ytd').innerText = "$0.00";
                     list.innerHTML = `<li class="text-center text-muted italic text-xs py-2">No sales found.</li>`;
                     container.classList.remove('hidden');
                 }
 
             } catch(e) { 
-                if (activeSalesFetchId !== thisRequestId) return;
                 console.error("Sales Load Error:", e); 
-                placeholder.innerText = "Error loading sales."; 
+                placeholder.innerHTML = `<div class="text-red-500 font-bold">Error loading sales. <br><button onclick="window.loadSalesData('${id}')" class="underline mt-1">Retry</button></div>`;
                 placeholder.classList.remove('hidden'); 
             } finally { 
-                if (activeSalesFetchId === thisRequestId) {
-                    loader.classList.add('hidden'); 
-                }
+                loader.classList.add('hidden'); 
             }
         }
 
@@ -668,7 +656,7 @@
             items.forEach(item => { if(item.innerHTML.includes(id)) item.classList.add('is-selected'); else item.classList.remove('is-selected'); });
             if(currentSelectedRecord) { 
                 window.populateForm(currentSelectedRecord); 
-                window.loadSalesData(currentRecordId); 
+                window.resetSalesUI(); // RESET UI TO SHOW BUTTON instead of auto-loading
                 isEditMode = true; 
                 window.updateFormDisplayMode(); 
                 document.getElementById('qb-notes-input').focus();
