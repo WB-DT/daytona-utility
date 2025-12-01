@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Account Utility v6.33 (Sales Parser Fix)</title>
+    <title>Daytona Account Utility v6.34 (Sync Fix)</title>
     <script src="https://cdn.tailwindcss.com" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -363,6 +363,9 @@
         const IMG_CHAIR = "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/WB%20Chair%20Mat.png"; 
 
         let currentThemeIdx=0, isEditMode=false, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentUserRepName=null, currentUserProfile=null;
+        
+        // SYNC HELPER
+        let activeSalesFetchId = null;
 
         // --- HELPER FUNCTIONS (HOISTED) ---
         window.getVal = function(obj, k) { return (obj && obj[k] != null) ? obj[k] : ''; }
@@ -499,25 +502,40 @@
             }
         }
 
-        // --- SALES LOGIC v6.33 (ROBUST STRING PARSING) ---
+        // --- SALES LOGIC v6.34 (SYNC FIX & FLASH PREVENTION) ---
         window.loadSalesData = async function(id) {
+            // 1. SETUP ASYNC TRACKER
+            const thisRequestId = id;
+            activeSalesFetchId = id;
+
+            // 2. PREP UI - FORCE HIDDEN STATE
             const container = document.getElementById('sales-content');
             const loader = document.getElementById('sales-loader');
             const placeholder = document.getElementById('sales-placeholder');
+            const ytdEl = document.getElementById('sales-ytd');
+            const list = document.getElementById('sales-category-list');
             
+            // Explicitly reset values so they don't show old data if container flashes
+            ytdEl.innerText = "--";
+            list.innerHTML = "";
+
             container.classList.add('hidden'); 
             placeholder.classList.add('hidden'); 
             loader.classList.remove('hidden');
 
             try {
                 const res = await fetch(SALES_DATA_FLOW_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ text: id, accountId: id }) });
+                
+                // RACE CONDITION CHECK
+                if (activeSalesFetchId !== thisRequestId) return; 
+
                 if(!res.ok) throw new Error("Sales API Error");
                 const json = await res.json();
                 
-                // DATA EXTRACTION (Handle direct or nested body)
+                // DATA EXTRACTION
                 const root = json.body ? json.body : json;
 
-                // 1. PARSE SALES ARRAY
+                // PARSE SALES ARRAY
                 let salesData = [];
                 if (root.salesByCategory) {
                     if (typeof root.salesByCategory === 'string') {
@@ -527,7 +545,7 @@
                     }
                 }
 
-                // 2. PARSE CUSTOMERS (CONTACTS)
+                // PARSE CUSTOMERS (CONTACTS)
                 if (root.customers) {
                     let custData = [];
                     if (typeof root.customers === 'string') {
@@ -535,10 +553,8 @@
                     } else if (Array.isArray(root.customers)) {
                         custData = root.customers;
                     }
-                    
                     if (Array.isArray(custData) && custData.length > 0) {
                         const cust = custData[0];
-                        // Update Fields if they are empty
                         const nameField = document.getElementById('contact-name-most');
                         if (!nameField.value || nameField.value === 'Unknown Name') {
                             nameField.value = cust['[FullName_most]'] || cust['[FullName_latest]'] || '';
@@ -550,9 +566,8 @@
                     }
                 }
                 
-                // 3. RENDER SALES UI
+                // RENDER SALES UI
                 let total = 0;
-                const list = document.getElementById('sales-category-list');
                 list.innerHTML = '';
                 
                 if (salesData.length > 0) {
@@ -569,10 +584,9 @@
                         list.innerHTML += `<li class="flex justify-between border-b py-1" style="border-color: var(--border-color)"><span class="text-muted">${window.escapeHTML(name)}</span><span class="font-bold text-brand">$${amt.toFixed(2)}</span></li>`;
                     });
                     
-                    document.getElementById('sales-ytd').innerText = `$${total.toFixed(2)}`;
-                    document.getElementById('sales-total-orders').innerText = '--'; // Data not present in this endpoint
+                    ytdEl.innerText = `$${total.toFixed(2)}`;
+                    document.getElementById('sales-total-orders').innerText = '--';
                     
-                    // Use Main Record for Last Order Date as fallback
                     if (currentSelectedRecord && currentSelectedRecord.cr714_dayssincelastorder) {
                          document.getElementById('sales-last-order').innerText = `${currentSelectedRecord.cr714_dayssincelastorder} Days`;
                     } else {
@@ -580,17 +594,20 @@
                     }
                     container.classList.remove('hidden');
                 } else {
-                    document.getElementById('sales-ytd').innerText = "$0.00";
+                    ytdEl.innerText = "$0.00";
                     list.innerHTML = `<li class="text-center text-muted italic text-xs py-2">No sales found.</li>`;
                     container.classList.remove('hidden');
                 }
 
             } catch(e) { 
+                if (activeSalesFetchId !== thisRequestId) return;
                 console.error("Sales Load Error:", e); 
                 placeholder.innerText = "Error loading sales."; 
                 placeholder.classList.remove('hidden'); 
             } finally { 
-                loader.classList.add('hidden'); 
+                if (activeSalesFetchId === thisRequestId) {
+                    loader.classList.add('hidden'); 
+                }
             }
         }
 
