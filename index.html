@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Account Utility v6.43 (HAR-Verified Fix)</title>
+    <title>Daytona Account Utility v6.44 (Polling & Profile Fix)</title>
     <script src="https://cdn.tailwindcss.com" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -431,18 +431,13 @@
              window.checkEmailRateLimit();
         }
         
-        // SAFE PARSE HELPER
+        // SAFE PARSE HELPER (v6.44 Update)
         window.safeJSONParse = function(str) {
             try {
-                // If the input is ALREADY an object/array, return it directly.
                 if (typeof str === 'object' && str !== null) return str;
-                
-                // If it's a string, parse it.
                 const parsed = JSON.parse(str);
-                
-                // Handle "Double Stringified" JSON (Common in Power Automate responses)
+                // Handle double encoding, common in Power Automate responses
                 if (typeof parsed === 'string') return JSON.parse(parsed);
-                
                 return parsed;
             } catch (e) {
                 console.warn("Parse warning:", e);
@@ -450,26 +445,26 @@
             }
         };
 
-        // --- MODAL FUNCTIONS ---
+        // --- MODAL FUNCTIONS (Fixed Data Mapping v6.44) ---
         window.showUserProfileCard = function() { 
             if(!currentUserProfile) return;
-            console.log("Current Profile Data:", currentUserProfile); // DEBUG
+            console.log("Current Profile Data:", currentUserProfile);
             const p = currentUserProfile;
+            const get = (k, fallback = '--') => (p[k] !== undefined && p[k] !== null) ? p[k] : fallback;
             
-            const get = (key, fallback = '--') => (p[key] !== undefined && p[key] !== null) ? p[key] : fallback;
-            
-            // Corrected Mapping based on HAR Data
+            // MAPPING BASED ON HAR FILE
             document.getElementById('popout-name').textContent = get('cr714_employeename', 'User');
             document.getElementById('popout-title').textContent = get('cr714_title@OData.Community.Display.V1.FormattedValue', 'Sales Rep');
             
-            // Note: Department & Location are lookups, using formatted value for display
             document.getElementById('popout-department').textContent = get('cr714_department@OData.Community.Display.V1.FormattedValue');
             document.getElementById('popout-location').textContent = get('cr714_location@OData.Community.Display.V1.FormattedValue');
             
             document.getElementById('popout-manager').textContent = get('cr714_managerassigned');
-            document.getElementById('popout-secondary-manager').textContent = '--'; // Field not in HAR, defaulting
+            // 'secondarymanager' not found in HAR, defaulting to --
+            document.getElementById('popout-secondary-manager').textContent = '--'; 
             document.getElementById('popout-sr-manager').textContent = get('cr714_srmanager');
-            document.getElementById('popout-supervisor').textContent = '--'; // Field not in HAR, defaulting
+             // 'supervisor' not found in HAR, defaulting to --
+            document.getElementById('popout-supervisor').textContent = '--'; 
             
             const gold = get('cr714_goldstarflag');
             document.getElementById('popout-gold-star').innerHTML = (gold === 'Y') ? `<i class="fas fa-star text-yellow-400"></i> Yes` : 'No';
@@ -537,13 +532,35 @@
             }
         }
 
-        // --- MANUAL SALES TRIGGER ---
+        // --- MANUAL SALES TRIGGER (POLLING FIX v6.44) ---
         window.resetSalesUI = function() {
             document.getElementById('sales-content').classList.add('hidden');
             document.getElementById('sales-loader').classList.add('hidden');
+            
             const ph = document.getElementById('sales-placeholder');
             ph.classList.remove('hidden');
             ph.innerHTML = `<button onclick="window.loadSalesData('${currentRecordId}')" class="btn-primary text-xs shadow-lg animate-pulse">Get Sales Snapshot</button>`;
+        }
+
+        async function fetchWithPolling(url, options) {
+            let res = await fetch(url, options);
+            
+            if (res.status === 202) {
+                const location = res.headers.get('location');
+                if (!location) throw new Error("Async 202 received but no Location header found.");
+                
+                // Poll up to 20 times (40 seconds max)
+                let retries = 0;
+                while (retries < 20) {
+                    await new Promise(r => setTimeout(r, 2000)); // Wait 2s
+                    let pollRes = await fetch(location);
+                    if (pollRes.status === 200) return pollRes;
+                    if (pollRes.status === 202) { retries++; continue; }
+                    throw new Error(`Polling failed with status ${pollRes.status}`);
+                }
+                throw new Error("Polling timed out.");
+            }
+            return res;
         }
 
         window.loadSalesData = async function(id) {
@@ -555,17 +572,22 @@
             loader.classList.remove('hidden');   
             
             try {
-                // FIXED: Use text and accountId based on previous working versions
-                const res = await fetch(SALES_DATA_FLOW_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ text: id, accountId: id }) });
-                if(!res.ok) throw new Error("Sales API Error");
+                // Using polling fetch to handle 202 Accepted response
+                const res = await fetchWithPolling(SALES_DATA_FLOW_URL, { 
+                    method: 'POST', 
+                    headers: {'Content-Type': 'application/json'}, 
+                    body: JSON.stringify({ text: id, accountId: id }) 
+                });
+                
+                if(!res.ok) throw new Error(`Sales API Error: ${res.status}`);
                 const json = await res.json();
                 
                 const root = json.body ? json.body : json;
 
-                // 2. PARSING (DOUBLE CHECK FOR STRINGIFIED JSON)
+                // 2. PARSING
                 let salesData = [];
                 if (root.salesByCategory) {
-                     salesData = window.safeJSONParse(root.salesByCategory) || [];
+                    salesData = window.safeJSONParse(root.salesByCategory) || [];
                 }
 
                 if (root.customers) {
