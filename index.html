@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Account Utility v6.31 (Patched)</title>
+    <title>Daytona Account Utility v6.32 (Sales Loading Fix)</title>
     <script src="https://cdn.tailwindcss.com" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -191,7 +191,7 @@
                     <div id="sales-content" class="hidden flex-grow flex flex-col gap-2 overflow-hidden">
                         <div class="grid grid-cols-2 gap-2 text-sm">
                             <div class="p-2 rounded" style="background-color: var(--bg-input);"><div class="text-xs uppercase" style="color: var(--text-muted);">3-Month Sales</div><div class="font-bold text-lg" style="color: var(--primary);" id="sales-ytd">--</div></div>
-                            <div class="p-2 rounded" style="background-color: var(--bg-input);"><div class="text-xs uppercase" style="color: var(--text-muted);">Categories</div><div class="font-bold" id="sales-total-orders">--</div></div>
+                            <div class="p-2 rounded" style="background-color: var(--bg-input);"><div class="text-xs uppercase" style="color: var(--text-muted);">Orders</div><div class="font-bold" id="sales-total-orders">--</div></div>
                             <div class="p-2 rounded col-span-2 flex justify-between items-center" style="background-color: var(--bg-input);"><div class="text-xs uppercase" style="color: var(--text-muted);">Last Order</div><div class="font-bold" id="sales-last-order">--</div></div>
                         </div>
                         <div class="flex-grow overflow-y-auto border-t pt-2" style="border-color: var(--border-color)">
@@ -379,7 +379,6 @@
         
         window.parseNotes = function(rawNotes) { 
             if (!rawNotes) return []; 
-            // IMPROVED REGEX: Handles various dash lengths
             const rawEntries = rawNotes.split(/[-]{5,}/).filter(s => s.trim().length > 0); 
             const parsed = []; 
             rawEntries.forEach(entry => { 
@@ -487,102 +486,52 @@
             }
         }
 
+        // --- SALES LOGIC FROM V4.12 INTEGRATED INTO V6.32 ---
         window.loadSalesData = async function(id) {
             const container = document.getElementById('sales-content');
             const loader = document.getElementById('sales-loader');
             const placeholder = document.getElementById('sales-placeholder');
             
-            // UI References
-            const totalEl = document.getElementById('sales-ytd');
-            const countEl = document.getElementById('sales-total-orders');
-            const lastOrderEl = document.getElementById('sales-last-order');
-            const list = document.getElementById('sales-category-list');
-            
-            // Reset UI
-            totalEl.innerText = "--";
-            countEl.innerText = "--";
-            lastOrderEl.innerText = "--";
-            list.innerHTML = '';
-            
-            container.classList.add('hidden'); placeholder.classList.add('hidden'); loader.classList.remove('hidden');
-            
+            // Hide previous content and show loader
+            container.classList.add('hidden'); 
+            placeholder.classList.add('hidden'); 
+            loader.classList.remove('hidden');
+
             try {
                 const res = await fetch(SALES_DATA_FLOW_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ text: id, accountId: id }) });
                 if(!res.ok) throw new Error("Sales API Error");
                 const json = await res.json();
                 
-                // SALES PARSER
-                let salesArray = [];
-                let salesRaw = json.salesByCategory || (json.body ? json.body.salesByCategory : null) || (json.d ? json.d.salesByCategory : null);
+                // V4.12 Parsing Logic
+                const sales = typeof json.body?.salesByCategory === 'string' ? JSON.parse(json.body.salesByCategory) : (json.body?.salesByCategory || []);
                 
-                if (salesRaw) {
-                    if (typeof salesRaw === 'string') {
-                         try { salesArray = JSON.parse(salesRaw); } catch(e){ console.error("Sales Parse Error", e); }
-                    } else if (Array.isArray(salesRaw)) {
-                         salesArray = salesRaw;
-                    }
-                }
-                
-                // CONTACT PARSER
-                let custRaw = json.customers || (json.body ? json.body.customers : null);
-                if (custRaw) {
-                      try {
-                          const custArray = (typeof custRaw === 'string') ? JSON.parse(custRaw) : custRaw;
-                          if (Array.isArray(custArray) && custArray.length > 0) {
-                              const custData = custArray[0];
-                              const nameField = document.getElementById('contact-name-most');
-                              if (!nameField.value || nameField.value === 'Unknown Name') {
-                                  nameField.value = custData['[FullName_most]'] || custData['[FullName_latest]'] || '';
-                              }
-                              const phoneField = document.getElementById('contact-phone-primary');
-                              if (!phoneField.value) phoneField.value = custData['[Phone]'] || '';
-                              const emailField = document.getElementById('contact-email-most');
-                              if (!emailField.value) emailField.value = custData['[Email_most]'] || custData['[Email_latest]'] || '';
-                          }
-                      } catch(e) { console.warn("Contact fallback failed", e); }
-                }
-
-                // --- POPULATE SALES DATA ---
                 let total = 0;
+                const list = document.getElementById('sales-category-list');
+                list.innerHTML = '';
                 
-                if (Array.isArray(salesArray) && salesArray.length > 0) {
-                    // Sort High-Low
-                    salesArray.sort((a, b) => {
-                        const valA = parseFloat(a["[Sales_Last3Months]"] || 0);
-                        const valB = parseFloat(b["[Sales_Last3Months]"] || 0);
-                        return valB - valA;
-                    });
-
-                    salesArray.forEach(s => {
-                        let amt = parseFloat(s["[Sales_Last3Months]"] || 0);
-                        let name = s["DimItemIDitemtypegroup[ItemTypeGroupDescription]"] || "Unknown";
-                        total += amt;
-                        list.innerHTML += `<li class="flex justify-between border-b py-1" style="border-color: var(--border-color)"><span class="text-muted">${window.escapeHTML(name)}</span><span class="font-bold text-brand">$${amt.toFixed(2)}</span></li>`;
-                    });
-                    
-                    // Update Sales Dollar Amount
-                    totalEl.innerText = `$${total.toFixed(2)}`;
-                    
-                    // Update "Categories" Count (Used as proxy for Orders since line-items aren't available)
-                    countEl.innerText = salesArray.length;
-                    
-                    // Update "Last Order"
-                    // Since Sales API returns aggregates, we check the main account record for the last order date logic
-                    if (currentSelectedRecord && currentSelectedRecord.cr714_dayssincelastorder) {
-                        const days = currentSelectedRecord.cr714_dayssincelastorder;
-                        lastOrderEl.innerText = `${days} Days Ago`;
-                    } else {
-                        lastOrderEl.innerText = "N/A";
-                    }
-
-                    container.classList.remove('hidden');
+                sales.forEach(s => {
+                    const amt = parseFloat(s["[Sales_Last3Months]"] || 0);
+                    total += amt;
+                    const name = s["DimItemIDitemtypegroup[ItemTypeGroupDescription]"] || "Unknown";
+                    list.innerHTML += `<li class="flex justify-between border-b py-1" style="border-color: var(--border-color)"><span class="text-muted">${window.escapeHTML(name)}</span><span class="font-bold text-brand">$${amt.toFixed(2)}</span></li>`;
+                });
+                
+                // Update Totals
+                document.getElementById('sales-ytd').innerText = `$${total.toFixed(2)}`;
+                // V4.12 didn't calculate Orders/LastOrder from Sales API (it kept them as placeholders or used main record data), 
+                // but to match V6 style we set them to '--' or calculate if possible. 
+                // In V4.12, these were usually static or populated from the main record elsewhere.
+                // We will default them to '--' to match the V4 behavior of only updating what it knows.
+                document.getElementById('sales-total-orders').innerText = '--';
+                
+                // However, we can use the Main Record data for "Last Order" if available (Hybrid approach)
+                if (currentSelectedRecord && currentSelectedRecord.cr714_dayssincelastorder) {
+                     document.getElementById('sales-last-order').innerText = `${currentSelectedRecord.cr714_dayssincelastorder} Days`;
                 } else {
-                    totalEl.innerText = "$0.00";
-                    countEl.innerText = "0";
-                    lastOrderEl.innerText = "--";
-                    list.innerHTML = `<li class="text-center text-muted italic text-xs py-2">No sales found.</li>`;
-                    container.classList.remove('hidden');
+                     document.getElementById('sales-last-order').innerText = '--';
                 }
+
+                container.classList.remove('hidden');
             } catch(e) { 
                 console.error(e); 
                 placeholder.innerText = "Error loading sales."; 
