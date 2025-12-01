@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Account Utility v6.32 (Sales Loading Fix)</title>
+    <title>Daytona Account Utility v6.33 (Sales Parser Fix)</title>
     <script src="https://cdn.tailwindcss.com" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -428,6 +428,19 @@
              localStorage.setItem('daytona_email_timestamps', JSON.stringify(timestamps));
              window.checkEmailRateLimit();
         }
+        
+        // SAFE PARSE HELPER
+        window.safeJSONParse = function(str) {
+            try {
+                const parsed = JSON.parse(str);
+                // Handle double encoding (stringified twice)
+                if (typeof parsed === 'string') return JSON.parse(parsed);
+                return parsed;
+            } catch (e) {
+                console.warn("Parse warning:", e);
+                return null;
+            }
+        };
 
         // --- MODAL FUNCTIONS ---
         window.showManagerFeedback = function() { document.getElementById('manager-feedback-modal').classList.remove('hidden'); }
@@ -486,13 +499,12 @@
             }
         }
 
-        // --- SALES LOGIC FROM V4.12 INTEGRATED INTO V6.32 ---
+        // --- SALES LOGIC v6.33 (ROBUST STRING PARSING) ---
         window.loadSalesData = async function(id) {
             const container = document.getElementById('sales-content');
             const loader = document.getElementById('sales-loader');
             const placeholder = document.getElementById('sales-placeholder');
             
-            // Hide previous content and show loader
             container.classList.add('hidden'); 
             placeholder.classList.add('hidden'); 
             loader.classList.remove('hidden');
@@ -502,38 +514,79 @@
                 if(!res.ok) throw new Error("Sales API Error");
                 const json = await res.json();
                 
-                // V4.12 Parsing Logic
-                const sales = typeof json.body?.salesByCategory === 'string' ? JSON.parse(json.body.salesByCategory) : (json.body?.salesByCategory || []);
+                // DATA EXTRACTION (Handle direct or nested body)
+                const root = json.body ? json.body : json;
+
+                // 1. PARSE SALES ARRAY
+                let salesData = [];
+                if (root.salesByCategory) {
+                    if (typeof root.salesByCategory === 'string') {
+                         salesData = window.safeJSONParse(root.salesByCategory) || [];
+                    } else if (Array.isArray(root.salesByCategory)) {
+                         salesData = root.salesByCategory;
+                    }
+                }
+
+                // 2. PARSE CUSTOMERS (CONTACTS)
+                if (root.customers) {
+                    let custData = [];
+                    if (typeof root.customers === 'string') {
+                        custData = window.safeJSONParse(root.customers) || [];
+                    } else if (Array.isArray(root.customers)) {
+                        custData = root.customers;
+                    }
+                    
+                    if (Array.isArray(custData) && custData.length > 0) {
+                        const cust = custData[0];
+                        // Update Fields if they are empty
+                        const nameField = document.getElementById('contact-name-most');
+                        if (!nameField.value || nameField.value === 'Unknown Name') {
+                            nameField.value = cust['[FullName_most]'] || cust['[FullName_latest]'] || '';
+                        }
+                        const phoneField = document.getElementById('contact-phone-primary');
+                        if (!phoneField.value) phoneField.value = cust['[Phone]'] || '';
+                        const emailField = document.getElementById('contact-email-most');
+                        if (!emailField.value) emailField.value = cust['[Email_most]'] || cust['[Email_latest]'] || '';
+                    }
+                }
                 
+                // 3. RENDER SALES UI
                 let total = 0;
                 const list = document.getElementById('sales-category-list');
                 list.innerHTML = '';
                 
-                sales.forEach(s => {
-                    const amt = parseFloat(s["[Sales_Last3Months]"] || 0);
-                    total += amt;
-                    const name = s["DimItemIDitemtypegroup[ItemTypeGroupDescription]"] || "Unknown";
-                    list.innerHTML += `<li class="flex justify-between border-b py-1" style="border-color: var(--border-color)"><span class="text-muted">${window.escapeHTML(name)}</span><span class="font-bold text-brand">$${amt.toFixed(2)}</span></li>`;
-                });
-                
-                // Update Totals
-                document.getElementById('sales-ytd').innerText = `$${total.toFixed(2)}`;
-                // V4.12 didn't calculate Orders/LastOrder from Sales API (it kept them as placeholders or used main record data), 
-                // but to match V6 style we set them to '--' or calculate if possible. 
-                // In V4.12, these were usually static or populated from the main record elsewhere.
-                // We will default them to '--' to match the V4 behavior of only updating what it knows.
-                document.getElementById('sales-total-orders').innerText = '--';
-                
-                // However, we can use the Main Record data for "Last Order" if available (Hybrid approach)
-                if (currentSelectedRecord && currentSelectedRecord.cr714_dayssincelastorder) {
-                     document.getElementById('sales-last-order').innerText = `${currentSelectedRecord.cr714_dayssincelastorder} Days`;
+                if (salesData.length > 0) {
+                    salesData.sort((a, b) => {
+                        const valA = parseFloat(a["[Sales_Last3Months]"] || 0);
+                        const valB = parseFloat(b["[Sales_Last3Months]"] || 0);
+                        return valB - valA;
+                    });
+
+                    salesData.forEach(s => {
+                        const amt = parseFloat(s["[Sales_Last3Months]"] || 0);
+                        total += amt;
+                        const name = s["DimItemIDitemtypegroup[ItemTypeGroupDescription]"] || "Unknown";
+                        list.innerHTML += `<li class="flex justify-between border-b py-1" style="border-color: var(--border-color)"><span class="text-muted">${window.escapeHTML(name)}</span><span class="font-bold text-brand">$${amt.toFixed(2)}</span></li>`;
+                    });
+                    
+                    document.getElementById('sales-ytd').innerText = `$${total.toFixed(2)}`;
+                    document.getElementById('sales-total-orders').innerText = '--'; // Data not present in this endpoint
+                    
+                    // Use Main Record for Last Order Date as fallback
+                    if (currentSelectedRecord && currentSelectedRecord.cr714_dayssincelastorder) {
+                         document.getElementById('sales-last-order').innerText = `${currentSelectedRecord.cr714_dayssincelastorder} Days`;
+                    } else {
+                         document.getElementById('sales-last-order').innerText = '--';
+                    }
+                    container.classList.remove('hidden');
                 } else {
-                     document.getElementById('sales-last-order').innerText = '--';
+                    document.getElementById('sales-ytd').innerText = "$0.00";
+                    list.innerHTML = `<li class="text-center text-muted italic text-xs py-2">No sales found.</li>`;
+                    container.classList.remove('hidden');
                 }
 
-                container.classList.remove('hidden');
             } catch(e) { 
-                console.error(e); 
+                console.error("Sales Load Error:", e); 
                 placeholder.innerText = "Error loading sales."; 
                 placeholder.classList.remove('hidden'); 
             } finally { 
