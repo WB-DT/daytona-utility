@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Manager v6.52 (Edit Fix)</title>
+    <title>Daytona Manager v6.54 (Rental Split & Live Data)</title>
     <script src="https://cdn.tailwindcss.com" defer></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -502,6 +502,7 @@
             if(currentSelectedRecord) { window.populateForm(currentSelectedRecord); isEditMode = false; window.updateFormDisplayMode(); } 
         }
         window.toggleEditMode = function() { 
+            console.log("toggleEditMode called. Current:", isEditMode); // DEBUG LOG
             if(currentSelectedRecord) { isEditMode = !isEditMode; window.updateFormDisplayMode(); } 
         }
         window.toggleNoteView = function(id) {
@@ -605,7 +606,21 @@
                 if (root.salesByCategory) {
                     salesData = window.safeJSONParse(root.salesByCategory) || [];
                 }
+
+                if (root.customers) {
+                    let custData = window.safeJSONParse(root.customers) || [];
+                    if (Array.isArray(custData) && custData.length > 0) {
+                        const cust = custData[0];
+                        const nameField = document.getElementById('contact-name-most');
+                        if (!nameField.value || nameField.value === 'Unknown Name') nameField.value = cust['[FullName_most]'] || cust['[FullName_latest]'] || '';
+                        const phoneField = document.getElementById('contact-phone-primary');
+                        if (!phoneField.value) phoneField.value = cust['[Phone]'] || '';
+                        const emailField = document.getElementById('contact-email-most');
+                        if (!emailField.value) emailField.value = cust['[Email_most]'] || cust['[Email_latest]'] || '';
+                    }
+                }
                 
+                // 3. RENDERING
                 let total = 0;
                 const list = document.getElementById('sales-category-list');
                 list.innerHTML = '';
@@ -650,13 +665,24 @@
             const fields = {'contact-name-most': 'cr714_namemost', 'contact-name-latest': 'cr714_namelatest', 'contact-phone-primary': 'cr714_primaryphone', 'contact-email-most': 'cr714_emailmost', 'contact-email-latest': 'cr714_emaillatest'};
             for(const [id, key] of Object.entries(fields)) { const el = document.getElementById(id); if(el) el.value = rec[key] || ''; }
             
-            // Reset Inputs
+            // RENTAL NOTE SPLITTING LOGIC
+            const fullNotes = rec.cr714_qbnotes || '';
+            const splitMarker = "*** RENTAL NOTE ***";
+            let genNotes = fullNotes;
+            let rentNotes = "";
+            
+            if (fullNotes.includes(splitMarker)) {
+                const parts = fullNotes.split(splitMarker);
+                genNotes = parts[0].trim();
+                if(parts.length > 1) rentNotes = parts[1].trim();
+            }
+
             const notesInput = document.getElementById('qb-notes-input');
-            notesInput.value = ""; 
-            notesInput.placeholder = QB_NOTES_TEMPLATE; 
+            notesInput.value = genNotes; 
+            if(!genNotes) notesInput.placeholder = QB_NOTES_TEMPLATE; 
             
             const rentalInput = document.getElementById('rental-notes-input');
-            rentalInput.value = "";
+            rentalInput.value = rentNotes;
 
             const dd = document.getElementById('email-template-dropdown');
             dd.innerHTML = ""; 
@@ -702,10 +728,13 @@
             items.forEach(item => { if(item.innerHTML.includes(id)) item.classList.add('is-selected'); else item.classList.remove('is-selected'); });
             if(currentSelectedRecord) { 
                 window.populateForm(currentSelectedRecord); 
-                window.resetSalesUI(); 
-                // --- RESTORED AUTO-EDIT ---
+                // AUTO-LOAD SALES DATA for contact info population
+                window.loadSalesData(currentRecordId); 
+                
+                // AUTO-ENABLE EDIT MODE
                 isEditMode = true; 
                 window.updateFormDisplayMode(); 
+                
                 // Safe focus
                 setTimeout(() => {
                     const el = document.getElementById('qb-notes-input');
@@ -787,11 +816,17 @@
                 el.disabled = !isEditMode;
                 if(isEditMode) { el.removeAttribute('disabled'); el.classList.add('is-editable'); } else { el.setAttribute('disabled', 'true'); el.classList.remove('is-editable'); }
             });
-            const notesInput = document.getElementById('qb-notes-input');
-            if (notesInput) {
-                if(isEditMode) { notesInput.removeAttribute('disabled'); notesInput.classList.add('is-editable'); notesInput.style.opacity = '1'; } 
-                else { notesInput.setAttribute('disabled', 'true'); notesInput.classList.remove('is-editable'); }
-            }
+            
+            // FIX: Ensure BOTH notes boxes are toggled correctly
+            const noteInputs = ['qb-notes-input', 'rental-notes-input'];
+            noteInputs.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    if(isEditMode) { el.removeAttribute('disabled'); el.classList.add('is-editable'); el.style.opacity = '1'; } 
+                    else { el.setAttribute('disabled', 'true'); el.classList.remove('is-editable'); }
+                }
+            });
+
             ['launch-email-button', 'email-template-dropdown', 'help-button', 'noopp-button', 'close-button'].forEach(id => {
                 const el = document.getElementById(id); if(el) el.disabled = !isEditMode;
             });
@@ -848,15 +883,16 @@
                 currentSelectedRecord.cr714_emailmost = payload.emailMost; 
                 currentSelectedRecord.cr714_emaillatest = payload.emailLatest; 
                 
-                // Don't disable edit mode automatically if we want it to persist like v6.36
-                // But typically save disables it. I'll leave it enabled since you prefer "automatic"
-                // isEditMode = false; 
+                // Keep in edit mode or toggle? User prefers automatic, usually that means staying ready.
+                // But typically save means 'done'. I'll toggle it off to show completion, then they can re-click if needed.
+                isEditMode = false; 
                 window.updateFormDisplayMode(); 
                 window.updateNotesPreview(); 
                 
-                // Clear inputs for next entry
-                document.getElementById('qb-notes-input').value = QB_NOTES_TEMPLATE;
-                document.getElementById('rental-notes-input').value = "";
+                // Clear inputs for next entry (visual reset)
+                // BUT populateForm will re-fill them if we re-select.
+                // Since we updated the record in memory, re-populating is safer.
+                window.populateForm(currentSelectedRecord);
 
             } catch(e) { window.showNotification("Error", e.message); }
         }
