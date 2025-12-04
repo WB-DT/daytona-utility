@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3.7 Rep Performance Dashboard</title>
+    <title>3.9 Rep Performance Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -42,14 +42,12 @@
         #review-date-slider { -webkit-appearance: none; background: var(--border-color); }
         #review-date-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: var(--primary); cursor: pointer; }
         
-        /* Overlays */
-        #loading-overlay, #auth-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 100; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        #loading-overlay { background: rgba(255,255,255,0.95); color: var(--text-main); font-weight: bold; }
-        #auth-container { background: rgba(0,0,0,0.8); }
+        #loading-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.95); z-index: 50; display: flex; flex-direction: column; justify-content: center; align-items: center; font-weight: bold; color: var(--text-main); transition: opacity 0.3s; }
+        #auth-container { position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 100; display: flex; justify-content: center; align-items: center; }
         .auth-box { background: var(--bg-card); padding: 2rem; border-radius: 10px; text-align: center; box-shadow: var(--shadow); border: 1px solid var(--border-color); }
         .spinner { width: 40px; height: 40px; border: 4px solid var(--border-color); border-top: 4px solid var(--primary); border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 1rem; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-
+        
         @media print {
             body * { visibility: hidden; } #print-section, #print-section * { visibility: visible; }
             #print-section { position: absolute; left: 0; top: 0; width: 100%; padding: 40px; color: #000; background: #fff; }
@@ -169,7 +167,7 @@
     </div>
 
     <script>
-        // --- 1. MSAL CONFIG ---
+        // --- 1. MSAL AUTH CONFIG ---
         const msalConfig = { 
             auth: { 
                 clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
@@ -181,14 +179,14 @@
         const msalInstance = new msal.PublicClientApplication(msalConfig);
         let username = "";
 
-        // --- 2. FLOW VARIABLES ---
+        // --- 2. GLOBAL VARIABLES ---
         const GET_DATA_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/d0d57d29d13548959817da5747dcd63f/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=y6xY5kfe1HX8q5Ka_8XBMEgql953PqGdonFZZ3wC7Cg"; 
         const SAVE_DATA_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/088be03ff3724bb4ac49e37532d96136/triggers/manual/paths/invoke?api-version=1";
 
         let currentRepId = null;
         let currentFilter = { type: 'All', value: null };
         let reviewDateRange = [];
-        let rawEmployees = []; // Empty, populated by Flow
+        let rawEmployees = [];
         let dbReviews = [];
         let dbLogs = [];
         let currentReview = null;
@@ -207,7 +205,9 @@
                     if (currentAccounts.length > 0) {
                         window.handleLoginSuccess(currentAccounts[0]);
                     } else {
-                        document.getElementById('loading-overlay').style.display = 'none';
+                        // SHOW LOGIN
+                        const loader = document.getElementById('loading-overlay');
+                        if(loader) loader.style.display = 'none';
                         document.getElementById('auth-container').classList.remove('hidden');
                     }
                 }
@@ -254,53 +254,66 @@
             const options = { method: 'POST', headers: headers, body: JSON.stringify(body) };
             const res = await fetch(url, options);
             if (!res.ok) throw new Error(`Flow Error: ${res.status}`);
+            
             const text = await res.text();
+            // Safe JSON parse (handles empty response)
             return text ? JSON.parse(text) : {};
         };
 
         // --- 4. INITIALIZATION ---
         window.initData = async function() {
             window.loadTheme();
-            
             const loader = document.getElementById('loading-overlay');
-            if(loader) {
-                 loader.style.display = 'flex';
-                 const txt = document.getElementById('loading-text');
-                 if(txt) txt.textContent = "Fetching Data...";
-            }
-
+            
             try {
                 const rawData = await window.callFlow(GET_DATA_FLOW_URL, { userEmail: username });
                 
-                // Handle nested "body" response structure from Flow
-                let root = rawData;
-                if (rawData.body) root = rawData.body; 
-
-                let employeesList = root.employees || [];
-                if (employeesList.value) employeesList = employeesList.value;
+                // PARSE FLOW RESPONSE STRUCTURE
+                // Expected: { employees: [{value:[]}], reviews: [{value:[]}], logs: [{value:[]}] }
                 
-                // Map Dataverse columns
-                rawEmployees = employeesList.map(e => ({
+                // Helper to extract value array from Dataverse list output
+                const extract = (obj, key) => {
+                    if (!obj) return [];
+                    let target = obj[key]; // e.g. rawData.employees
+                    if (!target) {
+                        // Try nested body
+                        if (obj.body && obj.body[key]) target = obj.body[key];
+                        else return [];
+                    }
+                    // Dataverse List Rows usually returns array of 1 object containing "value" array
+                    if (Array.isArray(target) && target.length > 0 && target[0].value) {
+                        return target[0].value; 
+                    }
+                    // Or sometimes just the array directly if cleaned up
+                    if (Array.isArray(target)) return target;
+                    return [];
+                };
+
+                const empList = extract(rawData, 'employees');
+                
+                // Map columns based on your Flow Output.txt schema
+                rawEmployees = empList.map(e => ({
                     id: e.cr714_employeename,
                     name: e.cr714_employeename,
-                    role: e['cr714_jobtitle@OData.Community.Display.V1.FormattedValue'] || e.cr714_jobtitle || 'Rep',
-                    dept: e['cr714_department@OData.Community.Display.V1.FormattedValue'] || e.cr714_department || 'N/A',
-                    managerId: e['_cr714_managerassigned_value@OData.Community.Display.V1.FormattedValue'] || e._cr714_managerassigned_value, 
-                    supervisorId: e['_cr714_supervisors_value@OData.Community.Display.V1.FormattedValue'] || e._cr714_supervisors_value,
-                    isGoldStar: e.cr714_goldstars === 'Y' || e.cr714_goldstars === true
+                    role: e['cr714_jobtitle'] || 'Rep',
+                    dept: e['cr714_department@OData.Community.Display.V1.FormattedValue'] || 'N/A',
+                    managerId: e['_cr714_managerassigned_value@OData.Community.Display.V1.FormattedValue'], 
+                    supervisorId: e['_cr714_supervisors_value@OData.Community.Display.V1.FormattedValue'],
+                    isGoldStar: e.cr714_goldstars === 'Y'
                 }));
                 
-                dbReviews = [];
-                dbLogs = [];
+                dbReviews = extract(rawData, 'reviews');
+                dbLogs = extract(rawData, 'logs');
 
                 if (dbLogs.length > 0) {
-                    reviewDateRange = [...new Set(dbLogs.map(l => l.date))].sort();
+                    reviewDateRange = [...new Set(dbLogs.map(l => l.cr714_logdate))].sort();
                 } else {
                     reviewDateRange = ["2024-11", "2024-12", "2025-01"];
                 }
 
                 if(loader) loader.style.display = 'none';
                 window.renderSidebar();
+
             } catch (error) {
                 console.error("Fetch error:", error);
                 if(loader) loader.innerHTML = `<div class="text-red-500 text-center p-4"><b>Error:</b> ${error.message}<br><br><button onclick="location.reload()" class="underline">Retry</button></div>`;
@@ -394,20 +407,24 @@
             const end = reviewDateRange[idx];
             document.getElementById('current-review-date-display').textContent = end;
             
-            const logs = dbLogs.filter(l => l.repId === currentRepId && l.date === end);
+            // Filter Logs based on Dataverse column name cr714_logdate
+            const logs = dbLogs.filter(l => l.cr714_employee_lookup === currentRepId && l.cr714_logdate === end);
             const kpis = kpiConfigs[rawEmployees.find(e=>e.id===currentRepId).dept] || kpiConfigs["Sales"];
             
             document.getElementById('kpi-table-body').innerHTML = kpis.map(k => {
-                const l = logs.find(x=>x.kpiId === k.id);
-                return `<tr><td class="px-4 py-2">${k.label}</td><td class="px-4 py-2 text-right">${k.target}</td><td class="px-4 py-2 text-right font-bold">${l ? Math.floor(l.value) : '-'}</td><td class="px-4 py-2 text-center">-</td></tr>`;
+                const l = logs.find(x=>x.cr714_kpiname === k.id); // Match metric name
+                return `<tr><td class="px-4 py-2">${k.label}</td><td class="px-4 py-2 text-right">${k.target}</td><td class="px-4 py-2 text-right font-bold">${l ? Math.floor(l.cr714_kpivalue) : '-'}</td><td class="px-4 py-2 text-center">-</td></tr>`;
             }).join('');
             
-            const rev = dbReviews.find(r => r.repId === currentRepId && r.date === end);
+            // Filter Reviews based on Dataverse column name cr714_reviewdate
+            const rev = dbReviews.find(r => r.cr714_employee_lookup === currentRepId && r.cr714_reviewdate === end);
             if(rev) {
                  const f = (id, arr) => document.getElementById(id).innerHTML = (arr||[]).map(i=>`<li>${i}</li>`).join('');
-                 f('text-opps-this', rev.oppsThis); f('text-opps-last', rev.oppsLast);
-                 f('text-best-practices', rev.bestPractices); f('text-action-plan', rev.actionPlan);
-                 document.getElementById('text-agent-voice').textContent = rev.agentVoice || '';
+                 f('text-opps-this', rev.cr714_opps_current?.split('\n')); 
+                 f('text-opps-last', rev.cr714_opps_previous?.split('\n'));
+                 f('text-best-practices', rev.cr714_bestpractices?.split('\n')); 
+                 f('text-action-plan', rev.cr714_actionplan?.split('\n'));
+                 document.getElementById('text-agent-voice').textContent = rev.cr714_agentvoice || '';
             } else {
                  ['text-opps-this','text-opps-last','text-best-practices','text-action-plan'].forEach(id => document.getElementById(id).innerHTML='');
                  document.getElementById('text-agent-voice').textContent = 'No review data.';
