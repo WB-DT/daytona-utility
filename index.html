@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Manager v6.85 (Rich Text + Rental Notes)</title>
+    <title>Daytona Manager v6.90 (Auto-Edit & Sales Fix)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -31,7 +31,7 @@
         [data-theme="harvest"] { --bg-app: #fffbeb; --bg-card: #ffffff; --bg-input: #fff7ed; --text-main: #78350f; --text-muted: #d97706; --border-color: #fcd34d; --primary: #d97706; --primary-fg: #ffffff; }
         
         /* MATT'S THEME (CAT) */
-        [data-theme="matt"] { --bg-app: #292524; --bg-card: #1c1917; --bg-input: #262626; --text-main: #e7e5e4; --text-muted: #a8a29e; --border-color: #44403c; --primary: #f97316; --primary-fg: #ffffff; --accent-warning: #fbbf24; }
+        [data-theme="matt"] { --bg-app: #262626; --bg-card: #404040; --bg-input: #525252; --text-main: #e5e5e5; --text-muted: #a3a3a3; --border-color: #525252; --primary: #22d3ee; --primary-fg: #000000; --accent-danger: #fb7185; --accent-warning: #fbbf24; }
         [data-theme="matt"] .gallery-item:hover { background-color: #292524; }
         [data-theme="matt"] .card { border-top: 3px solid var(--primary); }
 
@@ -371,7 +371,7 @@
         </div>
     </div>
 
-    <div id="profile-modal" class="modal-overlay hidden" onclick="if(event.target===this) this.classList.add('hidden')" style="display:none;">
+    <div id="profile-modal" class="modal-overlay hidden" onclick="if(event.target===this) this.classList.add('hidden')" style="display:none; z-index: 70;">
         <div class="modal-content max-w-md p-0 overflow-hidden relative">
             <div class="bg-gradient-to-r from-blue-600 to-blue-400 h-24 relative">
                 <button onclick="document.getElementById('profile-modal').classList.add('hidden')" class="absolute top-2 right-2 text-white hover:text-gray-200"><i class="fas fa-times"></i></button>
@@ -639,7 +639,7 @@
             document.getElementById('qb-notes-preview').innerHTML = html || '<div class="text-center text-muted italic mt-10">No content to display.</div>';
         }
 
-        // --- CALENDAR LOGIC (Restored from Architecture) ---
+        // --- CALENDAR LOGIC ---
         window.createCalendarEvent = function() {
             if(!currentSelectedRecord) return;
             const d = document.getElementById('follow-up-date').value;
@@ -674,7 +674,25 @@ END:VCALENDAR`;
             document.body.removeChild(link);
         }
 
-        // --- MAIN LOGIC ---
+        // --- SALES & POLLING (FIXED 504 ERROR) ---
+        async function fetchWithPolling(url, options) {
+            let res = await fetch(url, options);
+            if (res.status === 202) {
+                const location = res.headers.get('location');
+                if (!location) throw new Error("Async 202 received but no Location header found.");
+                let retries = 0;
+                while (retries < 40) { // Increased retries for slower connections
+                    await new Promise(r => setTimeout(r, 3000)); // 3s wait
+                    let pollRes = await fetch(location);
+                    if (pollRes.status === 200) return pollRes; 
+                    if (pollRes.status === 202) { retries++; continue; } 
+                    throw new Error(`Polling failed with status ${pollRes.status}`);
+                }
+                throw new Error("Polling timed out.");
+            }
+            return res;
+        }
+
         window.loadRecords = async function() {
             const list = document.getElementById('record-gallery-list'); 
             list.innerHTML = '<div class="loader">Loading...</div>'; 
@@ -682,15 +700,19 @@ END:VCALENDAR`;
             document.getElementById('global-loader').style.opacity = '1'; 
             allRecords = [];
             try {
-                const response = await fetch(GET_MY_RECORDS_FLOW_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repName: currentUserRepName }) });
+                // USE POLLING TO FIX 504 TIMEOUT
+                const response = await fetchWithPolling(GET_MY_RECORDS_FLOW_URL, { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ repName: currentUserRepName }) 
+                });
+                
                 if (!response.ok) throw new Error(`Flow Error: ${response.status}`);
+                
                 let data = await response.json();
-                
-                // SAFETY PARSE FOR DOUBLE STRINGIFIED JSON
-                if (typeof data === 'string') {
-                    try { data = JSON.parse(data); } catch(e) { console.error("JSON Parse fail", e); }
-                }
-                
+                // Double Parse Check (Fix for stringified response)
+                if (typeof data === 'string') { try { data = JSON.parse(data); } catch(e) { console.error(e); } }
+
                 if (data.accountList && Array.isArray(data.accountList)) {
                     allRecords = data.accountList;
                     if (data.userProfile) currentUserProfile = data.userProfile;
@@ -712,28 +734,9 @@ END:VCALENDAR`;
                 setTimeout(()=>document.getElementById('global-loader').style.display='none', 500);
             } catch (e) { 
                 console.error(e); 
-                list.innerHTML = `<div class="p-4 text-red-600">Error: ${e.message}</div>`; 
+                list.innerHTML = `<div class="p-4 text-red-600 text-center">Error: ${e.message}<br><button onclick="window.loadRecords()" class="mt-2 underline font-bold">Retry</button></div>`; 
                 document.getElementById('global-loader').style.display='none'; 
             }
-        }
-
-        // --- SALES & POLLING ---
-        async function fetchWithPolling(url, options) {
-            let res = await fetch(url, options);
-            if (res.status === 202) {
-                const location = res.headers.get('location');
-                if (!location) throw new Error("Async 202 received but no Location header found.");
-                let retries = 0;
-                while (retries < 20) {
-                    await new Promise(r => setTimeout(r, 2000)); 
-                    let pollRes = await fetch(location);
-                    if (pollRes.status === 200) return pollRes; 
-                    if (pollRes.status === 202) { retries++; continue; } 
-                    throw new Error(`Polling failed with status ${pollRes.status}`);
-                }
-                throw new Error("Polling timed out.");
-            }
-            return res;
         }
 
         window.loadSalesData = async function(id) {
@@ -888,10 +891,13 @@ END:VCALENDAR`;
             const items = document.querySelectorAll('.gallery-item');
             items.forEach(item => { if(item.innerHTML.includes(id)) item.classList.add('is-selected'); else item.classList.remove('is-selected'); });
             if(currentSelectedRecord) { 
-                window.populateForm(currentSelectedRecord); 
-                window.resetSalesUI(); // RESET UI TO SHOW BUTTON instead of auto-loading
+                window.populateForm(currentSelectedRecord);
+                
+                // AUTO-LOAD SALES & ENABLE EDIT MODE
+                window.loadSalesData(id);
                 isEditMode = true; 
                 window.updateFormDisplayMode(); 
+                
                 document.getElementById('qb-notes-input').focus();
             }
         }
