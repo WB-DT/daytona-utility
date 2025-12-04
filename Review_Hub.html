@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>2.8 Rep Performance Dashboard</title>
+    <title>2.9 Rep Performance Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -30,9 +30,8 @@
         .text-main { color: var(--text-main); } .text-muted { color: var(--text-muted); } .border-color { border-color: var(--border-color); }
         .shadow-theme { box-shadow: var(--shadow); }
         .bg-primary { background-color: var(--primary); color: var(--primary-fg); }
-        .hover\:bg-primary:hover { background-color: var(--primary); opacity: 0.9; color: var(--primary-fg); }
-
         .sidebar-header { background-color: var(--primary); color: var(--primary-fg); }
+        
         .hierarchy-item:hover { background-color: var(--border-color); }
         .hierarchy-item.active { background-color: var(--border-color); border-left: 4px solid var(--primary); }
         
@@ -57,7 +56,13 @@
     </style>
 
     <script>
-        // --- 1. GLOBAL VARIABLES (Must be defined first) ---
+        // --- 1. CONFIGURATION ---
+        // URL from Turn 11 (GET DATA) - CONFIRMED
+        const GET_DATA_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/d0d57d29d13548959817da5747dcd63f/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=y6xY5kfe1HX8q5Ka_8XBMEgql953PqGdonFZZ3wC7Cg";
+        
+        // URL for SAVE DATA - **PASTE YOUR FULL URL HERE**
+        const SAVE_DATA_FLOW_URL = "PASTE_YOUR_FULL_SAVE_URL_HERE";
+
         const msalConfig = { 
             auth: { 
                 clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
@@ -67,9 +72,7 @@
             cache: { cacheLocation: "localStorage" } 
         };
         
-        const GET_DATA_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/d0d57d29d13548959817da5747dcd63f/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=y6xY5kfe1HX8q5Ka_8XBMEgql953PqGdonFZZ3wC7Cg"; 
-        const SAVE_DATA_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/088be03ff3724bb4ac49e37532d96136/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=1vZTb9PuSi5SC6Q3_af9YNiuLxLDYcBPqCfOVDFFftA";
-
+        // --- 2. GLOBAL VARIABLES ---
         let msalInstance = null;
         let username = "";
         let currentRepId = null;
@@ -81,75 +84,111 @@
         let currentReview = null;
         let chartInstance = null;
 
-        const kpiConfigs = {"Sales":[{id:"outbound",label:"Outbound Calls",target:50},{id:"invoices",label:"Invoices",target:10}],"Quotes":[{id:"projects",label:"Quotes",target:50}],"Food Service":[{id:"orders",label:"Orders",target:30}],"Retail":[{id:"sales",label:"Sales",target:5}]};
+        const kpiConfigs = {"Sales":[{id:"outbound",label:"Outbound Calls",target:50,type:"number",agg:"sum"},{id:"invoices",label:"Invoices",target:10,type:"number",agg:"sum"},{id:"talktime",label:"Avg Talk Time",target:120,type:"time",agg:"avg"}],"Quotes":[{id:"projects",label:"Quotes",target:50,type:"number",agg:"sum"},{id:"accuracy",label:"Accuracy",target:98,type:"percent",agg:"avg"}],"Food Service":[{id:"orders",label:"Orders",target:30,type:"number",agg:"sum"}],"Retail":[{id:"sales",label:"Sales",target:5,type:"number",agg:"sum"}]};
 
-        // --- 2. CORE FUNCTIONS (Defined on window for global access) ---
+        // --- 3. AUTH & API FUNCTIONS ---
         
         window.initAuth = async function() {
             try {
                 msalInstance = new msal.PublicClientApplication(msalConfig);
                 const response = await msalInstance.handleRedirectPromise();
-                if (response) { 
-                    username = response.account.username; 
-                } else { 
-                    const accs = msalInstance.getAllAccounts(); 
-                    if (accs.length > 0) username = accs[0].username; 
-                }
                 
-                if(username) {
-                    document.getElementById('auth-container').classList.add('hidden');
-                    document.getElementById('user-display').textContent = username;
-                    window.initData();
+                if (response && response.account) {
+                    window.handleLoginSuccess(response.account);
                 } else {
-                    document.getElementById('loading-overlay').style.display = 'none';
-                    document.getElementById('auth-container').classList.remove('hidden');
+                    const currentAccounts = msalInstance.getAllAccounts();
+                    if (currentAccounts.length > 0) {
+                        window.handleLoginSuccess(currentAccounts[0]);
+                    } else {
+                        // Show Login Screen
+                        document.getElementById('loading-overlay').style.display = 'none';
+                        document.getElementById('auth-container').classList.remove('hidden');
+                    }
                 }
-            } catch(e) { console.error(e); }
+            } catch (e) {
+                console.error("Auth Init Failed:", e);
+                document.getElementById('loading-overlay').innerHTML = `<div class="text-red-500 font-bold">Auth Error: ${e.message}</div>`;
+            }
         };
 
         window.signIn = function() {
             msalInstance.loginPopup({ scopes: ["User.Read"] }).then(resp => {
                 if (resp && resp.account) {
-                    username = resp.account.username;
-                    document.getElementById('user-display').textContent = resp.account.name;
-                    document.getElementById('auth-container').classList.add('hidden');
-                    document.getElementById('loading-overlay').style.display = 'flex';
-                    window.initData();
+                    window.handleLoginSuccess(resp.account);
                 }
-            }).catch(e => console.error("Login Failed:", e));
+            }).catch(e => {
+                console.error("Login Failed:", e);
+                alert("Login failed: " + e.message);
+            });
+        };
+
+        window.handleLoginSuccess = function(account) {
+            username = account.username;
+            document.getElementById('user-display').textContent = account.name;
+            
+            // FORCE HIDE AUTH & SHOW LOADING
+            document.getElementById('auth-container').classList.add('hidden');
+            const loader = document.getElementById('loading-overlay');
+            loader.style.display = 'flex';
+            loader.innerHTML = '<div class="spinner"></div><div id="loading-text">Fetching Data...</div>';
+            
+            window.initData();
+        };
+
+        window.getToken = async function() {
+            const account = msalInstance.getAllAccounts()[0];
+            if (!account) return null;
+            try {
+                const response = await msalInstance.acquireTokenSilent({ scopes: ["User.Read"], account: account });
+                return response.accessToken;
+            } catch (e) { return null; }
         };
 
         window.callFlow = async function(url, body) {
-            const options = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+            const headers = { 'Content-Type': 'application/json' };
+            // Only add token if signature is missing (SAS vs Bearer)
+            if (!url.includes('sig=')) {
+                const token = await window.getToken();
+                if (token) headers['Authorization'] = `Bearer ${token}`;
+            }
+            
+            const options = { method: 'POST', headers: headers, body: JSON.stringify(body) };
             const res = await fetch(url, options);
             if (!res.ok) throw new Error(`Flow Error: ${res.status}`);
             const text = await res.text();
             return text ? JSON.parse(text) : {};
         };
 
+        // --- 4. DATA INITIALIZATION ---
         window.initData = async function() {
             window.loadTheme();
-            const loader = document.getElementById('loading-overlay');
-            if(loader) { loader.style.display = 'flex'; document.getElementById('loading-text').innerText = "Fetching Data..."; }
-
+            
             try {
                 const data = await window.callFlow(GET_DATA_FLOW_URL, { userEmail: username });
+                
+                // Populate Data
                 rawEmployees = data.employees || [];
                 dbReviews = data.reviews || [];
                 dbLogs = data.logs || [];
 
-                if (dbLogs.length > 0) reviewDateRange = [...new Set(dbLogs.map(l => l.date))].sort();
-                else reviewDateRange = ["2024-11", "2024-12", "2025-01"];
+                // Calculate Dates
+                if (dbLogs.length > 0) {
+                    reviewDateRange = [...new Set(dbLogs.map(l => l.date))].sort();
+                } else {
+                    reviewDateRange = ["2024-11", "2024-12", "2025-01"];
+                }
 
-                if(loader) loader.style.display = 'none';
+                // Render
+                document.getElementById('loading-overlay').style.display = 'none';
                 window.renderSidebar();
+                
             } catch (error) {
                 console.error("Fetch error:", error);
-                if(loader) loader.innerHTML = `<div class="text-red-500 text-center p-4">Error: ${error.message}<br><button onclick="location.reload()" class="underline">Retry</button></div>`;
+                document.getElementById('loading-overlay').innerHTML = `<div class="text-red-500 text-center p-4"><b>Error:</b> ${error.message}<br><br><button onclick="location.reload()" class="underline">Retry</button></div>`;
             }
         };
 
-        // --- 3. UI LOGIC ---
+        // --- 5. UI LOGIC ---
         window.applyTheme = function(t) { if(t) { document.documentElement.setAttribute('data-theme', t); localStorage.setItem('selectedTheme', t); } };
         window.loadTheme = function() { const t = localStorage.getItem('selectedTheme') || 'winter'; window.applyTheme(t); const el = document.getElementById('theme-select'); if(el) el.value = t; };
 
@@ -184,15 +223,25 @@
             const t = document.getElementById('view-title'); if(t) t.textContent = type === 'All' ? 'Dashboard' : val;
             document.getElementById('page-review').classList.remove('active');
             document.getElementById('page-create').classList.remove('active');
+            document.getElementById('btn-new-review').style.display = 'none';
             
             const repList = document.getElementById('list-rep');
             if(repList.classList.contains('hidden')) window.toggleSection('rep');
         };
 
+        window.selectRep = function(id, btn) {
+            document.querySelectorAll('.hierarchy-item').forEach(b => b.classList.remove('active'));
+            if(btn) btn.classList.add('active');
+            window.loadRepDashboard(id);
+        };
+
         window.renderSidebar = function() {
-            if(!rawEmployees.length) return;
+            if(!rawEmployees.length) {
+                document.getElementById('list-rep').innerHTML = '<div class="p-4 text-sm text-muted italic">No data returned from Flow.</div>';
+                return;
+            }
             const getRole = (r) => rawEmployees.filter(e => e.role === r).sort((a,b) => a.name.localeCompare(b.name));
-            const depts = [...new Set(rawEmployees.map(e => e.dept))].filter(d => d).sort();
+            const depts = [...new Set(rawEmployees.map(e => e.dept))].filter(d => d && d !== 'N/A').sort();
             
             document.getElementById('list-dept').innerHTML = depts.map(d => `<button onclick="window.filterReps('Department', '${d}', this)" class="hierarchy-item block w-full text-left px-4 py-2 text-sm rounded flex justify-between"><span>${d}</span></button>`).join('');
             document.getElementById('list-mgr').innerHTML = getRole('Manager').map(m => `<button onclick="window.filterReps('Manager', ${m.id}, this)" class="hierarchy-item block w-full text-left px-4 py-2 text-sm rounded color-mgr">${m.name}</button>`).join('');
@@ -200,12 +249,6 @@
             document.getElementById('list-rep').innerHTML = getRole('Rep').map(r => `<button data-id="${r.id}" onclick="window.selectRep(${r.id}, this)" class="hierarchy-item block w-full text-left px-4 py-2 text-sm rounded flex justify-between"><span class="${r.isGoldStar ? 'color-gold' : ''}">${r.name}</span></button>`).join('');
             
             ['dept', 'mgr', 'sup'].forEach(id => { const el = document.getElementById('list-'+id); if(el) el.classList.add('hidden'); });
-        };
-
-        window.selectRep = function(id, btn) {
-            document.querySelectorAll('.hierarchy-item').forEach(b => b.classList.remove('active'));
-            if(btn) btn.classList.add('active');
-            window.loadRepDashboard(id);
         };
 
         window.loadRepDashboard = function(id) {
@@ -240,7 +283,17 @@
                 return `<tr><td class="px-4 py-2">${k.label}</td><td class="px-4 py-2 text-right">${k.target}</td><td class="px-4 py-2 text-right font-bold">${l ? Math.floor(l.value) : '-'}</td><td class="px-4 py-2 text-center">-</td></tr>`;
             }).join('');
             
-            // Simple chart stub
+            // Reviews
+            const rev = dbReviews.find(r => r.repId === currentRepId && r.date === end);
+            if(rev) {
+                 const f = (id, arr) => document.getElementById(id).innerHTML = (arr||[]).map(i=>`<li>${i}</li>`).join('');
+                 f('text-opps-this', rev.oppsThis); f('text-opps-last', rev.oppsLast);
+                 f('text-best-practices', rev.bestPractices); f('text-action-plan', rev.actionPlan);
+                 document.getElementById('text-agent-voice').textContent = rev.agentVoice || '';
+            } else {
+                 ['text-opps-this','text-opps-last','text-best-practices','text-action-plan'].forEach(id => document.getElementById(id).innerHTML='');
+                 document.getElementById('text-agent-voice').textContent = 'No review data.';
+            }
             window.updateChart();
         };
 
@@ -279,120 +332,7 @@
         window.openExportModal = function() { window.print(); };
         window.triggerFlowSync = function() { alert("Syncing..."); window.callFlow(GET_DATA_FLOW_URL, {}).then(()=>alert("Done")); };
 
-    </script>
-</head>
-<body class="bg-app antialiased h-screen flex overflow-hidden">
-
-    <div id="auth-container" class="hidden">
-        <div class="auth-box">
-            <h2 class="text-2xl font-bold mb-4 text-main">Performance Hub</h2>
-            <p class="mb-6 text-muted">Sign in to access Dataverse.</p>
-            <button onclick="window.signIn()" class="bg-primary text-primary-fg px-6 py-3 rounded font-bold hover:opacity-90">Sign In with Microsoft</button>
-        </div>
-    </div>
-
-    <div id="loading-overlay">
-        <div class="spinner"></div>
-        <div id="loading-text">Initializing...</div>
-    </div>
-
-    <div class="w-1/4 min-w-[300px] bg-card border-r border-color flex flex-col shadow-theme z-10">
-        <div class="p-4 border-b border-color sidebar-header">
-            <h1 class="text-xl font-bold">Performance Hub</h1>
-            <p class="text-xs opacity-80">Dataverse Connected</p>
-        </div>
-        <div class="flex-1 overflow-y-auto">
-            <div class="border-b border-color"><button onclick="window.toggleSection('dept')" class="w-full text-left p-3 bg-input font-semibold text-xs text-muted uppercase flex justify-between">Department <span id="chev-dept">▼</span></button><div id="list-dept" class="p-2 space-y-1 hidden"></div></div>
-            <div class="border-b border-color"><button onclick="window.toggleSection('mgr')" class="w-full text-left p-3 bg-input font-semibold text-xs text-muted uppercase flex justify-between">Manager Group <span id="chev-mgr">▼</span></button><div id="list-mgr" class="p-2 space-y-1 hidden"></div></div>
-            <div class="border-b border-color"><button onclick="window.toggleSection('sup')" class="w-full text-left p-3 bg-input font-semibold text-xs text-muted uppercase flex justify-between">Supervisor Group <span id="chev-sup">▼</span></button><div id="list-sup" class="p-2 space-y-1 hidden"></div></div>
-            <div class="border-b border-color"><button onclick="window.filterReps('GoldStar', true, this)" class="hierarchy-item block w-full text-left p-3 bg-input font-semibold text-xs text-muted uppercase">Gold Star Reps 🌟</button></div>
-            <div class="flex-1"><button onclick="window.toggleSection('rep')" class="w-full text-left p-3 bg-input font-semibold text-xs text-muted uppercase flex justify-between">Representative <span id="chev-rep">▲</span></button><div id="list-rep" class="p-2 space-y-1 hidden"></div></div>
-        </div>
-        <div class="p-4 border-t border-color bg-input">
-            <button onclick="window.triggerFlowSync()" class="w-full bg-card border border-color text-main py-2 rounded shadow-theme hover:bg-input text-sm font-medium flex justify-center items-center gap-2">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-                Sync Data
-            </button>
-        </div>
-    </div>
-
-    <div class="flex-1 flex flex-col overflow-hidden relative">
-        <header class="bg-card border-b border-color p-4 flex justify-between items-center shadow-theme">
-            <div><h2 id="view-title" class="text-2xl font-bold text-main">Dashboard</h2><p id="view-subtitle" class="text-sm text-muted">Select an employee</p></div>
-            <div class="flex gap-3 items-center">
-                <span id="user-display" class="text-xs font-bold text-primary hidden md:inline"></span>
-                <select id="theme-select" onchange="window.applyTheme(this.value)" class="p-2 text-sm border border-color rounded bg-input text-main shadow-theme">
-                    <option value="winter">Winter</option><option value="midnight">Midnight</option><option value="oled">OLED</option>
-                </select>
-                <button onclick="window.openCreateReviewModal()" id="btn-new-review" class="bg-primary text-primary-fg px-4 py-2 rounded shadow-theme text-sm hidden no-print">New Review</button>
-                <button onclick="window.openExportModal()" class="bg-primary text-primary-fg px-4 py-2 rounded shadow-theme text-sm no-print">Export</button>
-            </div>
-        </header>
-
-        <main class="flex-1 overflow-y-auto p-6 bg-app">
-            <div id="page-review" class="page max-w-6xl mx-auto space-y-6">
-                <div class="flex justify-between items-end bg-card p-4 rounded-xl shadow-theme">
-                    <div class="w-full max-w-md space-y-2">
-                        <div class="flex justify-between"><label class="text-xs font-bold text-muted uppercase">Period Ending</label><span id="current-review-date-display" class="text-sm font-bold text-main">--</span></div>
-                        <input type="range" id="review-date-slider" class="w-full h-2 bg-input rounded-lg cursor-pointer" min="0" max="0" value="0" oninput="window.updateDashboardFromSlider()">
-                        <div class="flex gap-2 items-center"><label class="text-xs font-bold text-muted uppercase">Compare:</label><select id="duration-select" onchange="window.updateDashboardFromSlider()" class="p-1 text-xs border border-color rounded bg-input text-main"><option value="1">Monthly</option><option value="3">Quarterly</option><option value="6">6 Months</option><option value="12">Annual</option></select></div>
-                    </div>
-                    <div class="text-right"><div class="text-sm text-muted">Reports to</div><div id="manager-name" class="font-medium text-main">--</div></div>
-                </div>
-
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div class="bg-card rounded-xl shadow-theme p-5 border border-color">
-                        <h3 class="text-lg font-bold text-main mb-4">Performance Metrics</h3>
-                        <div class="overflow-x-auto"><table class="min-w-full"><thead class="bg-input text-xs uppercase text-muted"><tr><th class="px-4 py-2 text-left">KPI</th><th class="px-4 py-2 text-right">Target</th><th class="px-4 py-2 text-right">Actual</th><th class="px-4 py-2 text-center">Trend</th></tr></thead><tbody id="kpi-table-body" class="divide-y divide-border-color text-sm text-main"><tr><td colspan="4" class="text-center py-8 text-muted">Select a rep to view data.</td></tr></tbody></table></div>
-                    </div>
-                    <div class="bg-card rounded-xl shadow-theme p-5 border border-color flex flex-col">
-                        <div class="flex justify-between items-center mb-4"><h3 class="text-lg font-bold text-main">Trend</h3><select id="chart-kpi-select" onchange="window.updateChart()" class="text-xs border border-color rounded bg-card text-main"></select></div>
-                        <div class="flex-1 relative w-full h-64"><canvas id="trendChart"></canvas></div>
-                    </div>
-                </div>
-
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div class="bg-card rounded-xl shadow-theme p-5 border-l-4" style="border-color: var(--primary);"><h4 class="font-bold text-main mb-2">🎯 Opportunities (Current)</h4><ul id="text-opps-this" class="text-sm text-main list-disc list-inside"></ul></div>
-                    <div class="bg-card rounded-xl shadow-theme p-5 border-l-4" style="border-color: var(--text-muted);"><h4 class="font-bold text-main mb-2">🔙 Opportunities (Previous)</h4><ul id="text-opps-last" class="text-sm text-main list-disc list-inside"></ul></div>
-                    <div class="bg-card rounded-xl shadow-theme p-5 border-l-4" style="border-color: var(--color-sup);"><h4 class="font-bold text-main mb-2">✨ Best Practices</h4><ul id="text-best-practices" class="text-sm text-main list-disc list-inside"></ul></div>
-                    <div class="bg-card rounded-xl shadow-theme p-5 border-l-4" style="border-color: var(--accent-warning);"><h4 class="font-bold text-main mb-2">🚀 Action Plan</h4><ul id="text-action-plan" class="text-sm text-main list-disc list-inside"></ul></div>
-                </div>
-                <div class="bg-card rounded-xl shadow-theme p-5 border border-color"><h4 class="font-bold text-main mb-2">🗣️ Agent's Voice</h4><p id="text-agent-voice" class="text-sm text-muted italic bg-input p-3 rounded"></p></div>
-            </div>
-
-            <div id="page-create" class="page max-w-4xl mx-auto space-y-6">
-                <h3 class="text-2xl font-bold text-main border-b border-color pb-2">New Review: <span id="new-review-rep-name"></span></h3>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div class="bg-card rounded-xl shadow-theme p-5 border border-color space-y-4">
-                        <h4 class="font-bold text-main mb-2">Review Details</h4>
-                        <div><label class="text-sm font-medium text-main">Date</label><input type="date" id="form-date" class="w-full border border-color rounded p-2 bg-input text-main"></div>
-                        <div><label class="text-sm font-medium text-main">Type</label><select id="form-type" class="w-full border border-color rounded p-2 bg-input text-main"><option>EOM</option><option>EOQ</option><option>Annual</option><option>30-Day</option><option>90-Day</option></select></div>
-                         <div><label class="text-sm font-medium text-main">Reviewer Level</label><select id="form-level" class="w-full border border-color rounded p-2 bg-input text-main"><option>Manager</option><option>Supervisor</option><option>Director</option></select></div>
-                    </div>
-                    <div class="bg-card rounded-xl shadow-theme p-5 border border-color"><h4 class="font-bold text-main mb-2">KPIs</h4><div id="form-kpi-inputs" class="space-y-2"></div></div>
-                </div>
-                <div class="bg-card rounded-xl shadow-theme p-5 border border-color space-y-4">
-                    <h4 class="font-bold text-main mb-2">Qualitative Feedback</h4>
-                    <div><label class="text-sm font-medium text-main">Opportunities</label><textarea id="form-opps-this" rows="2" class="w-full border border-color rounded p-2 bg-input text-main"></textarea></div>
-                    <div><label class="text-sm font-medium text-main">Action Plan</label><textarea id="form-action-plan" rows="2" class="w-full border border-color rounded p-2 bg-input text-main"></textarea></div>
-                    <div><label class="text-sm font-medium text-main">Special Notes</label><textarea id="form-special-notes" rows="2" class="w-full border border-color rounded p-2 bg-input text-main"></textarea></div>
-                    <div class="flex gap-4 mt-4"><button onclick="window.saveNewReview()" class="flex-1 bg-primary text-primary-fg py-2 rounded">Save</button><button onclick="window.loadRepDashboard(currentRepId)" class="flex-1 bg-input text-main py-2 rounded">Cancel</button></div>
-                </div>
-            </div>
-        </main>
-    </div>
-    
-    <div id="print-section" class="hidden bg-card">
-        <div class="max-w-3xl mx-auto">
-            <div class="flex justify-between border-b border-black pb-4 mb-6"><div><h1 class="text-2xl font-bold">Performance Review</h1><p id="print-subtitle"></p></div><div class="text-right"><h2 class="font-bold text-xl">W.B. Mason</h2><p id="print-date"></p></div></div>
-            <table class="w-full mb-6 text-sm"><thead><tr class="bg-input"><th class="p-2 text-left">KPI</th><th class="p-2 text-right">Target</th><th class="p-2 text-right">Result</th><th class="p-2 text-center">Status</th></tr></thead><tbody id="print-table-body"></tbody></table>
-            <div id="print-text-content" class="space-y-4 text-sm"></div>
-            <div class="mt-12 pt-8 grid grid-cols-2 gap-10"><div class="border-t border-black pt-2"><p class="font-bold">Manager Signature</p></div><div class="border-t border-black pt-2"><p class="font-bold">Employee Signature</p></div></div>
-        </div>
-    </div>
-
-    <script>
-        // Start App
+        // START
         document.addEventListener('DOMContentLoaded', () => { window.initAuth(); });
     </script>
 </body>
