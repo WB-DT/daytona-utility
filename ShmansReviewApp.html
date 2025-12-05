@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rep Performance Dashboard v1.5</title>
+    <title>Rep Performance Dashboard v1.6 (Dataverse Fix)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -82,7 +82,7 @@
                     </div>
 
                     <!-- Metrics -->
-                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:col-span-4 gap-4 mb-6" id="kpi-metrics">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6" id="kpi-metrics">
                         <!-- Metric Cards will be injected here -->
                     </div>
 
@@ -131,7 +131,7 @@
                             </div>
                             
                             <h3 class="text-xl font-semibold text-main mb-3 border-t pt-4">Key Performance Indicators</h3>
-                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:col-span-3 gap-4 mb-6" id="form-kpi-inputs">
+                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6" id="form-kpi-inputs">
                                 <!-- KPI Inputs will be dynamically generated here -->
                             </div>
 
@@ -212,7 +212,7 @@
             throw new Error('API request failed after multiple retries.');
         }
 
-        // --- Data Fetching Logic ---
+        // --- Data Fetching Logic (FIXED FOR DATA NESTING) ---
         async function fetchInitialDataFromFlow() {
             const syncButton = document.getElementById('sync-button');
             const historyBody = document.getElementById('review-history-body');
@@ -224,27 +224,38 @@
             historyBody.innerHTML = '<tr class="text-muted"><td colspan="4" class="p-6 text-center">Fetching initial data from external flow...</td></tr>';
 
             try {
-                // Flow URLs usually require a GET request to trigger the manual path
                 const response = await fetchWithRetry(flowApiUrl, { method: 'GET' });
                 const data = await response.json();
 
-                // 1. Validate the expected top-level keys based on the required JSON schema
+                // 1. Validate the expected top-level keys
                 if (!data.repData || !data.kpiConfigs || !data.reviewData) {
                     throw new Error("Flow response is missing 'repData', 'kpiConfigs', or 'reviewData'. Check your flow output JSON structure.");
                 }
 
-                // 2. Assign fetched data to global state
-                employeeData = data.repData;
-                kpiConfigs = data.kpiConfigs;
-                reviewData = data.reviewData;
+                // --- FIX: Check for Dataverse/Power Automate 'value' nesting ---
+                
+                // Process repData: Expects array, checks for { value: array } fallback
+                const rawRepData = data.repData;
+                employeeData = Array.isArray(rawRepData) ? rawRepData : rawRepData.value || [];
+                
+                // Process reviewData: Expects array, checks for { value: array } fallback
+                const rawReviewData = data.reviewData;
+                reviewData = Array.isArray(rawReviewData) ? rawReviewData : rawReviewData.value || [];
 
-                // 3. Re-map employees for quick lookup
+                // kpiConfigs is an object and less likely to be nested in 'value', so assign directly
+                kpiConfigs = data.kpiConfigs;
+
+                if (employeeData.length === 0) {
+                     showMessage("Success (But Empty)", "Data loaded successfully, but the employee list (repData) is empty. Check your Dataverse table filters.");
+                } else {
+                    showMessage("Success", `Dashboard data successfully loaded! Found ${employeeData.length} employees.`);
+                }
+                
+                // 2. Re-map employees for quick lookup
                 employeeMap = {};
                 employeeData.forEach(emp => {
                     employeeMap[emp.id] = emp;
                 });
-                
-                showMessage("Success", "Dashboard data successfully loaded from the external flow!");
                 
             } catch (error) {
                 console.error("Data Flow Error:", error);
@@ -261,7 +272,6 @@
 
         // --- Initialization and UI Population ---
         async function initData(isManualSync = false) {
-            // Only fetch data if this is the initial load OR a manual sync
             if (isManualSync || employeeData.length === 0) {
                 await fetchInitialDataFromFlow();
             }
@@ -274,7 +284,8 @@
             employeeData.forEach(emp => {
                 const option = document.createElement('option');
                 option.value = emp.id;
-                option.textContent = `${emp.name} (${emp.dept})`; 
+                // Ensure name and dept fields exist on the employee object
+                option.textContent = `${emp.name || 'Unknown'} (${emp.dept || 'Unknown'})`; 
                 repSelect.appendChild(option);
             });
             
@@ -336,11 +347,11 @@
             }
 
             // Update Info Card
-            document.getElementById('dashboard-title').textContent = `${rep.name}'s Performance`;
-            document.getElementById('rep-name-info').textContent = rep.name;
-            document.getElementById('rep-id-info').textContent = rep.id;
-            document.getElementById('rep-dept-info').textContent = rep.dept;
-            document.getElementById('rep-start-date-info').textContent = rep.start_date;
+            document.getElementById('dashboard-title').textContent = `${rep.name || 'Unknown'}'s Performance`;
+            document.getElementById('rep-name-info').textContent = rep.name || 'N/A';
+            document.getElementById('rep-id-info').textContent = rep.id || 'N/A';
+            document.getElementById('rep-dept-info').textContent = rep.dept || 'N/A';
+            document.getElementById('rep-start-date-info').textContent = rep.start_date || 'N/A';
             btnNewReview.disabled = false;
 
             // Filter reviews for the selected rep and sort by date
@@ -379,7 +390,8 @@
                  historyBody.innerHTML = '<tr class="text-muted"><td colspan="4" class="p-6 text-center">No review data available.</td></tr>';
             } else {
                 historyBody.innerHTML = repReviews.reverse().map(r => {
-                    const kpiSummary = kpis.map(k => `${k.label.split(' ')[0]}: ${r.kpis[k.id] || 0}`).join(' | ');
+                    // Safety check for kpis object before mapping
+                    const kpiSummary = kpis.map(k => `${k.label.split(' ')[0]}: ${(r.kpis && r.kpis[k.id]) || 0}`).join(' | ');
                     return `
                         <tr class="hover:bg-gray-50 transition">
                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-main">${r.date}</td>
@@ -396,7 +408,6 @@
 
         function selectRep(repId) {
             loadRepDashboard(repId);
-            // Hide create page if visible
             document.getElementById('page-create').classList.remove('active');
             document.getElementById('page-review').classList.add('active');
         }
@@ -410,7 +421,7 @@
 
             let details = `Date: ${review.date}\nScore: ${review.score}/10\nComments: ${review.comments || 'N/A'}\n\nKey Metrics:\n`;
             kpis.forEach(k => {
-                 details += `- ${k.label}: ${review.kpis[k.id] !== undefined ? review.kpis[k.id] : 'N/A'}\n`;
+                 details += `- ${k.label}: ${(review.kpis && review.kpis[k.id]) !== undefined ? review.kpis[k.id] : 'N/A'}\n`;
             });
             
             showMessage(`Review Details for ${rep.name}`, details);
@@ -446,9 +457,9 @@
         }
 
         function saveNewReview() {
-            // Note: This function currently saves locally. 
-            // To fully integrate, this would need a POST request to a separate Flow endpoint.
-            // For now, it simulates success and updates the local state.
+            // NOTE: This function simulates saving locally. For full integration, 
+            // you would make a POST request to a separate Power Automate flow here 
+            // with the newReview object as the payload.
             
             const date = document.getElementById('form-date').value;
             const score = parseInt(document.getElementById('form-overall-score').value);
@@ -474,7 +485,7 @@
 
             reviewData.push(newReview);
             
-            showMessage("Success", "Review saved locally! To make this permanent, you would send this JSON payload to a separate 'Save Review' flow.");
+            showMessage("Success", "Review saved locally! You should now see it in the history. To make this permanent, set up a 'Save Review' flow.");
             
             // Return to dashboard and refresh
             cancelNewReview();
