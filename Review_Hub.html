@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>6.0 Performance Hub Pro (AI Edition)</title>
+    <title>6.1 Performance Hub Pro (Smart Import)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -183,7 +183,7 @@
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div class="glass-panel p-6 rounded-xl border-l-4 border-l-blue-500 animate-enter">
-                        <h4 class="font-bold text-text mb-4 flex items-center gap-2 text-lg"><i class="fa-solid fa-bullseye text-blue-500"></i> Opportunities</h4>
+                        <h4 class="font-bold text-text mb-4 flex items-center gap-2 text-lg"><i class="fa-solid fa-bullseye text-blue-500"></i> Opportunities/Summary</h4>
                         <ul id="text-opps-this" class="text-sm text-text/80 list-disc list-inside space-y-2 marker:text-blue-500"></ul>
                     </div>
                     <div class="glass-panel p-6 rounded-xl border-l-4 border-l-amber-500 animate-enter">
@@ -221,15 +221,15 @@
         const toggleForce = (id, show) => { const el = document.getElementById(id); if(el) show ? el.classList.remove('hidden-force') : el.classList.add('hidden-force'); };
         const toggleEl = (id, show) => { const el = document.getElementById(id); if(el) show ? el.classList.remove('hidden') : el.classList.add('hidden'); };
 
-        // --- SMART FILE PARSER (AI Feature) ---
+        // --- SMART FILE PARSER V2 ---
         window.handleFileUpload = async function(input) {
             if(!input.files.length) return;
             
             const loader = document.getElementById('loading-text');
-            if(loader) loader.textContent = `Analyzing ${input.files.length} documents...`;
+            if(loader) loader.textContent = `Scanning ${input.files.length} files...`;
             toggleForce('loading-overlay', true);
 
-            let importedCount = 0;
+            let results = [];
 
             for (let file of input.files) {
                 try {
@@ -251,49 +251,78 @@
                     if (text) {
                         const extracted = extractDataFromText(text);
                         if (extracted.name) {
-                            dbReviews.push({
+                            // Store extracted review
+                            const review = {
                                 repId: extracted.name,
                                 date: extracted.date,
                                 oppsThis: extracted.opps,
                                 actionPlan: extracted.plan,
                                 bestPractices: extracted.best,
                                 agentVoice: extracted.voice
-                            });
-                            importedCount++;
+                            };
+                            dbReviews.push(review);
+                            results.push(`${extracted.name} (${extracted.date})`);
                         }
                     }
-                } catch (e) { console.error("Parsing error:", e); }
+                } catch (e) { console.error("Parsing error:", file.name, e); }
             }
 
-            alert(`AI Import Complete! Processed ${importedCount} reviews.`);
-            // Update Dates
-            const newDates = [...new Set(dbReviews.map(r => r.date))].sort().reverse();
-            reviewDateRange = [...new Set([...reviewDateRange, ...newDates])].sort().reverse();
+            alert(results.length > 0 ? `Successfully mapped:\n${results.join('\n')}` : "No valid review data found in selected files.");
+            
+            if (dbReviews.length > 0) {
+                 const newDates = [...new Set(dbReviews.map(r => r.date))].sort().reverse();
+                 reviewDateRange = [...new Set([...reviewDateRange, ...newDates])].sort().reverse();
+            }
             window.forceLoad();
         };
 
         function extractDataFromText(text) {
-            // AI Regex Patterns
-            const nameMatch = text.match(/Agent Name:?[\s,]*([A-Za-z]+[\s]+[A-Za-z]+)/i);
-            let rawName = nameMatch ? nameMatch[1].trim() : null;
-            if(rawName) rawName = rawName.replace(/([A-Z])\s([a-z])/g, "$1$2"); // Fix "A lex" -> "Alex"
-
-            // Date extraction: looking for MM/DD/YYYY or "Month Year"
-            const dateMatch = text.match(/Date:?[\s,]*(\d{1,2}\/\d{1,2}\/\d{4})/i) || text.match(/(\w+ \d{4})/);
+            // 1. Normalize Text
+            const clean = text.replace(/\s+/g, ' ').trim();
             
-            const getBlock = (header) => {
-                const regex = new RegExp(header + "[:\\s]*([\\s\\S]*?)(?=(Agent’s Voice|Action Plan|Best Practices|Statement|$))", "i");
-                const match = text.match(regex);
-                return match ? match[1].trim() : "";
+            // 2. Extract Name (Fix "A lex" pattern)
+            let nameMatch = clean.match(/Agent Name[:\s,]*([A-Za-z]+[\s]+[A-Za-z]+)/i);
+            let rawName = nameMatch ? nameMatch[1].trim() : null;
+            if(rawName) rawName = rawName.replace(/([A-Z])\s([a-z])/g, "$1$2"); // Fix casing spaces
+
+            // 3. Extract Date
+            let dateMatch = clean.match(/Date[:\s,]*(\d{1,2}\/\d{1,2}\/\d{4})/i);
+            let dateStr = dateMatch ? dateMatch[1] : "Unknown Date";
+            // Fallback to Month Year
+            if (dateStr === "Unknown Date") {
+                let moMatch = clean.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}/i);
+                if(moMatch) dateStr = moMatch[0];
+            }
+
+            // 4. Extract Sections (Slicing method)
+            const getSection = (headers) => {
+                let startIdx = -1;
+                for (let h of headers) {
+                    let idx = clean.search(new RegExp(h, "i"));
+                    if (idx !== -1) { startIdx = idx + h.length; break; }
+                }
+                if (startIdx === -1) return "";
+                
+                // Find next likely header to stop
+                const stopWords = ["Action Plan", "Best Practices", "Agent’s Voice", "Statement of Understanding", "Manager's Signature"];
+                let endIdx = clean.length;
+                
+                for (let w of stopWords) {
+                    let idx = clean.indexOf(w, startIdx + 5); // Buffer
+                    if (idx !== -1 && idx < endIdx) endIdx = idx;
+                }
+                
+                let content = clean.substring(startIdx, endIdx).trim();
+                return content.replace(/^[:\s-]+/, ''); // Remove leading punctuation
             };
 
             return {
                 name: rawName,
-                date: dateMatch ? dateMatch[1] : new Date().toLocaleDateString(),
-                opps: getBlock("Summary of Expectations") || getBlock("Opportunities"),
-                plan: getBlock("Action Plan"),
-                best: getBlock("Best Practices"),
-                voice: getBlock("Agent’s Voice")
+                date: dateStr,
+                opps: getSection(["Summary of Expectations", "Opportunities"]),
+                plan: getSection(["Action Plan"]),
+                best: getSection(["Best Practices"]),
+                voice: getSection(["Agent’s Voice", "Buy In"])
             };
         }
 
@@ -329,7 +358,6 @@
 
         window.initData = async function() {
             window.startClock();
-            // Failsafe to prevent infinite loading
             setTimeout(() => { if(document.getElementById('loading-overlay').classList.contains('hidden-force') === false) window.forceLoad(); }, 6000);
 
             try {
@@ -411,7 +439,7 @@
             const container = document.getElementById('rep-list');
             if(container) {
                 container.innerHTML = list.sort((a,b)=>a.name.localeCompare(b.name)).map(r => 
-                    `<div class="nav-item p-2 text-xs rounded cursor-pointer hover:bg-white flex justify-between" onclick="window.selectRep('${r.id.replace(/'/g,"\\'")}')"><span class="${r.isGoldStar?'text-gold':''}">${r.name}</span></div>`
+                    `<div class="nav-item p-2 text-xs rounded cursor-pointer hover:bg-white flex justify-between" onclick="window.selectRep('${r.id.replace(/'/g,"\\'")}')"><span class="${r.isGoldStar?'text-gold font-bold':''}">${r.name}</span></div>`
                 ).join('');
             }
         };
@@ -443,7 +471,14 @@
         window.handleDateChange = function() {
             if(!currentRepId) return;
             const end = document.getElementById('date-end').value;
-            const rev = dbReviews.find(r => (r.repId === currentRepId || r.repId.includes(currentRepId.split(',')[0])) && (r.date === end || r.date.includes(end.split('-')[0])));
+            // Fuzzy date matching for imported reviews
+            const rev = dbReviews.find(r => {
+                // Match Name (exact or fuzzy)
+                const nameMatch = r.repId === currentRepId || (r.repId && currentRepId && r.repId.toLowerCase().includes(currentRepId.toLowerCase().split(' ')[0]));
+                // Match Date (exact or fuzzy Month/Year)
+                const dateMatch = r.date === end || (r.date && end && r.date.includes(end.split('-')[0]));
+                return nameMatch && dateMatch;
+            });
             
             const fill = (id, val) => safeSetHTML(id, val ? val.split('\n').map(t=>`<li>${t}</li>`).join('') : '<li>No data.</li>');
             
