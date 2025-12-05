@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rep Performance Dashboard v12</title>
+    <title>Rep Performance Dashboard v1.5 (Flow Robustness)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <!-- Chart.js is used for the Performance Trend graph -->
@@ -139,6 +139,8 @@
         // --- CONFIGURATION ---
         // Your specific Power Automate Flow URL
         const POWER_AUTOMATE_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/c82c5aa6117a4df3b1f8dbb0f8a098bb/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=9NlNJzdB9nO-12No3oVcrptS45NC6I9gsFtokTeH_6E";
+        // Timeout in milliseconds (10 seconds)
+        const FLOW_TIMEOUT = 10000; 
 
         // --- GLOBAL DATA STORES ---
         let kpiConfigs = {};
@@ -171,7 +173,7 @@
                 case 'error':
                     color = 'text-danger';
                     title = 'Error!';
-                    duration = 5000; 
+                    duration = 8000; // Keep errors visible longer
                     break;
                 case 'info':
                 default:
@@ -184,10 +186,12 @@
             modal.classList.remove('hidden');
             modal.classList.add('flex');
 
-            setTimeout(() => {
-                modal.classList.remove('flex');
-                modal.classList.add('hidden');
-            }, duration);
+            if (type !== 'loading') {
+                setTimeout(() => {
+                    modal.classList.remove('flex');
+                    modal.classList.add('hidden');
+                }, duration);
+            }
         }
         
         function hideMessage() {
@@ -195,52 +199,70 @@
             document.getElementById('app-modal').classList.add('hidden');
         }
 
-        // --- FLOW INTEGRATION (The Fix) ---
+        // --- FLOW INTEGRATION (Added Timeout Controller) ---
         
         /**
-         * Fetches data from the Power Automate Flow URL via a POST request.
+         * Fetches data from the Power Automate Flow URL via a POST request with a timeout.
          * @param {boolean} isManualSync - true if triggered by the Sync button.
          */
         async function fetchDataFromFlow(isManualSync = false) {
-            // Show loading message
             showMessage('loading', isManualSync ? 'Syncing latest data from Flow...' : 'Loading initial data...');
             
+            const controller = new AbortController();
+            const signal = controller.signal;
+            const timeoutId = setTimeout(() => controller.abort(), FLOW_TIMEOUT);
+
             try {
-                // Perform POST request to trigger the flow and retrieve data
                 const response = await fetch(POWER_AUTOMATE_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({})
+                    body: JSON.stringify({}),
+                    signal: signal // Apply the timeout signal
                 });
 
+                clearTimeout(timeoutId);
+
                 if (!response.ok) {
-                    throw new Error(`HTTP error! Status: ${response.status}`);
+                    // This handles 4xx or 5xx HTTP status codes
+                    throw new Error(`HTTP Error ${response.status}: Failed to get data.`);
                 }
 
-                // The flow must return the unified JSON structure (kpiConfigs and repData)
                 const flowData = await response.json();
                 
                 if (flowData.repData && flowData.kpiConfigs) {
                     repData = flowData.repData;
                     kpiConfigs = flowData.kpiConfigs;
                     
-                    // Re-initialize the app with the new data
                     initData(true); 
 
                     if (isManualSync) {
                         showMessage('success', 'Data sync successful! Dashboard updated.');
                     }
                 } else {
-                    throw new Error("Flow response is malformed. Expected 'repData' and 'kpiConfigs'.");
+                    throw new Error("Flow response is malformed. Expected 'repData' and 'kpiConfigs' in the returned JSON.");
                 }
 
             } catch (error) {
-                console.error("Error fetching data from Power Automate Flow. If you see a 'CORS' error, check your flow's configuration.", error);
+                clearTimeout(timeoutId);
                 
-                // Fallback to hardcoded sample data on failure to prevent a blank screen
+                let errorMessage = 'Failed to load data from Flow.';
+
+                if (error.name === 'AbortError') {
+                    errorMessage = `Flow timed out after ${FLOW_TIMEOUT / 1000} seconds. Please check if your flow is running or taking too long.`;
+                } else if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+                    // This is the common error for CORS failure
+                    errorMessage = "Network/CORS Error: Failed to connect to the flow URL. Check the browser console for CORS errors.";
+                } else {
+                    errorMessage = `${errorMessage} Reason: ${error.message}`;
+                }
+
+                console.error("FLOW FETCH ERROR:", errorMessage, error);
+                
+                // Fallback to sample data on failure
                 loadFallbackData(); 
                 
-                showMessage('error', `Failed to load data from flow! Displaying sample data. Please check your flow URL/CORS settings. Error: ${error.message.substring(0, 100)}...`);
+                showMessage('error', errorMessage + " Displaying sample data.");
+
             } finally {
                 // Ensure the loading message is hidden after processing
                 hideMessage();
@@ -262,13 +284,19 @@
                 ]
             };
             repData = [
-                { id: 101, name: "Alice Johnson", dept: "Sales", reviews: [{ date: "2025-11-30", data: { "revenue": { value: 450000 }, "deals": { value: 18 }, "customer-satisfaction": { value: 92 } } }] },
-                { id: 102, name: "Bob Smith", dept: "Support", reviews: [{ date: "2025-11-30", data: { "tickets": { value: 480 }, "resolution-time": { value: 4.5 }, "satisfaction-score": { value: 4.8 } } }] }
+                { id: 101, name: "Alice Johnson", dept: "Sales", reviews: [
+                    { date: "2025-11-30", data: { "revenue": { value: 450000, comment: "Excellent quarter." }, "deals": { value: 18, comment: "" }, "customer-satisfaction": { value: 92, comment: "Top performer." }, "general-comment": { comment: "Strong results across the board." } } },
+                    { date: "2025-10-30", data: { "revenue": { value: 380000, comment: "Slight dip this month." }, "deals": { value: 14, comment: "" }, "customer-satisfaction": { value: 95, comment: "High CSAT maintained." }, "general-comment": { comment: "Solid performance, nearing target." } } }
+                ]},
+                { id: 102, name: "Bob Smith", dept: "Support", reviews: [
+                    { date: "2025-11-30", data: { "tickets": { value: 480, comment: "Exceeded target easily." }, "resolution-time": { value: 4.5, comment: "Very fast resolution." }, "satisfaction-score": { value: 4.8, comment: "Great feedback from users." }, "general-comment": { comment: "Support delivery is consistently excellent." } } },
+                    { date: "2025-10-30", data: { "tickets": { value: 430, comment: "Just missed target." }, "resolution-time": { value: 5.2, comment: "Slightly over target." }, "satisfaction-score": { value: 4.4, comment: "Still strong scores." }, "general-comment": { comment: "Good month, needs minor focus on resolution time." } } }
+                ]}
             ];
-            initData(true); // Render the app with fallback data
+            initData(true); 
         }
 
-        // --- APPLICATION RENDERING LOGIC ---
+        // --- APPLICATION RENDERING LOGIC (Unchanged from previous version) ---
 
         function createEmployeeMap() {
             employeeMap = repData.reduce((acc, rep) => {
@@ -281,7 +309,7 @@
             const repList = document.getElementById('rep-list');
             
             if (repData.length === 0) {
-                 repList.innerHTML = `<p class="text-xs text-text-muted mt-2 p-2">No employee data loaded.</p>`;
+                 repList.innerHTML = `<p class="text-xs text-text-muted mt-2 p-2">No employee data loaded. Using fallback data if applicable.</p>`;
                  return;
             }
 
