@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rep Performance Dashboard v1.6 (Dataverse Fix)</title>
+    <title>Rep Performance Dashboard v1.7 (Improved Error Handling)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -82,7 +82,7 @@
                     </div>
 
                     <!-- Metrics -->
-                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6" id="kpi-metrics">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:col-cols-4 gap-4 mb-6" id="kpi-metrics">
                         <!-- Metric Cards will be injected here -->
                     </div>
 
@@ -131,7 +131,7 @@
                             </div>
                             
                             <h3 class="text-xl font-semibold text-main mb-3 border-t pt-4">Key Performance Indicators</h3>
-                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6" id="form-kpi-inputs">
+                            <div class="grid grid-cols-1 sm:grid-cols-2 lg:col-cols-3 gap-4 mb-6" id="form-kpi-inputs">
                                 <!-- KPI Inputs will be dynamically generated here -->
                             </div>
 
@@ -190,26 +190,44 @@
         }
 
         async function fetchWithRetry(url, options = {}, retries = 3, delay = 1000) {
+            let lastError = null;
+            let lastStatus = null;
             for (let i = 0; i < retries; i++) {
                 try {
                     const response = await fetch(url, options);
                     if (response.ok) {
                         return response;
                     }
-                    if (response.status === 429) { // Rate limit
-                        console.warn(`Rate limit hit. Retrying in ${delay / 1000}s...`);
-                    } else {
-                        // For non-rate limit errors, we still retry to be robust
-                        console.error(`Fetch failed with status ${response.status}. Retrying...`);
+                    lastStatus = response.status;
+                    
+                    // Provide more detail for common errors
+                    if (lastStatus === 401 || lastStatus === 403) {
+                        lastError = new Error(`Authorization/Permission error. Status ${lastStatus}. Check flow trigger security settings (e.g., 'Anyone' permissions).`);
+                        break; // Stop retrying on clear auth errors
+                    } else if (lastStatus >= 400) {
+                        console.error(`Fetch failed with status ${lastStatus}. Retrying...`);
+                        lastError = new Error(`Flow execution failed. Status ${lastStatus}. Check Power Automate run history for details.`);
                     }
                 } catch (error) {
-                    console.error("Network error, retrying...", error);
+                    lastError = error;
+                    // TypeErrors here often mean a network issue, like CORS or a blocked request.
+                    console.error("Network error or CORS block, retrying...", error);
                 }
                 if (i < retries - 1) {
                     await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
                 }
             }
-            throw new Error('API request failed after multiple retries.');
+            
+            // Throw a more informative error based on what happened
+            if (lastError instanceof Error && lastError.message.includes('Authorization/Permission')) {
+                throw lastError;
+            }
+            
+            let finalMessage = `API request failed after ${retries} retries. Final Status: ${lastStatus || 'No Response (Network/CORS)'}.`;
+            if (lastStatus === null) {
+                finalMessage += " Check the browser console for CORS errors (Cross-Origin Resource Sharing) or network issues.";
+            }
+            throw new Error(finalMessage);
         }
 
         // --- Data Fetching Logic (FIXED FOR DATA NESTING) ---
@@ -227,9 +245,9 @@
                 const response = await fetchWithRetry(flowApiUrl, { method: 'GET' });
                 const data = await response.json();
 
-                // 1. Validate the expected top-level keys
+                // 1. Validate the expected top-level keys: repData, kpiConfigs, reviewData
                 if (!data.repData || !data.kpiConfigs || !data.reviewData) {
-                    throw new Error("Flow response is missing 'repData', 'kpiConfigs', or 'reviewData'. Check your flow output JSON structure.");
+                    throw new Error("Flow response is missing one or more required keys ('repData', 'kpiConfigs', or 'reviewData'). Check your flow output JSON structure.");
                 }
 
                 // --- FIX: Check for Dataverse/Power Automate 'value' nesting ---
