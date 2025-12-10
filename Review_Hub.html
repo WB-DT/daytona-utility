@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Performance Hub Pro | v8.0 (Doc-First Logic)</title>
+    <title>Performance Hub Pro | v8.1 Enterprise</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -246,7 +246,7 @@
         // --- PARSING ENGINE ---
         window.startParsing = async function() {
             if(!selectedFiles.length) return;
-            logConsole(`> --- STARTING v8.0 PARSE ---`);
+            logConsole(`> --- STARTING v8.1 PARSE ---`);
             migrationQueue = { reviews: [], kpis: [] };
             parsingStats = { processed: 0, noName: 0, noKPIs: 0 };
             failedFiles = [];
@@ -292,9 +292,9 @@
                             migrationQueue.reviews.push({
                                 fileName: file.name,
                                 cr714_employeename: empName,
-                                _cr714_employee_value: empId, // Can be null
+                                _cr714_employee_value: empId, 
                                 cr714_reviewdate: data.date,
-                                cr714_reviewtype: "End of Month",
+                                cr714_reviewtype: data.type,
                                 cr714_opportunities_current: data.opps,
                                 cr714_actionplan: data.plan,
                                 cr714_agentvoice: data.voice
@@ -315,11 +315,11 @@
                                     });
                                 });
                             } else {
-                                logConsole(`  ! Warning: No KPIs found in text.`, 'log-warn');
+                                logConsole(`  ! Warning: No KPIs found.`, 'log-warn');
                                 parsingStats.noKPIs++;
                             }
                         } else {
-                            logConsole(`  ! FAILED: Could not extract Name from document.`, 'log-err');
+                            logConsole(`  ! FAILED: Could not extract Name.`, 'log-err');
                             parsingStats.noName++;
                             failedFiles.push(file.name);
                         }
@@ -346,14 +346,10 @@
             
             // Try to match roster
             return store.employees.find(e => {
-                // Name format in roster: "Williams, Joshua" or "Joshua Williams"
                 const roster = e.name.toLowerCase().replace(/[^a-z ]/g, '').trim();
                 const rTokens = roster.split(/\s+/);
-                
-                // If every token in document name appears in roster name -> Match
-                // e.g. Doc: "Joshua" -> Roster: "Williams Joshua" (Match)
                 const intersection = tokens.filter(t => rTokens.includes(t));
-                return intersection.length >= 2; // Require at least First+Last match
+                return intersection.length >= 2; 
             });
         }
 
@@ -372,9 +368,8 @@
         // --- EXTRACTOR ---
         function extractDataFromText(text, fileName) {
             const clean = text.replace(/\r\n/g, '\n').replace(/\t/g, ',').trim(); 
-            const lines = clean.split('\n').map(l => l.trim()).filter(l => l);
-
-            // 1. Name Extraction (Doc Priority)
+            
+            // 1. Name Extraction (CamelCase Splitter)
             let agentName = null;
             let nameMatch = clean.match(/(Agent Name|Name)[:\s,]*([A-Za-z]+\s+[A-Za-z]+)/i);
             
@@ -383,9 +378,26 @@
                 if (!/[\d\/]/.test(candidate)) agentName = candidate;
             }
 
-            // 2. Date Extraction
+            // Fallback: Filename CamelCase Splitter
+            if(!agentName) {
+                const parts = fileName.split('.')[0].split(/[-_]/);
+                // Filter out date words
+                const potentialNames = parts.filter(p => p.length > 3 && !/\d/.test(p) && !['EOM', 'EOQ', 'ANNUAL', 'REVIEW'].includes(p.toUpperCase()));
+                
+                if(potentialNames.length > 0) {
+                    // This splits "EbonyThomas" -> "Ebony Thomas"
+                    agentName = potentialNames.join(' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+                }
+            }
+
+            // 2. Metadata
             let dateMatch = clean.match(/Date[:\s,]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
             let reviewDate = dateMatch ? dateMatch[1] : new Date().toLocaleDateString();
+            
+            // Type Detection
+            let type = "End of Month";
+            if (fileName.toLowerCase().includes("annual")) type = "Annual";
+            if (fileName.toLowerCase().includes("eoq")) type = "End of Quarter";
 
             // 3. Sections
             const getSection = (startMarker, endMarkers) => {
@@ -404,55 +416,45 @@
             const plan = getSection("Action Plan", ["Agent’s Voice", "Statement"]);
             const voice = getSection("Agent’s Voice", ["Statement"]);
 
-            // 4. KPI Extraction
+            // 4. KPI Extraction (Proximity Search)
             const kpiRows = [];
-            const metrics = ["Total Calls", "Total Sales", "Avg. Talk Time", "Call Notes", "Availability Per Shift", "AUX Accuracy", "Projects/Opps Completed", "Average Break", "Average Lunch"];
+            const metrics = [
+                { key: "Total Calls", regex: /Total Calls.*?(\d+)/i },
+                { key: "Total Sales", regex: /Total Sales.*?(\$[\d,]+)/i },
+                { key: "Avg. Talk Time", regex: /Avg.*?Talk.*?(\d+:\d+:\d+|\d+:\d+)/i },
+                { key: "Call Notes", regex: /Call Notes.*?(\d+%)/i },
+                { key: "AUX Accuracy", regex: /AUX Accuracy.*?(\d+%|\d+:\d+)/i },
+                { key: "Availability", regex: /Availability.*?([A-Z]{2})/i },
+                { key: "Score", regex: /Score.*?(\d+)/i }
+            ];
 
-            const parseVal = (str) => {
-                if(!str) return { v: "N/A", t: "Flat" };
-                let t = "Flat";
-                if(str.includes("↑")) t = "Up";
-                if(str.includes("↓")) t = "Down";
-                const cleanMatch = str.match(/[\$]?[\d,]+(\.\d+)?(:[\d:]+)?%?/);
-                let v = cleanMatch ? cleanMatch[0] : str.replace(/[↑↓→]/g, '').trim();
-                return { v, t };
-            };
-
-            const lastMonthIdx = clean.toUpperCase().indexOf("LAST MONTH");
-            const thisMonthIdx = clean.toUpperCase().indexOf("THIS MONTH");
-            const endMetricsIdx = clean.toUpperCase().indexOf("OPPORTUNITIES"); 
-
-            if (lastMonthIdx !== -1 && thisMonthIdx !== -1) {
-                const targetText = clean.substring(lastMonthIdx, thisMonthIdx);
-                const valueText = clean.substring(thisMonthIdx, endMetricsIdx > -1 ? endMetricsIdx : clean.length);
-
-                metrics.forEach(m => {
-                    const regex = new RegExp(`${m}.*?([↑↓→]?\\s*[\\$]?\\d[\\d,:.]*%?)`, "i");
-                    const valMatch = valueText.match(regex);
-                    const targetMatch = targetText.match(regex);
+            metrics.forEach(m => {
+                // Find all matches for this metric
+                const matches = [...clean.matchAll(new RegExp(m.key, 'gi'))];
+                
+                if (matches.length > 0) {
+                    // Look ahead in text for value
+                    const startIdx = matches[0].index;
+                    const searchWindow = clean.substring(startIdx, startIdx + 150); // Search next 150 chars
+                    
+                    const valMatch = searchWindow.match(m.regex);
                     if (valMatch) {
-                        const { v, t } = parseVal(valMatch[1]);
-                        let target = "N/A";
-                        if (targetMatch) {
-                            const { v: tVal } = parseVal(targetMatch[1]);
-                            target = tVal;
-                        }
-                        kpiRows.push({ metric: m, target: target, value: v, trend: t });
+                         // Check for trends
+                        let trend = "Flat";
+                        if(searchWindow.includes("↑")) trend = "Up";
+                        if(searchWindow.includes("↓")) trend = "Down";
+                        
+                        kpiRows.push({
+                            metric: m.key,
+                            target: "N/A", // Hard to infer without tables
+                            value: valMatch[1],
+                            trend: trend
+                        });
                     }
-                });
-            } else {
-                // Fallback
-                metrics.forEach(m => {
-                    const regex = new RegExp(`${m}.*?([↑↓→]?\\s*[\\$]?\\d[\\d,:.]*%?)`, "i");
-                    const match = clean.match(regex);
-                    if(match) {
-                        const { v, t } = parseVal(match[1]);
-                        kpiRows.push({ metric: m, target: "--", value: v, trend: t });
-                    }
-                });
-            }
+                }
+            });
 
-            return { name: agentName, date: reviewDate, opps, plan, voice, kpiRows };
+            return { name: agentName, date: reviewDate, type, opps, plan, voice, kpiRows };
         }
 
         // --- UI & UPLOAD ---
