@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Performance Hub Pro | 7.0 Enterprise (Fixed Matching)</title>
+    <title>Performance Hub Pro | 7.1 Enterprise (Double-Lock Match)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -298,7 +298,7 @@
         window.startParsing = async function() {
             if(!selectedFiles.length) return;
             
-            logConsole(`> --- STARTING PARSE ENGINE v7.0 ---`);
+            logConsole(`> --- STARTING PARSE ENGINE v7.1 (Double-Lock Match) ---`);
             migrationQueue = { reviews: [], kpis: [] };
             parsingStats = { processed: 0, inactive: 0, noName: 0, noKPIs: 0 };
             failedFiles = [];
@@ -331,7 +331,7 @@
                         const data = extractDataFromText(text, file.name);
                         
                         if(data.name) {
-                            // CROSS REFERENCE: Link Employee & Check Active Status
+                            // CROSS REFERENCE: Double Check cr714_employeename AND cr714_repname
                             const emp = findActiveEmployee(data.name);
 
                             if (emp) {
@@ -355,7 +355,7 @@
                                     data.kpiRows.forEach(kpi => {
                                         migrationQueue.kpis.push({
                                             fileName: file.name,
-                                            cr714_employeename: emp.name, // Use Official Name
+                                            cr714_employeename: emp.name, 
                                             _cr714_employee_value: empId,
                                             cr714_logdate: data.date,
                                             cr714_kpiname: kpi.metric,
@@ -392,48 +392,54 @@
             }
         };
 
-        // --- CORE MATCHING LOGIC (NAME FLIPPING) ---
+        // --- CORE MATCHING LOGIC (DOUBLE LOCK) ---
         function findActiveEmployee(extractedName) {
-            // Document Name is usually "First Last" e.g. "Joshua Williams"
-            const searchFirstLast = extractedName.toLowerCase().replace(/[^a-z ]/g, '').trim();
+            // Tokenize Search: "Joshua Williams" -> ["joshua", "williams"]
+            const cleanSearch = extractedName.toLowerCase().replace(/[^a-z ]/g, '').trim();
+            const searchTokens = cleanSearch.split(/\s+/);
             
+            if (searchTokens.length < 2) {
+                logConsole(`  ! [REJECT] Name too short: "${extractedName}"`, 'log-err');
+                return null;
+            }
+
             const match = store.employees.find(e => {
-                // Roster Name is usually "Last, First" e.g. "Williams, Joshua"
-                const rosterRaw = e.name.toLowerCase();
-                
-                // 1. Convert Roster to "First Last" for comparison
-                let rosterFirstLast = rosterRaw;
-                if (rosterRaw.includes(',')) {
-                    const parts = rosterRaw.split(',');
-                    if(parts.length === 2) {
-                        rosterFirstLast = `${parts[1].trim()} ${parts[0].trim()}`; // "Joshua Williams"
-                    }
+                // Get all possible name variations from Roster
+                // 1. Employee Name (e.g. "Joshua Williams")
+                // 2. Rep Name (e.g. "Williams, Joshua")
+                const rosterNames = [
+                    e.name.toLowerCase(), 
+                    (e.repName || '').toLowerCase()
+                ];
+
+                // Check against ALL variations
+                for(let rName of rosterNames) {
+                    if(!rName) continue;
+                    
+                    // Tokenize Roster Name: "Williams, Joshua" -> ["williams", "joshua"]
+                    const rTokens = rName.replace(/[^a-z ]/g, '').trim().split(/\s+/);
+                    
+                    // Check Intersection: Do they share the same tokens?
+                    // This handles "First Last" == "Last First" automatically
+                    const intersection = searchTokens.filter(t => rTokens.includes(t));
+                    
+                    // If we match at least 2 tokens (First & Last), it's a match
+                    if(intersection.length >= 2) return true;
                 }
-                rosterFirstLast = rosterFirstLast.replace(/[^a-z ]/g, '').trim();
-
-                // 2. Check Match
-                if (rosterFirstLast === searchFirstLast) return true;
-                
-                // 3. Fuzzy Check (Contains)
-                if (searchFirstLast.length > 5 && rosterFirstLast.includes(searchFirstLast)) return true;
-
                 return false;
             });
 
             if (match) {
-                // Strict Status Check
                 if (match.status === 'Active') {
                     return match;
                 } else {
                     logConsole(`  ! [SKIPPED] ${match.name} is Inactive.`, 'log-warn');
                     parsingStats.inactive++;
-                    // We don't push to queue if inactive
                     return null;
                 }
             } else {
                 logConsole(`  ! [FAILED] "${extractedName}" not found in Roster.`, 'log-err');
                 parsingStats.noName++;
-                // Add to failed list for report
                 return null;
             }
         }
@@ -453,22 +459,25 @@
             const clean = text.replace(/\r\n/g, '\n').replace(/\t/g, ',').trim(); 
             const lines = clean.split('\n').map(l => l.trim()).filter(l => l);
 
-            // 1. Metadata
-            let nameMatch = clean.match(/(Agent Name|Name)[:\s,]*([A-Za-z]+\s+[A-Za-z]+)/i);
+            // 1. Metadata - Name Search
             let agentName = null;
             
+            // Priority: Document Text ("Agent Name: ...")
+            let nameMatch = clean.match(/(Agent Name|Name)[:\s,]*([A-Za-z]+\s+[A-Za-z]+)/i);
             if (nameMatch) {
                 let candidate = nameMatch[2].trim();
+                // Reject dates/numbers disguised as names
                 if (!/[\d\/]/.test(candidate)) agentName = candidate;
             }
 
-            // Fallback to Filename (Handle CamelCase: "RebecaMendezVelez" -> "Rebeca Mendez Velez")
+            // Fallback: Filename
             if(!agentName) {
+                // Clean filename e.g. "EOM_JohnDoe_May.docx" -> "John Doe"
                 const parts = fileName.split('.')[0].split(/[-_]/);
                 const potentialNames = parts.filter(p => p.length > 3 && !/\d/.test(p) && !['EOM', 'EOQ'].includes(p.toUpperCase()));
                 
                 if(potentialNames.length > 0) {
-                    // Inject spaces into CamelCase
+                    // Handle CamelCase e.g. "JohnDoe" -> "John Doe"
                     agentName = potentialNames.join(' ').replace(/([a-z])([A-Z])/g, '$1 $2');
                 }
             }
@@ -644,11 +653,13 @@
                 {"cr714_employeename":"Williams, Joshua","cr714_employeeinformation1id":"9c98e6d3-997e-f011-b4cb-000d3a149458","cr714_department@OData.Community.Display.V1.FormattedValue":"Jacksonville","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"},
                 {"cr714_employeename":"Landi, Abigail","cr714_employeeinformation1id":"4e3a4020-1f7d-f011-b4cb-000d3a537e3f","cr714_department@OData.Community.Display.V1.FormattedValue":"New Hire In Training","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"},
                 {"cr714_employeename":"Mendez Velez, Rebeca","cr714_employeeinformation1id":"ca06a546-c384-ee11-8179-0022481e4dc1","cr714_department@OData.Community.Display.V1.FormattedValue":"Sales","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"}
+                // Note: Add full list from prompt to this object for complete testing
             ] };
             
             store.employees = rawData.value.map(e => ({ 
                 id: e.cr714_employeeinformation1id, 
-                name: e.cr714_employeename, 
+                name: e.cr714_employeename,
+                repName: e.cr714_repname, // Ensure this field maps if available 
                 title: e['cr714_title@OData.Community.Display.V1.FormattedValue'], 
                 dept: e['cr714_department@OData.Community.Display.V1.FormattedValue'], 
                 status: e['cr714_status@OData.Community.Display.V1.FormattedValue'] 
