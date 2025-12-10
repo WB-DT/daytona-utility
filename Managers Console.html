@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Manager v7.36 (Patch Flow Fixed)</title>
+    <title>Daytona Manager v7.37 (Optimistic UI & Alert Center)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -169,12 +169,18 @@
         .bar-yellow { background-color: #eab308; }
         .bar-red { background-color: #ef4444; }
 
-        /* ALERT BUTTONS */
+        /* ALERT BUTTONS & BELL */
         .btn-alert-base { font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; transition: all 0.3s ease; border: 2px solid transparent; position: relative; overflow: hidden; }
         .btn-has-data-red { color: #dc2626 !important; background: #fee2e2 !important; border: 1px solid #dc2626; animation: pulse-red 2s infinite; }
         .btn-has-data-yellow { color: #ca8a04 !important; background: #fef9c3 !important; border: 1px solid #ca8a04; animation: pulse-yellow 2s infinite; }
         @keyframes pulse-red { 0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4); } 70% { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); } 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); } }
         @keyframes pulse-yellow { 0% { box-shadow: 0 0 0 0 rgba(202, 138, 4, 0.4); } 70% { box-shadow: 0 0 0 6px rgba(202, 138, 4, 0); } 100% { box-shadow: 0 0 0 0 rgba(202, 138, 4, 0); } }
+
+        .bell-btn { position: relative; color: var(--text-muted); cursor: pointer; transition: color 0.2s; background: none; border: none; font-size: 1.2rem; }
+        .bell-btn:hover { color: var(--primary); }
+        .bell-btn.has-error { color: var(--accent-danger); animation: pulse-red 2s infinite; }
+        .bell-badge { position: absolute; top: -5px; right: -5px; background: var(--accent-danger); color: white; font-size: 0.6rem; padding: 2px 5px; border-radius: 999px; display: none; }
+        .bell-btn.has-error .bell-badge { display: block; }
     </style>
 </head>
 <body class="p-0 md:p-4">
@@ -206,6 +212,10 @@
                 <div class="flex items-center gap-2 ml-2 pl-4 border-l" style="border-color: var(--border-color)">
                     <span id="welcome-message" onclick="window.showUserProfileCard()" class="text-sm font-medium cursor-pointer hover:text-blue-600" title="View Profile"></span>
                     <button onclick="window.promptAdminLogin()" class="hover:text-brand transition-colors" style="color: var(--text-muted);" title="Admin Override"><i class="fas fa-user-lock"></i></button>
+                    <button onclick="window.showFailedSaves()" id="notification-bell" class="bell-btn hidden" title="View Failed Operations">
+                        <i class="fas fa-bell"></i>
+                        <span id="bell-badge" class="bell-badge">0</span>
+                    </button>
                 </div>
             </div>
             
@@ -449,6 +459,14 @@
         </div>
     </div>
     
+    <div id="failed-saves-modal" class="modal-overlay hidden" style="display:none; z-index: 2000;">
+        <div class="modal-content border-t-4 border-red-500">
+             <div class="flex justify-between items-center mb-4"><h3 class="font-bold text-lg text-red-600"><i class="fas fa-exclamation-circle mr-2"></i>Failed Operations</h3><button onclick="document.getElementById('failed-saves-modal').classList.add('hidden'); document.getElementById('failed-saves-modal').style.display='none';" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button></div>
+             <div id="failed-items-list" class="text-sm text-gray-700 mb-4 max-h-60 overflow-y-auto"></div>
+             <button onclick="window.retryFailedSaves()" class="btn-primary w-full">Retry All</button>
+        </div>
+    </div>
+    
     <div id="welcome-toast" class="fixed bottom-5 right-5 z-50 hidden transition-all duration-500 transform translate-y-full opacity-0"><div class="bg-white border-l-4 border-blue-500 shadow-2xl rounded p-4 max-w-xs"><div class="flex justify-between items-start mb-2"><h4 class="font-bold text-blue-800">Welcome! 🚀</h4><button onclick="window.dismissWelcome()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button></div><p class="text-xs text-gray-600 mb-2">1. Sign in<br>2. Click Refresh<br>3. Select Account</p><button onclick="window.dismissWelcome()" class="bg-blue-100 text-blue-700 text-xs font-bold px-2 py-1 rounded hover:bg-blue-200 w-full">Got it</button></div></div>
 
     <script>
@@ -481,6 +499,8 @@
         const IMG_CHAIR = "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/WB%20Chair%20Mat.png"; 
 
         let currentThemeIdx=0, isEditMode=false, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentUserRepName=null, currentUserProfile=null;
+        
+        let failedSaves = [];
         
         // --- HELPERS ---
         window.getVal = function(obj, k) { return (obj && obj[k] != null) ? obj[k] : ''; }
@@ -920,7 +940,7 @@
             // PROSPECTING AUTOMATION (One-Click Send)
             if (action === "Prospecting" || templateVal === "Trying To Reach You") {
                 if (confirm(`Send Prospecting Email to ${accName} immediately?`)) {
-                    // Using text from "Trying To Reach You.oft" 
+                    // Using text from "Trying To Reach You.oft"
                     subject = `Trying To Reach You - ${accNum} // ${accName}`;
                     body = `Good afternoon,<br><br>I am reaching out to you as I was advised you handle where you currently purchase supplies for your company?<br><br>It doesn't look like you've ordered in a little while and we miss your business!<br>I would love the opportunity to price out your top 10 most purchased items.<br><br>Simply send me a copy of a recent invoice, order confirmation, favorites list or just the top items you purchase with the current item numbers you are buying from a competitor.<br><br>If this is something that you are interested in, please contact me directly or reply to this email.<br><br>I look forward to your future business! At W.B. Mason we guarantee:<br><ul><li>Customized pricing with amazing prices on what your business actually orders.</li><li>Free delivery with no order minimums.</li><li>Personal driver, customer service representative, and inside sales representative.</li><li>One-stop shopping for all your needs, no need to go anywhere else!</li></ul><br><br><img src="${IMG_SIG}" style="max-width:100%;">`;
                     
@@ -935,9 +955,23 @@
                         window.logEmailSent(); 
                         window.showNotification("Success", "Prospecting Email Sent!");
                         
-                        // CRITICAL FIX: Ensure BOTH email and patch logic run
-                        window.handleCustomSave(`Action Email Sent (Flow - Auto).\nSubject: ${subject}`, true);
-                        
+                        // NEW FIX: ADD INSTANT UI UPDATE & BACKGROUND SAVE FOR PROSPECTING
+                        // Create the new note content
+                        const noteText = `Action Email Sent (Flow - Auto).\nSubject: ${subject}`;
+                        const newNoteEntry = `------------------------------\nModified On: ${new Date().toLocaleString()}\nModified By: ${currentUserRepName}\n\n${noteText}\n\n`;
+
+                        // Optimistic Update (Immediate Feedback)
+                        if (currentSelectedRecord.cr714_qbnotes) {
+                            currentSelectedRecord.cr714_qbnotes = newNoteEntry + currentSelectedRecord.cr714_qbnotes;
+                        } else {
+                            currentSelectedRecord.cr714_qbnotes = newNoteEntry;
+                        }
+                        window.updateNotesPreview();
+
+                        // Fire Patch Flow in Background
+                        // IMPORTANT: Pass noteText to save, use suppressNotify=true for background feel
+                        window.handleCustomSave(noteText, true);
+
                         window.filterAndSortGallery(); 
                     })
                     .catch(e => window.showNotification("Error", e.message));
@@ -1017,7 +1051,10 @@
                 document.getElementById('email-modal').classList.add('hidden');
                 document.getElementById('email-modal').style.display = 'none';
                 window.showNotification("Success", "Email Sent via Flow!");
+                
+                // CRITICAL FIX: Ensure BOTH email and patch logic run
                 window.handleCustomSave(`Action Email Sent (Flow).\nSubject: ${payload.subject}`, true);
+                
                 window.filterAndSortGallery(); 
             } catch(e) { window.showNotification("Error", e.message); }
         }
@@ -1125,7 +1162,7 @@
                 
                 if(isEditMode) { isEditMode=false; window.updateFormDisplayMode(); } 
                 window.updateNotesPreview(); 
-                window.filterAndSortGallery();
+                window.filterAndSortGallery(); 
             } catch(e) { 
                 window.showNotification("Error", e.message); 
             }
