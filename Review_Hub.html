@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Performance Hub Pro | 6.8 Stable</title>
+    <title>Performance Hub Pro | 6.9 Enterprise Migration</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -42,25 +42,24 @@
     </script>
 
     <style>
-        /* --- THEMING VARIABLES --- */
         :root { --color-primary: #002f6c; --color-bg: #f4f7f6; --color-card: #ffffff; --color-text: #2c3e50; --color-muted: #7f8c8d; --color-border: #e2e8f0; --secondary: #d42e12; }
         [data-theme="midnight"] { --color-primary: #60a5fa; --color-bg: #0f172a; --color-card: #1e293b; --color-text: #f1f5f9; --color-muted: #94a3b8; --color-border: #334155; --secondary: #f87171; }
         
         body { background-color: var(--color-bg); color: var(--color-text); transition: background-color 0.3s, color 0.3s; }
         
-        /* --- UTILITIES --- */
+        /* Layout Utils */
         .glass-panel { background: var(--color-card); border: 1px solid var(--color-border); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
         .hidden-force { display: none !important; }
         .animate-enter { animation: slideIn 0.4s ease-out forwards; }
         @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         
-        /* --- COMPONENT STYLES --- */
+        /* Navigation */
         .view { display: none; }
         .view.active { display: block; animation: slideIn 0.3s ease-in-out; }
-
         .nav-item { cursor: pointer; transition: all 0.2s; border-left: 3px solid transparent; }
         .nav-item:hover, .nav-item.active { background: rgba(0,0,0,0.05); border-left-color: var(--secondary); color: var(--color-primary); }
 
+        /* Tables */
         table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
         th { text-align: left; padding: 12px; background: var(--color-bg); color: var(--color-muted); font-weight: 700; border-bottom: 2px solid var(--color-border); text-transform: uppercase; letter-spacing: 0.05em; }
         td { padding: 12px; border-bottom: 1px solid var(--color-border); vertical-align: middle; }
@@ -69,8 +68,12 @@
         /* Console */
         .console-log {
             background: #1e1e1e; color: #00ff00; font-family: 'Courier New', monospace; font-size: 0.75rem;
-            padding: 1rem; border-radius: 0.5rem; height: 200px; overflow-y: auto; border: 1px solid #333;
+            padding: 1rem; border-radius: 0.5rem; height: 300px; overflow-y: auto; border: 1px solid #333;
         }
+        .log-warn { color: #facc15; }
+        .log-err { color: #f87171; }
+        .log-success { color: #4ade80; }
+        .log-info { color: #60a5fa; }
 
         /* Status Badges */
         .badge { padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; }
@@ -277,6 +280,8 @@
         let migrationQueue = { reviews: [], kpis: [] };
         let store = { employees: [], reviews: [], kpis: [] };
         let selectedFiles = [];
+        let parsingStats = { processed: 0, inactive: 0, noName: 0, noKPIs: 0 };
+        let failedFiles = [];
 
         // --- MIGRATION: FILE HANDLING ---
         window.handleMigrationFiles = function(input) {
@@ -294,8 +299,10 @@
         window.startParsing = async function() {
             if(!selectedFiles.length) return;
             
-            logConsole(`> --- STARTING PARSE ENGINE v6.7 (Stable) ---`);
-            migrationQueue = { reviews: [], kpis: [] }; 
+            logConsole(`> --- STARTING PARSE ENGINE v6.8 ---`);
+            migrationQueue = { reviews: [], kpis: [] };
+            parsingStats = { processed: 0, inactive: 0, noName: 0, noKPIs: 0 };
+            failedFiles = [];
             
             const btn = document.getElementById('btn-parse');
             const originalText = btn.innerHTML;
@@ -325,52 +332,72 @@
                         const data = extractDataFromText(text, file.name);
                         
                         if(data.name) {
-                            // Link Employee
+                            // Link Employee & Check Active
                             const emp = store.employees.find(e => e.name.toLowerCase().includes(data.name.split(' ')[0].toLowerCase()));
-                            const empId = emp ? emp.id : null;
+                            
+                            if (emp) {
+                                // Filter Inactive
+                                if (emp.status !== 'Active') {
+                                    logConsole(`  ! Skipped: ${emp.name} is Inactive`, 'warn');
+                                    parsingStats.inactive++;
+                                    failedFiles.push({ file: file.name, reason: "Inactive Rep" });
+                                    continue;
+                                }
 
-                            // 1. REVIEWS
-                            migrationQueue.reviews.push({
-                                fileName: file.name,
-                                cr714_employeename: data.name,
-                                _cr714_employee_value: empId,
-                                cr714_reviewdate: data.date,
-                                cr714_reviewtype: "End of Month",
-                                cr714_opportunities_current: data.opps,
-                                cr714_actionplan: data.plan,
-                                cr714_agentvoice: data.voice
-                            });
+                                const empId = emp.id;
+                                parsingStats.processed++;
 
-                            // 2. KPIS
-                            if(data.kpiRows && data.kpiRows.length > 0) {
-                                data.kpiRows.forEach(kpi => {
-                                    migrationQueue.kpis.push({
-                                        fileName: file.name,
-                                        cr714_employeename: data.name,
-                                        _cr714_employee_value: empId,
-                                        cr714_logdate: data.date,
-                                        cr714_kpiname: kpi.metric,
-                                        cr714_kpitarget: kpi.target, 
-                                        cr714_kpivalue: kpi.value,
-                                        cr714_trend: kpi.trend
-                                    });
+                                // 1. REVIEWS
+                                migrationQueue.reviews.push({
+                                    fileName: file.name,
+                                    cr714_employeename: data.name,
+                                    _cr714_employee_value: empId,
+                                    cr714_reviewdate: data.date,
+                                    cr714_reviewtype: "End of Month",
+                                    cr714_opportunities_current: data.opps,
+                                    cr714_actionplan: data.plan,
+                                    cr714_agentvoice: data.voice
                                 });
-                                logConsole(`  + Extracted ${data.kpiRows.length} KPIs`);
+
+                                // 2. KPIS
+                                if(data.kpiRows && data.kpiRows.length > 0) {
+                                    data.kpiRows.forEach(kpi => {
+                                        migrationQueue.kpis.push({
+                                            fileName: file.name,
+                                            cr714_employeename: data.name,
+                                            _cr714_employee_value: empId,
+                                            cr714_logdate: data.date,
+                                            cr714_kpiname: kpi.metric,
+                                            cr714_kpitarget: kpi.target, 
+                                            cr714_kpivalue: kpi.value,
+                                            cr714_trend: kpi.trend
+                                        });
+                                    });
+                                    logConsole(`  + Extracted ${data.kpiRows.length} KPIs`, 'success');
+                                } else {
+                                    logConsole(`  ! Warning: No KPIs found.`, 'warn');
+                                    parsingStats.noKPIs++;
+                                    failedFiles.push({ file: file.name, reason: "No KPIs Found" });
+                                }
                             } else {
-                                logConsole(`  ! Warning: No KPIs found.`);
+                                logConsole(`  ! Error: Rep "${data.name}" not in roster`, 'err');
+                                parsingStats.noName++;
+                                failedFiles.push({ file: file.name, reason: "Rep Not Found in DB" });
                             }
 
                         } else {
-                            logConsole(`  ! Agent Name not found in ${file.name}`);
+                            logConsole(`  ! Agent Name not found in ${file.name}`, 'err');
+                            parsingStats.noName++;
+                            failedFiles.push({ file: file.name, reason: "Name Parse Failed" });
                         }
                     }
                 } catch(e) {
-                    logConsole(`  ! Error: ${e.message}`);
+                    logConsole(`  ! Error: ${e.message}`, 'err');
                 }
             }
 
             btn.innerHTML = originalText;
-            logConsole(`> Parse Complete.`);
+            printSummary();
             updatePreviewTables();
             
             if(migrationQueue.reviews.length > 0) {
@@ -379,17 +406,57 @@
             }
         };
 
-        // --- ENHANCED EXTRACTOR LOGIC (Fixing the Target/Value Split) ---
-        function extractDataFromText(text, fileName) {
-            // Clean weird spacing, normalize newlines
-            const clean = text.replace(/\r\n/g, '\n').replace(/\t/g, ' ').replace(/\s+/g, ' ').trim(); 
+        function printSummary() {
+            logConsole("------------------------------------------------");
+            logConsole(`MIGRATION SUMMARY:`);
+            logConsole(`Total Files: ${selectedFiles.length}`);
+            logConsole(`Successfully Parsed: ${parsingStats.processed}`, 'success');
+            logConsole(`Skipped (Inactive): ${parsingStats.inactive}`, 'warn');
+            logConsole(`Failed (No Name): ${parsingStats.noName}`, 'err');
+            logConsole(`Warnings (No KPIs): ${parsingStats.noKPIs}`, 'warn');
             
-            // 1. Metadata
-            let nameMatch = clean.match(/Agent Name[:\s,]*([A-Za-z]+\s+[A-Za-z]+)/i);
-            let agentName = nameMatch ? nameMatch[1].trim() : null;
-            if(!agentName) {
-                const parts = fileName.split('_');
-                if(parts.length > 1) agentName = parts[1].replace(/([A-Z])/g, ' $1').trim(); 
+            if (failedFiles.length > 0) {
+                logConsole("--- FAILED / SKIPPED FILES ---");
+                failedFiles.forEach(f => logConsole(`[${f.reason}] ${f.file}`, 'warn'));
+            }
+            logConsole("------------------------------------------------");
+        }
+
+        // --- ENHANCED EXTRACTOR LOGIC ---
+        function extractDataFromText(text, fileName) {
+            // Clean text
+            const clean = text.replace(/\r\n/g, '\n').replace(/\t/g, ',').trim();
+            const lines = clean.split('\n').map(l => l.trim()).filter(l => l);
+
+            // 1. SMART NAME EXTRACTION
+            let agentName = null;
+
+            // Priority A: Inside Document Text
+            // Regex for "Agent Name: [Name]" or "Name: [Name]"
+            let nameMatch = clean.match(/(Agent Name|Name)[:\s,]*([A-Za-z]+\s+[A-Za-z]+)/i);
+            
+            if (nameMatch) {
+                let candidate = nameMatch[2].trim();
+                // Validation: Reject if it looks like a date (contains numbers or slashes)
+                if (!/[\d\/]/.test(candidate)) {
+                    agentName = candidate;
+                }
+            }
+
+            // Priority B: Filename Fallback
+            if (!agentName) {
+                // Filenames often: "EOM_JohnDoe_May2025.docx"
+                // Clean common prefixes/suffixes
+                let nameFromFn = fileName.split('.')[0]
+                                  .replace(/EOM[-_]?/i, '')
+                                  .replace(/EOQ[-_]?/i, '')
+                                  .replace(/_/g, ' ')
+                                  .replace(/\d{4}/g, '') // Remove years
+                                  .replace(/(January|February|March|April|May|June|July|August|September|October|November|December)/i, '')
+                                  .trim();
+                // Take first two words if possible
+                let parts = nameFromFn.split(' ').filter(p => p.length > 1);
+                if (parts.length >= 2) agentName = `${parts[0]} ${parts[1]}`;
             }
 
             let dateMatch = clean.match(/Date[:\s,]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
@@ -420,36 +487,26 @@
                 "Average Break", "Average Lunch"
             ];
 
-            // Clean Helper
             const parseVal = (str) => {
                 if(!str) return { v: "--", t: "Flat" };
                 let t = "Flat";
                 if(str.includes("↑")) t = "Up";
                 if(str.includes("↓")) t = "Down";
-                // Regex: Match standard numbers, currency, times (e.g. 514, $48,386, 00:01:49)
-                // Ignore the arrow itself in the value
                 const cleanMatch = str.match(/[\$]?[\d,]+(\.\d+)?(:[\d:]+)?%?/);
                 let v = cleanMatch ? cleanMatch[0] : str.replace(/[↑↓→]/g, '').trim();
                 return { v, t };
             };
 
-            // A. ISOLATE ZONES
-            // Find "Last Month" and "This Month" headers
             const lastMonthIdx = clean.toUpperCase().indexOf("LAST MONTH");
             const thisMonthIdx = clean.toUpperCase().indexOf("THIS MONTH");
-            const endMetricsIdx = clean.toUpperCase().indexOf("OPPORTUNITIES"); // Section usually after metrics
+            const endMetricsIdx = clean.toUpperCase().indexOf("OPPORTUNITIES"); 
 
-            // If structure is valid
             if (lastMonthIdx !== -1 && thisMonthIdx !== -1) {
-                // Target Zone: Text between "LAST MONTH" and "THIS MONTH"
                 const targetText = clean.substring(lastMonthIdx, thisMonthIdx);
-                
-                // Value Zone: Text between "THIS MONTH" and "OPPORTUNITIES" (or end)
                 const valueText = clean.substring(thisMonthIdx, endMetricsIdx > -1 ? endMetricsIdx : clean.length);
 
                 metrics.forEach(m => {
-                    // Regex: Look for the Metric Name, followed by optional chars, then a value
-                    // The value might be on the next line in the raw text, which appears as "Metric ... value" after replace
+                    // Smart Regex: Matches metric name, ignores " ≤ 30 Minutes", grabs next value
                     const regex = new RegExp(`${m}.*?([↑↓→]?\\s*[\\$]?\\d[\\d,:.]*%?)`, "i");
 
                     const valMatch = valueText.match(regex);
@@ -462,18 +519,10 @@
                             const { v: tVal } = parseVal(targetMatch[1]);
                             target = tVal;
                         }
-
-                        kpiRows.push({
-                            metric: m,
-                            target: target,
-                            value: v,
-                            trend: t
-                        });
+                        kpiRows.push({ metric: m, target: target, value: v, trend: t });
                     }
                 });
-
             } else {
-                // Fallback: Global search if headers missing (rare)
                 metrics.forEach(m => {
                     const regex = new RegExp(`${m}.*?([↑↓→]?\\s*[\\$]?\\d[\\d,:.]*%?)`, "i");
                     const match = clean.match(regex);
@@ -525,7 +574,6 @@
             document.getElementById('table-reviews').classList.add('hidden');
             document.getElementById('table-kpis').classList.add('hidden');
             document.getElementById(`table-${type}`).classList.remove('hidden');
-            
             const tabs = btn.parentElement.querySelectorAll('button');
             tabs.forEach(t => { t.classList.remove('border-b-2', 'border-primary', 'bg-blue-50', 'text-primary'); t.classList.add('text-muted'); });
             btn.classList.add('border-b-2', 'border-primary', 'bg-blue-50', 'text-primary');
@@ -548,34 +596,38 @@
             const revs = migrationQueue.reviews;
             const kpis = migrationQueue.kpis;
             const total = Math.ceil(revs.length / BATCH) + Math.ceil(kpis.length / BATCH);
-            
             if(!confirm(`Upload ${revs.length} Reviews and ${kpis.length} KPIs?`)) return;
-            
-            logConsole(`> Starting Cloud Upload (${total} batches)...`);
+            logConsole(`> Starting Cloud Upload (${total} batches)...`, 'log-info');
             
             for(let i=0; i<revs.length; i+=BATCH) {
                 const chunk = revs.slice(i, i+BATCH);
                 try {
                     await fetch(FLOW_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ mode: 'bulk_upload', table: 'reviews', data: chunk }) });
                     logConsole(`  > Reviews Batch OK.`);
-                } catch(e) { logConsole(`  ! Error: ${e.message}`); }
+                } catch(e) { logConsole(`  ! Error: ${e.message}`, 'log-err'); }
             }
             for(let i=0; i<kpis.length; i+=BATCH) {
                 const chunk = kpis.slice(i, i+BATCH);
                 try {
                     await fetch(FLOW_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ mode: 'bulk_upload', table: 'kpis', data: chunk }) });
                     logConsole(`  > KPIs Batch OK.`);
-                } catch(e) { logConsole(`  ! Error: ${e.message}`); }
+                } catch(e) { logConsole(`  ! Error: ${e.message}`, 'log-err'); }
             }
             alert("Upload Complete.");
         };
 
         // --- HELPER UTILS ---
-        function logConsole(msg) { const c = document.getElementById('mig-console'); c.innerHTML += `<div>${msg}</div>`; c.scrollTop = c.scrollHeight; }
+        function logConsole(msg, type='text-white') { 
+            const c = document.getElementById('mig-console'); 
+            c.innerHTML += `<div class="${type}">${msg}</div>`; 
+            c.scrollTop = c.scrollHeight; 
+        }
         const safeSetText = (id, txt) => { const el = document.getElementById(id); if(el) el.textContent = txt; };
         const toggleForce = (id, show) => { const el = document.getElementById(id); if(el) show ? el.classList.remove('hidden-force') : el.classList.add('hidden-force'); };
         
         window.forceLoad = () => {
+            // LOAD REAL EMPLOYEE DATA FROM PROMPT JSON
+            // Paste the full JSON here in production, or fetch from Flow
             const rawData = { "value": [ {"cr714_employeename":"Joshua Williams","cr714_employeeinformation1id":"9c98e6d3-997e-f011-b4cb-000d3a149458","cr714_department@OData.Community.Display.V1.FormattedValue":"Jacksonville","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"}, {"cr714_employeename":"Abigail Landi","cr714_employeeinformation1id":"4e3a4020-1f7d-f011-b4cb-000d3a537e3f","cr714_department@OData.Community.Display.V1.FormattedValue":"New Hire In Training","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"} ] };
             store.employees = rawData.value.map(e => ({ id: e.cr714_employeeinformation1id, name: e.cr714_employeename, title: e['cr714_title@OData.Community.Display.V1.FormattedValue'], dept: e['cr714_department@OData.Community.Display.V1.FormattedValue'], status: e['cr714_status@OData.Community.Display.V1.FormattedValue'] }));
             
