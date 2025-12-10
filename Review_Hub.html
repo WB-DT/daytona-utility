@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Performance Hub Pro | 6.10 Enterprise</title>
+    <title>Performance Hub Pro | 7.0 Enterprise (Fixed Matching)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -279,6 +279,8 @@
         let migrationQueue = { reviews: [], kpis: [] };
         let store = { employees: [], reviews: [], kpis: [] };
         let selectedFiles = [];
+        let parsingStats = { processed: 0, inactive: 0, noName: 0, noKPIs: 0 };
+        let failedFiles = [];
 
         // --- MIGRATION: FILE HANDLING ---
         window.handleMigrationFiles = function(input) {
@@ -296,8 +298,10 @@
         window.startParsing = async function() {
             if(!selectedFiles.length) return;
             
-            logConsole(`> --- STARTING PARSE ENGINE v6.9 ---`);
-            migrationQueue = { reviews: [], kpis: [] }; 
+            logConsole(`> --- STARTING PARSE ENGINE v7.0 ---`);
+            migrationQueue = { reviews: [], kpis: [] };
+            parsingStats = { processed: 0, inactive: 0, noName: 0, noKPIs: 0 };
+            failedFiles = [];
             
             const btn = document.getElementById('btn-parse');
             const originalText = btn.innerHTML;
@@ -332,7 +336,8 @@
 
                             if (emp) {
                                 const empId = emp.id;
-                                
+                                parsingStats.processed++;
+
                                 // 1. REVIEWS
                                 migrationQueue.reviews.push({
                                     fileName: file.name,
@@ -362,10 +367,14 @@
                                     logConsole(`  + [SUCCESS] Linked to ${emp.name} (${data.kpiRows.length} KPIs)`, 'log-success');
                                 } else {
                                     logConsole(`  ! Warning: No KPIs found in text.`, 'log-warn');
+                                    parsingStats.noKPIs++;
+                                    failedFiles.push({ file: file.name, reason: "No KPIs Found" });
                                 }
                             }
                         } else {
                             logConsole(`  ! Agent Name not found in ${file.name}`, 'log-err');
+                            parsingStats.noName++;
+                            failedFiles.push({ file: file.name, reason: "Name Parse Failed" });
                         }
                     }
                 } catch(e) {
@@ -374,7 +383,7 @@
             }
 
             btn.innerHTML = originalText;
-            logConsole(`> Parse Complete.`);
+            printSummary();
             updatePreviewTables();
             
             if(migrationQueue.reviews.length > 0) {
@@ -383,47 +392,61 @@
             }
         };
 
-        // --- CORE MATCHING LOGIC ---
+        // --- CORE MATCHING LOGIC (NAME FLIPPING) ---
         function findActiveEmployee(extractedName) {
-            // Normalize: "Williams, Joshua" -> "Joshua Williams"
-            // Remove punctuation, extra spaces, lowercase
-            const cleanSearch = extractedName.toLowerCase().replace(/[^a-z ]/g, '').trim();
-            const parts = cleanSearch.split(/\s+/);
-
-            // Find match in roster
+            // Document Name is usually "First Last" e.g. "Joshua Williams"
+            const searchFirstLast = extractedName.toLowerCase().replace(/[^a-z ]/g, '').trim();
+            
             const match = store.employees.find(e => {
-                const cleanRoster = e.name.toLowerCase().replace(/[^a-z ]/g, '').trim();
+                // Roster Name is usually "Last, First" e.g. "Williams, Joshua"
+                const rosterRaw = e.name.toLowerCase();
                 
-                // 1. Exact Match
-                if(cleanRoster === cleanSearch) return true;
-
-                // 2. Name Flip (Last First vs First Last)
-                if(parts.length > 1) {
-                    const flipped = parts.slice().reverse().join(' ');
-                    if(cleanRoster === flipped) return true;
+                // 1. Convert Roster to "First Last" for comparison
+                let rosterFirstLast = rosterRaw;
+                if (rosterRaw.includes(',')) {
+                    const parts = rosterRaw.split(',');
+                    if(parts.length === 2) {
+                        rosterFirstLast = `${parts[1].trim()} ${parts[0].trim()}`; // "Joshua Williams"
+                    }
                 }
+                rosterFirstLast = rosterFirstLast.replace(/[^a-z ]/g, '').trim();
+
+                // 2. Check Match
+                if (rosterFirstLast === searchFirstLast) return true;
                 
-                // 3. Contains (Fuzzy) - only if lengthy enough to be safe
-                if(cleanSearch.length > 5 && cleanRoster.includes(cleanSearch)) return true;
-                
+                // 3. Fuzzy Check (Contains)
+                if (searchFirstLast.length > 5 && rosterFirstLast.includes(searchFirstLast)) return true;
+
                 return false;
             });
 
             if (match) {
-                // FOUND! Now check Status
-                // JSON Field: cr714_status@OData.Community.Display.V1.FormattedValue
+                // Strict Status Check
                 if (match.status === 'Active') {
                     return match;
                 } else {
                     logConsole(`  ! [SKIPPED] ${match.name} is Inactive.`, 'log-warn');
+                    parsingStats.inactive++;
+                    // We don't push to queue if inactive
                     return null;
                 }
             } else {
                 logConsole(`  ! [FAILED] "${extractedName}" not found in Roster.`, 'log-err');
+                parsingStats.noName++;
+                // Add to failed list for report
                 return null;
             }
         }
 
+        function printSummary() {
+            logConsole("------------------------------------------------");
+            logConsole(`MIGRATION SUMMARY:`);
+            logConsole(`Total Files: ${selectedFiles.length}`);
+            logConsole(`Successfully Parsed: ${parsingStats.processed}`, 'log-success');
+            logConsole(`Skipped (Inactive): ${parsingStats.inactive}`, 'log-warn');
+            logConsole(`Failed (No Name): ${parsingStats.noName}`, 'log-err');
+            logConsole("------------------------------------------------");
+        }
 
         // --- ENHANCED EXTRACTOR LOGIC ---
         function extractDataFromText(text, fileName) {
@@ -436,16 +459,18 @@
             
             if (nameMatch) {
                 let candidate = nameMatch[2].trim();
-                // Basic validation: Reject if it looks like a date
                 if (!/[\d\/]/.test(candidate)) agentName = candidate;
             }
 
-            // Fallback to Filename
+            // Fallback to Filename (Handle CamelCase: "RebecaMendezVelez" -> "Rebeca Mendez Velez")
             if(!agentName) {
                 const parts = fileName.split('.')[0].split(/[-_]/);
-                // Look for longest segment that isn't a date or keyword
                 const potentialNames = parts.filter(p => p.length > 3 && !/\d/.test(p) && !['EOM', 'EOQ'].includes(p.toUpperCase()));
-                if(potentialNames.length > 0) agentName = potentialNames.join(' ');
+                
+                if(potentialNames.length > 0) {
+                    // Inject spaces into CamelCase
+                    agentName = potentialNames.join(' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+                }
             }
 
             let dateMatch = clean.match(/Date[:\s,]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
@@ -468,7 +493,7 @@
             const plan = getSection("Action Plan", ["Agent’s Voice", "Statement"]);
             const voice = getSection("Agent’s Voice", ["Statement"]);
 
-            // 3. KPI Extraction (Target vs Value)
+            // 3. KPI Extraction (Zone-based)
             const kpiRows = [];
             const metrics = [
                 "Total Calls", "Total Sales", "Avg. Talk Time", "Call Notes", 
@@ -496,7 +521,6 @@
 
                 metrics.forEach(m => {
                     const regex = new RegExp(`${m}.*?([↑↓→]?\\s*[\\$]?\\d[\\d,:.]*%?)`, "i");
-
                     const valMatch = valueText.match(regex);
                     const targetMatch = targetText.match(regex);
 
@@ -562,7 +586,6 @@
             document.getElementById('table-reviews').classList.add('hidden');
             document.getElementById('table-kpis').classList.add('hidden');
             document.getElementById(`table-${type}`).classList.remove('hidden');
-            
             const tabs = btn.parentElement.querySelectorAll('button');
             tabs.forEach(t => { t.classList.remove('border-b-2', 'border-primary', 'bg-blue-50', 'text-primary'); t.classList.add('text-muted'); });
             btn.classList.add('border-b-2', 'border-primary', 'bg-blue-50', 'text-primary');
@@ -586,7 +609,7 @@
             const kpis = migrationQueue.kpis;
             const total = Math.ceil(revs.length / BATCH) + Math.ceil(kpis.length / BATCH);
             if(!confirm(`Upload ${revs.length} Reviews and ${kpis.length} KPIs?`)) return;
-            logConsole(`> Starting Cloud Upload (${total} batches)...`);
+            logConsole(`> Starting Cloud Upload (${total} batches)...`, 'text-white');
             
             for(let i=0; i<revs.length; i+=BATCH) {
                 const chunk = revs.slice(i, i+BATCH);
@@ -616,7 +639,13 @@
         
         window.forceLoad = () => {
             // LOAD REAL EMPLOYEE DATA FROM PROMPT JSON
-            const rawData = { "value": [ {"cr714_employeename":"Joshua Williams","cr714_employeeinformation1id":"9c98e6d3-997e-f011-b4cb-000d3a149458","cr714_department@OData.Community.Display.V1.FormattedValue":"Jacksonville","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"}, {"cr714_employeename":"Abigail Landi","cr714_employeeinformation1id":"4e3a4020-1f7d-f011-b4cb-000d3a537e3f","cr714_department@OData.Community.Display.V1.FormattedValue":"New Hire In Training","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"} ] };
+            // In production, fetch this from flow.
+            const rawData = { "value": [
+                {"cr714_employeename":"Williams, Joshua","cr714_employeeinformation1id":"9c98e6d3-997e-f011-b4cb-000d3a149458","cr714_department@OData.Community.Display.V1.FormattedValue":"Jacksonville","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"},
+                {"cr714_employeename":"Landi, Abigail","cr714_employeeinformation1id":"4e3a4020-1f7d-f011-b4cb-000d3a537e3f","cr714_department@OData.Community.Display.V1.FormattedValue":"New Hire In Training","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"},
+                {"cr714_employeename":"Mendez Velez, Rebeca","cr714_employeeinformation1id":"ca06a546-c384-ee11-8179-0022481e4dc1","cr714_department@OData.Community.Display.V1.FormattedValue":"Sales","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"}
+            ] };
+            
             store.employees = rawData.value.map(e => ({ 
                 id: e.cr714_employeeinformation1id, 
                 name: e.cr714_employeename, 
