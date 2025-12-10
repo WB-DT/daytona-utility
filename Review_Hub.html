@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Performance Hub Pro | 6.7 Enterprise Parser</title>
+    <title>Performance Hub Pro | 6.8 Stable</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -179,14 +179,14 @@
                             <i class="fa-solid fa-file-lines text-2xl text-primary mb-2 group-hover:scale-110 transition-transform"></i>
                             <div class="text-sm font-bold">Select Files</div>
                             <div class="text-xs text-muted">For testing specific docs</div>
-                            <input type="file" id="mig-file-input" multiple class="hidden" onchange="window.handleFiles(this)">
+                            <input type="file" id="mig-file-input" multiple class="hidden" onchange="window.handleMigrationFiles(this)">
                         </div>
 
                         <div class="bg-white p-4 rounded-lg border border-border shadow-sm text-center cursor-pointer hover:border-warning transition-colors group" onclick="document.getElementById('mig-folder-input').click()">
                             <i class="fa-solid fa-folder-tree text-2xl text-warning mb-2 group-hover:scale-110 transition-transform"></i>
                             <div class="text-sm font-bold">Select Folder</div>
                             <div class="text-xs text-muted">For bulk processing (800+)</div>
-                            <input type="file" id="mig-folder-input" webkitdirectory multiple class="hidden" onchange="window.handleFiles(this)">
+                            <input type="file" id="mig-folder-input" webkitdirectory multiple class="hidden" onchange="window.handleMigrationFiles(this)">
                         </div>
 
                         <div class="md:col-span-2 bg-bg/50 p-4 rounded-lg border border-border flex flex-col justify-center">
@@ -237,8 +237,8 @@
                                         <th>Agent</th>
                                         <th>Log Date</th>
                                         <th>Metric Name</th>
-                                        <th>Target (Last Month)</th>
-                                        <th>Actual Value</th>
+                                        <th>Target (Last)</th>
+                                        <th>Value (This)</th>
                                         <th>Trend</th>
                                     </tr>
                                 </thead>
@@ -279,7 +279,7 @@
         let selectedFiles = [];
 
         // --- MIGRATION: FILE HANDLING ---
-        window.handleFiles = function(input) {
+        window.handleMigrationFiles = function(input) {
             const files = Array.from(input.files).filter(f => f.name.endsWith('.docx') || f.name.endsWith('.pdf'));
             if(files.length === 0) return logConsole("! No valid .docx/.pdf files selected.");
 
@@ -294,7 +294,7 @@
         window.startParsing = async function() {
             if(!selectedFiles.length) return;
             
-            logConsole(`> --- STARTING PARSE ENGINE v6.6 ---`);
+            logConsole(`> --- STARTING PARSE ENGINE v6.7 (Stable) ---`);
             migrationQueue = { reviews: [], kpis: [] }; 
             
             const btn = document.getElementById('btn-parse');
@@ -357,7 +357,7 @@
                                 });
                                 logConsole(`  + Extracted ${data.kpiRows.length} KPIs`);
                             } else {
-                                logConsole(`  ! Warning: No KPIs found in ${file.name}`);
+                                logConsole(`  ! Warning: No KPIs found.`);
                             }
 
                         } else {
@@ -379,12 +379,11 @@
             }
         };
 
-        // --- INTELLIGENT EXTRACTOR LOGIC ---
+        // --- ENHANCED EXTRACTOR LOGIC (Fixing the Target/Value Split) ---
         function extractDataFromText(text, fileName) {
             // Clean weird spacing, normalize newlines
-            const clean = text.replace(/\r\n/g, '\n').replace(/\t/g, ',').trim(); 
-            const lines = clean.split('\n').map(l => l.trim()).filter(l => l);
-
+            const clean = text.replace(/\r\n/g, '\n').replace(/\t/g, ' ').replace(/\s+/g, ' ').trim(); 
+            
             // 1. Metadata
             let nameMatch = clean.match(/Agent Name[:\s,]*([A-Za-z]+\s+[A-Za-z]+)/i);
             let agentName = nameMatch ? nameMatch[1].trim() : null;
@@ -396,7 +395,7 @@
             let dateMatch = clean.match(/Date[:\s,]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
             let reviewDate = dateMatch ? dateMatch[1] : new Date().toLocaleDateString();
 
-            // 2. Text Sections (Review Table)
+            // 2. Text Sections
             const getSection = (startMarker, endMarkers) => {
                 let start = clean.indexOf(startMarker);
                 if(start === -1) return "";
@@ -413,7 +412,7 @@
             const plan = getSection("Action Plan", ["Agent’s Voice", "Statement"]);
             const voice = getSection("Agent’s Voice", ["Statement"]);
 
-            // 3. KPI Extraction (Target vs Value)
+            // 3. KPI Extraction (Zone-based)
             const kpiRows = [];
             const metrics = [
                 "Total Calls", "Total Sales", "Avg. Talk Time", "Call Notes", 
@@ -421,91 +420,61 @@
                 "Average Break", "Average Lunch"
             ];
 
-            // Helper to clean values (Remove arrows, clean spaces)
+            // Clean Helper
             const parseVal = (str) => {
-                if(!str) return { v: "N/A", t: "Flat" };
+                if(!str) return { v: "--", t: "Flat" };
                 let t = "Flat";
                 if(str.includes("↑")) t = "Up";
                 if(str.includes("↓")) t = "Down";
-                // Regex to grab just the number/currency/time part
-                // e.g. "↓ 34" -> "34", "$48,000" -> "$48,000"
+                // Regex: Match standard numbers, currency, times (e.g. 514, $48,386, 00:01:49)
+                // Ignore the arrow itself in the value
                 const cleanMatch = str.match(/[\$]?[\d,]+(\.\d+)?(:[\d:]+)?%?/);
                 let v = cleanMatch ? cleanMatch[0] : str.replace(/[↑↓→]/g, '').trim();
                 return { v, t };
             };
 
-            // Strategy: 
-            // 1. Find index of "LAST MONTH" (Target Zone)
-            // 2. Find index of "THIS MONTH" (Value Zone)
-            // 3. In each zone, find the metric name, then find the value immediately following it (next line or comma)
+            // A. ISOLATE ZONES
+            // Find "Last Month" and "This Month" headers
+            const lastMonthIdx = clean.toUpperCase().indexOf("LAST MONTH");
+            const thisMonthIdx = clean.toUpperCase().indexOf("THIS MONTH");
+            const endMetricsIdx = clean.toUpperCase().indexOf("OPPORTUNITIES"); // Section usually after metrics
 
-            let lastMonthIdx = -1;
-            let thisMonthIdx = -1;
-
-            lines.forEach((line, idx) => {
-                if(line.toUpperCase().includes("LAST MONTH")) lastMonthIdx = idx;
-                if(line.toUpperCase().includes("THIS MONTH")) thisMonthIdx = idx;
-            });
-
-            // If we found the split
+            // If structure is valid
             if (lastMonthIdx !== -1 && thisMonthIdx !== -1) {
+                // Target Zone: Text between "LAST MONTH" and "THIS MONTH"
+                const targetText = clean.substring(lastMonthIdx, thisMonthIdx);
                 
-                // Helper to search a zone for a metric's value
-                const findValueInZone = (metricName, startIdx, endIdx) => {
-                    for(let i = startIdx; i < endIdx && i < lines.length; i++) {
-                        const line = lines[i];
-                        
-                        // Scenario A: CSV Style (Metric, Value on same line or split)
-                        if(line.includes(metricName)) {
-                            // Check if value is on SAME line (e.g. "Total Sales: $500")
-                            const sameLineRegex = new RegExp(`${metricName}[:\\s,]*([↑↓→]?\\s*[\\$]?[\\d,]+)`, 'i');
-                            const slMatch = line.match(sameLineRegex);
-                            if(slMatch) return slMatch[1];
+                // Value Zone: Text between "THIS MONTH" and "OPPORTUNITIES" (or end)
+                const valueText = clean.substring(thisMonthIdx, endMetricsIdx > -1 ? endMetricsIdx : clean.length);
 
-                            // Check if value is on NEXT line (Mammoth table flattening)
-                            // Usually if line matches "Total Calls", the next line is "488"
-                            if(i+1 < endIdx) {
-                                // If the line is a header row "Calls, Sales, Aux", find index
-                                if(line.includes(",")) {
-                                    const headers = line.split(",");
-                                    const colIndex = headers.findIndex(h => h.includes(metricName));
-                                    const nextLine = lines[i+1];
-                                    if(colIndex > -1 && nextLine.includes(",")) {
-                                        return nextLine.split(",")[colIndex];
-                                    }
-                                } 
-                                // Fallback: just return next line content if it looks like a number
-                                const nextVal = lines[i+1].trim();
-                                if (/^[↑↓→\$0-9]/.test(nextVal)) return nextVal;
-                            }
-                        }
-                    }
-                    return null;
-                };
-
-                // Processing Loop
                 metrics.forEach(m => {
-                    const rawTarget = findValueInZone(m, lastMonthIdx, thisMonthIdx);
-                    const rawValue = findValueInZone(m, thisMonthIdx, lines.length);
+                    // Regex: Look for the Metric Name, followed by optional chars, then a value
+                    // The value might be on the next line in the raw text, which appears as "Metric ... value" after replace
+                    const regex = new RegExp(`${m}.*?([↑↓→]?\\s*[\\$]?\\d[\\d,:.]*%?)`, "i");
 
-                    if(rawValue) {
-                        const { v: valClean, t: trend } = parseVal(rawValue);
-                        const { v: targetClean } = parseVal(rawTarget);
-                        
+                    const valMatch = valueText.match(regex);
+                    const targetMatch = targetText.match(regex);
+
+                    if (valMatch) {
+                        const { v, t } = parseVal(valMatch[1]);
+                        let target = "N/A";
+                        if (targetMatch) {
+                            const { v: tVal } = parseVal(targetMatch[1]);
+                            target = tVal;
+                        }
+
                         kpiRows.push({
                             metric: m,
-                            target: targetClean, // Goal from Last Month
-                            value: valClean,     // Actual from This Month
-                            trend: trend         // Arrow from This Month
+                            target: target,
+                            value: v,
+                            trend: t
                         });
                     }
                 });
 
             } else {
-                // Fallback: If document structure is weird, just Regex search globally
+                // Fallback: Global search if headers missing (rare)
                 metrics.forEach(m => {
-                    // Look for the SECOND occurrence (usually "This Month") vs First ("Last Month")?
-                    // Actually, simple regex usually hits first. Let's just grab what we can.
                     const regex = new RegExp(`${m}.*?([↑↓→]?\\s*[\\$]?\\d[\\d,:.]*%?)`, "i");
                     const match = clean.match(regex);
                     if(match) {
@@ -607,7 +576,6 @@
         const toggleForce = (id, show) => { const el = document.getElementById(id); if(el) show ? el.classList.remove('hidden-force') : el.classList.add('hidden-force'); };
         
         window.forceLoad = () => {
-            // LOAD MOCK EMPLOYEES
             const rawData = { "value": [ {"cr714_employeename":"Joshua Williams","cr714_employeeinformation1id":"9c98e6d3-997e-f011-b4cb-000d3a149458","cr714_department@OData.Community.Display.V1.FormattedValue":"Jacksonville","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"}, {"cr714_employeename":"Abigail Landi","cr714_employeeinformation1id":"4e3a4020-1f7d-f011-b4cb-000d3a537e3f","cr714_department@OData.Community.Display.V1.FormattedValue":"New Hire In Training","cr714_title@OData.Community.Display.V1.FormattedValue":"Rep","cr714_status@OData.Community.Display.V1.FormattedValue":"Active"} ] };
             store.employees = rawData.value.map(e => ({ id: e.cr714_employeeinformation1id, name: e.cr714_employeename, title: e['cr714_title@OData.Community.Display.V1.FormattedValue'], dept: e['cr714_department@OData.Community.Display.V1.FormattedValue'], status: e['cr714_status@OData.Community.Display.V1.FormattedValue'] }));
             
