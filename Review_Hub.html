@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Account Reassignment Tool (v2.4)</title>
+    <title>Account Reassignment Tool (Final v2.4)</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     
     <style>
@@ -13,6 +13,7 @@
         
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
         
+        /* Table Styling */
         .table-container { max-height: 500px; overflow-y: auto; border: 1px solid #ddd; }
         table { width: 100%; border-collapse: collapse; }
         th { position: sticky; top: 0; background: #0078d4; color: white; padding: 10px; text-align: left; }
@@ -20,6 +21,7 @@
         tr:hover { background-color: #e5f1fb; }
         tr.selected { background-color: #c7e0f4; font-weight: bold; }
 
+        /* Form Styling */
         .form-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: 600; }
         input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
@@ -39,7 +41,7 @@
         .user-badge { font-size: 12px; background: #e0e0e0; padding: 4px 8px; border-radius: 12px; font-weight: normal; color: #333; }
         
         /* Debug toggle */
-        #debug-panel { display:none; margin-top:20px; padding:10px; background:#eee; font-family:monospace; font-size:10px; }
+        #debug-panel { display:none; margin-top:20px; padding:10px; background:#eee; font-family:monospace; font-size:10px; overflow-x: auto; }
     </style>
 </head>
 <body>
@@ -128,7 +130,7 @@
 
     let groupedData = {};
 
-    // --- 3. AUTH LOGIC (LOGIN ONLY) ---
+    // --- 3. AUTH LOGIC ---
     async function login() {
         try {
             const resp = await msalInstance.loginPopup({ scopes: ["User.Read"] });
@@ -148,7 +150,7 @@
         fetchData();
     }
 
-    // --- 4. DATA LOGIC ---
+    // --- 4. DATA LOGIC (CORRECTED) ---
     async function fetchData() {
         const loader = document.getElementById('loader');
         const tbody = document.getElementById('repTableBody');
@@ -160,12 +162,12 @@
         warningBox.style.display = 'none';
 
         try {
-            // Using User context but NO Auth header for Flow
             const payload = { 
                 repName: msalAccount ? msalAccount.name : '',
                 email: msalAccount ? msalAccount.username : ''
             };
 
+            // NOTE: No Authorization header sent to Flow (prevents 401 on SAS URL)
             const response = await fetch(GET_ROWS_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }, 
@@ -175,41 +177,41 @@
             if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
             const json = await response.json();
-            const rows = json.accountList ? json.accountList : (Array.isArray(json) ? json : []);
+            
+            // FIX 1: Handle the "body" wrapper from your specific Flow output
+            // Checks json.accountList (direct) OR json.body.accountList (nested)
+            const rows = json.accountList ? json.accountList : (json.body && json.body.accountList ? json.body.accountList : []);
 
             console.log(`Fetched ${rows.length} rows`);
-            
-            // --- UPDATED Compatibility Check ---
-            // Only warns if the data is TRULY missing from ALL known note columns
+            debug.innerText = `DEBUG: Received ${rows.length} rows. First row keys: ` + (rows.length > 0 ? Object.keys(rows[0]).join(', ') : 'None');
+
+            // --- Compatibility Check ---
             if (rows.length > 0) {
                 const sample = rows[0];
                 const missingCols = [];
-                
-                // We check if we have either the direct note column OR the backup qbnotes
+                // Check for notes in any known location
                 const hasNotes = (sample.cr714_accountmanagementnotes !== undefined) || (sample.cr714_qbnotes !== undefined);
-                
                 if (!hasNotes) missingCols.push("cr714_accountmanagementnotes / cr714_qbnotes");
-                
-                // This column IS missing based on your HAR file, so this warning is valid
-                // You need to add this to your Flow 'Select' action to fix it.
+                // Check for email date
                 if (sample.cr714_actionemailsent === undefined) missingCols.push("cr714_actionemailsent");
 
                 if (missingCols.length > 0) {
-                    warningBox.innerHTML = `<strong>Warning:</strong> Missing columns: <em>${missingCols.join(', ')}</em>. <br>Please add 'cr714_actionemailsent' to your Power Automate Flow output to enable date-based filtering.`;
+                    warningBox.innerHTML = `<strong>Warning:</strong> Missing columns: <em>${missingCols.join(', ')}</em>. <br>Please add 'cr714_actionemailsent' to your Power Automate Flow output to enable strict date-based filtering.`;
                     warningBox.style.display = 'block';
                 }
             }
 
-            // --- UPDATED FILTERING LOGIC ---
+            // --- FILTERING LOGIC ---
             const filtered = rows.filter(r => {
                 const action = (r.cr714_action || "").toUpperCase();
                 const isCorrectAction = action === 'NONBUY' || action === 'NONOVDEC';
                 
-                // Updated to look at 'cr714_qbnotes' as well
+                // Check notes columns for "Email Sent:"
                 const notes = (r.cr714_accountmanagementnotes || r.cr714_qbnotes || r.cr714_managernotes || "").toString();
                 const hasEmailNote = notes.includes("Email Sent:");
                 
-                // This will be false if column is missing, which is safe
+                // FIX 2: Explicitly check cr714_actionemailsent for a date value
+                // This ensures we skip records that already have a date stamp
                 const hasEmailDate = r.cr714_actionemailsent != null && r.cr714_actionemailsent !== "";
                 
                 return isCorrectAction && (!hasEmailDate && !hasEmailNote);
@@ -217,10 +219,13 @@
 
             console.log(`Filtered down to ${filtered.length} eligible rows.`);
 
-            // Group
+            // Group by Rep Name
             groupedData = {};
             filtered.forEach(r => {
-                const rep = r.cr714_accountrep || "Unknown";
+                // FIX 3: Use 'cr714_rep' matching your Flow output
+                // Fallback to 'cr714_accountrep' just in case
+                const rep = r.cr714_rep || r.cr714_accountrep || "Unknown";
+                
                 if (!groupedData[rep]) groupedData[rep] = 0;
                 groupedData[rep]++;
             });
@@ -294,7 +299,6 @@
             };
 
             try {
-                // NOTE: Authorization header REMOVED here too
                 const response = await fetch(REASSIGN_FLOW_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
