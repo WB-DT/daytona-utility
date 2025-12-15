@@ -3,11 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Account Reassignment Tool</title>
+    <title>Account Reassignment Tool (Auth Enabled)</title>
+    <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
+    
     <style>
         body { font-family: 'Segoe UI', sans-serif; padding: 20px; background-color: #f4f4f9; }
         .container { max-width: 1200px; margin: 0 auto; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h2 { color: #333; border-bottom: 2px solid #0078d4; padding-bottom: 10px; }
+        h2 { color: #333; border-bottom: 2px solid #0078d4; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
         
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
         
@@ -22,7 +24,7 @@
         /* Form Styling */
         .form-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: 600; }
-        input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+        input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
         button { background-color: #0078d4; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; width: 100%; }
         button:hover { background-color: #005a9e; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
@@ -32,12 +34,29 @@
         .error { background-color: #fde7e9; color: #a80000; }
         .warning { background-color: #fff4ce; color: #664d03; margin-bottom: 15px; padding: 10px; border-radius: 4px; display: none; }
         .loading { color: #0078d4; font-weight: bold; }
+
+        /* Login Modal Styles */
+        .modal-overlay { position: fixed; inset: 0; background-color: rgba(0,0,0,0.6); backdrop-filter: blur(2px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+        .modal-content { background-color: white; border-radius: 8px; padding: 2rem; width: 100%; max-width: 400px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
+        .user-badge { font-size: 12px; background: #e0e0e0; padding: 4px 8px; border-radius: 12px; font-weight: normal; color: #333; }
     </style>
 </head>
 <body>
 
-<div class="container">
-    <h2>Account Reassignment Dashboard</h2>
+<div id="login-container" class="modal-overlay">
+    <div class="modal-content">
+        <h2 style="justify-content: center; border: none;">🔐 Authentication</h2>
+        <p style="margin-bottom: 20px; color: #666;">Please sign in to access the Reassignment Tool.</p>
+        <button onclick="window.login()" id="login-button">Sign in with Microsoft</button>
+        <p id="login-error" class="error" style="display:none; margin-top:10px;"></p>
+    </div>
+</div>
+
+<div class="container" id="main-app" style="display:none;">
+    <h2>
+        Account Reassignment Tool
+        <span id="user-display" class="user-badge">--</span>
+    </h2>
     
     <div id="compatibilityWarning" class="warning"></div>
 
@@ -88,16 +107,81 @@
 </div>
 
 <script>
-    // --- Configuration ---
-    // NEW GET Flow URL (Updated)
+    // --- MSAL CONFIGURATION ---
+    const msalConfig = { 
+        auth: { 
+            clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
+            authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", 
+            redirectUri: "https://WB-DT.github.io/daytona-utility/" 
+        }, 
+        cache: { 
+            cacheLocation: "localStorage", 
+            storeAuthStateInCookie: false 
+        } 
+    };
+    
+    const msalInstance = new msal.PublicClientApplication(msalConfig);
+    let msalAccount = null;
+
+    // --- APP CONFIGURATION ---
+    // GET Flow URL (Updated from previous turn)
     const GET_ROWS_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/952746524c354ee8a4d335d24ce01d6d/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=wOEIjRMghIgIGX4GU85rwL1hLdIeFT8O0I44C9C0vSo";
     
-    // POST Flow URL (Reassignment - Using previous link)
+    // POST Flow URL (Reassignment)
     const REASSIGN_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/ccd1e78456a4470c9bef267fc8b6ba77/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=delp7lT79GXjEHWIj9AHaxSmAyUrojFqAhNx0nsv0pM";
 
     let groupedData = {};
 
-    // 1. Fetch and Filter Data
+    // --- AUTH FUNCTIONS ---
+    async function login() {
+        try {
+            const resp = await msalInstance.loginPopup({ scopes: ["User.Read"] });
+            msalAccount = resp.account;
+            initializeApp();
+        } catch (error) {
+            console.error("Login failed", error);
+            const errEl = document.getElementById('login-error');
+            errEl.innerText = "Login failed: " + error.message;
+            errEl.style.display = 'block';
+        }
+    }
+
+    function initializeApp() {
+        // Hide Login, Show App
+        document.getElementById('login-container').style.display = 'none';
+        document.getElementById('main-app').style.display = 'block';
+        
+        // Update UI with User Info
+        document.getElementById('user-display').innerText = msalAccount.name;
+        
+        // Initial Data Load
+        fetchData();
+    }
+
+    // Attempt to get a token silently to pass in the Authorization header
+    // This helps if the Power Automate trigger is set to "Any user in my tenant"
+    async function getAuthHeaders() {
+        if (!msalAccount) return { 'Content-Type': 'application/json' };
+        
+        try {
+            const tokenResp = await msalInstance.acquireTokenSilent({
+                scopes: ["User.Read"], // Or specific scope if your API requires it
+                account: msalAccount
+            });
+            return {
+                'Content-Type': 'application/json',
+                // Note: Standard Power Automate 'Manual' triggers rely on SAS (sig) in URL.
+                // However, adding Bearer token can help resolve 401/403 if Identity is enforced.
+                // 'Authorization': `Bearer ${tokenResp.accessToken}` 
+            };
+        } catch (e) {
+            console.warn("Could not acquire silent token", e);
+            return { 'Content-Type': 'application/json' };
+        }
+    }
+
+    // --- APP LOGIC ---
+
     async function fetchData() {
         const loader = document.getElementById('loader');
         const tbody = document.getElementById('repTableBody');
@@ -108,13 +192,18 @@
         warningBox.style.display = 'none';
 
         try {
+            const headers = await getAuthHeaders();
+            
             const response = await fetch(GET_ROWS_URL, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}) 
+                headers: headers,
+                body: JSON.stringify({ 
+                    // We can pass user info here if the flow uses it for logging
+                    requestorEmail: msalAccount ? msalAccount.username : '' 
+                }) 
             });
 
-            if (!response.ok) throw new Error("Failed to fetch data");
+            if (!response.ok) throw new Error(`Failed to fetch data: ${response.status} ${response.statusText}`);
 
             const json = await response.json();
             
@@ -123,30 +212,30 @@
 
             console.log(`Fetched ${rows.length} total rows.`);
 
+            // Compatibility Check
             if (rows.length > 0) {
-                // Compatibility Check
                 const sample = rows[0];
                 const missingCols = [];
                 if (sample.cr714_accountmanagementnotes === undefined) missingCols.push("cr714_accountmanagementnotes");
                 if (sample.cr714_actionemailsent === undefined) missingCols.push("cr714_actionemailsent");
 
                 if (missingCols.length > 0) {
-                    warningBox.innerHTML = `<strong>Warning:</strong> The following columns appear to be missing from the Flow data: <em>${missingCols.join(', ')}</em>. <br>Filters relying on these columns will not work (emails may be resent).`;
+                    warningBox.innerHTML = `<strong>Warning:</strong> Missing columns: <em>${missingCols.join(', ')}</em>. Filters may be inaccurate.`;
                     warningBox.style.display = 'block';
                 }
             }
 
             // --- FILTERING LOGIC ---
             const filtered = rows.filter(r => {
-                // 1. Check Action (Case insensitive safety)
+                // 1. Check Action
                 const action = (r.cr714_action || "").toUpperCase();
                 const isCorrectAction = action === 'NONBUY' || action === 'NONOVDEC';
 
-                // 2. Check Notes for "Email Sent:" string (Handle missing column gracefully)
+                // 2. Check Notes for "Email Sent:"
                 const notes = (r.cr714_accountmanagementnotes || r.cr714_managernotes || "").toString();
                 const hasEmailNote = notes.includes("Email Sent:");
 
-                // 3. Check Date Stamp Column (Handle missing column gracefully)
+                // 3. Check Date Stamp Column
                 const hasEmailDate = r.cr714_actionemailsent != null && r.cr714_actionemailsent !== "";
 
                 // Logic: Must be correct action AND (No Date Stamp AND No "Email Sent" in notes)
@@ -159,9 +248,7 @@
             groupedData = {};
             filtered.forEach(r => {
                 const rep = r.cr714_accountrep || "Unknown";
-                if (!groupedData[rep]) {
-                    groupedData[rep] = 0;
-                }
+                if (!groupedData[rep]) groupedData[rep] = 0;
                 groupedData[rep]++;
             });
 
@@ -169,17 +256,15 @@
 
         } catch (error) {
             console.error(error);
-            alert("Error loading data. Check console for details.");
+            alert("Error loading data: " + error.message);
         } finally {
             loader.style.display = 'none';
         }
     }
 
-    // 2. Render Data to Table
     function renderTable() {
         const tbody = document.getElementById('repTableBody');
         tbody.innerHTML = '';
-
         const sortedReps = Object.keys(groupedData).sort();
 
         if (sortedReps.length === 0) {
@@ -190,41 +275,33 @@
         sortedReps.forEach(rep => {
             const tr = document.createElement('tr');
             tr.innerHTML = `<td>${rep}</td><td>${groupedData[rep]}</td>`;
-            
             tr.onclick = () => selectRep(tr, rep, groupedData[rep]);
             tbody.appendChild(tr);
         });
     }
 
-    // 3. Handle Row Selection
     function selectRep(row, repName, maxCount) {
         document.querySelectorAll('#repTableBody tr').forEach(r => r.classList.remove('selected'));
         row.classList.add('selected');
 
         document.getElementById('sourceRep').value = repName;
-        
         const countInput = document.getElementById('count');
         countInput.max = maxCount;
         countInput.value = "";
         countInput.placeholder = `Max: ${maxCount}`;
-        
         validateForm();
     }
 
-    // 4. Validate Form
     function validateForm() {
         const source = document.getElementById('sourceRep').value;
         const target = document.getElementById('targetRep').value;
         const count = document.getElementById('count').value;
-        const btn = document.getElementById('submitBtn');
-
-        btn.disabled = !(source && target && count > 0);
+        document.getElementById('submitBtn').disabled = !(source && target && count > 0);
     }
 
     document.getElementById('targetRep').addEventListener('input', validateForm);
     document.getElementById('count').addEventListener('input', validateForm);
 
-    // 5. Trigger Reassign Flow
     async function triggerFlow() {
         const sourceRep = document.getElementById('sourceRep').value;
         const targetRep = document.getElementById('targetRep').value;
@@ -232,7 +309,7 @@
         const statusDiv = document.getElementById('statusMessage');
         const btn = document.getElementById('submitBtn');
 
-        if(confirm(`Are you sure you want to move ${reassignCount} records FROM ${sourceRep} TO ${targetRep}?`)) {
+        if(confirm(`Move ${reassignCount} records FROM ${sourceRep} TO ${targetRep}?`)) {
             
             btn.disabled = true;
             btn.innerText = "Processing...";
@@ -241,13 +318,17 @@
             const payload = {
                 sourceRep: sourceRep,
                 targetRep: targetRep,
-                reassignCount: reassignCount
+                reassignCount: reassignCount,
+                // Add user context so the flow knows who triggered it
+                triggeredBy: msalAccount ? msalAccount.username : 'Unknown'
             };
 
             try {
+                const headers = await getAuthHeaders();
+                
                 const response = await fetch(REASSIGN_FLOW_URL, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: headers,
                     body: JSON.stringify(payload)
                 });
 
@@ -263,11 +344,11 @@
                         btn.innerText = "Reassign Records";
                     }, 3000);
                 } else {
-                    throw new Error("Flow returned error");
+                    throw new Error("Flow Error: " + response.statusText);
                 }
             } catch (error) {
                 statusDiv.className = 'status error';
-                statusDiv.innerText = "Error triggering flow. Check console.";
+                statusDiv.innerText = "Error triggering flow: " + error.message;
                 statusDiv.style.display = 'block';
                 btn.disabled = false;
                 btn.innerText = "Reassign Records";
@@ -276,8 +357,16 @@
         }
     }
 
-    // Initial Load
-    fetchData();
+    // Auto-Login Check on Load
+    document.addEventListener('DOMContentLoaded', () => {
+        const accounts = msalInstance.getAllAccounts();
+        if(accounts.length > 0) {
+            msalAccount = accounts[0];
+            initializeApp();
+        } else {
+            // Show login modal (default state)
+        }
+    });
 </script>
 
 </body>
