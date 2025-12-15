@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Account Reassignment Tool (Auth Fixed)</title>
+    <title>Account Reassignment Tool (Final)</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     
     <style>
@@ -33,9 +33,13 @@
         .warning { background-color: #fff4ce; color: #664d03; margin-bottom: 15px; padding: 10px; border-radius: 4px; display: none; }
         .loading { color: #0078d4; font-weight: bold; }
 
+        /* Login Modal Styles */
         .modal-overlay { position: fixed; inset: 0; background-color: rgba(0,0,0,0.6); backdrop-filter: blur(2px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
         .modal-content { background-color: white; border-radius: 8px; padding: 2rem; width: 100%; max-width: 400px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
         .user-badge { font-size: 12px; background: #e0e0e0; padding: 4px 8px; border-radius: 12px; font-weight: normal; color: #333; }
+        
+        /* Debug toggle */
+        #debug-panel { display:none; margin-top:20px; padding:10px; background:#eee; font-family:monospace; font-size:10px; }
     </style>
 </head>
 <body>
@@ -99,15 +103,13 @@
             
             <div id="statusMessage" class="status"></div>
             
-            <div style="margin-top: 20px; border-top: 1px solid #eee; padding-top: 10px; font-size: 11px; color: #999;">
-                <strong>Debug Info:</strong> <span id="debug-status">Ready</span>
-            </div>
+            <div id="debug-panel"></div>
         </div>
     </div>
 </div>
 
 <script>
-    // --- CONFIGURATION ---
+    // --- 1. MSAL CONFIG ---
     const msalConfig = { 
         auth: { 
             clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
@@ -120,12 +122,13 @@
     const msalInstance = new msal.PublicClientApplication(msalConfig);
     let msalAccount = null;
 
+    // --- 2. FLOW CONFIG ---
     const GET_ROWS_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/952746524c354ee8a4d335d24ce01d6d/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=wOEIjRMghIgIGX4GU85rwL1hLdIeFT8O0I44C9C0vSo";
     const REASSIGN_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/ccd1e78456a4470c9bef267fc8b6ba77/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=delp7lT79GXjEHWIj9AHaxSmAyUrojFqAhNx0nsv0pM";
 
     let groupedData = {};
 
-    // --- AUTH LOGIC ---
+    // --- 3. AUTH LOGIC (LOGIN ONLY) ---
     async function login() {
         try {
             const resp = await msalInstance.loginPopup({ scopes: ["User.Read"] });
@@ -133,7 +136,7 @@
             initializeApp();
         } catch (error) {
             console.error(error);
-            document.getElementById('login-error').innerText = error.message;
+            document.getElementById('login-error').innerText = "Login failed: " + error.message;
             document.getElementById('login-error').style.display = 'block';
         }
     }
@@ -145,45 +148,20 @@
         fetchData();
     }
 
-    // ROBUST AUTH HEADERS: Tries silent, falls back to Popup
-    async function getAuthHeaders() {
-        let headers = { 'Content-Type': 'application/json' };
-        if (!msalAccount) return headers;
-
-        try {
-            // 1. Try Silent
-            const tokenResp = await msalInstance.acquireTokenSilent({ scopes: ["User.Read"], account: msalAccount });
-            headers['Authorization'] = `Bearer ${tokenResp.accessToken}`;
-        } catch (error) {
-            // 2. If Silent fails (InteractionRequired), Try Popup
-            console.warn("Silent Auth failed, trying Popup...", error);
-            try {
-                const tokenResp = await msalInstance.acquireTokenPopup({ scopes: ["User.Read"], account: msalAccount });
-                headers['Authorization'] = `Bearer ${tokenResp.accessToken}`;
-            } catch (popupError) {
-                console.error("Popup Auth failed", popupError);
-                alert("Authentication failed. Please refresh and log in again.");
-            }
-        }
-        return headers;
-    }
-
-    // --- DATA LOGIC ---
+    // --- 4. DATA LOGIC ---
     async function fetchData() {
         const loader = document.getElementById('loader');
         const tbody = document.getElementById('repTableBody');
         const warningBox = document.getElementById('compatibilityWarning');
-        const debug = document.getElementById('debug-status');
+        const debug = document.getElementById('debug-panel');
         
         loader.style.display = 'block';
         tbody.innerHTML = ''; 
         warningBox.style.display = 'none';
-        debug.innerText = "Fetching...";
 
         try {
-            const headers = await getAuthHeaders();
+            // NOTE: Authorization header REMOVED to prevent 401 Conflict with SAS URL
             
-            // Sending 'repName' as the key logic used by your flow
             const payload = { 
                 repName: msalAccount ? msalAccount.name : '',
                 email: msalAccount ? msalAccount.username : ''
@@ -191,18 +169,28 @@
 
             const response = await fetch(GET_ROWS_URL, {
                 method: 'POST',
-                headers: headers,
+                headers: { 'Content-Type': 'application/json' }, // Only Content-Type
                 body: JSON.stringify(payload)
             });
 
-            if (response.status === 401) throw new Error("401 Unauthorized - Token rejected by Flow.");
             if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
             const json = await response.json();
             const rows = json.accountList ? json.accountList : (Array.isArray(json) ? json : []);
 
             console.log(`Fetched ${rows.length} rows`);
-            debug.innerText = `Success: ${rows.length} rows loaded.`;
+            
+            // Compatibility Check
+            if (rows.length > 0) {
+                const sample = rows[0];
+                const missingCols = [];
+                if (sample.cr714_accountmanagementnotes === undefined) missingCols.push("cr714_accountmanagementnotes");
+                if (sample.cr714_actionemailsent === undefined) missingCols.push("cr714_actionemailsent");
+                if (missingCols.length > 0) {
+                    warningBox.innerHTML = `<strong>Warning:</strong> Missing columns: <em>${missingCols.join(', ')}</em>. Filters may be inaccurate.`;
+                    warningBox.style.display = 'block';
+                }
+            }
 
             // Filter
             const filtered = rows.filter(r => {
@@ -226,7 +214,6 @@
 
         } catch (error) {
             console.error(error);
-            debug.innerText = "Error: " + error.message;
             alert("Error loading data: " + error.message);
         } finally {
             loader.style.display = 'none';
@@ -239,7 +226,7 @@
         const sortedReps = Object.keys(groupedData).sort();
 
         if (sortedReps.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="2">No records found.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;">No eligible records found.</td></tr>';
             return;
         }
 
@@ -292,10 +279,10 @@
             };
 
             try {
-                const headers = await getAuthHeaders();
+                // NOTE: Authorization header REMOVED here too
                 const response = await fetch(REASSIGN_FLOW_URL, {
                     method: 'POST',
-                    headers: headers,
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
 
