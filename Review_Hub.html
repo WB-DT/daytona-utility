@@ -9,7 +9,6 @@
         .container { max-width: 1200px; margin: 0 auto; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
         h2 { color: #333; border-bottom: 2px solid #0078d4; padding-bottom: 10px; }
         
-        /* Layout */
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
         
         /* Table Styling */
@@ -31,6 +30,7 @@
         .status { margin-top: 15px; padding: 10px; border-radius: 4px; display: none; }
         .success { background-color: #dff6dd; color: #107c10; }
         .error { background-color: #fde7e9; color: #a80000; }
+        .warning { background-color: #fff4ce; color: #664d03; margin-bottom: 15px; padding: 10px; border-radius: 4px; display: none; }
         .loading { color: #0078d4; font-weight: bold; }
     </style>
 </head>
@@ -39,6 +39,8 @@
 <div class="container">
     <h2>Account Reassignment Dashboard</h2>
     
+    <div id="compatibilityWarning" class="warning"></div>
+
     <div class="grid">
         <div>
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
@@ -58,8 +60,8 @@
                         </tbody>
                 </table>
             </div>
-            <p style="font-size: 0.9em; color: #666; margin-top: 5px;">
-                *Filtering: Action is NONBUY or NONovDec AND No Email Sent.
+            <p style="font-size: 0.85em; color: #666; margin-top: 5px;">
+                *Filtering: Action is NONBUY/NONovDec AND "Email Sent" not found in notes/date.
             </p>
         </div>
 
@@ -87,25 +89,27 @@
 
 <script>
     // --- Configuration ---
-    // GET Flow URL (Fetches all data)
-    const GET_ROWS_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/2d5cc7c0ffa34dcb87e6416df29b9acf/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=8qFD-lNiuxDgafyu31UYZ8zzePJMRJ4wpUzLzbb9bMs";
+    // NEW GET Flow URL (Updated)
+    const GET_ROWS_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/952746524c354ee8a4d335d24ce01d6d/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=wOEIjRMghIgIGX4GU85rwL1hLdIeFT8O0I44C9C0vSo";
     
-    // POST Flow URL (Triggers reassignment)
+    // POST Flow URL (Reassignment - Using previous link)
     const REASSIGN_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/ccd1e78456a4470c9bef267fc8b6ba77/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=delp7lT79GXjEHWIj9AHaxSmAyUrojFqAhNx0nsv0pM";
 
-    let rawData = [];
     let groupedData = {};
 
     // 1. Fetch and Filter Data
     async function fetchData() {
         const loader = document.getElementById('loader');
         const tbody = document.getElementById('repTableBody');
+        const warningBox = document.getElementById('compatibilityWarning');
+        
         loader.style.display = 'block';
-        tbody.innerHTML = ''; // Clear table
+        tbody.innerHTML = ''; 
+        warningBox.style.display = 'none';
 
         try {
             const response = await fetch(GET_ROWS_URL, {
-                method: 'POST', // Usually Power Automate triggers are POST unless configured as GET
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({}) 
             });
@@ -114,25 +118,35 @@
 
             const json = await response.json();
             
-            // Adjust this based on if the flow returns the array directly or inside an object property
-            // Often "List rows" returns { value: [...] } or your flow might respond with just the array.
-            // Based on your provided schema, it looks like the root is the array.
-            const rows = Array.isArray(json) ? json : (json.value || json.items || []);
+            // Handle { "accountList": [...] } wrapper OR direct Array
+            const rows = json.accountList ? json.accountList : (Array.isArray(json) ? json : []);
 
             console.log(`Fetched ${rows.length} total rows.`);
 
+            if (rows.length > 0) {
+                // Compatibility Check
+                const sample = rows[0];
+                const missingCols = [];
+                if (sample.cr714_accountmanagementnotes === undefined) missingCols.push("cr714_accountmanagementnotes");
+                if (sample.cr714_actionemailsent === undefined) missingCols.push("cr714_actionemailsent");
+
+                if (missingCols.length > 0) {
+                    warningBox.innerHTML = `<strong>Warning:</strong> The following columns appear to be missing from the Flow data: <em>${missingCols.join(', ')}</em>. <br>Filters relying on these columns will not work (emails may be resent).`;
+                    warningBox.style.display = 'block';
+                }
+            }
+
             // --- FILTERING LOGIC ---
             const filtered = rows.filter(r => {
-                // 1. Check Action
-                const action = r.cr714_action;
-                const isCorrectAction = action === 'NONBUY' || action === 'NONovDec';
+                // 1. Check Action (Case insensitive safety)
+                const action = (r.cr714_action || "").toUpperCase();
+                const isCorrectAction = action === 'NONBUY' || action === 'NONOVDEC';
 
-                // 2. Check Notes for "Email Sent:" string
-                const notes = r.cr714_accountmanagementnotes || "";
+                // 2. Check Notes for "Email Sent:" string (Handle missing column gracefully)
+                const notes = (r.cr714_accountmanagementnotes || r.cr714_managernotes || "").toString();
                 const hasEmailNote = notes.includes("Email Sent:");
 
-                // 3. Check Date Stamp Column (ensure this column is included in your flow response!)
-                // Checks if value is null, undefined, or empty string
+                // 3. Check Date Stamp Column (Handle missing column gracefully)
                 const hasEmailDate = r.cr714_actionemailsent != null && r.cr714_actionemailsent !== "";
 
                 // Logic: Must be correct action AND (No Date Stamp AND No "Email Sent" in notes)
@@ -144,7 +158,7 @@
             // Group by Rep Name
             groupedData = {};
             filtered.forEach(r => {
-                const rep = r.cr714_accountrep || "Unknown"; // Using schema key cr714_accountrep
+                const rep = r.cr714_accountrep || "Unknown";
                 if (!groupedData[rep]) {
                     groupedData[rep] = 0;
                 }
@@ -155,7 +169,7 @@
 
         } catch (error) {
             console.error(error);
-            alert("Error loading data. See console for details.");
+            alert("Error loading data. Check console for details.");
         } finally {
             loader.style.display = 'none';
         }
@@ -166,8 +180,12 @@
         const tbody = document.getElementById('repTableBody');
         tbody.innerHTML = '';
 
-        // Sort reps alphabetically
         const sortedReps = Object.keys(groupedData).sort();
+
+        if (sortedReps.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="2">No records found matching criteria.</td></tr>';
+            return;
+        }
 
         sortedReps.forEach(rep => {
             const tr = document.createElement('tr');
@@ -180,17 +198,14 @@
 
     // 3. Handle Row Selection
     function selectRep(row, repName, maxCount) {
-        // Highlight row
         document.querySelectorAll('#repTableBody tr').forEach(r => r.classList.remove('selected'));
         row.classList.add('selected');
 
-        // Populate Form
         document.getElementById('sourceRep').value = repName;
         
-        // Update max on count input
         const countInput = document.getElementById('count');
         countInput.max = maxCount;
-        countInput.value = ""; // Reset value
+        countInput.value = "";
         countInput.placeholder = `Max: ${maxCount}`;
         
         validateForm();
@@ -206,7 +221,6 @@
         btn.disabled = !(source && target && count > 0);
     }
 
-    // Listen for inputs to validate
     document.getElementById('targetRep').addEventListener('input', validateForm);
     document.getElementById('count').addEventListener('input', validateForm);
 
@@ -242,14 +256,12 @@
                     statusDiv.innerText = "Success! Flow triggered. Refreshing data...";
                     statusDiv.style.display = 'block';
                     
-                    // Wait 2 seconds then refresh data to see changes (if flow is fast enough)
                     setTimeout(() => {
                         fetchData();
                         document.getElementById('sourceRep').value = '';
                         document.getElementById('count').value = '';
                         btn.innerText = "Reassign Records";
-                        // Keep Target Rep populated as user might assign more to them
-                    }, 2000);
+                    }, 3000);
                 } else {
                     throw new Error("Flow returned error");
                 }
