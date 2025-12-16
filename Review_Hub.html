@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Account Reassignment Tool (Final v2.4)</title>
+    <title>Account Reassignment Tool (Final v3.0)</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     
     <style>
@@ -150,7 +150,7 @@
         fetchData();
     }
 
-    // --- 4. DATA LOGIC (CORRECTED) ---
+    // --- 4. DATA LOGIC ---
     async function fetchData() {
         const loader = document.getElementById('loader');
         const tbody = document.getElementById('repTableBody');
@@ -167,7 +167,7 @@
                 email: msalAccount ? msalAccount.username : ''
             };
 
-            // NOTE: No Authorization header sent to Flow (prevents 401 on SAS URL)
+            // NOTE: Authorization header intentionally REMOVED to prevent 401 Conflict with Flow SAS URL
             const response = await fetch(GET_ROWS_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }, 
@@ -178,21 +178,22 @@
 
             const json = await response.json();
             
-            // FIX 1: Handle the "body" wrapper from your specific Flow output
-            // Checks json.accountList (direct) OR json.body.accountList (nested)
+            // FIX: Handle nested 'body' structure from your Flow output
+            // Looks for json.accountList OR json.body.accountList
             const rows = json.accountList ? json.accountList : (json.body && json.body.accountList ? json.body.accountList : []);
 
             console.log(`Fetched ${rows.length} rows`);
-            debug.innerText = `DEBUG: Received ${rows.length} rows. First row keys: ` + (rows.length > 0 ? Object.keys(rows[0]).join(', ') : 'None');
+            debug.innerText = `DEBUG: Received ${rows.length} rows.`;
 
             // --- Compatibility Check ---
             if (rows.length > 0) {
                 const sample = rows[0];
                 const missingCols = [];
-                // Check for notes in any known location
-                const hasNotes = (sample.cr714_accountmanagementnotes !== undefined) || (sample.cr714_qbnotes !== undefined);
-                if (!hasNotes) missingCols.push("cr714_accountmanagementnotes / cr714_qbnotes");
-                // Check for email date
+                // Check if ANY note field is present
+                const hasNotes = (sample.cr714_accountmanagementnotes !== undefined) || (sample.cr714_qbnotes !== undefined) || (sample.cr714_managernotes !== undefined);
+                if (!hasNotes) missingCols.push("cr714_qbnotes / cr714_accountmanagementnotes");
+                
+                // Check for email date field
                 if (sample.cr714_actionemailsent === undefined) missingCols.push("cr714_actionemailsent");
 
                 if (missingCols.length > 0) {
@@ -206,12 +207,11 @@
                 const action = (r.cr714_action || "").toUpperCase();
                 const isCorrectAction = action === 'NONBUY' || action === 'NONOVDEC';
                 
-                // Check notes columns for "Email Sent:"
+                // Combine all possible note columns for searching
                 const notes = (r.cr714_accountmanagementnotes || r.cr714_qbnotes || r.cr714_managernotes || "").toString();
                 const hasEmailNote = notes.includes("Email Sent:");
                 
-                // FIX 2: Explicitly check cr714_actionemailsent for a date value
-                // This ensures we skip records that already have a date stamp
+                // Safe check for date column (won't crash if missing)
                 const hasEmailDate = r.cr714_actionemailsent != null && r.cr714_actionemailsent !== "";
                 
                 return isCorrectAction && (!hasEmailDate && !hasEmailNote);
@@ -222,8 +222,7 @@
             // Group by Rep Name
             groupedData = {};
             filtered.forEach(r => {
-                // FIX 3: Use 'cr714_rep' matching your Flow output
-                // Fallback to 'cr714_accountrep' just in case
+                // FIX: Use cr714_rep as priority, fallback to accountrep, fallback to Unknown
                 const rep = r.cr714_rep || r.cr714_accountrep || "Unknown";
                 
                 if (!groupedData[rep]) groupedData[rep] = 0;
@@ -246,7 +245,7 @@
         const sortedReps = Object.keys(groupedData).sort();
 
         if (sortedReps.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;">No eligible records found.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="2" style="text-align:center; padding:15px; color:#666;">No eligible records found.<br><small>If you see "Fetched 0 rows" in console, check your Flow response.</small></td></tr>';
             return;
         }
 
@@ -279,6 +278,7 @@
     document.getElementById('targetRep').addEventListener('input', validateForm);
     document.getElementById('count').addEventListener('input', validateForm);
 
+    // --- 5. TRIGGER ACTION LOGIC ---
     async function triggerFlow() {
         const sourceRep = document.getElementById('sourceRep').value;
         const targetRep = document.getElementById('targetRep').value;
@@ -291,14 +291,17 @@
             btn.innerText = "Processing...";
             statusDiv.style.display = 'none';
 
+            // PAYLOAD UPDATE: Sending requesting user info
             const payload = {
                 sourceRep: sourceRep,
                 targetRep: targetRep,
                 reassignCount: reassignCount,
-                triggeredBy: msalAccount ? msalAccount.username : 'Unknown'
+                requestingUser: msalAccount ? msalAccount.username : 'Unknown',
+                requestingUserName: msalAccount ? msalAccount.name : 'Unknown'
             };
 
             try {
+                // NOTE: No Authorization header (using SAS URL)
                 const response = await fetch(REASSIGN_FLOW_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
