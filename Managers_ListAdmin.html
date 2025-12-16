@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Manager v9.7 (Final Fix)</title>
+    <title>Daytona Manager v9.8 (Platinum Master)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -132,6 +132,7 @@
         .ai-imp { border-left-color: var(--accent-danger); } .ai-imp .ai-header { color: var(--accent-danger); }
         .ai-mgr { border-left-color: var(--accent-success); } .ai-mgr .ai-header { color: var(--accent-success); }
         .ai-key { border-left-color: var(--primary); } .ai-key .ai-header { color: var(--primary); }
+        .ai-temp-card { background: var(--bg-input); border: 1px solid var(--border-color); padding: 10px; border-radius: 6px; text-align: center; margin-bottom: 10px; }
         
         .note-card { margin-bottom: 0.75rem; border-radius: 0.375rem; border: 1px solid var(--border-color); background-color: var(--bg-card); box-shadow: var(--shadow); overflow: hidden; }
         .note-card-header { padding: 0.5rem; background-color: var(--bg-header); border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; font-size: 0.7rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; }
@@ -242,11 +243,14 @@
                     <div id="theme-menu" class="theme-menu-content"></div>
                 </div>
                 <select id="sort-dropdown" onchange="window.filterAndSortGallery()" class="text-xs w-40">
-                    <option value="company-asc">Sort: Company A-Z</option>
-                    <option value="days-desc">Days Since Order &#x2193;</option>
+                    <option value="company-asc">Company (A-Z)</option>
+                    <option value="company-desc">Company (Z-A)</option>
+                    <option value="rep-asc">Rep (A-Z)</option>
+                    <option value="rep-desc">Rep (Z-A)</option>
+                    <option value="days-desc">Days (High &#8594; Low)</option>
+                    <option value="days-asc">Days (Low &#8594; High)</option>
                     <option value="followup-asc">Follow Up (Oldest)</option>
                     <option value="followup-desc">Follow Up (Newest)</option>
-                    <option value="rep-asc">Rep A-Z</option>
                 </select>
                 <select id="filter-action-dropdown" onchange="window.filterAndSortGallery()" class="text-xs w-40" disabled><option value="">Filter: All Actions</option></select>
             </div>
@@ -295,7 +299,7 @@
                                 <button onclick="window.handleCustomSave()" class="btn-primary text-xs py-1">Save</button>
                                 <button onclick="window.handleCustomReset()" class="btn-secondary text-xs py-1">Cancel</button>
                             </div>
-                            <button onclick="window.showAdvisory()" id="btn-account-alerts" class="hidden btn-secondary text-xs px-2 rounded">Alerts</button>
+                            <button onclick="window.openAiSummary()" id="btn-account-alerts" class="hidden btn-alert-pulse text-xs px-2 rounded border">Alerts</button>
                             <button onclick="window.toggleEditMode()" id="editModeButton" class="btn-secondary text-xs py-1 ml-2" disabled>Edit Profile</button>
                         </div>
                     </div>
@@ -523,14 +527,6 @@
         </div>
     </div>
     
-    <div id="advisory-modal" class="modal-overlay hidden" style="display:none; z-index: 7800;">
-        <div class="modal-content max-w-2xl border-t-4 border-blue-600">
-            <div class="flex justify-between items-center mb-4"><h3 class="font-bold text-lg text-gray-800"><i class="fas fa-bell text-blue-600 mr-2"></i>Account Advisory</h3><button onclick="window.closeAdvisory()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button></div>
-            <div id="advisory-content" class="space-y-4 max-h-[60vh] overflow-y-auto p-1"></div>
-            <button onclick="window.closeAdvisory()" class="btn-primary w-full mt-4">Acknowledge</button>
-        </div>
-    </div>
-    
     <div id="ai-modal" class="modal-overlay hidden" style="display:none; z-index: 9200;">
         <div class="modal-content max-w-lg w-full">
             <div class="bg-gradient-to-r from-indigo-500 to-purple-500 p-4 text-white flex justify-between items-center rounded-t-lg -m-6 mb-4">
@@ -539,7 +535,6 @@
             </div>
             <div id="ai-content-area" class="mt-6 max-h-[60vh] overflow-y-auto space-y-4"></div>
             <div class="mt-4 pt-4 border-t flex justify-end gap-2">
-                <button onclick="window.copyAndOpenGemini()" class="btn-secondary text-xs px-4 border-purple-500 text-purple-600 hover:bg-purple-50"><i class="fas fa-external-link-alt mr-1"></i> Analyze with Gemini</button>
                 <button onclick="document.getElementById('ai-modal').style.display='none'" class="btn-primary text-xs px-4">Close</button>
             </div>
         </div>
@@ -746,7 +741,7 @@
                 const dropdown = document.getElementById('filter-action-dropdown');
                 if(dropdown) {
                     const recordActions = new Set(allRecords.map(r => r.cr714_action).filter(Boolean));
-                    const allActions = new Set(['Help', 'No Opp', 'Close Account', ...recordActions]);
+                    const allActions = Array.from(new Set(['Help', 'No Opp', 'Close Account', ...recordActions])).sort();
                     dropdown.innerHTML = '<option value="">Filter: All Actions</option>';
                     allActions.forEach(a => dropdown.innerHTML += `<option value="${a}">${a}</option>`);
                     dropdown.disabled = false;
@@ -805,54 +800,41 @@
             const mgrNotes = getVal(record, 'cr714_managernotes', '').trim();
             const impInfo = getVal(record, 'cr714_importantaccountinformation', '').trim();
             let summaryHtml = "";
+            
+            // KEYWORD SCANNER (Simple Client-Side Sentiment)
+            const lowerNotes = notes.toLowerCase().substring(0, 2000); // Check recent 2000 chars
+            const positive = (lowerNotes.match(/thank|good|great|happy|love|appreciate|order/g) || []).length;
+            const negative = (lowerNotes.match(/bad|upset|mad|cancel|return|damage|wrong|issue|complaint/g) || []).length;
+            
+            let sentiment = "Neutral / Stable";
+            let colorClass = "text-gray-600 border-gray-300 bg-gray-50";
+            let icon = "fa-minus-circle";
+            
+            if (positive > negative + 1) { sentiment = "Positive / Happy"; colorClass = "text-green-700 border-green-300 bg-green-50"; icon = "fa-smile"; }
+            else if (negative > positive) { sentiment = "At Risk / Needs Attention"; colorClass = "text-red-700 border-red-300 bg-red-50"; icon = "fa-frown"; }
+            
+            // TEMP CHECK CARD
+            summaryHtml += `<div class="ai-temp-card ${colorClass}"><h3 class="font-bold uppercase text-xs mb-1">AI Sentiment Check</h3><div class="text-lg font-bold"><i class="fas ${icon} mr-2"></i>${sentiment}</div></div>`;
+
             if (impInfo) summaryHtml += `<div class="ai-box ai-imp"><div class="ai-header"><i class="fas fa-exclamation-triangle"></i> IMPORTANT INFO</div><div class="ai-body">${escapeHTML(impInfo)}</div></div>`;
             if (mgrNotes) summaryHtml += `<div class="ai-box ai-mgr"><div class="ai-header"><i class="fas fa-user-tie"></i> MANAGER FEEDBACK</div><div class="ai-body">${escapeHTML(mgrNotes)}</div></div>`;
+            
             if (notes) {
-                const qbLines = notes.split('\n').filter(line => line.trim() !== '------------------------------' && line.trim() !== '' && !line.includes('Modified On:') && !line.includes('Modified By:')).slice(0, 8);
-                if (qbLines.length > 0) summaryHtml += `<div class="ai-box ai-key"><div class="ai-header"><i class="fas fa-file-alt"></i> RECENT NOTE SNIPPETS</div><div class="ai-body text-xs font-mono">${escapeHTML(qbLines.join('\n'))}</div></div>`;
+                // Formatting: Replace newlines with <br> for HTML display in modal
+                let formattedNotes = escapeHTML(notes.substring(0, 1500)).replace(/\n/g, '<br>');
+                summaryHtml += `<div class="ai-box ai-key"><div class="ai-header"><i class="fas fa-file-alt"></i> RECENT NOTE HISTORY</div><div class="ai-body text-xs font-mono" style="max-height:300px; overflow-y:auto;">${formattedNotes}...</div></div>`;
+            } else {
+                summaryHtml += `<div class="p-4 text-center text-gray-400 italic">No historical notes found. Account appears neutral.</div>`;
             }
             return summaryHtml;
         }
 
         window.openAiSummary = function() {
             if(!currentSelectedRecord) return;
-            // Generate full context for display
-            let content = `<div class="p-3 bg-gray-50 rounded border mb-4">
-                <div class="font-bold text-gray-700 mb-2">Temp Check Data Source:</div>
-                <ul class="list-disc pl-5 text-sm text-gray-600">
-                    <li>Manager Feedback: ${currentSelectedRecord.cr714_managernotes ? 'Yes' : 'No'}</li>
-                    <li>Important Info: ${currentSelectedRecord.cr714_importantaccountinformation ? 'Yes' : 'No'}</li>
-                    <li>Historical Notes: Available</li>
-                </ul>
-                <div class="mt-3 text-xs text-gray-500 italic">Click "Analyze with Gemini" to copy this data and open the AI analysis tool.</div>
-            </div>`;
-            
-            content += window.generateAiSummary(currentSelectedRecord);
-            
+            const content = window.generateAiSummary(currentSelectedRecord);
             document.getElementById('ai-content-area').innerHTML = content;
             document.getElementById('ai-modal').classList.remove('hidden'); 
             document.getElementById('ai-modal').style.display='flex'; 
-        }
-
-        window.copyAndOpenGemini = function() {
-            if(!currentSelectedRecord) return;
-            const notes = currentSelectedRecord.cr714_qbnotes || "";
-            const mgr = currentSelectedRecord.cr714_managernotes || "None";
-            const imp = currentSelectedRecord.cr714_importantaccountinformation || "None";
-            
-            const prompt = `I am a sales rep for W.B. Mason. Analyze these customer notes for Account ${currentSelectedRecord.cr714_company}.
-            
-            MANAGER FEEDBACK: ${mgr}
-            IMPORTANT INFO: ${imp}
-            
-            RECENT HISTORY:
-            ${notes.substring(0, 5000)}
-            
-            Provide a summary of the relationship, current sentiment, and 3 actionable next steps.`;
-            
-            navigator.clipboard.writeText(prompt);
-            window.showToast("Data Copied! Pasting into Gemini...", "success");
-            setTimeout(() => window.open("https://gemini.google.com/app", "_blank"), 1000);
         }
 
         window.parseNotes = function(rawNotes) { 
@@ -884,7 +866,14 @@
             const intVal = document.getElementById('internal-note-input') ? document.getElementById('internal-note-input').value.trim() : '';
             let html = '';
             
-            if(showAI) html += window.generateAiSummary(currentSelectedRecord);
+            // Replaced inline AI summary with simple button if checked, or small banner
+            if(showAI) {
+                 const mgr = currentSelectedRecord.cr714_managernotes || "";
+                 const imp = currentSelectedRecord.cr714_importantaccountinformation || "";
+                 if(mgr || imp) {
+                     html += `<div class="mb-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-800 cursor-pointer hover:bg-yellow-100" onclick="window.openAiSummary()"><i class="fas fa-exclamation-circle mr-1"></i> <b>Alerts Active:</b> Click to view details.</div>`;
+                 }
+            }
 
             if(showNew && (genVal || intVal)) {
                 html += `<div class="ai-box ai-key" style="border-color: var(--accent-warning); background: var(--bg-input);"><div class="ai-header" style="color: var(--accent-warning);"><i class="fas fa-pencil-alt"></i> Draft Note Preview</div><div class="ai-body">`;
@@ -935,14 +924,24 @@
             
              filtered.sort((a, b) => {
                 const get = (item, key) => (item[key] || '').toString().toLowerCase();
-                if(sort.includes('company')) return sort === 'company-asc' ? get(a,'cr714_company').localeCompare(get(b,'cr714_company')) : get(b,'cr714_company').localeCompare(get(a,'cr714_company'));
+                
+                if (sort === 'company-asc') return get(a,'cr714_company').localeCompare(get(b,'cr714_company'));
+                if (sort === 'company-desc') return get(b,'cr714_company').localeCompare(get(a,'cr714_company'));
+                
+                if (sort === 'rep-asc') return get(a,'cr714_rep').localeCompare(get(b,'cr714_rep'));
+                if (sort === 'rep-desc') return get(b,'cr714_rep').localeCompare(get(a,'cr714_rep'));
+                
+                if (sort.includes('days')) { 
+                    const da = parseFloat(a.cr714_dayssincelastorder) || 0; 
+                    const db = parseFloat(b.cr714_dayssincelastorder) || 0; 
+                    return sort === 'days-asc' ? da - db : db - da; 
+                }
+                
                 if(sort.includes('followup')) {
                     const da = a.cr714_followup ? new Date(a.cr714_followup) : new Date(sort === 'followup-asc' ? 8640000000000000 : -8640000000000000);
                     const db = b.cr714_followup ? new Date(b.cr714_followup) : new Date(sort === 'followup-asc' ? 8640000000000000 : -8640000000000000);
                     return sort === 'followup-asc' ? da - db : db - da;
                 }
-                if(sort.includes('days')) { const da = parseFloat(a.cr714_dayssincelastorder) || 0; const db = parseFloat(b.cr714_dayssincelastorder) || 0; return sort === 'days-asc' ? da - db : db - da; }
-                if(sort.includes('rep')) return sort === 'rep-asc' ? get(a,'cr714_rep').localeCompare(get(b,'cr714_rep')) : get(b,'cr714_rep').localeCompare(get(a,'cr714_rep'));
                 return 0;
             });
 
@@ -974,10 +973,10 @@
                 isEditMode = true; 
                 window.updateFormDisplayMode();
                 
-                // AUTO-ALERT IF EXISTS
+                // AUTO-ALERT IF EXISTS: Triggers AI/Alert Modal directly
                 const hasMgr = (currentSelectedRecord.cr714_managernotes && currentSelectedRecord.cr714_managernotes.trim().length > 0);
                 const hasImp = (currentSelectedRecord.cr714_importantaccountinformation && currentSelectedRecord.cr714_importantaccountinformation.trim().length > 0);
-                if (hasMgr || hasImp) { window.showAdvisory(); }
+                if (hasMgr || hasImp) { window.openAiSummary(); }
             }
         }
         
@@ -1220,6 +1219,7 @@
         window.closeSidebarModal = function(id, frameId) {
             document.getElementById(id).classList.remove('active'); document.getElementById(id).classList.remove('fullscreen');
             document.body.classList.remove('split-screen');
+            document.body.classList.remove('full-screen-modal');
             if(frameId) setTimeout(() => document.getElementById(frameId).src = 'about:blank', 300);
         }
         window.toggleModalFullscreen = function(id) { document.getElementById(id).classList.toggle('fullscreen'); document.body.classList.toggle('full-screen-modal'); }
@@ -1228,6 +1228,9 @@
         window.openSalesReportModal = function() { document.getElementById('sales-report-frame').src = `https://go.masonville.com/#/report/${currentRecordId}`; document.getElementById('sales-report-modal').classList.add('active'); document.body.classList.add('split-screen'); }
         window.openWBMasonModal = function() { document.getElementById('wb-mason-frame').src = "https://www.wbmason.com"; document.getElementById('wb-mason-modal').classList.add('active'); document.body.classList.add('split-screen'); }
         window.openCSWModal = function() { document.getElementById('csw-frame').src = "https://wbmasonco.crm.dynamics.com/main.aspx?appid=9e06e7d4-8616-eb11-a817-000d3a8b6b20"; document.getElementById('csw-modal').classList.add('active'); document.body.classList.add('split-screen'); }
+        window.openAiSummary = function() { document.getElementById('ai-modal').style.display='flex'; document.getElementById('ai-modal').classList.remove('hidden'); }
+        window.showAdvisory = function() { window.openAiSummary(); }
+        window.closeAdvisory = function() { document.getElementById('advisory-modal').classList.add('hidden'); document.getElementById('advisory-modal').style.display='none'; }
         
         window.showUserProfileCard = function() {
             let p = { name: currentUserRepName, title: 'Sales Rep', department: 'Sales', location: 'Unknown', manager: 'Unknown', isGold: false };
@@ -1258,8 +1261,6 @@
         window.insertTemplate = function() { document.getElementById('qb-notes-input').value = QB_NOTES_TEMPLATE + document.getElementById('qb-notes-input').value; }
         window.toggleInternalNote = function() { document.getElementById('internal-note-wrapper').classList.toggle('open'); }
         window.sendInternalNote = function() { window.handleActionButtonClick('Help', document.getElementById('internal-note-input').value); }
-        window.showAdvisory = function() { document.getElementById('advisory-modal').classList.remove('hidden'); document.getElementById('advisory-modal').style.display='flex'; }
-        window.closeAdvisory = function() { document.getElementById('advisory-modal').classList.add('hidden'); document.getElementById('advisory-modal').style.display='none'; }
         window.promptAdminLogin = function() { document.getElementById('admin-modal').classList.add('active'); }
         window.checkAdminPassword = function() { if(document.getElementById('admin-password').value === 'admin') { currentUserRepName = document.getElementById('override-rep-name').value; window.loadRecords(); window.closeSidebarModal('admin-modal'); } }
         window.handleCustomReset = function() { window.populateForm(currentSelectedRecord); window.toggleEditMode(true); }
