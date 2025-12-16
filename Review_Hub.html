@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Account Reassignment Tool v3.1</title>
+    <title>Account Reassignment Tool v3.2</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     
     <style>
@@ -27,11 +27,18 @@
         button:hover { background-color: #005a9e; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
         
+        /* Status & Progress Bar Styles */
         .status { margin-top: 15px; padding: 10px; border-radius: 4px; display: none; }
         .success { background-color: #dff6dd; color: #107c10; }
         .error { background-color: #fde7e9; color: #a80000; }
         .warning { background-color: #fff4ce; color: #664d03; margin-bottom: 15px; padding: 10px; border-radius: 4px; display: none; }
         .loading { color: #0078d4; font-weight: bold; }
+
+        /* New Progress Bar */
+        #progress-wrapper { display: none; margin-top: 15px; }
+        .progress-container { width: 100%; background-color: #e0e0e0; border-radius: 4px; height: 10px; overflow: hidden; }
+        .progress-bar { width: 0%; height: 100%; background-color: #0078d4; transition: width 0.5s ease; }
+        .progress-text { font-size: 12px; color: #666; margin-top: 5px; text-align: center; }
 
         .modal-overlay { position: fixed; inset: 0; background-color: rgba(0,0,0,0.6); backdrop-filter: blur(2px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
         .modal-content { background-color: white; border-radius: 8px; padding: 2rem; width: 100%; max-width: 400px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
@@ -111,6 +118,13 @@
             
             <button id="submitBtn" onclick="triggerFlow()" disabled>Reassign Records</button>
             
+            <div id="progress-wrapper">
+                <div class="progress-container">
+                    <div id="progressBar" class="progress-bar"></div>
+                </div>
+                <div id="progressText" class="progress-text">Processing...</div>
+            </div>
+
             <div id="statusMessage" class="status"></div>
             
             <div id="debug-panel"></div>
@@ -137,7 +151,7 @@
     const REASSIGN_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/ccd1e78456a4470c9bef267fc8b6ba77/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=delp7lT79GXjEHWIj9AHaxSmAyUrojFqAhNx0nsv0pM";
 
     let groupedData = {};
-    let availableActions = new Set(); // Store unique actions found
+    let availableActions = new Set(); 
 
     // --- 3. AUTH LOGIC ---
     async function login() {
@@ -186,17 +200,15 @@
 
             const json = await response.json();
             
-            // --- PARSE ACCOUNT LIST ---
             const rows = json.accountList ? json.accountList : (json.body && json.body.accountList ? json.body.accountList : []);
-            
-            // --- PARSE REP ROSTER (New) ---
             const reps = json.repList ? json.repList : (json.body && json.body.repList ? json.body.repList : []);
+            
             populateRepDropdown(reps);
 
             console.log(`Fetched ${rows.length} rows and ${reps.length} reps`);
             debug.innerText = `DEBUG: Received ${rows.length} rows, ${reps.length} reps.`;
 
-            // --- Compatibility Check ---
+            // Compatibility Check
             if (rows.length > 0) {
                 const sample = rows[0];
                 const missingCols = [];
@@ -210,22 +222,17 @@
                 }
             }
 
-            // --- FILTERING & ACTION GATHERING ---
+            // Filtering
             availableActions.clear();
             const filtered = rows.filter(r => {
                 const action = (r.cr714_action || "").toUpperCase();
                 const isCorrectAction = action === 'NONBUY' || action === 'NONOVDEC';
-                
                 const notes = (r.cr714_accountmanagementnotes || r.cr714_qbnotes || r.cr714_managernotes || "").toString();
                 const hasEmailNote = notes.includes("Email Sent:");
-                
                 const hasEmailDate = r.cr714_actionemailsent != null && r.cr714_actionemailsent !== "";
                 
                 const keep = isCorrectAction && (!hasEmailDate && !hasEmailNote);
-                
-                // If keeping, collect this action type for the dropdown
                 if(keep && r.cr714_action) availableActions.add(r.cr714_action);
-                
                 return keep;
             });
 
@@ -233,7 +240,7 @@
 
             console.log(`Filtered down to ${filtered.length} eligible rows.`);
 
-            // Group by Rep Name
+            // Group by Rep
             groupedData = {};
             filtered.forEach(r => {
                 const rep = r.cr714_rep || r.cr714_accountrep || "Unknown";
@@ -251,17 +258,11 @@
         }
     }
 
-    // New: Populate Target Rep Dropdown
     function populateRepDropdown(reps) {
         const select = document.getElementById('targetRep');
         select.innerHTML = '<option value="">-- Select Target Rep --</option>';
-        
-        // Sort alphabetically
         reps.sort((a, b) => (a.cr714_name || "").localeCompare(b.cr714_name || ""));
-
         reps.forEach(rep => {
-            // Filter by Status if present (Assuming 'Active' or '1')
-            // If status is missing, show all.
             const status = (rep.cr714_status || "Active").toLowerCase();
             if(status.includes('active') || status === '1') {
                 const opt = document.createElement('option');
@@ -272,11 +273,9 @@
         });
     }
 
-    // New: Populate Action Dropdown
     function populateActionDropdown() {
         const select = document.getElementById('actionToTransfer');
         select.innerHTML = '<option value="All">All Available Actions</option>';
-        
         availableActions.forEach(action => {
             const opt = document.createElement('option');
             opt.value = action;
@@ -325,28 +324,52 @@
     document.getElementById('count').addEventListener('input', validateForm);
 
     // --- 5. TRIGGER ACTION LOGIC ---
+    let progressInterval = null;
+
     async function triggerFlow() {
         const sourceRep = document.getElementById('sourceRep').value;
         const targetRep = document.getElementById('targetRep').value;
         const actionFilter = document.getElementById('actionToTransfer').value;
         const reassignCount = parseInt(document.getElementById('count').value);
+        
         const statusDiv = document.getElementById('statusMessage');
         const btn = document.getElementById('submitBtn');
+        const progressWrapper = document.getElementById('progress-wrapper');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
 
-        // Confirm Text
         const actionText = actionFilter === 'All' ? 'ALL Actions' : actionFilter;
         const msg = `Move ${reassignCount} records\nFROM: ${sourceRep}\nTO: ${targetRep}\nACTION: ${actionText}?`;
 
         if(confirm(msg)) {
+            // UI Reset
             btn.disabled = true;
             btn.innerText = "Processing...";
             statusDiv.style.display = 'none';
+            
+            // Start Progress Animation (90s target)
+            progressWrapper.style.display = 'block';
+            progressBar.style.width = '0%';
+            progressBar.classList.remove('error'); // remove error color if persisted
+            progressBar.style.backgroundColor = '#0078d4'; // reset color
+            let width = 0;
+            const estimatedDuration = 90; // seconds
+            
+            clearInterval(progressInterval);
+            progressInterval = setInterval(() => {
+                // Increment roughly to reach 95% in 90s
+                if (width < 95) {
+                    width += (100 / (estimatedDuration * 10)); // updates every 100ms
+                    progressBar.style.width = width + '%';
+                    progressText.innerText = `Processing... (~${Math.round(1.5 - (width/100)*1.5)} min remaining)`;
+                }
+            }, 100);
 
             const payload = {
                 sourceRep: sourceRep,
                 targetRep: targetRep,
                 reassignCount: reassignCount,
-                actionFilter: actionFilter, // Passing the specific action (or "All")
+                actionFilter: actionFilter, 
                 requestingUser: msalAccount ? msalAccount.username : 'Unknown',
                 requestingUserName: msalAccount ? msalAccount.name : 'Unknown'
             };
@@ -360,22 +383,39 @@
 
                 if (!response.ok) throw new Error("Flow Error: " + response.statusText);
 
+                // Success
+                clearInterval(progressInterval);
+                progressBar.style.width = '100%';
+                progressBar.style.backgroundColor = '#107c10'; // Green
+                progressText.innerText = "Complete!";
+                
                 statusDiv.className = 'status success';
                 statusDiv.innerText = "Success! Flow triggered.";
                 statusDiv.style.display = 'block';
                 
                 setTimeout(() => {
                     fetchData();
+                    // Reset Form
                     document.getElementById('sourceRep').value = '';
                     document.getElementById('count').value = '';
                     btn.innerText = "Reassign Records";
+                    // Hide progress bar after delay
+                    setTimeout(() => { progressWrapper.style.display = 'none'; }, 2000);
                 }, 3000);
+
             } catch (error) {
+                // Error
+                clearInterval(progressInterval);
+                progressBar.style.backgroundColor = '#a80000'; // Red
+                progressText.innerText = "Failed";
+                
                 statusDiv.className = 'status error';
                 statusDiv.innerText = "Error: " + error.message;
                 statusDiv.style.display = 'block';
+                
                 btn.disabled = false;
                 btn.innerText = "Reassign Records";
+                console.error(error);
             }
         }
     }
