@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Account Reassignment Tool (Final v3.0)</title>
+    <title>Account Reassignment Tool v3.1</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     
     <style>
@@ -13,7 +13,6 @@
         
         .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
         
-        /* Table Styling */
         .table-container { max-height: 500px; overflow-y: auto; border: 1px solid #ddd; }
         table { width: 100%; border-collapse: collapse; }
         th { position: sticky; top: 0; background: #0078d4; color: white; padding: 10px; text-align: left; }
@@ -21,10 +20,9 @@
         tr:hover { background-color: #e5f1fb; }
         tr.selected { background-color: #c7e0f4; font-weight: bold; }
 
-        /* Form Styling */
         .form-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: 600; }
-        input { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        input, select { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
         button { background-color: #0078d4; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; width: 100%; }
         button:hover { background-color: #005a9e; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
@@ -35,12 +33,10 @@
         .warning { background-color: #fff4ce; color: #664d03; margin-bottom: 15px; padding: 10px; border-radius: 4px; display: none; }
         .loading { color: #0078d4; font-weight: bold; }
 
-        /* Login Modal Styles */
         .modal-overlay { position: fixed; inset: 0; background-color: rgba(0,0,0,0.6); backdrop-filter: blur(2px); z-index: 9999; display: flex; align-items: center; justify-content: center; }
         .modal-content { background-color: white; border-radius: 8px; padding: 2rem; width: 100%; max-width: 400px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
         .user-badge { font-size: 12px; background: #e0e0e0; padding: 4px 8px; border-radius: 12px; font-weight: normal; color: #333; }
         
-        /* Debug toggle */
         #debug-panel { display:none; margin-top:20px; padding:10px; background:#eee; font-family:monospace; font-size:10px; overflow-x: auto; }
     </style>
 </head>
@@ -88,14 +84,26 @@
 
         <div>
             <h3>Reassign Records</h3>
+            
             <div class="form-group">
                 <label>Reassign From (Source)</label>
                 <input type="text" id="sourceRep" readonly placeholder="Select a rep from the list on the left">
             </div>
+
             <div class="form-group">
-                <label>Reassign To (Target Rep Name)</label>
-                <input type="text" id="targetRep" placeholder="Enter Target Rep Name">
+                <label>Reassign To (Target Rep)</label>
+                <select id="targetRep">
+                    <option value="">-- Loading Reps... --</option>
+                </select>
             </div>
+
+            <div class="form-group">
+                <label>Action to Transfer</label>
+                <select id="actionToTransfer">
+                    <option value="All">All Available Actions</option>
+                </select>
+            </div>
+
             <div class="form-group">
                 <label>Count to Transfer</label>
                 <input type="number" id="count" min="1" placeholder="How many records?">
@@ -129,6 +137,7 @@
     const REASSIGN_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/ccd1e78456a4470c9bef267fc8b6ba77/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=delp7lT79GXjEHWIj9AHaxSmAyUrojFqAhNx0nsv0pM";
 
     let groupedData = {};
+    let availableActions = new Set(); // Store unique actions found
 
     // --- 3. AUTH LOGIC ---
     async function login() {
@@ -167,7 +176,6 @@
                 email: msalAccount ? msalAccount.username : ''
             };
 
-            // NOTE: Authorization header intentionally REMOVED to prevent 401 Conflict with Flow SAS URL
             const response = await fetch(GET_ROWS_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }, 
@@ -178,53 +186,57 @@
 
             const json = await response.json();
             
-            // FIX: Handle nested 'body' structure from your Flow output
-            // Looks for json.accountList OR json.body.accountList
+            // --- PARSE ACCOUNT LIST ---
             const rows = json.accountList ? json.accountList : (json.body && json.body.accountList ? json.body.accountList : []);
+            
+            // --- PARSE REP ROSTER (New) ---
+            const reps = json.repList ? json.repList : (json.body && json.body.repList ? json.body.repList : []);
+            populateRepDropdown(reps);
 
-            console.log(`Fetched ${rows.length} rows`);
-            debug.innerText = `DEBUG: Received ${rows.length} rows.`;
+            console.log(`Fetched ${rows.length} rows and ${reps.length} reps`);
+            debug.innerText = `DEBUG: Received ${rows.length} rows, ${reps.length} reps.`;
 
             // --- Compatibility Check ---
             if (rows.length > 0) {
                 const sample = rows[0];
                 const missingCols = [];
-                // Check if ANY note field is present
                 const hasNotes = (sample.cr714_accountmanagementnotes !== undefined) || (sample.cr714_qbnotes !== undefined) || (sample.cr714_managernotes !== undefined);
                 if (!hasNotes) missingCols.push("cr714_qbnotes / cr714_accountmanagementnotes");
-                
-                // Check for email date field
                 if (sample.cr714_actionemailsent === undefined) missingCols.push("cr714_actionemailsent");
 
                 if (missingCols.length > 0) {
-                    warningBox.innerHTML = `<strong>Warning:</strong> Missing columns: <em>${missingCols.join(', ')}</em>. <br>Please add 'cr714_actionemailsent' to your Power Automate Flow output to enable strict date-based filtering.`;
+                    warningBox.innerHTML = `<strong>Warning:</strong> Missing columns: <em>${missingCols.join(', ')}</em>. Filters may be inaccurate.`;
                     warningBox.style.display = 'block';
                 }
             }
 
-            // --- FILTERING LOGIC ---
+            // --- FILTERING & ACTION GATHERING ---
+            availableActions.clear();
             const filtered = rows.filter(r => {
                 const action = (r.cr714_action || "").toUpperCase();
                 const isCorrectAction = action === 'NONBUY' || action === 'NONOVDEC';
                 
-                // Combine all possible note columns for searching
                 const notes = (r.cr714_accountmanagementnotes || r.cr714_qbnotes || r.cr714_managernotes || "").toString();
                 const hasEmailNote = notes.includes("Email Sent:");
                 
-                // Safe check for date column (won't crash if missing)
                 const hasEmailDate = r.cr714_actionemailsent != null && r.cr714_actionemailsent !== "";
                 
-                return isCorrectAction && (!hasEmailDate && !hasEmailNote);
+                const keep = isCorrectAction && (!hasEmailDate && !hasEmailNote);
+                
+                // If keeping, collect this action type for the dropdown
+                if(keep && r.cr714_action) availableActions.add(r.cr714_action);
+                
+                return keep;
             });
+
+            populateActionDropdown();
 
             console.log(`Filtered down to ${filtered.length} eligible rows.`);
 
             // Group by Rep Name
             groupedData = {};
             filtered.forEach(r => {
-                // FIX: Use cr714_rep as priority, fallback to accountrep, fallback to Unknown
                 const rep = r.cr714_rep || r.cr714_accountrep || "Unknown";
-                
                 if (!groupedData[rep]) groupedData[rep] = 0;
                 groupedData[rep]++;
             });
@@ -239,13 +251,47 @@
         }
     }
 
+    // New: Populate Target Rep Dropdown
+    function populateRepDropdown(reps) {
+        const select = document.getElementById('targetRep');
+        select.innerHTML = '<option value="">-- Select Target Rep --</option>';
+        
+        // Sort alphabetically
+        reps.sort((a, b) => (a.cr714_name || "").localeCompare(b.cr714_name || ""));
+
+        reps.forEach(rep => {
+            // Filter by Status if present (Assuming 'Active' or '1')
+            // If status is missing, show all.
+            const status = (rep.cr714_status || "Active").toLowerCase();
+            if(status.includes('active') || status === '1') {
+                const opt = document.createElement('option');
+                opt.value = rep.cr714_name;
+                opt.text = rep.cr714_name;
+                select.appendChild(opt);
+            }
+        });
+    }
+
+    // New: Populate Action Dropdown
+    function populateActionDropdown() {
+        const select = document.getElementById('actionToTransfer');
+        select.innerHTML = '<option value="All">All Available Actions</option>';
+        
+        availableActions.forEach(action => {
+            const opt = document.createElement('option');
+            opt.value = action;
+            opt.text = action;
+            select.appendChild(opt);
+        });
+    }
+
     function renderTable() {
         const tbody = document.getElementById('repTableBody');
         tbody.innerHTML = '';
         const sortedReps = Object.keys(groupedData).sort();
 
         if (sortedReps.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="2" style="text-align:center; padding:15px; color:#666;">No eligible records found.<br><small>If you see "Fetched 0 rows" in console, check your Flow response.</small></td></tr>';
+            tbody.innerHTML = '<tr><td colspan="2" style="text-align:center; padding:15px; color:#666;">No eligible records found.</td></tr>';
             return;
         }
 
@@ -275,33 +321,37 @@
         document.getElementById('submitBtn').disabled = !(source && target && count > 0);
     }
 
-    document.getElementById('targetRep').addEventListener('input', validateForm);
+    document.getElementById('targetRep').addEventListener('change', validateForm);
     document.getElementById('count').addEventListener('input', validateForm);
 
     // --- 5. TRIGGER ACTION LOGIC ---
     async function triggerFlow() {
         const sourceRep = document.getElementById('sourceRep').value;
         const targetRep = document.getElementById('targetRep').value;
+        const actionFilter = document.getElementById('actionToTransfer').value;
         const reassignCount = parseInt(document.getElementById('count').value);
         const statusDiv = document.getElementById('statusMessage');
         const btn = document.getElementById('submitBtn');
 
-        if(confirm(`Move ${reassignCount} records FROM ${sourceRep} TO ${targetRep}?`)) {
+        // Confirm Text
+        const actionText = actionFilter === 'All' ? 'ALL Actions' : actionFilter;
+        const msg = `Move ${reassignCount} records\nFROM: ${sourceRep}\nTO: ${targetRep}\nACTION: ${actionText}?`;
+
+        if(confirm(msg)) {
             btn.disabled = true;
             btn.innerText = "Processing...";
             statusDiv.style.display = 'none';
 
-            // PAYLOAD UPDATE: Sending requesting user info
             const payload = {
                 sourceRep: sourceRep,
                 targetRep: targetRep,
                 reassignCount: reassignCount,
+                actionFilter: actionFilter, // Passing the specific action (or "All")
                 requestingUser: msalAccount ? msalAccount.username : 'Unknown',
                 requestingUserName: msalAccount ? msalAccount.name : 'Unknown'
             };
 
             try {
-                // NOTE: No Authorization header (using SAS URL)
                 const response = await fetch(REASSIGN_FLOW_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
