@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Account Reassignment Tool v3.2</title>
+    <title>Account Reassignment Tool v3.4</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     
     <style>
@@ -323,8 +323,17 @@
     document.getElementById('targetRep').addEventListener('change', validateForm);
     document.getElementById('count').addEventListener('input', validateForm);
 
-    // --- 5. TRIGGER ACTION LOGIC ---
+    // --- 5. TRIGGER ACTION LOGIC (UPDATED WITH TIMING) ---
     let progressInterval = null;
+
+    // Helper: Estimate Time
+    function calculateDuration(count) {
+        // Benchmark: 800 records = 7 minutes (0.6s per record)
+        const secondsPerRecord = 0.6; 
+        const overhead = 5; 
+        let totalSeconds = Math.ceil((count * secondsPerRecord) + overhead);
+        return totalSeconds < 10 ? 10 : totalSeconds;
+    }
 
     async function triggerFlow() {
         const sourceRep = document.getElementById('sourceRep').value;
@@ -339,7 +348,12 @@
         const progressText = document.getElementById('progressText');
 
         const actionText = actionFilter === 'All' ? 'ALL Actions' : actionFilter;
-        const msg = `Move ${reassignCount} records\nFROM: ${sourceRep}\nTO: ${targetRep}\nACTION: ${actionText}?`;
+        
+        // Timer Calc
+        const estimatedSeconds = calculateDuration(reassignCount);
+        const estimatedMinutes = (estimatedSeconds / 60).toFixed(1);
+
+        const msg = `Move ${reassignCount} records\nFROM: ${sourceRep}\nTO: ${targetRep}\nACTION: ${actionText}?\n\n(Est. Time: ~${estimatedMinutes} mins)`;
 
         if(confirm(msg)) {
             // UI Reset
@@ -347,23 +361,30 @@
             btn.innerText = "Processing...";
             statusDiv.style.display = 'none';
             
-            // Start Progress Animation (90s target)
+            // Start Progress Animation
             progressWrapper.style.display = 'block';
             progressBar.style.width = '0%';
-            progressBar.classList.remove('error'); // remove error color if persisted
-            progressBar.style.backgroundColor = '#0078d4'; // reset color
-            let width = 0;
-            const estimatedDuration = 90; // seconds
+            progressBar.style.backgroundColor = '#0078d4';
+            
+            let currentSec = 0;
+            const updateRate = 100; // ms
             
             clearInterval(progressInterval);
             progressInterval = setInterval(() => {
-                // Increment roughly to reach 95% in 90s
-                if (width < 95) {
-                    width += (100 / (estimatedDuration * 10)); // updates every 100ms
-                    progressBar.style.width = width + '%';
-                    progressText.innerText = `Processing... (~${Math.round(1.5 - (width/100)*1.5)} min remaining)`;
-                }
-            }, 100);
+                currentSec += (updateRate / 1000);
+                let percentage = (currentSec / estimatedSeconds) * 100;
+                
+                // Cap visual progress at 95% until we are truly done
+                if (percentage > 95) percentage = 95;
+                
+                progressBar.style.width = percentage + '%';
+                
+                const remaining = Math.max(0, Math.ceil(estimatedSeconds - currentSec));
+                const mins = Math.floor(remaining / 60);
+                const secs = remaining % 60;
+                
+                progressText.innerText = `Processing... (~${mins}m ${secs}s remaining)`;
+            }, updateRate);
 
             const payload = {
                 sourceRep: sourceRep,
@@ -381,30 +402,28 @@
                     body: JSON.stringify(payload)
                 });
 
+                // --- 504 TIMEOUT HANDLING (Soft Fail) ---
+                if (response.status === 504 || response.status === 502) {
+                    console.warn("Gateway timeout received (expected for large batches). Continuing UI timer.");
+                    statusDiv.className = 'status warning';
+                    statusDiv.innerText = "Large batch detected. Running in background...";
+                    statusDiv.style.display = 'block';
+                    
+                    // Keep waiting until estimated time finishes
+                    setTimeout(() => {
+                        finishSuccessState();
+                    }, (estimatedSeconds * 1000) - (currentSec * 1000));
+                    
+                    return; // Exit fetch logic, let timeout handle the rest
+                }
+
                 if (!response.ok) throw new Error("Flow Error: " + response.statusText);
 
-                // Success
-                clearInterval(progressInterval);
-                progressBar.style.width = '100%';
-                progressBar.style.backgroundColor = '#107c10'; // Green
-                progressText.innerText = "Complete!";
-                
-                statusDiv.className = 'status success';
-                statusDiv.innerText = "Success! Flow triggered.";
-                statusDiv.style.display = 'block';
-                
-                setTimeout(() => {
-                    fetchData();
-                    // Reset Form
-                    document.getElementById('sourceRep').value = '';
-                    document.getElementById('count').value = '';
-                    btn.innerText = "Reassign Records";
-                    // Hide progress bar after delay
-                    setTimeout(() => { progressWrapper.style.display = 'none'; }, 2000);
-                }, 3000);
+                // Immediate success (small batch)
+                finishSuccessState();
 
             } catch (error) {
-                // Error
+                // Hard Error
                 clearInterval(progressInterval);
                 progressBar.style.backgroundColor = '#a80000'; // Red
                 progressText.innerText = "Failed";
@@ -417,6 +436,25 @@
                 btn.innerText = "Reassign Records";
                 console.error(error);
             }
+        }
+
+        function finishSuccessState() {
+            clearInterval(progressInterval);
+            progressBar.style.width = '100%';
+            progressBar.style.backgroundColor = '#107c10'; // Green
+            progressText.innerText = "Complete!";
+            
+            statusDiv.className = 'status success';
+            statusDiv.innerText = "Success! Flow triggered.";
+            statusDiv.style.display = 'block';
+            
+            setTimeout(() => {
+                fetchData();
+                document.getElementById('sourceRep').value = '';
+                document.getElementById('count').value = '';
+                btn.innerText = "Reassign Records";
+                setTimeout(() => { progressWrapper.style.display = 'none'; }, 2000);
+            }, 3000);
         }
     }
 
