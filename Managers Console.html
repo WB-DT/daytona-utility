@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Enterprise v16.8 (JSON Fix)</title>
+    <title>Daytona Enterprise v17.0 (Smart Mapping)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -240,7 +240,7 @@
         
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona <span class="text-sm font-normal text-gray-500">v16.8</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona <span class="text-sm font-normal text-gray-500">v17.0</span></h1>
                 <button onclick="window.fetchMasterData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             
@@ -386,7 +386,6 @@
         const ACTION_BUTTON_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/a2fa2c69f1d24a85a980599d21631808/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=aSQ1J4-BFNxrOURAp3-8tCQwunP0JITYHZfWV5BbDYI";
         
         // ** IMPORTANT: NEW FLOW FOR LAZY LOADING NOTES **
-        // Create a flow that takes { recordId: "GUID" } and returns { fullNote: "Text" }
         const GET_FULL_NOTE_FLOW_URL = "REPLACE_WITH_YOUR_NEW_FLOW_URL";
 
         const AX_CONFIG_TEXT = `Configuration export file for Dynamics\nFormatversion: 1\nConfiguration: Original (installed configuration)\nlogdir,Text,C:\\Users\\Public\\Microsoft\\Dynamics Ax\\Log\\\naos2,Text,AxProd@WBIodine1azP:2912;AxProd@WBIODINE2azP:2912\nclient,Text,thin\nsql,Int,1\ndatabase,Text,AXDB\ndbserver,Text,WBIodine1P\ninternet,Text,WBIodine1P\nservermask,Text,2912\n`;
@@ -422,7 +421,7 @@
             fetchMasterData(); 
         }
 
-        // --- DATA FETCHING (POLLING ENGINE) ---
+        // --- DATA FETCHING (SMART PARSING ENGINE) ---
         async function fetchMasterData() {
             const progressBar = document.getElementById('loading-progress-bar');
             let progress = 0;
@@ -445,33 +444,29 @@
                 if (!response.ok) throw new Error("API Error: " + response.status);
                 const data = await response.json();
                 
-                // --- FIXED PARSING LOGIC FOR "ActionOutputs (2).json" STRUCTURE ---
-                // The structure is data.body.accounts (Array)
+                // --- ROBUST PARSING LOGIC v2.0 ---
+                // We recursively search the response for the Arrays we need.
                 
-                if (data.body && data.body.accounts && Array.isArray(data.body.accounts)) {
-                    appState.rawData = data.body.accounts; // Correct path for your specific JSON file
-                } else if (data.body && Array.isArray(data.body)) {
-                    appState.rawData = data.body; // Fallback for standard array response
-                } else if (data.accounts) {
-                    appState.rawData = Array.isArray(data.accounts) ? data.accounts : JSON.parse(data.accounts || "[]");
-                } else {
-                    appState.rawData = [];
-                    console.warn("Could not find accounts array in response", data);
+                // 1. Find Accounts (Look for array with objects having 'cr714_id')
+                appState.rawData = findArrayWithKey(data, 'cr714_id') || [];
+                
+                // 2. Find Roster (Look for array with objects having 'cr714_name' OR 'cr714_employeename')
+                appState.roster = findArrayWithKey(data, 'cr714_name') || findArrayWithKey(data, 'cr714_employeename');
+
+                // Fallback: If no roster found, generate from accounts
+                if (!appState.roster || appState.roster.length === 0) {
+                    const uniqueReps = [...new Set(appState.rawData.map(item => item.cr714_rep).filter(Boolean))];
+                    appState.roster = uniqueReps.map(repName => ({ cr714_name: repName }));
                 }
 
-                // 2. Determine Roster (Auto-generate if missing)
-                if (data.roster && (Array.isArray(data.roster) || typeof data.roster === 'string')) {
-                    appState.roster = Array.isArray(data.roster) ? data.roster : JSON.parse(data.roster || "[]");
-                } else {
-                    // Fallback: Generate roster from account list unique reps
-                    const uniqueReps = [...new Set(appState.rawData.map(item => item.cr714_rep).filter(Boolean))];
-                    appState.roster = uniqueReps.map(repName => ({ cr714_employeename: repName }));
-                }
+                console.log("Parsed Accounts:", appState.rawData.length);
+                console.log("Parsed Roster:", appState.roster.length);
 
                 clearInterval(timer); progressBar.style.width = '100%';
                 
                 if (!appState.isManager) {
-                    const me = appState.roster.find(e => e.cr714_employeename === appState.user);
+                    // Check roster for title (supports both field names)
+                    const me = appState.roster.find(e => (e.cr714_name === appState.user || e.cr714_employeename === appState.user));
                     if (me && (me.cr714_title || "").match(/Manager|Director/i)) appState.isManager = true;
                 }
 
@@ -487,6 +482,23 @@
             } catch (e) { clearInterval(timer); progressBar.style.backgroundColor = "red"; alert(e.message); }
         }
 
+        // Helper to find data deeply nested
+        function findArrayWithKey(obj, key) {
+            if (Array.isArray(obj)) {
+                if (obj.length > 0 && obj[0] && Object.prototype.hasOwnProperty.call(obj[0], key)) return obj;
+                for (let item of obj) {
+                    const found = findArrayWithKey(item, key);
+                    if (found) return found;
+                }
+            } else if (typeof obj === 'object' && obj !== null) {
+                for (let k in obj) {
+                    const found = findArrayWithKey(obj[k], key);
+                    if (found) return found;
+                }
+            }
+            return null;
+        }
+
         // --- UI LOGIC ---
         function setupUI() {
             if (appState.isManager) {
@@ -497,12 +509,16 @@
                 const select = document.getElementById('quick-rep-select');
                 const mgrSelect = document.getElementById('mgr-rep-selector-q1');
                 
-                // Sort roster
-                const myTeam = appState.roster.sort((a,b) => (a.cr714_employeename||"").localeCompare(b.cr714_employeename||""));
+                // Sort roster (Handling 'cr714_name' vs 'cr714_employeename')
+                const getName = (r) => r.cr714_name || r.cr714_employeename || "";
+                const myTeam = appState.roster.sort((a,b) => getName(a).localeCompare(getName(b)));
                 
                 [select, mgrSelect].forEach(s => {
                     s.innerHTML = `<option value="${appState.user}">My Accounts</option>`;
-                    myTeam.forEach(emp => { s.innerHTML += `<option value="${emp.cr714_employeename}">${emp.cr714_employeename}</option>`; });
+                    myTeam.forEach(emp => { 
+                        const n = getName(emp);
+                        if(n) s.innerHTML += `<option value="${n}">${n}</option>`; 
+                    });
                 });
                 
                 appState.currentRepView = appState.user;
@@ -576,27 +592,32 @@
         async function selectRecord(r) {
             appState.selectedRecord = r;
             
-            // FIXED MAPPING: Use fields from ActionOutputs (2).json
+            // FIXED MAPPING: Use fields from ActionOutputs (3).json
             document.getElementById('detail-company').innerText = r.cr714_company || "(No Company Name)";
             document.getElementById('detail-id').innerText = r.cr714_id || "";
             document.getElementById('detail-contact').value = r.cr714_namemost || '';
             document.getElementById('detail-phone').value = r.cr714_primaryphone || '';
-            document.getElementById('detail-email').value = r.cr714_emailmost || ''; // Could also be cr714_emaillatest
+            document.getElementById('detail-email').value = r.cr714_emailmost || ''; 
             document.getElementById('detail-status').innerText = r.cr714_recordstatus || 'Normal';
             
             const notesInput = document.getElementById('qb-notes-input');
             
-            // LAZY LOAD LOGIC:
-            if (r.cr714_qbnotes && r.cr714_qbnotes.length > 100) {
-                notesInput.value = r.cr714_qbnotes;
+            // Note Loading Logic:
+            // Check cache first, then action message, then lazy load
+            let noteContent = r.cr714_qbnotes || "";
+            if (!noteContent && r.cr714_actionmessage) {
+                noteContent = "Action Required: " + r.cr714_actionmessage;
+            }
+
+            if (noteContent.length > 100) {
+                notesInput.value = noteContent;
             } else {
-                const preview = r.cr714_qbnotes || "";
-                notesInput.value = preview + "\n\n[LOADING FULL HISTORY...]";
+                notesInput.value = (noteContent ? noteContent + "\n\n" : "") + "[LOADING FULL HISTORY...]";
                 notesInput.classList.add('animate-pulse');
                 
                 try {
                     if (GET_FULL_NOTE_FLOW_URL.includes("REPLACE")) {
-                        notesInput.value = preview + "\n\n(Note: Configure GET_FULL_NOTE_FLOW_URL to fetch history)";
+                        notesInput.value = (noteContent ? noteContent + "\n\n" : "") + "(Note: Configure GET_FULL_NOTE_FLOW_URL to fetch history)";
                     } else {
                         const res = await fetch(GET_FULL_NOTE_FLOW_URL, {
                             method: 'POST',
@@ -611,7 +632,7 @@
                                 r.cr714_qbnotes = fullNote; // Cache it
                                 notesInput.value = fullNote;
                             } else {
-                                notesInput.value = preview + "\n(No additional history found)";
+                                notesInput.value = (noteContent ? noteContent + "\n" : "") + "(No additional history found)";
                             }
                         }
                     }
@@ -745,9 +766,14 @@
             const now = new Date();
             const next30 = new Date(); next30.setDate(now.getDate() + 30);
 
-            const team = appState.roster.filter(e => e.cr714_managerassigned === appState.user || GLOBAL_ADMINS.map(n=>n.toLowerCase()).includes(appState.user.toLowerCase()));
+            // Supports 'cr714_name' or 'cr714_employeename'
+            const team = appState.roster.filter(e => {
+                const mgr = e.cr714_managerassigned || "";
+                return mgr === appState.user || GLOBAL_ADMINS.map(n=>n.toLowerCase()).includes(appState.user.toLowerCase());
+            });
 
             team.forEach(emp => {
+                const name = emp.cr714_name || emp.cr714_employeename;
                 const promoDate = emp['cr714_promotiondate'];
                 const isPromo = promoDate && promoDate.trim() !== ""; 
 
@@ -776,11 +802,11 @@
                             if (targetDate < now) {
                                 overdue++;
                                 status = "Overdue";
-                                addReviewRow(emp.cr714_employeename, rev.type, targetDate, null, "Overdue");
+                                addReviewRow(name, rev.type, targetDate, null, "Overdue");
                             } else if (targetDate <= next30) {
                                 upcoming++;
                                 status = "Upcoming";
-                                addReviewRow(emp.cr714_employeename, rev.type, targetDate, null, "Upcoming");
+                                addReviewRow(name, rev.type, targetDate, null, "Upcoming");
                             }
                         }
                     }
