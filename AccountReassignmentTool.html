@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3.2 Account Reassignment Tool</title>
+    <title>3.0 Account Reassignment Tool</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -416,8 +416,20 @@
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const json = await response.json();
             
-            let rawRows = json.accountList || [];
-            const repList = json.repList || [];
+            // --- FIX: HANDLE JSON WRAPPER (body.accountList vs accountList) ---
+            const dataRoot = json.body ? json.body : json;
+            
+            let rawRows = dataRoot.accountList || [];
+            let repList = dataRoot.repList || [];
+            
+            // --- FIX: GENERATE REP LIST IF MISSING ---
+            if (repList.length === 0 && rawRows.length > 0) {
+                const uniqueReps = new Set();
+                rawRows.forEach(r => {
+                    if(r.cr714_rep) uniqueReps.add(r.cr714_rep);
+                });
+                repList = Array.from(uniqueReps).map(name => ({ cr714_name: name, cr714_status: '1' }));
+            }
             
             populateRepDropdown(repList);
 
@@ -430,8 +442,8 @@
             allProcessedRows = rawRows.map(record => {
                 
                 // 1. REP MAPPING
-                // Use cr714_rep if available, otherwise fallback to random assignment if needed
                 if (!record.cr714_rep) {
+                    // Fallback to random assignment if absolutely no rep exists
                     if (repList.length > 0) {
                         const randomRep = repList[Math.floor(Math.random() * repList.length)];
                         record.cr714_rep = randomRep.cr714_name;
@@ -441,10 +453,10 @@
                 }
 
                 // 2. FIXED ACCOUNT NUM & NAME MAPPING
-                // Account Num mapped to cr714_id
+                // Account Num mapped strictly to cr714_id
                 record.cr714_accountnumber = record.cr714_id || record.cr714_accountnum || record.recordId || "N/A";
                 
-                // Account Name mapped to cr714_company
+                // Account Name mapped strictly to cr714_company
                 record.display_account_name = record.cr714_company || record.cr714_accountname || "Unknown Account";
 
                 // 3. STATS CALCULATION
@@ -452,14 +464,17 @@
                 if (!repStats[repName]) {
                     repStats[repName] = { total: 0, completed: 0 };
                 }
+                
+                // TOTAL includes ALL records for the rep
                 repStats[repName].total++;
                 
-                // Completed = Has email sent date
+                // COMPLETED = Has email sent date (Not null/empty)
                 if (record.cr714_actionemailsent && record.cr714_actionemailsent.trim() !== "") {
                     repStats[repName].completed++;
                 }
 
                 // 4. FORECAST CALCULATION
+                // Note: If fields are missing in JSON, these default to 0
                 const revenue = parseFloat(record.cr714_est_revenue) || 0;
                 const probability = parseFloat(record.cr714_probability) || 0;
                 const forecastVal = revenue * (probability / 100);
@@ -485,7 +500,6 @@
                 const hasEmailDate = r.cr714_actionemailsent != null && r.cr714_actionemailsent !== "";
                 
                 // We only want rows that match action types AND are NOT completed (no email sent)
-                // Also check notes for legacy "Email Sent:" marker just in case
                 return (action === 'NONBUY' || action === 'NONOVDEC') && (!hasEmailDate && !notes.includes("Email Sent:"));
             });
 
@@ -500,7 +514,8 @@
         }
     }
 
-    // --- 4. FILTERING & RENDERING ---\n    function populateRepDropdown(reps) {
+    // --- 4. FILTERING & RENDERING ---
+    function populateRepDropdown(reps) {
         const select = document.getElementById('targetRep');
         select.innerHTML = '<option value="">-- Select Target Rep --</option>';
         reps.sort((a, b) => (a.cr714_name || "").localeCompare(b.cr714_name || ""));
