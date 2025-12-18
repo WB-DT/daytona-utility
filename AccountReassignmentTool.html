@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3.3 Account Reassignment Tool</title>
+    <title>3.5 Account Reassignment Tool</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -248,6 +248,7 @@
                     <thead>
                         <tr class="heavy-header">
                             <th onclick="handleSort('name')">Rep <i class="sort-icon name-icon"></i></th>
+                            <th onclick="handleSort('status')">Status <i class="sort-icon status-icon"></i></th>
                             <th onclick="handleSort('count')">Avail <i class="sort-icon count-icon"></i></th>
                             <th onclick="handleSort('total')">Total <i class="sort-icon total-icon"></i></th>
                             <th>% Done</th>
@@ -263,6 +264,7 @@
                     <thead>
                         <tr>
                             <th onclick="handleSort('name')">Rep <i class="sort-icon name-icon"></i></th>
+                            <th onclick="handleSort('status')">Status <i class="sort-icon status-icon"></i></th>
                             <th onclick="handleSort('count')">Avail <i class="sort-icon count-icon"></i></th>
                             <th onclick="handleSort('total')">Total <i class="sort-icon total-icon"></i></th>
                             <th>% Done</th>
@@ -336,15 +338,16 @@
     
     // --- FLOW URLS ---
     const GET_ROWS_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/952746524c354ee8a4d335d24ce01d6d/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=wOEIjRMghIgIGX4GU85rwL1hLdIeFT8O0I44C9C0vSo";
+    const GET_TOTALS_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/beb6856d76da4608b3d6ae5835efd428/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=s_DKBVFGuVtD62AQw0ajNkvCrgJX-cjgziVJ7ApNH88";
     const REASSIGN_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/ccd1e78456a4470c9bef267fc8b6ba77/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=delp7lT79GXjEHWIj9AHaxSmAyUrojFqAhNx0nsv0pM";
 
     // Global State
     const msalInstance = new msal.PublicClientApplication(msalConfig);
     let msalAccount = null;
     let allAvailableRows = []; 
-    let allProcessedRows = []; // Stores all rows (completed and incomplete)
-    let groupedData = {};       // "Avail" Counts (Incomplete)
-    let repStats = {};          // { "RepName": { total: 0 } }
+    let allProcessedRows = []; 
+    let groupedData = {};       // "Avail" Counts
+    let totalsMap = {};         // "Total" Counts from new flow
     let currentFilteredRows = [];
     let sortState = { column: 'smart', direction: 'desc' };
 
@@ -380,46 +383,59 @@
         standardBody.innerHTML = ''; 
         
         try {
-            const response = await fetch(GET_ROWS_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' }, 
-                body: JSON.stringify({ 
-                    repName: msalAccount ? msalAccount.name : '',
-                    email: msalAccount ? msalAccount.username : ''
+            // CALL BOTH FLOWS IN PARALLEL
+            const [rowsResponse, totalsResponse] = await Promise.all([
+                fetch(GET_ROWS_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ 
+                        repName: msalAccount ? msalAccount.name : '',
+                        email: msalAccount ? msalAccount.username : ''
+                    })
+                }),
+                fetch(GET_TOTALS_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
                 })
-            });
+            ]);
 
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const json = await response.json();
+            if (!rowsResponse.ok) throw new Error(`Rows Flow Error: ${rowsResponse.status}`);
             
-            // --- FIX: HANDLE JSON WRAPPER (body.accountList vs accountList) ---
-            const dataRoot = json.body ? json.body : json;
-            
+            // PROCESS ROWS
+            const jsonRows = await rowsResponse.json();
+            const dataRoot = jsonRows.body ? jsonRows.body : jsonRows;
             let rawRows = dataRoot.accountList || [];
             let repList = dataRoot.repList || [];
-            
-            // --- FIX: GENERATE REP LIST IF MISSING ---
+
+            // Generate Rep List if missing
             if (repList.length === 0 && rawRows.length > 0) {
                 const uniqueReps = new Set();
-                rawRows.forEach(r => {
-                    if(r.cr714_rep) uniqueReps.add(r.cr714_rep);
-                });
+                rawRows.forEach(r => { if(r.cr714_rep) uniqueReps.add(r.cr714_rep); });
                 repList = Array.from(uniqueReps).map(name => ({ cr714_name: name, cr714_status: '1' }));
             }
-            
             populateRepDropdown(repList);
 
-            // =========================================================
-            //  CUSTOM DATA PROCESSING (Fixed Mapping & Stats)
-            // =========================================================
-            
-            repStats = {}; // Reset Stats
+            // PROCESS TOTALS
+            totalsMap = {};
+            if(totalsResponse.ok) {
+                try {
+                    const jsonTotals = await totalsResponse.json();
+                    const totalsRoot = jsonTotals.body ? jsonTotals.body : jsonTotals; // Safety for body wrapper
+                    const totalsList = totalsRoot.totals || [];
+                    
+                    totalsList.forEach(t => {
+                        const n = normalizeName(t.repName);
+                        totalsMap[n] = t.totalCount || 0;
+                    });
+                } catch(e) { console.warn("Totals flow JSON parse error", e); }
+            } else {
+                console.warn("Totals flow failed", totalsResponse.status);
+            }
 
+            // PROCESS LIST LOGIC
             allProcessedRows = rawRows.map(record => {
-                
-                // 1. REP MAPPING
                 if (!record.cr714_rep) {
-                    // Fallback to random assignment if absolutely no rep exists
                     if (repList.length > 0) {
                         const randomRep = repList[Math.floor(Math.random() * repList.length)];
                         record.cr714_rep = randomRep.cr714_name;
@@ -427,40 +443,16 @@
                         record.cr714_rep = "Unassigned";
                     }
                 }
-
-                // 2. FIXED ACCOUNT NUM & NAME MAPPING
-                // Account Num mapped strictly to cr714_id
                 record.cr714_accountnumber = record.cr714_id || record.cr714_accountnum || record.recordId || "N/A";
-                
-                // Account Name mapped strictly to cr714_company
-                record.display_account_name = record.cr714_company || record.cr714_accountname || "Unknown Account";
-
-                // 3. STATS CALCULATION
-                const repName = normalizeName(record.cr714_rep);
-                if (!repStats[repName]) {
-                    repStats[repName] = { total: 0 };
-                }
-                
-                // TOTAL includes ALL records for the rep found in the JSON
-                repStats[repName].total++;
-                
+                record.display_account_name = record.cr714_company || record.cr714_accountname || record.cr714_name || "Unknown Account";
                 return record;
             });
 
-            // =========================================================
-            //  END CUSTOM PROCESSING
-            // =========================================================
-
-            // Filter Rows Logic (WORK QUEUE - Only Incomplete Items)
+            // Filter (Work Queue)
             allAvailableRows = allProcessedRows.filter(r => {
                 const action = (r.cr714_action || "").toUpperCase();
                 const notes = (r.cr714_accountmanagementnotes || r.cr714_qbnotes || r.cr714_managernotes || "").toString();
-                
-                // Check if email sent column exists and has value
                 const hasEmailDate = r.cr714_actionemailsent != null && r.cr714_actionemailsent !== "";
-                
-                // We only want rows that match action types AND are NOT completed (no email sent)
-                // If column is missing, hasEmailDate is false, so it relies on Action filter.
                 return (action === 'NONBUY' || action === 'NONOVDEC') && (!hasEmailDate && !notes.includes("Email Sent:"));
             });
 
@@ -513,11 +505,9 @@
 
         groupedData = {};
         
-        // Grouping with Normalization (Counts Available Work)
         currentFilteredRows.forEach(r => {
             const rawRep = r.cr714_rep || "Unknown";
             const cleanRep = normalizeName(rawRep);
-            
             if (!groupedData[cleanRep]) groupedData[cleanRep] = 0;
             groupedData[cleanRep]++;
         });
@@ -546,13 +536,19 @@
         const sortFunc = (a, b) => {
             const cA = groupedData[a];
             const cB = groupedData[b];
-            const totalA = repStats[a] ? repStats[a].total : 0;
-            const totalB = repStats[b] ? repStats[b].total : 0;
+            
+            // Map Total from New Flow Map
+            const totalA = totalsMap[a] || 0;
+            const totalB = totalsMap[b] || 0;
+            
+            const statusA = cA <= 10 ? 1 : 0;
+            const statusB = cB <= 10 ? 1 : 0;
 
             if (sortState.column === 'smart') return (cA <= 10 && cB > 10) ? -1 : (cA > 10 && cB <= 10) ? 1 : cB - cA;
             if (sortState.column === 'name') return sortState.direction === 'asc' ? a.localeCompare(b) : b.localeCompare(a);
             if (sortState.column === 'count') return sortState.direction === 'asc' ? cA - cB : cB - cA;
             if (sortState.column === 'total') return sortState.direction === 'asc' ? totalA - totalB : totalB - totalA;
+            if (sortState.column === 'status') return sortState.direction === 'asc' ? statusB - statusA : statusA - statusB;
         };
 
         heavy.sort(sortFunc).forEach(r => heavyBody.appendChild(createRow(r, groupedData[r])));
@@ -563,29 +559,32 @@
         const tr = document.createElement('tr');
         if (avail <= 10) tr.classList.add('row-critical');
         
-        // --- NEW PERCENTAGE LOGIC ---
-        // Avail = "Work Remaining" (from groupedData)
-        // Total = "Total Records" (from repStats)
-        const stats = repStats[rep] || { total: 0 };
-        const total = stats.total;
-        
-        // Logic: Done = Total - Avail
-        // If Avail > Total (rare edge case in filtering), assume 0% done.
+        // --- PERCENTAGE LOGIC USING NEW TOTALS FLOW ---
+        const total = totalsMap[rep] || 0; // Default to 0 if flow didn't return this rep
         
         let pctHtml = '--';
         let pctVal = 0;
         
+        // Only calculate if we have a valid total greater than 0
         if (total > 0) {
-            // Calculate Percentage Done
             const done = Math.max(0, total - avail);
             pctVal = Math.round((done / total) * 100);
+            
+            // Clamp to 0-100 just in case
+            if (pctVal < 0) pctVal = 0;
+            if (pctVal > 100) pctVal = 100;
             
             pctHtml = `${pctVal}%`;
             if (pctVal > 90) pctHtml = `<span class="pct-high">${pctVal}%</span>`;
             if (pctVal < 10) pctHtml = `<span class="pct-low">${pctVal}%</span>`;
+        } else {
+             // If total is 0 (or missing) but we have avail, it's an anomaly. 
+             // We can optionally display "??" or just "--"
         }
 
-        tr.innerHTML = `<td>${rep} ${avail<=10 ? '<span class="badge badge-warn">Low</span>' : ''}</td>
+        // --- UPDATED COLUMN STRUCTURE (Semi-Bold Rep, Centered Status) ---
+        tr.innerHTML = `<td style="font-weight:600;">${rep}</td>
+                        <td style="text-align:center;">${avail<=10 ? '<span class="badge badge-warn">Low</span>' : ''}</td>
                         <td><strong>${avail}</strong></td>
                         <td style="color:#666;">${total || '--'}</td>
                         <td>${pctHtml}</td>`;
@@ -658,7 +657,6 @@
         csvContent += "Account Name,Account Number,Action,Source Rep\n";
         
         currentFilteredRows.forEach(r => {
-            // Corrected mapping used here
             const name = (r.display_account_name || "").replace(/,/g, ""); 
             const num = (r.cr714_accountnumber || "N/A");
             const action = r.cr714_action || "";
@@ -683,7 +681,6 @@
         document.getElementById('kpi-critical').innerText = Object.values(groupedData).filter(c=>c<=10).length;
 
         // Populate Raw Table in Tab 2
-        // --- FIX: USE CORRECT MAPPINGS FOR REPORT ---
         const rawTbody = document.querySelector('#rawReportTable tbody');
         rawTbody.innerHTML = '';
         currentFilteredRows.slice(0, 100).forEach(r => {
