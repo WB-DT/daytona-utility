@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3.0 Account Reassignment Tool</title>
+    <title>3.2 Account Reassignment Tool</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -361,14 +361,14 @@
     // --- FLOW URLS ---
     const GET_ROWS_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/952746524c354ee8a4d335d24ce01d6d/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=wOEIjRMghIgIGX4GU85rwL1hLdIeFT8O0I44C9C0vSo";
     const REASSIGN_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/ccd1e78456a4470c9bef267fc8b6ba77/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=delp7lT79GXjEHWIj9AHaxSmAyUrojFqAhNx0nsv0pM";
-    const GET_TOTAL_COUNTS_URL = ""; 
 
     // Global State
     const msalInstance = new msal.PublicClientApplication(msalConfig);
     let msalAccount = null;
     let allAvailableRows = []; 
-    let groupedData = {};       
-    let totalData = {};        
+    let allProcessedRows = []; // Stores all rows (completed and incomplete)
+    let groupedData = {};       // "Avail" Counts (Incomplete)
+    let repStats = {};          // { "RepName": { total: 0, completed: 0 } }
     let currentFilteredRows = [];
     let sortState = { column: 'smart', direction: 'desc' };
 
@@ -386,7 +386,6 @@
             document.getElementById('login-modal').style.display = 'none';
             document.getElementById('user-display').innerText = msalAccount.name;
             fetchData();
-            fetchTotalCounts();
         } catch (error) {
             console.error(error);
             document.getElementById('login-error').innerText = "Login failed: " + error.message;
@@ -423,38 +422,48 @@
             populateRepDropdown(repList);
 
             // =========================================================
-            //  CUSTOM DATA PROCESSING (Enrichment, Mapping, Random Rep)
+            //  CUSTOM DATA PROCESSING (Fixed Mapping & Stats)
             // =========================================================
-            const processedRows = rawRows.map(record => {
+            
+            repStats = {}; // Reset Stats
+
+            allProcessedRows = rawRows.map(record => {
                 
-                // 1. RANDOM SOURCE REP POPULATION
-                // "Populate source rep with anyone available in the list"
-                // If repList has data, pick a random one.
-                if(repList.length > 0) {
-                     const randomRep = repList[Math.floor(Math.random() * repList.length)];
-                     // Map to cr714_rep or cr714_accountrep (whichever you use for Source Rep grouping)
-                     // Here we force populate 'cr714_rep' for consistent grouping later.
-                     record.cr714_rep = randomRep.cr714_name;
-                } else {
-                     record.cr714_rep = record.cr714_rep || "Unassigned";
+                // 1. REP MAPPING
+                // Use cr714_rep if available, otherwise fallback to random assignment if needed
+                if (!record.cr714_rep) {
+                    if (repList.length > 0) {
+                        const randomRep = repList[Math.floor(Math.random() * repList.length)];
+                        record.cr714_rep = randomRep.cr714_name;
+                    } else {
+                        record.cr714_rep = "Unassigned";
+                    }
                 }
 
-                // 2. ACCOUNT NUM & NAME MAPPING
-                // "Account Num should be the recordId or cr714_accountnum"
-                if(!record.cr714_accountnumber) {
-                    record.cr714_accountnumber = record.cr714_accountnum || record.recordId || "N/A";
-                }
-                // "Account Name is cr714_accountname"
-                // (Already exists in source usually, but ensuring it maps for display)
-                record.display_account_name = record.cr714_accountname || "Unknown Account";
+                // 2. FIXED ACCOUNT NUM & NAME MAPPING
+                // Account Num mapped to cr714_id
+                record.cr714_accountnumber = record.cr714_id || record.cr714_accountnum || record.recordId || "N/A";
+                
+                // Account Name mapped to cr714_company
+                record.display_account_name = record.cr714_company || record.cr714_accountname || "Unknown Account";
 
-                // 3. FORECAST CALCULATION
-                // Logic: Revenue * (Probability / 100)
+                // 3. STATS CALCULATION
+                const repName = normalizeName(record.cr714_rep);
+                if (!repStats[repName]) {
+                    repStats[repName] = { total: 0, completed: 0 };
+                }
+                repStats[repName].total++;
+                
+                // Completed = Has email sent date
+                if (record.cr714_actionemailsent && record.cr714_actionemailsent.trim() !== "") {
+                    repStats[repName].completed++;
+                }
+
+                // 4. FORECAST CALCULATION
                 const revenue = parseFloat(record.cr714_est_revenue) || 0;
                 const probability = parseFloat(record.cr714_probability) || 0;
                 const forecastVal = revenue * (probability / 100);
                 
-                // Attach new fields to record for use in Reports
                 record.forecast_raw = forecastVal;
                 record.forecast_formatted = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(forecastVal);
                 record.revenue_formatted = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(revenue);
@@ -467,11 +476,16 @@
             //  END CUSTOM PROCESSING
             // =========================================================
 
-            // Filter Rows Logic
-            allAvailableRows = processedRows.filter(r => {
+            // Filter Rows Logic (WORK QUEUE - Only Incomplete Items)
+            allAvailableRows = allProcessedRows.filter(r => {
                 const action = (r.cr714_action || "").toUpperCase();
                 const notes = (r.cr714_accountmanagementnotes || r.cr714_qbnotes || r.cr714_managernotes || "").toString();
+                
+                // "Has value in cr714_actionemailsent" = Completed
                 const hasEmailDate = r.cr714_actionemailsent != null && r.cr714_actionemailsent !== "";
+                
+                // We only want rows that match action types AND are NOT completed (no email sent)
+                // Also check notes for legacy "Email Sent:" marker just in case
                 return (action === 'NONBUY' || action === 'NONOVDEC') && (!hasEmailDate && !notes.includes("Email Sent:"));
             });
 
@@ -486,30 +500,7 @@
         }
     }
 
-    async function fetchTotalCounts() {
-        if(!GET_TOTAL_COUNTS_URL) return;
-        try {
-            const response = await fetch(GET_TOTAL_COUNTS_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ request: "totals" }) 
-            });
-            if(response.ok) {
-                const json = await response.json();
-                const rawList = json.allReps || [];
-                
-                totalData = {};
-                rawList.forEach(repName => {
-                    const cleanName = normalizeName(repName);
-                    totalData[cleanName] = (totalData[cleanName] || 0) + 1;
-                });
-                renderTables(); 
-            }
-        } catch(e) { console.warn("Totals fetch failed", e); }
-    }
-
-    // --- 4. FILTERING & RENDERING ---
-    function populateRepDropdown(reps) {
+    // --- 4. FILTERING & RENDERING ---\n    function populateRepDropdown(reps) {
         const select = document.getElementById('targetRep');
         select.innerHTML = '<option value="">-- Select Target Rep --</option>';
         reps.sort((a, b) => (a.cr714_name || "").localeCompare(b.cr714_name || ""));
@@ -539,16 +530,16 @@
 
     function applyListFilter() {
         const selectedAction = document.getElementById('actionFilter').value;
+        
         currentFilteredRows = (selectedAction === 'All') 
             ? allAvailableRows 
             : allAvailableRows.filter(r => r.cr714_action === selectedAction);
 
         groupedData = {};
         
-        // Grouping with Normalization
+        // Grouping with Normalization (Counts Available Work)
         currentFilteredRows.forEach(r => {
-            // Because we randomly populated cr714_rep in fetchData, this will now be dense
-            const rawRep = r.cr714_rep || r.cr714_accountrep || "Unknown";
+            const rawRep = r.cr714_rep || "Unknown";
             const cleanRep = normalizeName(rawRep);
             
             if (!groupedData[cleanRep]) groupedData[cleanRep] = 0;
@@ -577,11 +568,15 @@
         });
 
         const sortFunc = (a, b) => {
-            const cA = groupedData[a], cB = groupedData[b];
+            const cA = groupedData[a];
+            const cB = groupedData[b];
+            const totalA = repStats[a] ? repStats[a].total : 0;
+            const totalB = repStats[b] ? repStats[b].total : 0;
+
             if (sortState.column === 'smart') return (cA <= 10 && cB > 10) ? -1 : (cA > 10 && cB <= 10) ? 1 : cB - cA;
             if (sortState.column === 'name') return sortState.direction === 'asc' ? a.localeCompare(b) : b.localeCompare(a);
             if (sortState.column === 'count') return sortState.direction === 'asc' ? cA - cB : cB - cA;
-            if (sortState.column === 'total') return sortState.direction === 'asc' ? (totalData[a]||0) - (totalData[b]||0) : (totalData[b]||0) - (totalData[a]||0);
+            if (sortState.column === 'total') return sortState.direction === 'asc' ? totalA - totalB : totalB - totalA;
         };
 
         heavy.sort(sortFunc).forEach(r => heavyBody.appendChild(createRow(r, groupedData[r])));
@@ -592,12 +587,15 @@
         const tr = document.createElement('tr');
         if (count <= 10) tr.classList.add('row-critical');
         
-        let total = totalData[rep] || 0;
+        // Use new stats logic
+        const stats = repStats[rep] || { total: 0, completed: 0 };
+        const total = stats.total;
+        const completed = stats.completed;
+        
         let pctHtml = '--';
         
         if (total > 0) {
-            let done = total - count;
-            let pct = Math.round((done / total) * 100);
+            let pct = Math.round((completed / total) * 100);
             pctHtml = `${pct}%`;
             if (pct > 90) pctHtml = `<span class="pct-high">${pct}%</span>`;
             if (pct < 10) pctHtml = `<span class="pct-low">${pct}%</span>`;
@@ -633,7 +631,10 @@
         if(!name) return;
         
         const avail = parseInt(document.getElementById('sourceRep').getAttribute('data-max'));
-        const total = parseInt(document.getElementById('sourceRep').getAttribute('data-total'));
+        // Total from Stats
+        const stats = repStats[normalizeName(name)] || { total: 0, completed: 0 };
+        const total = stats.total;
+        const completed = stats.completed;
         
         document.getElementById('profile-name').innerText = name;
         document.getElementById('profile-avail').innerText = avail;
@@ -644,8 +645,7 @@
         let width = 0;
 
         if (total > 0) {
-            const done = total - avail;
-            const pct = Math.round((done / total) * 100);
+            const pct = Math.round((completed / total) * 100);
             width = pct;
             if (pct > 30) { tempClass = "temp-warm"; tempText = "Warm"; }
             if (pct > 75) { tempClass = "temp-hot"; tempText = "On Fire!"; }
@@ -680,8 +680,8 @@
         csvContent += "Account Name,Account Number,Action,Source Rep,Forecast\n";
         
         currentFilteredRows.forEach(r => {
+            // Corrected mapping used here
             const name = (r.display_account_name || "").replace(/,/g, ""); 
-            // Use the mapped cr714_accountnumber
             const num = (r.cr714_accountnumber || "N/A");
             const action = r.cr714_action || "";
             const rep = normalizeName(r.cr714_rep || "");
