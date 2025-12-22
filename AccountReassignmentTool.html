@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v42.9 (Hybrid)</title>
+    <title>Daytona Reassignment v43 (JSON Unpacker)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -155,7 +155,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.8</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.9</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -280,26 +280,27 @@
             window.clearSelection();
 
             try {
-                // Fetch Rows (Robust Network Call)
+                // Fetch Rows
                 const rowsRes = await fetchWithRetry(GET_ROWS_URL, { repName: appState.user.name });
                 
-                // Fetch Totals (Robust Network Call)
+                // Fetch Totals
                 let totalsRes = null;
                 try { totalsRes = await fetchWithRetry(GET_TOTALS_URL, {}); } catch(e) { console.warn("Totals skipped", e); }
 
-                // --- V42.8 HYBRID LOGIC ---
-                // 1. Use v42.0 Recursive Parser to find the arrays
-                const foundRows = findArrayWithKey(rowsRes, 'cr714_id') || findArrayWithKey(rowsRes, 'cr714_accountnumber') || findArrayWithKey(rowsRes, 'Rep') || [];
-                const foundRoster = findArrayWithKey(rowsRes, 'cr714_status') || [];
-                const foundTotals = findArrayWithKey(totalsRes, 'Rep') || findArrayWithKey(totalsRes, 'rep') || [];
+                // --- DATA EXTRACTION (V42.9 FIX: JSON UNPACKER + SCORING) ---
+                console.log("Raw Response:", rowsRes);
+                
+                const parsedRows = smartExtract(rowsRes);
+                const parsedTotals = smartExtract(totalsRes);
 
-                // 2. Use v42.7 Normalizer to map columns (Rep vs cr714_rep)
-                appState.rawData = normalizeDataUniversal(foundRows);
-                appState.roster = foundRoster;
-                appState.totalsData = normalizeDataUniversal(foundTotals);
+                // Use Fuzzy Normalizer
+                appState.rawData = normalizeDataUniversal(parsedRows.accounts);
+                appState.roster = parsedRows.reps;
+                appState.totalsData = normalizeDataUniversal(parsedTotals.accounts);
                 
                 appState.totalsLoaded = (appState.totalsData.length > 0);
 
+                // Debug Toast
                 if (appState.rawData.length > 0) {
                      showToast(`Loaded ${appState.rawData.length} accounts`, "info");
                 } else {
@@ -316,17 +317,73 @@
             }
         }
 
-        // --- V42.0 PARSER (RESTORED AS REQUESTED) ---
-        function findArrayWithKey(obj, key) {
-            if (!obj) return null;
-            if (Array.isArray(obj)) {
-                if (obj.length > 0 && obj[0] && Object.prototype.hasOwnProperty.call(obj[0], key)) return obj;
-                for (let item of obj) { const found = findArrayWithKey(item, key); if (found) return found; }
-            } else if (typeof obj === 'object') {
-                if (obj.body) { const foundInBody = findArrayWithKey(obj.body, key); if (foundInBody) return foundInBody; }
-                for (let k in obj) { const found = findArrayWithKey(obj[k], key); if (found) return found; }
+        // --- V42.9 SMART EXTRACTOR ---
+        function smartExtract(obj) {
+            let accounts = [];
+            let reps = [];
+            
+            if (!obj) return { accounts, reps };
+
+            // 1. Unpack JSON Strings (The missing piece!)
+            // Sometimes Power Automate returns { body: "{\"accountList\":...}" }
+            let cleanObj = obj;
+            if (obj.body && typeof obj.body === 'string') {
+                try { cleanObj = JSON.parse(obj.body); } catch(e) { console.log("Body parse failed", e); }
+            } else if (obj.body) {
+                cleanObj = obj.body;
             }
-            return null;
+
+            // 2. Scan for Arrays
+            const candidates = [];
+            scanForArrays(cleanObj, candidates, 0);
+
+            // 3. Score Arrays to find the "Real" Data
+            // We look for arrays containing objects with 'Rep', 'Id', 'Company', or 'cr714_' keys
+            if (candidates.length > 0) {
+                candidates.forEach(c => {
+                    c.score = 0;
+                    if(c.key && c.key.toLowerCase().includes('account')) c.score += 5;
+                    if(c.key && c.key.toLowerCase().includes('rep')) c.score += 2; // Bias for reps list
+                    
+                    if (c.data.length > 0 && typeof c.data[0] === 'object') {
+                        const keys = Object.keys(c.data[0]).join(" ").toLowerCase();
+                        if (keys.includes('cr714')) c.score += 10;
+                        if (keys.includes('rep') || keys.includes('owner')) c.score += 3;
+                        if (keys.includes('id') && !keys.includes('guid')) c.score += 2;
+                    }
+                    c.score += (c.data.length / 100); // Tie-breaker: larger arrays win
+                });
+
+                candidates.sort((a,b) => b.score - a.score);
+                
+                // Assign top winner to accounts
+                accounts = candidates[0].data;
+                
+                // Try to find a separate 'Reps' list (secondary winner)
+                const repCand = candidates.find(c => c !== candidates[0] && (c.key||"").toLowerCase().includes('rep'));
+                if (repCand) reps = repCand.data;
+            }
+
+            return { accounts, reps };
+        }
+
+        function scanForArrays(obj, results, depth) {
+            if (depth > 4 || !obj) return;
+            
+            if (Array.isArray(obj)) {
+                results.push({ key: "root", data: obj });
+                return;
+            }
+
+            if (typeof obj === 'object') {
+                for (const key in obj) {
+                    if (Array.isArray(obj[key])) {
+                        results.push({ key: key, data: obj[key] });
+                    } else if (typeof obj[key] === 'object') {
+                        scanForArrays(obj[key], results, depth + 1);
+                    }
+                }
+            }
         }
 
         // --- V42.7 NORMALIZER (To handle column renaming) ---
