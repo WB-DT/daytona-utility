@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v43 (JSON Unpacker)</title>
+    <title>Daytona Reassignment v42.11 (Smart Translator)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -155,7 +155,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.9</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.11</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -287,20 +287,17 @@
                 let totalsRes = null;
                 try { totalsRes = await fetchWithRetry(GET_TOTALS_URL, {}); } catch(e) { console.warn("Totals skipped", e); }
 
-                // --- DATA EXTRACTION (V42.9 FIX: JSON UNPACKER + SCORING) ---
-                console.log("Raw Response:", rowsRes);
-                
-                const parsedRows = smartExtract(rowsRes);
-                const parsedTotals = smartExtract(totalsRes);
+                // --- DATA EXTRACTION (V42.11: SMART TRANSLATION) ---
+                const parsedRows = extractData(rowsRes);
+                const parsedTotals = extractData(totalsRes);
 
-                // Use Fuzzy Normalizer
-                appState.rawData = normalizeDataUniversal(parsedRows.accounts);
-                appState.roster = parsedRows.reps;
-                appState.totalsData = normalizeDataUniversal(parsedTotals.accounts);
+                // Use Smart Instant Normalizer
+                appState.rawData = normalizeDataInstant(parsedRows.accounts);
+                appState.roster = normalizeRoster(parsedRows.reps);
+                appState.totalsData = normalizeDataInstant(parsedTotals.accounts);
                 
                 appState.totalsLoaded = (appState.totalsData.length > 0);
 
-                // Debug Toast
                 if (appState.rawData.length > 0) {
                      showToast(`Loaded ${appState.rawData.length} accounts`, "info");
                 } else {
@@ -317,96 +314,74 @@
             }
         }
 
-        // --- V42.9 SMART EXTRACTOR ---
-        function smartExtract(obj) {
+        // --- EXTRACTOR (SAFE UNPACKING) ---
+        function extractData(response) {
             let accounts = [];
             let reps = [];
             
-            if (!obj) return { accounts, reps };
+            if (!response) return { accounts, reps };
 
-            // 1. Unpack JSON Strings (The missing piece!)
-            // Sometimes Power Automate returns { body: "{\"accountList\":...}" }
-            let cleanObj = obj;
-            if (obj.body && typeof obj.body === 'string') {
-                try { cleanObj = JSON.parse(obj.body); } catch(e) { console.log("Body parse failed", e); }
-            } else if (obj.body) {
-                cleanObj = obj.body;
+            let validBody = response;
+            if (response.body) {
+                if (typeof response.body === 'string') {
+                     try { validBody = JSON.parse(response.body); } catch(e) { console.warn("Parse error", e); }
+                } else {
+                     validBody = response.body;
+                }
             }
 
-            // 2. Scan for Arrays
-            const candidates = [];
-            scanForArrays(cleanObj, candidates, 0);
-
-            // 3. Score Arrays to find the "Real" Data
-            // We look for arrays containing objects with 'Rep', 'Id', 'Company', or 'cr714_' keys
-            if (candidates.length > 0) {
-                candidates.forEach(c => {
-                    c.score = 0;
-                    if(c.key && c.key.toLowerCase().includes('account')) c.score += 5;
-                    if(c.key && c.key.toLowerCase().includes('rep')) c.score += 2; // Bias for reps list
-                    
-                    if (c.data.length > 0 && typeof c.data[0] === 'object') {
-                        const keys = Object.keys(c.data[0]).join(" ").toLowerCase();
-                        if (keys.includes('cr714')) c.score += 10;
-                        if (keys.includes('rep') || keys.includes('owner')) c.score += 3;
-                        if (keys.includes('id') && !keys.includes('guid')) c.score += 2;
-                    }
-                    c.score += (c.data.length / 100); // Tie-breaker: larger arrays win
-                });
-
-                candidates.sort((a,b) => b.score - a.score);
+            if (validBody) {
+                if (Array.isArray(validBody)) return { accounts: validBody, reps: [] };
                 
-                // Assign top winner to accounts
-                accounts = candidates[0].data;
-                
-                // Try to find a separate 'Reps' list (secondary winner)
-                const repCand = candidates.find(c => c !== candidates[0] && (c.key||"").toLowerCase().includes('rep'));
-                if (repCand) reps = repCand.data;
+                // Case-Insensitive Key Search
+                const keys = Object.keys(validBody);
+                const accKey = keys.find(k => k.toLowerCase().includes('accountlist')) || 'value';
+                const repKey = keys.find(k => k.toLowerCase().includes('replist'));
+
+                if (accKey && Array.isArray(validBody[accKey])) accounts = validBody[accKey];
+                if (repKey && Array.isArray(validBody[repKey])) reps = validBody[repKey];
             }
-
+            
             return { accounts, reps };
         }
 
-        function scanForArrays(obj, results, depth) {
-            if (depth > 4 || !obj) return;
+        // --- INSTANT NORMALIZER (O(1) Map Creation) ---
+        function normalizeDataInstant(data) {
+            if (!Array.isArray(data) || data.length === 0) return [];
             
-            if (Array.isArray(obj)) {
-                results.push({ key: "root", data: obj });
-                return;
-            }
+            // 1. CREATE TRANSLATION MAP FROM FIRST ROW
+            const sample = data[0];
+            const keys = Object.keys(sample);
+            
+            const kRep = keys.find(k => k === 'Rep' || k === 'cr714_rep' || k === 'cr714_employeename') || 'Rep';
+            const kAct = keys.find(k => k === 'Action' || k === 'cr714_action') || 'Action';
+            const kId = keys.find(k => k === 'cr714_id' || k === 'cr714_accountnum') || 'cr714_id';
+            const kComp = keys.find(k => k === 'cr714_company' || k === 'cr714_accountname') || 'cr714_company';
+            const kStat = keys.find(k => k === 'Status' || k === 'cr714_recordstatus') || 'Status';
 
-            if (typeof obj === 'object') {
-                for (const key in obj) {
-                    if (Array.isArray(obj[key])) {
-                        results.push({ key: key, data: obj[key] });
-                    } else if (typeof obj[key] === 'object') {
-                        scanForArrays(obj[key], results, depth + 1);
-                    }
-                }
-            }
+            // 2. APPLY MAP (FAST)
+            return data.map(item => ({
+                cr714_rep: item[kRep] || "Unknown",
+                cr714_action: item[kAct] || "No Action",
+                cr714_id: item[kId] || "-",
+                cr714_company: item[kComp] || "Unknown Company",
+                cr714_recordstatus: item[kStat] || "Active",
+                cr714_qbnotes: item['cr714_qbnotes'] || item['cr714_accountmanagementnotes'] || ""
+            }));
         }
 
-        // --- V42.7 NORMALIZER (To handle column renaming) ---
-        function normalizeDataUniversal(data) {
-            if (!Array.isArray(data)) return [];
-            return data.map(item => {
-                const keys = Object.keys(item);
-                
-                const repKey = keys.find(k => /rep|owner|employee|name/i.test(k) && !/company/i.test(k) && !/note/i.test(k));
-                const actionKey = keys.find(k => /action/i.test(k));
-                const idKey = keys.find(k => /id|account/i.test(k) && !/guide|guid/i.test(k));
-                const companyKey = keys.find(k => /company|customer|business/i.test(k));
-                const statusKey = keys.find(k => /status|state/i.test(k));
+        // --- ROSTER NORMALIZER (Special handling for cr714_status vs statecode) ---
+        function normalizeRoster(data) {
+            if (!Array.isArray(data) || data.length === 0) return [];
+            const sample = data[0];
+            
+            const kName = 'cr714_name' in sample ? 'cr714_name' : ('cr714_employeename' in sample ? 'cr714_employeename' : 'Rep');
+            const kStatus = 'statecode' in sample ? 'statecode' : ('cr714_status' in sample ? 'cr714_status' : 'Status');
 
-                return {
-                    ...item,
-                    cr714_rep: item[repKey] || "Unknown",
-                    cr714_action: item[actionKey] || "No Action",
-                    cr714_id: item[idKey] || "-",
-                    cr714_company: item[companyKey] || "Unknown Company",
-                    cr714_recordstatus: item[statusKey] || "Active"
-                };
-            });
+            return data.map(item => ({
+                cr714_name: item[kName],
+                cr714_status: item[kStatus]
+            }));
         }
 
         // --- ROBUST RETRY & POLLING LOGIC ---
@@ -478,8 +453,14 @@
             const targetSel = document.getElementById('target-rep-select');
             if (targetSel.options.length <= 1) {
                 let targetList = [];
-                if(appState.roster && appState.roster.length > 0) targetList = appState.roster.filter(r => r.cr714_status == 1).map(r => r.cr714_name);
-                else targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep)));
+                // Use normalized roster
+                if(appState.roster && appState.roster.length > 0) {
+                    // Filter for Active (statecode 0 or 1 depending on Dataverse, usually 0 is active, 1 inactive)
+                    // Adjust logic based on your specific Dataverse setup. Assuming 1 = Active based on previous code.
+                    targetList = appState.roster.filter(r => r.cr714_status == 1 || r.cr714_status == 0).map(r => r.cr714_name);
+                } else {
+                    targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep)));
+                }
                 targetList.sort().forEach(r => { if(r) targetSel.innerHTML += `<option value="${r}">${r}</option>`; });
             }
         }
@@ -495,10 +476,12 @@
             const search = document.getElementById('search-input').value.toLowerCase();
             const actionFilter = document.getElementById('action-filter').value;
             document.getElementById('transfer-action-filter').value = actionFilter;
-            listEl.innerHTML = "";
+            
+            // 1. Filter Keys
             let keys = Object.keys(appState.groupedData);
             if (search) keys = keys.filter(k => k.toLowerCase().includes(search));
             
+            // 2. Sort Keys
             keys.sort((a,b) => {
                 const va = appState.groupedData[a], vb = appState.groupedData[b];
                 const ta = getTotalForRep(a, actionFilter), tb = getTotalForRep(b, actionFilter);
@@ -510,10 +493,19 @@
 
             document.getElementById('rep-count-badge').innerText = keys.length;
 
-            keys.forEach(repName => {
+            // 3. Build HTML String (Batch Render)
+            let html = "";
+            const MAX_ITEMS = 500; 
+            const limit = Math.min(keys.length, MAX_ITEMS);
+
+            for(let i=0; i<limit; i++) {
+                const repName = keys[i];
                 const count = appState.groupedData[repName]; 
                 const total = getTotalForRep(repName, actionFilter);
-                let pctHtml = '<span class="stat-badge neutral">N/A</span>', totalHtml = '<span class="text-gray-300">---</span>';
+                
+                let pctHtml = '<span class="stat-badge neutral">N/A</span>';
+                let totalHtml = '<span class="text-gray-300">---</span>';
+                
                 if (appState.totalsLoaded && total > 0) {
                     const remainingPct = (count / total) * 100;
                     let donePct = Math.round(100 - remainingPct);
@@ -521,12 +513,19 @@
                     totalHtml = total.toLocaleString();
                     pctHtml = `<span class="stat-badge ${donePct >= 100 ? 'good' : 'critical'}">${donePct}% Done</span>`;
                 }
-                const item = document.createElement('div');
-                item.className = 'gallery-item';
-                item.onclick = () => selectRep(repName, count, total, item);
-                item.innerHTML = `<div><div class="font-bold text-sm text-gray-800">${repName}</div><div class="text-xs text-gray-500 mt-1">Available: ${count.toLocaleString()}</div></div><div class="text-right"><div class="text-xs text-gray-400 mb-1">Total: ${totalHtml}</div>${pctHtml}</div>`;
-                listEl.appendChild(item);
-            });
+
+                const safeName = repName.replace(/'/g, "\\'");
+                html += `<div class="gallery-item" onclick="selectRep('${safeName}', ${count}, ${total}, this)">
+                            <div><div class="font-bold text-sm text-gray-800">${repName}</div><div class="text-xs text-gray-500 mt-1">Available: ${count.toLocaleString()}</div></div>
+                            <div class="text-right"><div class="text-xs text-gray-400 mb-1">Total: ${totalHtml}</div>${pctHtml}</div>
+                         </div>`;
+            }
+            
+            if (keys.length > MAX_ITEMS) {
+                html += `<div class="text-center p-2 text-xs text-gray-400">Showing top ${MAX_ITEMS} of ${keys.length} reps</div>`;
+            }
+
+            listEl.innerHTML = html;
         }
         
         function getTotalForRep(repName, filter) {
