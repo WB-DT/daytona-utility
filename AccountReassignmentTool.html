@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v32.2</title>
+    <title>Daytona Reassignment v35.0</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -159,7 +159,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v34.0</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v35.0</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -184,7 +184,7 @@
                     <div class="p-2 bg-gray-50 border-b space-y-2">
                         <div class="flex gap-2">
                             <input type="text" id="search-input" onkeyup="window.renderRepList()" placeholder="Search Reps..." class="text-sm flex-grow">
-                            <select id="action-filter" onchange="window.renderRepList()" class="text-xs w-32">
+                            <select id="action-filter" onchange="window.processData()" class="text-xs w-32">
                                 <option value="All">All Actions</option>
                             </select>
                         </div>
@@ -278,18 +278,19 @@
             window.clearSelection();
 
             try {
+                // Fetch Rows
                 const rowsData = await fetchWithPoll(GET_ROWS_URL, { repName: appState.user.name });
-                let totalsData = null;
-                try { totalsData = await fetchWithPoll(GET_TOTALS_URL, {}); } catch(e) { console.warn("Totals skipped", e); }
-
+                
+                // Parse Rows (Recursive + Key Normalization)
                 appState.rawData = findArrayWithKey(rowsData, 'cr714_id') || findArrayWithKey(rowsData, 'cr714_accountnumber') || [];
                 appState.roster = findArrayWithKey(rowsData, 'cr714_status') || []; 
                 
-                const rawTotals = findArrayWithKey(totalsData, 'totalCount') || findArrayWithKey(totalsData, 'count') || [];
+                // 1. CALCULATE TOTALS CLIENT-SIDE (Honest Method)
+                // We count occurrence of Rep Name in the RAW list (Total Book)
                 appState.totalsMap = {};
-                rawTotals.forEach(t => {
-                    const name = normalizeName(t.cr714_rep || t.repName || t.RepName || "Unknown");
-                    appState.totalsMap[name] = t.totalCount || t.count || 0;
+                appState.rawData.forEach(r => {
+                    const name = normalizeName(r.cr714_rep || r.Rep || "Unknown");
+                    appState.totalsMap[name] = (appState.totalsMap[name] || 0) + 1;
                 });
                 appState.totalsLoaded = true;
 
@@ -337,8 +338,23 @@
         }
 
         function processData() {
+            // 2. CALCULATE "AVAILABLE" (Filtered Count)
+            const filterAction = document.getElementById('action-filter').value;
             appState.groupedData = {};
-            appState.rawData.forEach(r => { const name = normalizeName(r.cr714_rep); appState.groupedData[name] = (appState.groupedData[name] || 0) + 1; });
+            
+            let filteredRows = appState.rawData;
+            if (filterAction !== "All") {
+                filteredRows = appState.rawData.filter(r => (r.cr714_action || r.Action) === filterAction);
+            }
+
+            // Normal filters (NonBuy/NonOvDec if implied by user logic, but here we stick to UI selection)
+            // If the user wants specific logic, we can add it here. For now, we trust the UI filter.
+            
+            filteredRows.forEach(r => { 
+                const name = normalizeName(r.cr714_rep || r.Rep || "Unknown"); 
+                appState.groupedData[name] = (appState.groupedData[name] || 0) + 1; 
+            });
+            
             populateFilters();
             renderRepList();
         }
@@ -346,20 +362,25 @@
         function populateFilters() {
             const s1 = document.getElementById('action-filter');
             const s2 = document.getElementById('transfer-action-filter');
-            s1.innerHTML = '<option value="All">All Actions</option>'; s2.innerHTML = '<option value="All">All Actions</option>';
-            const actions = new Set();
-            appState.rawData.forEach(r => { if(r.cr714_action) actions.add(r.cr714_action); });
-            Array.from(actions).sort().forEach(a => { s1.innerHTML += `<option value="${a}">${a}</option>`; s2.innerHTML += `<option value="${a}">${a}</option>`; });
+            if (s1.options.length <= 1) {
+                const actions = new Set();
+                appState.rawData.forEach(r => { 
+                    const a = r.cr714_action || r.Action;
+                    if(a) actions.add(a); 
+                });
+                Array.from(actions).sort().forEach(a => { s1.innerHTML += `<option value="${a}">${a}</option>`; s2.innerHTML += `<option value="${a}">${a}</option>`; });
+            }
             
             const targetSel = document.getElementById('target-rep-select');
-            targetSel.innerHTML = '<option value="">-- Select Target --</option>';
-            let targetList = [];
-            if(appState.roster && appState.roster.length > 0) {
-                targetList = appState.roster.filter(r => r.cr714_status == 1).map(r => r.cr714_name);
-            } else {
-                targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep)));
+            if (targetSel.options.length <= 1) {
+                let targetList = [];
+                if(appState.roster && appState.roster.length > 0) {
+                    targetList = appState.roster.filter(r => r.cr714_status == 1).map(r => r.cr714_name);
+                } else {
+                    targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep || r.Rep)));
+                }
+                targetList.sort().forEach(r => { if(r) targetSel.innerHTML += `<option value="${r}">${r}</option>`; });
             }
-            targetList.sort().forEach(r => { targetSel.innerHTML += `<option value="${r}">${r}</option>`; });
         }
 
         function handleSort(col) {
@@ -378,10 +399,10 @@
             let keys = Object.keys(appState.groupedData);
             if (search) keys = keys.filter(k => k.toLowerCase().includes(search));
             
+            // SORTING LOGIC
             keys.sort((a,b) => {
                 const va = appState.groupedData[a], vb = appState.groupedData[b];
                 const ta = appState.totalsMap[a] || 0, tb = appState.totalsMap[b] || 0;
-                const pa = ta > 0 ? (ta-va)/ta : 0, pb = tb > 0 ? (tb-vb)/tb : 0;
                 
                 if (appState.sort.col === 'name') return appState.sort.asc ? a.localeCompare(b) : b.localeCompare(a);
                 if (appState.sort.col === 'total') return appState.sort.asc ? ta - tb : tb - ta;
@@ -392,27 +413,22 @@
             document.getElementById('rep-count-badge').innerText = keys.length;
 
             keys.forEach(repName => {
-                const count = appState.groupedData[repName];
+                const count = appState.groupedData[repName]; // Available (Filtered)
+                const total = appState.totalsMap[repName] || 0; // Total (Raw)
                 
-                // HONEST TOTALS LOGIC
-                let totalHtml = '<span class="text-gray-300">---</span>';
                 let pctHtml = '<span class="stat-badge neutral">N/A</span>';
-                let totalVal = 0;
                 let pctVal = 0;
 
-                if (appState.totalsLoaded) {
-                    totalVal = appState.totalsMap[repName];
-                    if (totalVal !== undefined) {
-                        pctVal = Math.round(((totalVal - count) / totalVal) * 100) || 0;
-                        totalHtml = totalVal.toLocaleString();
-                        pctHtml = `<span class="stat-badge ${pctVal >= 100 ? 'good' : 'critical'}">${pctVal}% Done</span>`;
-                    }
+                if (total > 0) {
+                    pctVal = Math.round(((total - count) / total) * 100);
+                    if (pctVal < 0) pctVal = 0; // Logic safety
+                    pctHtml = `<span class="stat-badge ${pctVal >= 100 ? 'good' : 'critical'}">${pctVal}% Done</span>`;
                 }
 
                 const item = document.createElement('div');
                 item.className = 'gallery-item';
-                item.onclick = () => selectRep(repName, count, totalVal, pctVal, item);
-                item.innerHTML = `<div><div class="font-bold text-sm text-gray-800">${repName}</div><div class="text-xs text-gray-500 mt-1">Available: ${count.toLocaleString()}</div></div><div class="text-right"><div class="text-xs text-gray-400 mb-1">Total: ${totalHtml}</div>${pctHtml}</div>`;
+                item.onclick = () => selectRep(repName, count, total, pctVal, item);
+                item.innerHTML = `<div><div class="font-bold text-sm text-gray-800">${repName}</div><div class="text-xs text-gray-500 mt-1">Available: ${count.toLocaleString()}</div></div><div class="text-right"><div class="text-xs text-gray-400 mb-1">Total: ${total.toLocaleString()}</div>${pctHtml}</div>`;
                 listEl.appendChild(item);
             });
         }
@@ -422,8 +438,8 @@
             el.classList.add('is-selected');
             document.getElementById('source-rep-display').value = name;
             document.getElementById('stat-avail').innerText = avail.toLocaleString();
-            document.getElementById('stat-total').innerText = total ? total.toLocaleString() : "-";
-            document.getElementById('stat-pct').innerText = total ? pct + "%" : "-";
+            document.getElementById('stat-total').innerText = total.toLocaleString();
+            document.getElementById('stat-pct').innerText = pct + "%";
             document.getElementById('transfer-count').max = avail;
             document.getElementById('transfer-count').placeholder = `Max: ${avail}`;
             document.getElementById('clear-btn').classList.remove('hidden');
@@ -452,10 +468,19 @@
             document.getElementById('inspector-modal').classList.add('active');
             const tbody = document.getElementById('inspector-table-body');
             tbody.innerHTML = "";
-            const records = appState.rawData.filter(r => normalizeName(r.cr714_rep) === normalizeName(source));
+            
+            // Inspect allows seeing ALL records for Rep, or just Filtered? 
+            // Usually Inspect shows what's available to move.
+            const filterAction = document.getElementById('action-filter').value;
+            let records = appState.rawData.filter(r => normalizeName(r.cr714_rep || r.Rep) === normalizeName(source));
+            
+            if (filterAction !== "All") {
+                records = records.filter(r => (r.cr714_action || r.Action) === filterAction);
+            }
+
             records.forEach(r => {
                 const tr = document.createElement('tr');
-                tr.innerHTML = `<td class="font-mono text-blue-600">${r.cr714_id}</td><td>${r.cr714_company}</td><td>${r.cr714_action||'-'}</td><td><span class="stat-badge ${r.cr714_recordstatus==='Help'?'critical':'good'}">${r.cr714_recordstatus||'Normal'}</span></td><td class="text-xs text-gray-500 max-w-xs truncate">${(r.cr714_qbnotes||"").substring(0,40)}</td><td><button onclick="downloadAx('${r.cr714_id}')" class="text-xs bg-blue-100 text-blue-800 px-2 rounded hover:bg-blue-200">AX</button></td>`;
+                tr.innerHTML = `<td class="font-mono text-blue-600">${r.cr714_id || '-'}</td><td>${r.cr714_company || '-'}</td><td>${r.cr714_action||r.Action||'-'}</td><td><span class="stat-badge ${r.cr714_recordstatus==='Help'?'critical':'good'}">${r.cr714_recordstatus||'Normal'}</span></td><td class="text-xs text-gray-500 max-w-xs truncate">${(r.cr714_qbnotes||"").substring(0,40)}</td><td><button onclick="downloadAx('${r.cr714_id}')" class="text-xs bg-blue-100 text-blue-800 px-2 rounded hover:bg-blue-200">AX</button></td>`;
                 tbody.appendChild(tr);
             });
         }
@@ -470,7 +495,7 @@
 
         function exportGridCSV() {
             const source = document.getElementById('source-rep-display').value;
-            const records = appState.rawData.filter(r => normalizeName(r.cr714_rep) === normalizeName(source));
+            const records = appState.rawData.filter(r => normalizeName(r.cr714_rep || r.Rep) === normalizeName(source));
             if(records.length===0) return;
             const ws = XLSX.utils.json_to_sheet(records);
             const wb = XLSX.utils.book_new();
@@ -485,7 +510,7 @@
             document.getElementById('kpi-critical').innerText = appState.rawData.filter(r=>r.cr714_recordstatus==='Help').length;
             
             const actions = {};
-            appState.rawData.forEach(r => actions[r.cr714_action] = (actions[r.cr714_action]||0)+1);
+            appState.rawData.forEach(r => { const a = r.cr714_action||r.Action; if(a) actions[a] = (actions[a]||0)+1; });
             if(window.chart1) window.chart1.destroy();
             window.chart1 = new Chart(document.getElementById('chartActions'), { type: 'doughnut', data: { labels: Object.keys(actions), datasets:[{ data: Object.values(actions), backgroundColor: ['#0ea5e9','#6366f1','#8b5cf6','#f43f5e'] }] }, options:{maintainAspectRatio:false, plugins:{legend:{position:'right'}}} });
 
@@ -533,7 +558,7 @@
         window.setMaxCount = setMaxCount; window.executeReassignment = executeReassignment; window.login = login;
         window.exportCSV = exportCSV; window.showAnalytics = showAnalytics; window.showManagerDash = showManagerDash;
         window.inspectSource = inspectSource; window.exportGridCSV = exportGridCSV; window.downloadAx = downloadAx;
-        window.handleSort = handleSort;
+        window.handleSort = handleSort; window.processData = processData;
 
     </script>
 </body>
