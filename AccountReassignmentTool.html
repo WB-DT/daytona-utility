@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v42.12 (Unified Mapping)</title>
+    <title>Daytona Reassignment v42.13 (Performance Fix)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -155,7 +155,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.12</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.13</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -287,14 +287,14 @@
                 let totalsRes = null;
                 try { totalsRes = await fetchWithRetry(GET_TOTALS_URL, {}); } catch(e) { console.warn("Totals skipped", e); }
 
-                // --- DATA EXTRACTION (V42.12: ROBUST MAPPING) ---
+                // --- DATA EXTRACTION (V42.13: ROBUST & FAST) ---
                 const parsedRows = extractData(rowsRes);
                 const parsedTotals = extractData(totalsRes);
 
                 // Use Smart Instant Normalizer
-                appState.rawData = normalizeDataInstant(parsedRows.accounts);
-                appState.roster = normalizeRoster(parsedRows.reps);
-                appState.totalsData = normalizeDataInstant(parsedTotals.accounts);
+                appState.rawData = normalizeDataDirect(parsedRows.accounts);
+                appState.roster = normalizeRosterDirect(parsedRows.reps);
+                appState.totalsData = normalizeDataDirect(parsedTotals.accounts);
                 
                 appState.totalsLoaded = (appState.totalsData.length > 0);
 
@@ -314,7 +314,7 @@
             }
         }
 
-        // --- EXTRACTOR (SAFE UNPACKING) ---
+        // --- EXTRACTOR (SAFE & DEEP PARSING) ---
         function extractData(response) {
             let accounts = [];
             let reps = [];
@@ -322,15 +322,17 @@
             if (!response) return { accounts, reps };
 
             let validBody = response;
-            if (response.body) {
-                if (typeof response.body === 'string') {
-                      try { validBody = JSON.parse(response.body); } catch(e) { console.warn("Parse error", e); }
-                } else {
-                      validBody = response.body;
-                }
+            // 1. Handle "Double Stringification" (common in Power Automate)
+            if (typeof validBody === 'string') {
+                try { validBody = JSON.parse(validBody); } catch(e) {}
+            }
+            // 2. Handle Wrapper Objects (e.g. { d: ... } or { value: ... })
+            if (validBody && typeof validBody === 'object') {
+                 if (validBody.body) validBody = validBody.body; // Unpack body if present
+                 if (typeof validBody === 'string') { try { validBody = JSON.parse(validBody); } catch(e) {} } // Parse body if it was a string
             }
 
-            if (validBody) {
+            if (validBody && typeof validBody === 'object') {
                 if (Array.isArray(validBody)) return { accounts: validBody, reps: [] };
                 
                 // Case-Insensitive Key Search
@@ -345,63 +347,27 @@
             return { accounts, reps };
         }
 
-        // --- INSTANT NORMALIZER (Robust "Fuzzy" Matching) ---
-        function normalizeDataInstant(data) {
+        // --- DIRECT NORMALIZER (O(1) - Fast & Explicit) ---
+        function normalizeDataDirect(data) {
             if (!Array.isArray(data) || data.length === 0) return [];
-            
-            // 1. CREATE TRANSLATION MAP FROM FIRST ROW
-            // This maps the "clean" key (lowercase, no prefix) to the actual key in the data
-            const sample = data[0];
-            const keyMap = {};
-            
-            Object.keys(sample).forEach(originalKey => {
-                // Drop 'cr714_' and lowercase the rest
-                const cleanKey = originalKey.toLowerCase().replace('cr714_', '');
-                keyMap[cleanKey] = originalKey;
-            });
-
-            // 2. DEFINE MAPPINGS
-            // We look up the actual key using the clean version
-            const kRep = keyMap['rep'] || keyMap['employeename'] || keyMap['name'];
-            const kAct = keyMap['action'];
-            const kId = keyMap['id'] || keyMap['accountnum'];
-            const kComp = keyMap['company'] || keyMap['accountname'];
-            
-            // Status Logic: Checks for 'status', 'recordstatus', or 'statecode'
-            const kStat = keyMap['status'] || keyMap['recordstatus'] || keyMap['statecode'];
-            
-            const kNotes = keyMap['qbnotes'] || keyMap['accountmanagementnotes'];
-
-            // 3. APPLY MAP
+            // Explicitly check for all known key variations on EVERY row
+            // This prevents "first row" mismatches and is faster than object iteration
             return data.map(item => ({
-                cr714_rep: item[kRep] || "Unknown",
-                cr714_action: item[kAct] || "No Action",
-                cr714_id: item[kId] || "-",
-                cr714_company: item[kComp] || "Unknown Company",
-                cr714_recordstatus: item[kStat] || "Active",
-                cr714_qbnotes: item[kNotes] || ""
+                cr714_rep: item.Rep || item.cr714_rep || item.cr714_Rep || item.cr714_employeename || "Unknown",
+                cr714_action: item.Action || item.cr714_action || item.cr714_Action || "No Action",
+                cr714_id: item.cr714_id || item.cr714_accountnum || item.AccountNum || "-",
+                cr714_company: item.cr714_company || item.cr714_accountname || item.AccountName || "Unknown Company",
+                cr714_recordstatus: item.Status || item.cr714_status || item.cr714_recordstatus || item.statecode || "Active",
+                cr714_qbnotes: item.cr714_qbnotes || item.cr714_accountmanagementnotes || ""
             }));
         }
 
-        // --- ROSTER NORMALIZER ---
-        function normalizeRoster(data) {
+        // --- ROSTER NORMALIZER (Direct Check) ---
+        function normalizeRosterDirect(data) {
             if (!Array.isArray(data) || data.length === 0) return [];
-            
-            const sample = data[0];
-            const keyMap = {};
-            
-            Object.keys(sample).forEach(originalKey => {
-                const cleanKey = originalKey.toLowerCase().replace('cr714_', '');
-                keyMap[cleanKey] = originalKey;
-            });
-
-            const kName = keyMap['name'] || keyMap['employeename'] || keyMap['rep'];
-            // Explicitly allow 'statecode' or 'status'
-            const kStatus = keyMap['statecode'] || keyMap['status'];
-
             return data.map(item => ({
-                cr714_name: item[kName],
-                cr714_status: item[kStatus]
+                cr714_name: item.Rep || item.cr714_name || item.cr714_employeename || item.cr714_rep,
+                cr714_status: item.Status || item.statecode || item.cr714_status
             }));
         }
 
@@ -450,17 +416,20 @@
         }
 
         window.processData = function() {
-            appState.groupedData = {};
-            const filterAction = document.getElementById('action-filter').value;
-            let filteredRows = appState.rawData;
-            if (filterAction !== "All") filteredRows = appState.rawData.filter(r => r.cr714_action === filterAction);
+            // Defer processing to UI thread
+            setTimeout(() => {
+                appState.groupedData = {};
+                const filterAction = document.getElementById('action-filter').value;
+                let filteredRows = appState.rawData;
+                if (filterAction !== "All") filteredRows = appState.rawData.filter(r => r.cr714_action === filterAction);
 
-            filteredRows.forEach(r => { 
-                const name = normalizeName(r.cr714_rep); 
-                appState.groupedData[name] = (appState.groupedData[name] || 0) + 1; 
-            });
-            populateFilters();
-            renderRepList();
+                filteredRows.forEach(r => { 
+                    const name = normalizeName(r.cr714_rep); 
+                    appState.groupedData[name] = (appState.groupedData[name] || 0) + 1; 
+                });
+                populateFilters();
+                renderRepList();
+            }, 50);
         }
 
         function populateFilters() {
@@ -474,10 +443,7 @@
             const targetSel = document.getElementById('target-rep-select');
             if (targetSel.options.length <= 1) {
                 let targetList = [];
-                // Use normalized roster
                 if(appState.roster && appState.roster.length > 0) {
-                    // Filter for Active (statecode 0 or 1 depending on Dataverse, usually 0 is active, 1 inactive)
-                    // Adjust logic based on your specific Dataverse setup. Assuming 1 = Active based on previous code.
                     targetList = appState.roster.filter(r => r.cr714_status == 1 || r.cr714_status == 0).map(r => r.cr714_name);
                 } else {
                     targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep)));
@@ -493,60 +459,63 @@
         }
 
         window.renderRepList = function() {
-            const listEl = document.getElementById('rep-list');
-            const search = document.getElementById('search-input').value.toLowerCase();
-            const actionFilter = document.getElementById('action-filter').value;
-            document.getElementById('transfer-action-filter').value = actionFilter;
-            
-            // 1. Filter Keys
-            let keys = Object.keys(appState.groupedData);
-            if (search) keys = keys.filter(k => k.toLowerCase().includes(search));
-            
-            // 2. Sort Keys
-            keys.sort((a,b) => {
-                const va = appState.groupedData[a], vb = appState.groupedData[b];
-                const ta = getTotalForRep(a, actionFilter), tb = getTotalForRep(b, actionFilter);
-                if (appState.sort.col === 'name') return appState.sort.asc ? a.localeCompare(b) : b.localeCompare(a);
-                if (appState.sort.col === 'total') return appState.sort.asc ? ta - tb : tb - ta;
-                if (appState.sort.col === 'count') return appState.sort.asc ? va - vb : vb - va;
-                return 0;
-            });
-
-            document.getElementById('rep-count-badge').innerText = keys.length;
-
-            // 3. Build HTML String (Batch Render)
-            let html = "";
-            const MAX_ITEMS = 500; 
-            const limit = Math.min(keys.length, MAX_ITEMS);
-
-            for(let i=0; i<limit; i++) {
-                const repName = keys[i];
-                const count = appState.groupedData[repName]; 
-                const total = getTotalForRep(repName, actionFilter);
+            // Small timeout to let loader render if needed
+            setTimeout(() => {
+                const listEl = document.getElementById('rep-list');
+                const search = document.getElementById('search-input').value.toLowerCase();
+                const actionFilter = document.getElementById('action-filter').value;
+                document.getElementById('transfer-action-filter').value = actionFilter;
                 
-                let pctHtml = '<span class="stat-badge neutral">N/A</span>';
-                let totalHtml = '<span class="text-gray-300">---</span>';
+                // 1. Filter Keys
+                let keys = Object.keys(appState.groupedData);
+                if (search) keys = keys.filter(k => k.toLowerCase().includes(search));
                 
-                if (appState.totalsLoaded && total > 0) {
-                    const remainingPct = (count / total) * 100;
-                    let donePct = Math.round(100 - remainingPct);
-                    if (donePct < 0) donePct = 0; if (donePct > 100) donePct = 100;
-                    totalHtml = total.toLocaleString();
-                    pctHtml = `<span class="stat-badge ${donePct >= 100 ? 'good' : 'critical'}">${donePct}% Done</span>`;
+                // 2. Sort Keys
+                keys.sort((a,b) => {
+                    const va = appState.groupedData[a], vb = appState.groupedData[b];
+                    const ta = getTotalForRep(a, actionFilter), tb = getTotalForRep(b, actionFilter);
+                    if (appState.sort.col === 'name') return appState.sort.asc ? a.localeCompare(b) : b.localeCompare(a);
+                    if (appState.sort.col === 'total') return appState.sort.asc ? ta - tb : tb - ta;
+                    if (appState.sort.col === 'count') return appState.sort.asc ? va - vb : vb - va;
+                    return 0;
+                });
+
+                document.getElementById('rep-count-badge').innerText = keys.length;
+
+                // 3. Build HTML String (Batch Render)
+                let html = "";
+                const MAX_ITEMS = 500; 
+                const limit = Math.min(keys.length, MAX_ITEMS);
+
+                for(let i=0; i<limit; i++) {
+                    const repName = keys[i];
+                    const count = appState.groupedData[repName]; 
+                    const total = getTotalForRep(repName, actionFilter);
+                    
+                    let pctHtml = '<span class="stat-badge neutral">N/A</span>';
+                    let totalHtml = '<span class="text-gray-300">---</span>';
+                    
+                    if (appState.totalsLoaded && total > 0) {
+                        const remainingPct = (count / total) * 100;
+                        let donePct = Math.round(100 - remainingPct);
+                        if (donePct < 0) donePct = 0; if (donePct > 100) donePct = 100;
+                        totalHtml = total.toLocaleString();
+                        pctHtml = `<span class="stat-badge ${donePct >= 100 ? 'good' : 'critical'}">${donePct}% Done</span>`;
+                    }
+
+                    const safeName = repName.replace(/'/g, "\\'");
+                    html += `<div class="gallery-item" onclick="selectRep('${safeName}', ${count}, ${total}, this)">
+                                <div><div class="font-bold text-sm text-gray-800">${repName}</div><div class="text-xs text-gray-500 mt-1">Available: ${count.toLocaleString()}</div></div>
+                                <div class="text-right"><div class="text-xs text-gray-400 mb-1">Total: ${totalHtml}</div>${pctHtml}</div>
+                             </div>`;
+                }
+                
+                if (keys.length > MAX_ITEMS) {
+                    html += `<div class="text-center p-2 text-xs text-gray-400">Showing top ${MAX_ITEMS} of ${keys.length} reps</div>`;
                 }
 
-                const safeName = repName.replace(/'/g, "\\'");
-                html += `<div class="gallery-item" onclick="selectRep('${safeName}', ${count}, ${total}, this)">
-                            <div><div class="font-bold text-sm text-gray-800">${repName}</div><div class="text-xs text-gray-500 mt-1">Available: ${count.toLocaleString()}</div></div>
-                            <div class="text-right"><div class="text-xs text-gray-400 mb-1">Total: ${totalHtml}</div>${pctHtml}</div>
-                         </div>`;
-            }
-            
-            if (keys.length > MAX_ITEMS) {
-                html += `<div class="text-center p-2 text-xs text-gray-400">Showing top ${MAX_ITEMS} of ${keys.length} reps</div>`;
-            }
-
-            listEl.innerHTML = html;
+                listEl.innerHTML = html;
+            }, 10);
         }
         
         function getTotalForRep(repName, filter) {
