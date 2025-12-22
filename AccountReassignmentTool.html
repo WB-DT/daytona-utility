@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v42.3 (Auto-Mapper)</title>
+    <title>Daytona Reassignment v42.4 (Explicit Path)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -152,7 +152,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.3</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.4</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -276,25 +276,19 @@
 
             try {
                 // Fetch Rows
-                const rowsData = await fetchWithRetry(GET_ROWS_URL, { repName: appState.user.name });
+                const rowsRes = await fetchWithRetry(GET_ROWS_URL, { repName: appState.user.name });
                 
                 // Fetch Totals
-                let totalsRaw = null;
-                try { totalsRaw = await fetchWithRetry(GET_TOTALS_URL, {}); } catch(e) { console.warn("Totals skipped", e); }
+                let totalsRes = null;
+                try { totalsRes = await fetchWithRetry(GET_TOTALS_URL, {}); } catch(e) { console.warn("Totals skipped", e); }
 
-                // PARSE & NORMALIZE
-                let rawList = findArrayWithKey(rowsData, 'cr714_id') || 
-                              findArrayWithKey(rowsData, 'cr714_accountnumber') || 
-                              findArrayWithKey(rowsData, 'Rep') || 
-                              [];
-                
-                appState.rawData = normalizeData(rawList); // FORCE NORMALIZATION
+                // --- DATA EXTRACTION (V42.4 FIX: Explicit Paths) ---
+                const parsedRows = extractLists(rowsRes);
+                appState.rawData = normalizeData(parsedRows.accounts);
+                appState.roster = parsedRows.reps;
 
-                appState.roster = findArrayWithKey(rowsData, 'cr714_status') || []; 
-                
-                // Normalize totals as well just in case
-                let rawTotals = findArrayWithKey(totalsRaw, 'Rep') || findArrayWithKey(totalsRaw, 'rep') || [];
-                appState.totalsData = normalizeData(rawTotals);
+                const parsedTotals = extractLists(totalsRes);
+                appState.totalsData = normalizeData(parsedTotals.accounts);
                 
                 appState.totalsLoaded = (appState.totalsData.length > 0);
 
@@ -308,18 +302,38 @@
             }
         }
 
-        // --- DATA NORMALIZER (THE FIX) ---
+        // --- EXTRACTOR HELPER (TARGETS BODY.ACCOUNTLIST SPECIFICALLY) ---
+        function extractLists(jsonResponse) {
+            let accounts = [];
+            let reps = [];
+
+            // 1. Direct Body Check (Matches your uploaded files)
+            if (jsonResponse && jsonResponse.body) {
+                if (Array.isArray(jsonResponse.body.accountList)) accounts = jsonResponse.body.accountList;
+                if (Array.isArray(jsonResponse.body.repList)) reps = jsonResponse.body.repList;
+            }
+            
+            // 2. Fallback: Check if response IS the array or flat object
+            if (accounts.length === 0) {
+                 if (Array.isArray(jsonResponse)) accounts = jsonResponse;
+                 else if (jsonResponse.accountList && Array.isArray(jsonResponse.accountList)) accounts = jsonResponse.accountList;
+                 else {
+                     // Last resort: Recursive search
+                     accounts = findArrayWithKey(jsonResponse, 'cr714_id') || findArrayWithKey(jsonResponse, 'Rep') || [];
+                 }
+            }
+
+            return { accounts, reps };
+        }
+
+        // --- DATA NORMALIZER (HANDLES SCHEMA VARIATIONS) ---
         function normalizeData(data) {
             if (!Array.isArray(data)) return [];
             return data.map(item => {
-                // Return a copy of the object, ensuring the standard keys exist
                 return {
                     ...item,
-                    // If cr714_rep is missing, try 'Rep'
                     cr714_rep: item.cr714_rep || item.Rep || "Unknown",
-                    // If cr714_action is missing, try 'Action'
                     cr714_action: item.cr714_action || item.Action || "No Action",
-                    // Preserve other fields or set defaults if needed for the table
                     cr714_id: item.cr714_id || item.Id || "-",
                     cr714_company: item.cr714_company || item.Company || "Unknown Company",
                     cr714_recordstatus: item.cr714_recordstatus || item.Status || "Active"
@@ -327,69 +341,45 @@
             });
         }
 
-        // --- NEW ROBUST RETRY & POLLING LOGIC ---
-        
+        // --- ROBUST RETRY & POLLING LOGIC ---
         async function fetchWithRetry(url, payload, retries = 3) {
             let locationUrl = null;
             for (let i = 0; i < retries; i++) {
                 try {
                     console.log(`Attempting trigger ${i+1}/${retries}...`);
-                    const res = await fetch(url, { 
-                        method: 'POST', 
-                        headers: { 'Content-Type': 'application/json' }, 
-                        body: JSON.stringify(payload) 
-                    });
+                    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
 
                     if (res.status === 502 || res.status === 504) {
                          if(i === retries - 1) throw new Error("Server Timeout (Trigger Phase)");
-                         console.warn("Gateway timeout during trigger. Retrying...");
-                         await new Promise(r => setTimeout(r, 5000)); 
-                         continue;
+                         await new Promise(r => setTimeout(r, 5000)); continue;
                     }
-                    
                     if (res.status === 202) {
                         locationUrl = res.headers.get('location');
-                        console.log("Trigger successful (202). Location received.");
                         break; 
                     } else if (res.ok) {
                         return await res.json(); 
                     } else {
-                        throw new Error(`Trigger failed with status: ${res.status}`);
+                        throw new Error(`Trigger failed: ${res.status}`);
                     }
                 } catch (err) {
                     if (i === retries - 1) throw err;
                     await new Promise(r => setTimeout(r, 2000));
                 }
             }
-
             if (!locationUrl) return {};
             return await pollForResults(locationUrl);
         }
 
         async function pollForResults(url) {
-            const POLL_INTERVAL = 3000;   
-            const ERROR_BACKOFF = 15000;  
-            
-            console.log("Starting polling sequence...");
-            
+            const POLL_INTERVAL = 3000; const ERROR_BACKOFF = 15000;  
             while(true) {
                 try {
                     const res = await fetch(url);
-                    
-                    if (res.status === 200) {
-                        console.log("Polling complete (200 OK).");
-                        return await res.json();
-                    } else if (res.status === 202) {
-                        console.log("Still running (202)...");
-                        await new Promise(r => setTimeout(r, POLL_INTERVAL));
-                    } else if (res.status === 502 || res.status === 504) {
-                        console.warn(`Gateway Timeout (${res.status}). Backing off for 15s...`);
-                        await new Promise(r => setTimeout(r, ERROR_BACKOFF));
-                    } else {
-                        throw new Error(`Polling failed with status: ${res.status}`);
-                    }
+                    if (res.status === 200) return await res.json();
+                    else if (res.status === 202) await new Promise(r => setTimeout(r, POLL_INTERVAL));
+                    else if (res.status === 502 || res.status === 504) await new Promise(r => setTimeout(r, ERROR_BACKOFF));
+                    else throw new Error(`Polling failed: ${res.status}`);
                 } catch (e) {
-                    console.error("Network error during polling", e);
                     await new Promise(r => setTimeout(r, ERROR_BACKOFF));
                 }
             }
@@ -410,18 +400,13 @@
         window.processData = function() {
             appState.groupedData = {};
             const filterAction = document.getElementById('action-filter').value;
-            
-            // Available Work Filter (Now safely uses cr714_action thanks to normalization)
             let filteredRows = appState.rawData;
-            if (filterAction !== "All") {
-                 filteredRows = appState.rawData.filter(r => r.cr714_action === filterAction);
-            }
+            if (filterAction !== "All") filteredRows = appState.rawData.filter(r => r.cr714_action === filterAction);
 
             filteredRows.forEach(r => { 
                 const name = normalizeName(r.cr714_rep); 
                 appState.groupedData[name] = (appState.groupedData[name] || 0) + 1; 
             });
-            
             populateFilters();
             renderRepList();
         }
@@ -431,20 +416,14 @@
             const s2 = document.getElementById('transfer-action-filter');
             if (s1.options.length <= 1) {
                 const actions = new Set();
-                appState.rawData.forEach(r => { 
-                    if(r.cr714_action) actions.add(r.cr714_action); 
-                });
+                appState.rawData.forEach(r => { if(r.cr714_action) actions.add(r.cr714_action); });
                 Array.from(actions).sort().forEach(a => { s1.innerHTML += `<option value="${a}">${a}</option>`; s2.innerHTML += `<option value="${a}">${a}</option>`; });
             }
-            
             const targetSel = document.getElementById('target-rep-select');
             if (targetSel.options.length <= 1) {
                 let targetList = [];
-                if(appState.roster && appState.roster.length > 0) {
-                    targetList = appState.roster.filter(r => r.cr714_status == 1).map(r => r.cr714_name);
-                } else {
-                    targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep)));
-                }
+                if(appState.roster && appState.roster.length > 0) targetList = appState.roster.filter(r => r.cr714_status == 1).map(r => r.cr714_name);
+                else targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep)));
                 targetList.sort().forEach(r => { if(r) targetSel.innerHTML += `<option value="${r}">${r}</option>`; });
             }
         }
@@ -461,15 +440,12 @@
             const actionFilter = document.getElementById('action-filter').value;
             document.getElementById('transfer-action-filter').value = actionFilter;
             listEl.innerHTML = "";
-            
             let keys = Object.keys(appState.groupedData);
             if (search) keys = keys.filter(k => k.toLowerCase().includes(search));
             
-            // SORTING
             keys.sort((a,b) => {
                 const va = appState.groupedData[a], vb = appState.groupedData[b];
                 const ta = getTotalForRep(a, actionFilter), tb = getTotalForRep(b, actionFilter);
-                
                 if (appState.sort.col === 'name') return appState.sort.asc ? a.localeCompare(b) : b.localeCompare(a);
                 if (appState.sort.col === 'total') return appState.sort.asc ? ta - tb : tb - ta;
                 if (appState.sort.col === 'count') return appState.sort.asc ? va - vb : vb - va;
@@ -481,19 +457,14 @@
             keys.forEach(repName => {
                 const count = appState.groupedData[repName]; 
                 const total = getTotalForRep(repName, actionFilter);
-                
-                let pctHtml = '<span class="stat-badge neutral">N/A</span>';
-                let totalHtml = '<span class="text-gray-300">---</span>';
-                
+                let pctHtml = '<span class="stat-badge neutral">N/A</span>', totalHtml = '<span class="text-gray-300">---</span>';
                 if (appState.totalsLoaded && total > 0) {
                     const remainingPct = (count / total) * 100;
                     let donePct = Math.round(100 - remainingPct);
                     if (donePct < 0) donePct = 0; if (donePct > 100) donePct = 100;
-                    
                     totalHtml = total.toLocaleString();
                     pctHtml = `<span class="stat-badge ${donePct >= 100 ? 'good' : 'critical'}">${donePct}% Done</span>`;
                 }
-
                 const item = document.createElement('div');
                 item.className = 'gallery-item';
                 item.onclick = () => selectRep(repName, count, total, item);
@@ -504,29 +475,20 @@
         
         function getTotalForRep(repName, filter) {
             if(!appState.totalsData) return 0;
-            
-            // Uses normalized key cr714_rep
             const repTotals = appState.totalsData.filter(t => normalizeName(t.cr714_rep) === normalizeName(repName));
-            
-            if (filter === "All") {
-                 return repTotals.length;
-            } else {
-                 return repTotals.filter(t => t.cr714_action === filter).length;
-            }
+            if (filter === "All") return repTotals.length;
+            else return repTotals.filter(t => t.cr714_action === filter).length;
         }
 
         function selectRep(name, avail, total, el) {
             document.querySelectorAll('.gallery-item').forEach(d => d.classList.remove('is-selected'));
             el.classList.add('is-selected');
             document.getElementById('source-rep-display').value = name;
-            
             const action = document.getElementById('action-filter').value;
             const labelText = action === "All" ? "Total Book" : `Total ${action}`;
             document.getElementById('label-total').innerText = labelText;
-
             document.getElementById('stat-avail').innerText = avail.toLocaleString();
             document.getElementById('stat-total').innerText = total ? total.toLocaleString() : "-";
-            
             let pct = "0%";
             if(total > 0) {
                 let p = Math.round(100 - ((avail/total)*100));
@@ -534,7 +496,6 @@
                 pct = p+"%";
             }
             document.getElementById('stat-pct').innerText = pct;
-            
             document.getElementById('transfer-count').max = avail;
             document.getElementById('transfer-count').placeholder = `Max: ${avail}`;
             document.getElementById('clear-btn').classList.remove('hidden');
@@ -592,48 +553,34 @@
 
         window.exportCSV = function() {
             if(appState.rawData.length === 0) return showToast("No data to export", "error");
-            // Uses normalized keys
             let csv = "ID,Company,Rep,Action,Status,Contact,Phone,Email,Notes\n" + appState.rawData.map(r => `"${r.cr714_id||''}","${r.cr714_company||''}","${r.cr714_rep||''}","${r.cr714_action||''}","${r.cr714_recordstatus||''}","${r.cr714_namemost||''}","${r.cr714_primaryphone||''}","${r.cr714_emailmost||''}","${(r.cr714_qbnotes||"").substring(0,50)}"`).join("\n");
             const a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,' + encodeURI(csv); a.download = `Daytona_Export.csv`; a.click();
             showToast("Export Started", "success");
         }
 
-        // --- ANALYTICS MODAL (RPT) ---
         window.showAnalytics = function() {
             document.getElementById('analytics-modal').classList.add('active');
             document.getElementById('rpt-total').innerText = appState.rawData.length.toLocaleString();
             document.getElementById('rpt-reps').innerText = Object.keys(appState.groupedData).length;
             document.getElementById('rpt-critical').innerText = appState.rawData.filter(r=>r.cr714_recordstatus==='Help').length;
-            
             const actions = {};
-            // Uses normalized key
-            appState.rawData.forEach(r => {
-                const act = r.cr714_action;
-                if(act) actions[act] = (actions[act]||0)+1;
-            });
+            appState.rawData.forEach(r => { if(r.cr714_action) actions[r.cr714_action] = (actions[r.cr714_action]||0)+1; });
             if(rptChart1) rptChart1.destroy();
             rptChart1 = new Chart(document.getElementById('rpt-chartActions'), { type: 'doughnut', data: { labels: Object.keys(actions), datasets:[{ data: Object.values(actions), backgroundColor: ['#0ea5e9','#6366f1','#8b5cf6','#f43f5e'] }] }, options:{maintainAspectRatio:false, plugins:{legend:{position:'right'}}} });
-
             const topReps = Object.entries(appState.groupedData).sort((a,b)=>b[1]-a[1]).slice(0,8);
             if(rptChart2) rptChart2.destroy();
             rptChart2 = new Chart(document.getElementById('rpt-chartTopReps'), { type: 'bar', data: { labels: topReps.map(i=>i[0]), datasets:[{ label:'Records', data: topReps.map(i=>i[1]), backgroundColor: '#0284c7' }] }, options:{maintainAspectRatio:false} });
         }
 
-        // --- MANAGER MODAL (MGR) ---
         window.showManagerDash = function() { 
             document.getElementById('manager-modal').classList.add('active'); 
             document.getElementById('mgr-total').innerText = appState.rawData.length.toLocaleString();
             document.getElementById('mgr-reps').innerText = Object.keys(appState.groupedData).length;
             document.getElementById('mgr-critical').innerText = appState.rawData.filter(r=>r.cr714_recordstatus==='Help').length;
-            
             const actions = {};
-            appState.rawData.forEach(r => {
-                const act = r.cr714_action;
-                if(act) actions[act] = (actions[act]||0)+1;
-            });
+            appState.rawData.forEach(r => { if(r.cr714_action) actions[r.cr714_action] = (actions[r.cr714_action]||0)+1; });
             if(mgrChart1) mgrChart1.destroy();
             mgrChart1 = new Chart(document.getElementById('mgr-chartActions'), { type: 'doughnut', data: { labels: Object.keys(actions), datasets:[{ data: Object.values(actions), backgroundColor: ['#0ea5e9','#6366f1','#8b5cf6','#f43f5e'] }] }, options:{maintainAspectRatio:false, plugins:{legend:{position:'right'}}} });
-
             const topReps = Object.entries(appState.groupedData).sort((a,b)=>b[1]-a[1]).slice(0,8);
             if(mgrChart2) mgrChart2.destroy();
             mgrChart2 = new Chart(document.getElementById('mgr-chartTopReps'), { type: 'bar', data: { labels: topReps.map(i=>i[0]), datasets:[{ label:'Records', data: topReps.map(i=>i[1]), backgroundColor: '#0284c7' }] }, options:{maintainAspectRatio:false} });
@@ -646,7 +593,6 @@
             document.getElementById('inspector-modal').classList.add('active');
             const tbody = document.getElementById('inspector-table-body');
             tbody.innerHTML = "";
-            // Uses normalized key
             const records = appState.rawData.filter(r => normalizeName(r.cr714_rep) === normalizeName(source));
             records.forEach(r => {
                 const tr = document.createElement('tr');
