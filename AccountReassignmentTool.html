@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v42.15 (Instant Fix)</title>
+    <title>Daytona Reassignment v42.16 (Async Loader)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -68,9 +68,6 @@
         input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.15); }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
-        
-        #debug-footer { position: fixed; bottom: 0; right: 0; padding: 5px 10px; font-size: 10px; color: #ccc; cursor: pointer; z-index: 11000; }
-        #debug-footer:hover { color: #000; background: rgba(255,255,255,0.8); }
     </style>
 </head>
 <body>
@@ -158,7 +155,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.15</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.16</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -235,8 +232,6 @@
             </div>
         </div>
     </div>
-    
-    <div id="debug-footer" onclick="alert(JSON.stringify(appState.masterData.slice(0,2), null, 2))">DEBUG DATA</div>
 
     <script>
         const GLOBAL_ADMINS = ["Matt Bleakley", "Anslee Erickson", "Vanessa Parette"];
@@ -282,40 +277,56 @@
             const timer = setInterval(() => { if(progress < 90) { progress += 1; progressBar.style.width = `${progress}%`; } }, 100);
             window.clearSelection();
 
-            try {
-                // 1. Fetch ROWS (Available Items)
-                const rowsRes = await fetchWithRetry(GET_ROWS_URL, { repName: appState.user.name });
-                // We assume there's a list with 'Rep' or 'cr714_rep'
-                const rawRows = findArrayWithKey(rowsRes, 'cr714_rep') || findArrayWithKey(rowsRes, 'Rep') || [];
-                appState.masterData = rawRows.map(standardizeRow); // Clean & Standardize immediately
+            // 1. Kick off both requests in PARALLEL
+            const pRows = fetchWithRetry(GET_ROWS_URL, { repName: appState.user.name });
+            const pTotals = fetchWithRetry(GET_TOTALS_URL, {});
 
-                // 2. Fetch ROSTER (Status List)
+            try {
+                // 2. Await ROWS first (Critical Path)
+                // We show the UI as soon as we have the rows, we don't wait for totals
+                const rowsRes = await pRows;
+                const rawRows = findArrayWithKey(rowsRes, 'cr714_rep') || findArrayWithKey(rowsRes, 'Rep') || [];
+                appState.masterData = rawRows.map(standardizeRow);
+                
+                // Roster (if usually with rows)
                 const rawRoster = findArrayWithKey(rowsRes, 'cr714_status') || findArrayWithKey(rowsRes, 'Status') || [];
                 appState.roster = rawRoster.map(r => ({ name: r.cr714_name || r.cr714_rep || r.Rep, status: r.cr714_status || r.Status }));
 
-                // 3. Fetch TOTALS (Denominator)
-                let totalsRes = null;
-                try { totalsRes = await fetchWithRetry(GET_TOTALS_URL, {}); } catch(e) { console.warn("Totals skipped", e); }
-                const rawTotals = findArrayWithKey(totalsRes, 'Rep') || findArrayWithKey(totalsRes, 'rep') || [];
+                // RENDER IMMEDIATELY
+                processData(); 
+                clearInterval(timer); progressBar.style.width = '100%';
                 
-                // Build Totals Map
-                appState.totalsMap = {};
-                rawTotals.forEach(item => {
-                    const name = normalizeName(item.Rep || item.rep || "Unknown");
-                    appState.totalsMap[name] = (appState.totalsMap[name] || 0) + 1;
-                });
-                
-                appState.totalsLoaded = (Object.keys(appState.totalsMap).length > 0);
+                // Hide Loader
+                setTimeout(() => { 
+                    document.getElementById('global-loader').style.opacity = '0'; 
+                    setTimeout(() => { 
+                        document.getElementById('global-loader').style.display = 'none'; 
+                        document.getElementById('main-app-container').classList.remove('hidden'); 
+                    }, 500); 
+                }, 500);
 
                 if (appState.masterData.length > 0) {
                       showToast(`Loaded ${appState.masterData.length} accounts`, "info");
-                } else {
-                      showToast("Warning: 0 accounts loaded (Check DEBUG footer)", "error");
                 }
 
-                processData();
-                clearInterval(timer); progressBar.style.width = '100%';
-                setTimeout(() => { document.getElementById('global-loader').style.opacity = '0'; setTimeout(() => { document.getElementById('global-loader').style.display = 'none'; document.getElementById('main-app-container').classList.remove('hidden'); }, 500); }, 500);
+                // 3. Await TOTALS (Background Update)
+                try {
+                    const totalsRes = await pTotals;
+                    const rawTotals = findArrayWithKey(totalsRes, 'Rep') || findArrayWithKey(totalsRes, 'rep') || [];
+                    
+                    appState.totalsMap = {};
+                    rawTotals.forEach(item => {
+                        const name = normalizeName(item.Rep || item.rep || "Unknown");
+                        appState.totalsMap[name] = (appState.totalsMap[name] || 0) + 1;
+                    });
+                    
+                    appState.totalsLoaded = true;
+                    // RE-RENDER with Totals
+                    processData();
+                    showToast("Totals Loaded", "info");
+                } catch(e) {
+                    console.warn("Totals skipped/failed", e);
+                }
 
             } catch (e) {
                 console.error(e);
@@ -323,22 +334,17 @@
             }
         }
 
-        // --- RECURSIVE DATA FINDER (Fixes 'Where is my array?') ---
+        // --- RECURSIVE DATA FINDER ---
         function findArrayWithKey(obj, key) {
             if (!obj) return null;
-            // Handle stringified JSON (Double serialization common in Power Automate)
             if (typeof obj === 'string') { try { obj = JSON.parse(obj); } catch(e) { return null; } }
             
             if (Array.isArray(obj)) {
-                // Check if this array contains objects with the key we want
                 if (obj.length > 0 && obj[0] && typeof obj[0] === 'object' && key in obj[0]) return obj;
-                // Recursive search inside array items (rare but possible)
                 for (let item of obj) { const found = findArrayWithKey(item, key); if (found) return found; }
             } else if (typeof obj === 'object') {
-                // Check common wrapper properties
                 if (obj.body) { const f = findArrayWithKey(obj.body, key); if(f) return f; }
                 if (obj.value) { const f = findArrayWithKey(obj.value, key); if(f) return f; }
-                // Deep search in object values
                 for (let k in obj) {
                     if (typeof obj[k] === 'object') {
                         const found = findArrayWithKey(obj[k], key);
@@ -349,7 +355,7 @@
             return null;
         }
 
-        // --- STANDARDIZATION (Fixes 'cr714_' vs 'Rep') ---
+        // --- STANDARDIZATION ---
         function standardizeRow(r) {
             return {
                 id: r.cr714_id || r.cr714_accountnumber || r.AccountNum || "",
@@ -363,30 +369,17 @@
             };
         }
 
-        // --- ROBUST RETRY & POLLING LOGIC ---
+        // --- FETCH UTILS ---
         async function fetchWithRetry(url, payload, retries = 3) {
             let locationUrl = null;
             for (let i = 0; i < retries; i++) {
                 try {
-                    console.log(`Attempting trigger ${i+1}/${retries}...`);
                     const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-
-                    if (res.status === 502 || res.status === 504) {
-                         if(i === retries - 1) throw new Error("Server Timeout");
-                         await new Promise(r => setTimeout(r, 5000)); continue;
-                    }
-                    if (res.status === 202) {
-                        locationUrl = res.headers.get('location');
-                        break; 
-                    } else if (res.ok) {
-                        return await res.json(); 
-                    } else {
-                        throw new Error(`Trigger failed: ${res.status}`);
-                    }
-                } catch (err) {
-                    if (i === retries - 1) throw err;
-                    await new Promise(r => setTimeout(r, 2000));
-                }
+                    if (res.status === 202) { locationUrl = res.headers.get('location'); break; } 
+                    else if (res.ok) return await res.json(); 
+                    if (res.status >= 500 && i < retries - 1) { await new Promise(r => setTimeout(r, 2000)); continue; }
+                    throw new Error(`Trigger failed: ${res.status}`);
+                } catch (err) { if (i === retries - 1) throw err; await new Promise(r => setTimeout(r, 2000)); }
             }
             if (!locationUrl) return {};
             return await pollForResults(locationUrl);
@@ -399,27 +392,20 @@
                     const res = await fetch(url);
                     if (res.status === 200) return await res.json();
                     else if (res.status === 202) await new Promise(r => setTimeout(r, POLL_INTERVAL));
-                    else if (res.status === 502 || res.status === 504) await new Promise(r => setTimeout(r, ERROR_BACKOFF));
+                    else if (res.status >= 500) await new Promise(r => setTimeout(r, ERROR_BACKOFF));
                     else throw new Error(`Polling failed: ${res.status}`);
-                } catch (e) {
-                    await new Promise(r => setTimeout(r, ERROR_BACKOFF));
-                }
+                } catch (e) { await new Promise(r => setTimeout(r, ERROR_BACKOFF)); }
             }
         }
 
+        // --- APP LOGIC ---
         window.processData = function() {
-            // Remove delays to make UI responsive immediately
             appState.groupedData = {};
             const filterAction = document.getElementById('action-filter').value;
             
-            // Filter the Master Data (Clean Keys)
-            if (filterAction === "All") {
-                appState.filteredData = appState.masterData;
-            } else {
-                appState.filteredData = appState.masterData.filter(r => r.action === filterAction);
-            }
+            if (filterAction === "All") appState.filteredData = appState.masterData;
+            else appState.filteredData = appState.masterData.filter(r => r.action === filterAction);
 
-            // Group by Rep
             appState.filteredData.forEach(r => { 
                 const name = normalizeName(r.rep); 
                 appState.groupedData[name] = (appState.groupedData[name] || 0) + 1; 
@@ -440,7 +426,6 @@
             const targetSel = document.getElementById('target-rep-select');
             if (targetSel.options.length <= 1) {
                 let targetList = [];
-                // Use Roster if available, otherwise derive from master data
                 if(appState.roster && appState.roster.length > 0) {
                     targetList = appState.roster.filter(r => r.status == 1 || r.status == 0).map(r => r.name);
                 } else {
@@ -457,9 +442,7 @@
         }
 
         window.renderRepList = function() {
-            // Instant render
             const listEl = document.getElementById('rep-list');
-            // Clear existing content first to avoid duplicates or stale data
             listEl.innerHTML = "";
             
             const search = document.getElementById('search-input').value.toLowerCase();
@@ -469,7 +452,6 @@
             let keys = Object.keys(appState.groupedData);
             if (search) keys = keys.filter(k => k.toLowerCase().includes(search));
             
-            // Sort
             keys.sort((a,b) => {
                 const va = appState.groupedData[a], vb = appState.groupedData[b];
                 const ta = appState.totalsMap[a] || 0, tb = appState.totalsMap[b] || 0;
@@ -487,11 +469,11 @@
 
             for(let i=0; i<limit; i++) {
                 const repName = keys[i];
-                const count = appState.groupedData[repName]; // Numerator
-                const total = appState.totalsMap[repName] || 0; // Denominator
+                const count = appState.groupedData[repName]; 
+                const total = appState.totalsMap[repName] || 0; 
                 
-                let pctHtml = '<span class="stat-badge neutral">N/A</span>';
-                let totalHtml = '<span class="text-gray-300">---</span>';
+                let pctHtml = '<span class="stat-badge neutral">...</span>';
+                let totalHtml = '<span class="text-gray-300">...</span>';
                 
                 if (appState.totalsLoaded) {
                      if (total > 0) {
@@ -501,13 +483,9 @@
                         totalHtml = total.toLocaleString();
                         pctHtml = `<span class="stat-badge ${donePct >= 100 ? 'good' : 'critical'}">${donePct}% Done</span>`;
                     } else {
-                        // Loaded but no total found (likely 0 total book)
                          totalHtml = "0";
                          pctHtml = `<span class="stat-badge good">100% Done</span>`;
                     }
-                } else {
-                    // Loading state
-                    totalHtml = `<span class="skeleton"></span>`;
                 }
 
                 const safeName = repName.replace(/'/g, "\\'");
@@ -530,15 +508,21 @@
             document.getElementById('source-rep-display').value = name;
             
             document.getElementById('stat-avail').innerText = avail.toLocaleString();
-            document.getElementById('stat-total').innerText = total ? total.toLocaleString() : "-";
             
-            let pct = "0%";
-            if(total > 0) {
-                let p = Math.round(100 - ((avail/total)*100));
-                if(p<0) p=0; if(p>100) p=100;
-                pct = p+"%";
+            // Handle Totals Loading state
+            if(appState.totalsLoaded) {
+                document.getElementById('stat-total').innerText = total ? total.toLocaleString() : "-";
+                let pct = "0%";
+                if(total > 0) {
+                    let p = Math.round(100 - ((avail/total)*100));
+                    if(p<0) p=0; if(p>100) p=100;
+                    pct = p+"%";
+                }
+                document.getElementById('stat-pct').innerText = pct;
+            } else {
+                document.getElementById('stat-total').innerText = "...";
+                document.getElementById('stat-pct').innerText = "...";
             }
-            document.getElementById('stat-pct').innerText = pct;
             
             document.getElementById('transfer-count').max = avail;
             document.getElementById('transfer-count').placeholder = `Max: ${avail}`;
