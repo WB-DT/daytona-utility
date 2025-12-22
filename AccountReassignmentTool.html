@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v42.17 (Large Dataset Opt)</title>
+    <title>Daytona Reassignment v42.19 (Strict Wait)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -20,7 +20,7 @@
         .loader-spinner { width: 50px; height: 50px; border: 5px solid #e0f2fe; border-top: 5px solid #0284c7; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 1.5rem auto; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         .progress-track { width: 100%; height: 8px; background: #e2e8f0; border-radius: 99px; overflow: hidden; margin-top: 1rem; }
-        .progress-fill { height: 100%; background: #0284c7; width: 0%; transition: width 0.5s ease; }
+        .progress-fill { height: 100%; background: #0284c7; width: 0%; transition: width 0.2s ease; }
 
         .skeleton { background: #e2e8f0; border-radius: 4px; display: inline-block; width: 30px; height: 12px; animation: pulse 1.5s infinite; }
         @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
@@ -68,6 +68,9 @@
         input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.15); }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        
+        #debug-footer { position: fixed; bottom: 0; right: 0; padding: 5px 10px; font-size: 10px; color: #ccc; cursor: pointer; z-index: 11000; }
+        #debug-footer:hover { color: #000; background: rgba(255,255,255,0.8); }
     </style>
 </head>
 <body>
@@ -76,9 +79,9 @@
         <div class="loader-card">
             <div class="loader-spinner"></div>
             <h1 class="text-2xl font-bold text-gray-800">Daytona Reassignment</h1>
-            <p class="text-sm text-gray-500 mb-4" id="loading-status-text">Downloading large dataset...</p>
+            <p class="text-sm text-gray-500 mb-4" id="loading-status-text">Synchronizing Data...</p>
             <div class="progress-track"><div id="loading-progress-bar" class="progress-fill"></div></div>
-            <p class="text-xs text-gray-400 mt-2">This usually takes about 90 seconds. Please wait.</p>
+            <p class="text-xs text-gray-400 mt-2">Waiting for Rows and Totals (approx. 90s)...</p>
         </div>
     </div>
 
@@ -155,7 +158,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.17</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.19</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -232,6 +235,8 @@
             </div>
         </div>
     </div>
+    
+    <div id="debug-footer" onclick="alert(JSON.stringify(appState.masterData.slice(0,2), null, 2))">DEBUG DATA</div>
 
     <script>
         const GLOBAL_ADMINS = ["Matt Bleakley", "Anslee Erickson", "Vanessa Parette"];
@@ -273,71 +278,74 @@
             const progressBar = document.getElementById('loading-progress-bar');
             document.getElementById('global-loader').style.display = 'flex';
             document.getElementById('global-loader').style.opacity = '1';
+            
+            // 1. Asymptotic Progress Bar (Zeno's Paradox style)
+            // It will move quickly at first, then slow down, but never hit 100% until we say so.
             let progress = 0; 
-            // V42.17: Slowed down timer to 1000ms (1 second) interval to match 90s load time
-            const timer = setInterval(() => { if(progress < 90) { progress += 1; progressBar.style.width = `${progress}%`; } }, 1000);
+            const timer = setInterval(() => { 
+                if (progress < 50) progress += 2; // Fast start
+                else if (progress < 80) progress += 0.5; // Slow down
+                else if (progress < 95) progress += 0.1; // Crawl
+                // Cap at 95%
+                if (progress > 95) progress = 95;
+                progressBar.style.width = `${progress}%`; 
+            }, 200); 
+            
             window.clearSelection();
 
-            // 1. Kick off both requests in PARALLEL
-            const pRows = fetchWithRetry(GET_ROWS_URL, { repName: appState.user.name });
-            const pTotals = fetchWithRetry(GET_TOTALS_URL, {});
+            // 2. Fetch Both Sources (Cache Busted)
+            const ts = Date.now();
+            const pRows = fetchWithRetry(GET_ROWS_URL + `&t=${ts}`, { repName: appState.user.name });
+            const pTotals = fetchWithRetry(GET_TOTALS_URL + `&t=${ts}`, {});
 
             try {
-                // 2. Await ROWS first (Critical Path)
-                // We show the UI as soon as we have the rows, we don't wait for totals
-                const rowsRes = await pRows;
-                
-                // DEFER HEAVY PROCESSING TO AVOID UI FREEZE
+                // 3. WAIT FOR BOTH (Strict)
+                // We use Promise.all to ensure we don't render partial data
+                const [rowsRes, totalsRes] = await Promise.all([pRows, pTotals]);
+
+                // 4. Data Processing (Deferred to let UI breathe)
                 setTimeout(() => {
+                    // Extract Rows
                     const rawRows = findArrayWithKey(rowsRes, 'cr714_rep') || findArrayWithKey(rowsRes, 'Rep') || [];
                     appState.masterData = rawRows.map(standardizeRow);
                     
-                    // Roster (if usually with rows)
+                    // Extract Roster
                     const rawRoster = findArrayWithKey(rowsRes, 'cr714_status') || findArrayWithKey(rowsRes, 'Status') || [];
                     appState.roster = rawRoster.map(r => ({ name: r.cr714_name || r.cr714_rep || r.Rep, status: r.cr714_status || r.Status }));
 
-                    // RENDER IMMEDIATELY
+                    // Extract Totals
+                    const rawTotals = findArrayWithKey(totalsRes, 'Rep') || findArrayWithKey(totalsRes, 'rep') || [];
+                    appState.totalsMap = {};
+                    rawTotals.forEach(item => {
+                        const name = normalizeName(item.Rep || item.rep || "Unknown");
+                        appState.totalsMap[name] = (appState.totalsMap[name] || 0) + 1;
+                    });
+                    appState.totalsLoaded = true;
+
+                    // 5. Complete Progress Bar
+                    clearInterval(timer);
+                    progressBar.style.width = '100%';
+
+                    // 6. Render & Dismiss Loader (with slight delay for "100%" visual)
                     processData(); 
-                    clearInterval(timer); progressBar.style.width = '100%';
-                    
-                    // Hide Loader
+                    if (appState.masterData.length > 0) showToast(`Loaded ${appState.masterData.length} accounts`, "info");
+                    else showToast("Warning: 0 accounts loaded", "error");
+
                     setTimeout(() => { 
                         document.getElementById('global-loader').style.opacity = '0'; 
                         setTimeout(() => { 
                             document.getElementById('global-loader').style.display = 'none'; 
                             document.getElementById('main-app-container').classList.remove('hidden'); 
                         }, 500); 
-                    }, 500);
+                    }, 600);
 
-                    if (appState.masterData.length > 0) {
-                          showToast(`Loaded ${appState.masterData.length} accounts`, "info");
-                    }
-                }, 50);
-
-                // 3. Await TOTALS (Background Update)
-                try {
-                    const totalsRes = await pTotals;
-                    setTimeout(() => {
-                        const rawTotals = findArrayWithKey(totalsRes, 'Rep') || findArrayWithKey(totalsRes, 'rep') || [];
-                        
-                        appState.totalsMap = {};
-                        rawTotals.forEach(item => {
-                            const name = normalizeName(item.Rep || item.rep || "Unknown");
-                            appState.totalsMap[name] = (appState.totalsMap[name] || 0) + 1;
-                        });
-                        
-                        appState.totalsLoaded = true;
-                        // RE-RENDER with Totals
-                        processData();
-                        showToast("Totals Loaded", "info");
-                    }, 100);
-                } catch(e) {
-                    console.warn("Totals skipped/failed", e);
-                }
+                }, 100);
 
             } catch (e) {
                 console.error(e);
-                clearInterval(timer); progressBar.style.backgroundColor = '#ef4444'; showToast("Failed to load data.", "error");
+                clearInterval(timer); 
+                progressBar.style.backgroundColor = '#ef4444'; 
+                showToast("Failed to load data.", "error");
             }
         }
 
