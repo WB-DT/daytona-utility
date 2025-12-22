@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v42.1 (Stable)</title>
+    <title>Daytona Reassignment v42.3 (Schema Fix)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -152,7 +152,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.1</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.2</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -282,8 +282,14 @@
                 let totalsRaw = null;
                 try { totalsRaw = await fetchWithRetry(GET_TOTALS_URL, {}); } catch(e) { console.warn("Totals skipped", e); }
 
-                // PARSE
-                appState.rawData = findArrayWithKey(rowsData, 'cr714_id') || findArrayWithKey(rowsData, 'cr714_accountnumber') || [];
+                // PARSE - IMPROVED FALLBACK LOGIC
+                // 1. Try finding specific Dataverse IDs
+                // 2. Try finding generic "Rep" keys (in case Flow returns flat object)
+                appState.rawData = findArrayWithKey(rowsData, 'cr714_id') || 
+                                   findArrayWithKey(rowsData, 'cr714_accountnumber') || 
+                                   findArrayWithKey(rowsData, 'Rep') || 
+                                   [];
+                
                 appState.roster = findArrayWithKey(rowsData, 'cr714_status') || []; 
                 appState.totalsData = findArrayWithKey(totalsRaw, 'Rep') || findArrayWithKey(totalsRaw, 'rep') || [];
                 
@@ -395,11 +401,13 @@
             // Available Work Filter
             let filteredRows = appState.rawData;
             if (filterAction !== "All") {
-                 filteredRows = appState.rawData.filter(r => r.cr714_action === filterAction);
+                 filteredRows = appState.rawData.filter(r => (r.cr714_action || r.Action) === filterAction);
             }
 
             filteredRows.forEach(r => { 
-                const name = normalizeName(r.cr714_rep); 
+                // Fix: Handle both "cr714_rep" (Dataverse) and "Rep" (Summary) keys
+                const repVal = r.cr714_rep || r.Rep;
+                const name = normalizeName(repVal); 
                 appState.groupedData[name] = (appState.groupedData[name] || 0) + 1; 
             });
             
@@ -412,7 +420,10 @@
             const s2 = document.getElementById('transfer-action-filter');
             if (s1.options.length <= 1) {
                 const actions = new Set();
-                appState.rawData.forEach(r => { if(r.cr714_action) actions.add(r.cr714_action); });
+                appState.rawData.forEach(r => { 
+                    const act = r.cr714_action || r.Action;
+                    if(act) actions.add(act); 
+                });
                 Array.from(actions).sort().forEach(a => { s1.innerHTML += `<option value="${a}">${a}</option>`; s2.innerHTML += `<option value="${a}">${a}</option>`; });
             }
             
@@ -422,7 +433,8 @@
                 if(appState.roster && appState.roster.length > 0) {
                     targetList = appState.roster.filter(r => r.cr714_status == 1).map(r => r.cr714_name);
                 } else {
-                    targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep)));
+                    // Fallback to Reps in the data if roster is missing
+                    targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep || r.Rep)));
                 }
                 targetList.sort().forEach(r => { if(r) targetSel.innerHTML += `<option value="${r}">${r}</option>`; });
             }
@@ -574,7 +586,7 @@
 
         window.exportCSV = function() {
             if(appState.rawData.length === 0) return showToast("No data to export", "error");
-            let csv = "ID,Company,Rep,Action,Status,Contact,Phone,Email,Notes\n" + appState.rawData.map(r => `"${r.cr714_id}","${r.cr714_company}","${r.cr714_rep}","${r.cr714_action}","${r.cr714_recordstatus}","${r.cr714_namemost||''}","${r.cr714_primaryphone||''}","${r.cr714_emailmost||''}","${(r.cr714_qbnotes||"").substring(0,50)}"`).join("\n");
+            let csv = "ID,Company,Rep,Action,Status,Contact,Phone,Email,Notes\n" + appState.rawData.map(r => `"${r.cr714_id||''}","${r.cr714_company||''}","${r.cr714_rep||r.Rep||''}","${r.cr714_action||r.Action||''}","${r.cr714_recordstatus||''}","${r.cr714_namemost||''}","${r.cr714_primaryphone||''}","${r.cr714_emailmost||''}","${(r.cr714_qbnotes||"").substring(0,50)}"`).join("\n");
             const a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,' + encodeURI(csv); a.download = `Daytona_Export.csv`; a.click();
             showToast("Export Started", "success");
         }
@@ -587,7 +599,10 @@
             document.getElementById('rpt-critical').innerText = appState.rawData.filter(r=>r.cr714_recordstatus==='Help').length;
             
             const actions = {};
-            appState.rawData.forEach(r => actions[r.cr714_action] = (actions[r.cr714_action]||0)+1);
+            appState.rawData.forEach(r => {
+                const act = r.cr714_action || r.Action;
+                if(act) actions[act] = (actions[act]||0)+1;
+            });
             if(rptChart1) rptChart1.destroy();
             rptChart1 = new Chart(document.getElementById('rpt-chartActions'), { type: 'doughnut', data: { labels: Object.keys(actions), datasets:[{ data: Object.values(actions), backgroundColor: ['#0ea5e9','#6366f1','#8b5cf6','#f43f5e'] }] }, options:{maintainAspectRatio:false, plugins:{legend:{position:'right'}}} });
 
@@ -604,7 +619,10 @@
             document.getElementById('mgr-critical').innerText = appState.rawData.filter(r=>r.cr714_recordstatus==='Help').length;
             
             const actions = {};
-            appState.rawData.forEach(r => actions[r.cr714_action] = (actions[r.cr714_action]||0)+1);
+            appState.rawData.forEach(r => {
+                const act = r.cr714_action || r.Action;
+                if(act) actions[act] = (actions[act]||0)+1;
+            });
             if(mgrChart1) mgrChart1.destroy();
             mgrChart1 = new Chart(document.getElementById('mgr-chartActions'), { type: 'doughnut', data: { labels: Object.keys(actions), datasets:[{ data: Object.values(actions), backgroundColor: ['#0ea5e9','#6366f1','#8b5cf6','#f43f5e'] }] }, options:{maintainAspectRatio:false, plugins:{legend:{position:'right'}}} });
 
@@ -620,10 +638,10 @@
             document.getElementById('inspector-modal').classList.add('active');
             const tbody = document.getElementById('inspector-table-body');
             tbody.innerHTML = "";
-            const records = appState.rawData.filter(r => normalizeName(r.cr714_rep) === normalizeName(source));
+            const records = appState.rawData.filter(r => normalizeName(r.cr714_rep || r.Rep) === normalizeName(source));
             records.forEach(r => {
                 const tr = document.createElement('tr');
-                tr.innerHTML = `<td class="font-mono text-blue-600">${r.cr714_id}</td><td>${r.cr714_company}</td><td>${r.cr714_action||'-'}</td><td><span class="stat-badge ${r.cr714_recordstatus==='Help'?'critical':'good'}">${r.cr714_recordstatus||'Normal'}</span></td><td class="text-xs text-gray-500 max-w-xs truncate">${(r.cr714_qbnotes||"").substring(0,40)}</td><td><button onclick="downloadAx('${r.cr714_id}')" class="text-xs bg-blue-100 text-blue-800 px-2 rounded hover:bg-blue-200">AX</button></td>`;
+                tr.innerHTML = `<td class="font-mono text-blue-600">${r.cr714_id || '-'}</td><td>${r.cr714_company || '-'}</td><td>${r.cr714_action||r.Action||'-'}</td><td><span class="stat-badge ${r.cr714_recordstatus==='Help'?'critical':'good'}">${r.cr714_recordstatus||'Normal'}</span></td><td class="text-xs text-gray-500 max-w-xs truncate">${(r.cr714_qbnotes||"").substring(0,40)}</td><td><button onclick="downloadAx('${r.cr714_id}')" class="text-xs bg-blue-100 text-blue-800 px-2 rounded hover:bg-blue-200">AX</button></td>`;
                 tbody.appendChild(tr);
             });
         }
