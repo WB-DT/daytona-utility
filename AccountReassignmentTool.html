@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v42.3 (Schema Fix)</title>
+    <title>Daytona Reassignment v42.3 (Auto-Mapper)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -152,7 +152,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.2</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.3</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -282,16 +282,19 @@
                 let totalsRaw = null;
                 try { totalsRaw = await fetchWithRetry(GET_TOTALS_URL, {}); } catch(e) { console.warn("Totals skipped", e); }
 
-                // PARSE - IMPROVED FALLBACK LOGIC
-                // 1. Try finding specific Dataverse IDs
-                // 2. Try finding generic "Rep" keys (in case Flow returns flat object)
-                appState.rawData = findArrayWithKey(rowsData, 'cr714_id') || 
-                                   findArrayWithKey(rowsData, 'cr714_accountnumber') || 
-                                   findArrayWithKey(rowsData, 'Rep') || 
-                                   [];
+                // PARSE & NORMALIZE
+                let rawList = findArrayWithKey(rowsData, 'cr714_id') || 
+                              findArrayWithKey(rowsData, 'cr714_accountnumber') || 
+                              findArrayWithKey(rowsData, 'Rep') || 
+                              [];
                 
+                appState.rawData = normalizeData(rawList); // FORCE NORMALIZATION
+
                 appState.roster = findArrayWithKey(rowsData, 'cr714_status') || []; 
-                appState.totalsData = findArrayWithKey(totalsRaw, 'Rep') || findArrayWithKey(totalsRaw, 'rep') || [];
+                
+                // Normalize totals as well just in case
+                let rawTotals = findArrayWithKey(totalsRaw, 'Rep') || findArrayWithKey(totalsRaw, 'rep') || [];
+                appState.totalsData = normalizeData(rawTotals);
                 
                 appState.totalsLoaded = (appState.totalsData.length > 0);
 
@@ -300,16 +303,34 @@
                 setTimeout(() => { document.getElementById('global-loader').style.opacity = '0'; setTimeout(() => { document.getElementById('global-loader').style.display = 'none'; document.getElementById('main-app-container').classList.remove('hidden'); }, 500); }, 500);
 
             } catch (e) {
+                console.error(e);
                 clearInterval(timer); progressBar.style.backgroundColor = '#ef4444'; showToast("Failed to load data.", "error");
             }
+        }
+
+        // --- DATA NORMALIZER (THE FIX) ---
+        function normalizeData(data) {
+            if (!Array.isArray(data)) return [];
+            return data.map(item => {
+                // Return a copy of the object, ensuring the standard keys exist
+                return {
+                    ...item,
+                    // If cr714_rep is missing, try 'Rep'
+                    cr714_rep: item.cr714_rep || item.Rep || "Unknown",
+                    // If cr714_action is missing, try 'Action'
+                    cr714_action: item.cr714_action || item.Action || "No Action",
+                    // Preserve other fields or set defaults if needed for the table
+                    cr714_id: item.cr714_id || item.Id || "-",
+                    cr714_company: item.cr714_company || item.Company || "Unknown Company",
+                    cr714_recordstatus: item.cr714_recordstatus || item.Status || "Active"
+                };
+            });
         }
 
         // --- NEW ROBUST RETRY & POLLING LOGIC ---
         
         async function fetchWithRetry(url, payload, retries = 3) {
-            // STEP 1: INITIAL TRIGGER
             let locationUrl = null;
-            
             for (let i = 0; i < retries; i++) {
                 try {
                     console.log(`Attempting trigger ${i+1}/${retries}...`);
@@ -319,11 +340,10 @@
                         body: JSON.stringify(payload) 
                     });
 
-                    // Handle Gateway Timeout during trigger phase
                     if (res.status === 502 || res.status === 504) {
                          if(i === retries - 1) throw new Error("Server Timeout (Trigger Phase)");
                          console.warn("Gateway timeout during trigger. Retrying...");
-                         await new Promise(r => setTimeout(r, 5000)); // Wait 5s before retrying trigger
+                         await new Promise(r => setTimeout(r, 5000)); 
                          continue;
                     }
                     
@@ -332,7 +352,7 @@
                         console.log("Trigger successful (202). Location received.");
                         break; 
                     } else if (res.ok) {
-                        return await res.json(); // Synchronous success
+                        return await res.json(); 
                     } else {
                         throw new Error(`Trigger failed with status: ${res.status}`);
                     }
@@ -343,14 +363,12 @@
             }
 
             if (!locationUrl) return {};
-
-            // STEP 2: POLLING FOR RESULTS (Handles 502/504 Gracefully)
             return await pollForResults(locationUrl);
         }
 
         async function pollForResults(url) {
-            const POLL_INTERVAL = 3000;   // Check every 3 seconds
-            const ERROR_BACKOFF = 15000;  // If 502, wait 15 seconds
+            const POLL_INTERVAL = 3000;   
+            const ERROR_BACKOFF = 15000;  
             
             console.log("Starting polling sequence...");
             
@@ -362,21 +380,16 @@
                         console.log("Polling complete (200 OK).");
                         return await res.json();
                     } else if (res.status === 202) {
-                        // Still running
                         console.log("Still running (202)...");
                         await new Promise(r => setTimeout(r, POLL_INTERVAL));
                     } else if (res.status === 502 || res.status === 504) {
-                        // Gateway Timeout - Wait longer then retry
                         console.warn(`Gateway Timeout (${res.status}). Backing off for 15s...`);
                         await new Promise(r => setTimeout(r, ERROR_BACKOFF));
                     } else {
-                        // Fatal error
                         throw new Error(`Polling failed with status: ${res.status}`);
                     }
                 } catch (e) {
                     console.error("Network error during polling", e);
-                    // Decide if you want to throw or keep trying. 
-                    // For safety, we wait a bit and try again (network blip)
                     await new Promise(r => setTimeout(r, ERROR_BACKOFF));
                 }
             }
@@ -385,7 +398,7 @@
         function findArrayWithKey(obj, key) {
             if (!obj) return null;
             if (Array.isArray(obj)) {
-                if (obj.length > 0 && obj[0] && Object.prototype.hasOwnProperty.call(obj[0], key)) return obj;
+                if (obj.length > 0 && obj[0] && (Object.prototype.hasOwnProperty.call(obj[0], key) || Object.prototype.hasOwnProperty.call(obj[0], 'Rep'))) return obj;
                 for (let item of obj) { const found = findArrayWithKey(item, key); if (found) return found; }
             } else if (typeof obj === 'object') {
                 if (obj.body) { const foundInBody = findArrayWithKey(obj.body, key); if (foundInBody) return foundInBody; }
@@ -398,16 +411,14 @@
             appState.groupedData = {};
             const filterAction = document.getElementById('action-filter').value;
             
-            // Available Work Filter
+            // Available Work Filter (Now safely uses cr714_action thanks to normalization)
             let filteredRows = appState.rawData;
             if (filterAction !== "All") {
-                 filteredRows = appState.rawData.filter(r => (r.cr714_action || r.Action) === filterAction);
+                 filteredRows = appState.rawData.filter(r => r.cr714_action === filterAction);
             }
 
             filteredRows.forEach(r => { 
-                // Fix: Handle both "cr714_rep" (Dataverse) and "Rep" (Summary) keys
-                const repVal = r.cr714_rep || r.Rep;
-                const name = normalizeName(repVal); 
+                const name = normalizeName(r.cr714_rep); 
                 appState.groupedData[name] = (appState.groupedData[name] || 0) + 1; 
             });
             
@@ -421,8 +432,7 @@
             if (s1.options.length <= 1) {
                 const actions = new Set();
                 appState.rawData.forEach(r => { 
-                    const act = r.cr714_action || r.Action;
-                    if(act) actions.add(act); 
+                    if(r.cr714_action) actions.add(r.cr714_action); 
                 });
                 Array.from(actions).sort().forEach(a => { s1.innerHTML += `<option value="${a}">${a}</option>`; s2.innerHTML += `<option value="${a}">${a}</option>`; });
             }
@@ -433,8 +443,7 @@
                 if(appState.roster && appState.roster.length > 0) {
                     targetList = appState.roster.filter(r => r.cr714_status == 1).map(r => r.cr714_name);
                 } else {
-                    // Fallback to Reps in the data if roster is missing
-                    targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep || r.Rep)));
+                    targetList = Array.from(new Set(appState.rawData.map(r => r.cr714_rep)));
                 }
                 targetList.sort().forEach(r => { if(r) targetSel.innerHTML += `<option value="${r}">${r}</option>`; });
             }
@@ -470,7 +479,7 @@
             document.getElementById('rep-count-badge').innerText = keys.length;
 
             keys.forEach(repName => {
-                const count = appState.groupedData[repName]; // Available (Filtered)
+                const count = appState.groupedData[repName]; 
                 const total = getTotalForRep(repName, actionFilter);
                 
                 let pctHtml = '<span class="stat-badge neutral">N/A</span>';
@@ -494,18 +503,15 @@
         }
         
         function getTotalForRep(repName, filter) {
-            // Context-Aware Total Calculation
             if(!appState.totalsData) return 0;
             
-            // Filter the master totals list for this rep
-            const repTotals = appState.totalsData.filter(t => normalizeName(t.Rep || t.rep) === normalizeName(repName));
+            // Uses normalized key cr714_rep
+            const repTotals = appState.totalsData.filter(t => normalizeName(t.cr714_rep) === normalizeName(repName));
             
             if (filter === "All") {
-                 // Sum of ALL actions in the book
                  return repTotals.length;
             } else {
-                 // Sum of ONLY the specific action in the book
-                 return repTotals.filter(t => (t.Action || t.action) === filter).length;
+                 return repTotals.filter(t => t.cr714_action === filter).length;
             }
         }
 
@@ -586,7 +592,8 @@
 
         window.exportCSV = function() {
             if(appState.rawData.length === 0) return showToast("No data to export", "error");
-            let csv = "ID,Company,Rep,Action,Status,Contact,Phone,Email,Notes\n" + appState.rawData.map(r => `"${r.cr714_id||''}","${r.cr714_company||''}","${r.cr714_rep||r.Rep||''}","${r.cr714_action||r.Action||''}","${r.cr714_recordstatus||''}","${r.cr714_namemost||''}","${r.cr714_primaryphone||''}","${r.cr714_emailmost||''}","${(r.cr714_qbnotes||"").substring(0,50)}"`).join("\n");
+            // Uses normalized keys
+            let csv = "ID,Company,Rep,Action,Status,Contact,Phone,Email,Notes\n" + appState.rawData.map(r => `"${r.cr714_id||''}","${r.cr714_company||''}","${r.cr714_rep||''}","${r.cr714_action||''}","${r.cr714_recordstatus||''}","${r.cr714_namemost||''}","${r.cr714_primaryphone||''}","${r.cr714_emailmost||''}","${(r.cr714_qbnotes||"").substring(0,50)}"`).join("\n");
             const a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,' + encodeURI(csv); a.download = `Daytona_Export.csv`; a.click();
             showToast("Export Started", "success");
         }
@@ -599,8 +606,9 @@
             document.getElementById('rpt-critical').innerText = appState.rawData.filter(r=>r.cr714_recordstatus==='Help').length;
             
             const actions = {};
+            // Uses normalized key
             appState.rawData.forEach(r => {
-                const act = r.cr714_action || r.Action;
+                const act = r.cr714_action;
                 if(act) actions[act] = (actions[act]||0)+1;
             });
             if(rptChart1) rptChart1.destroy();
@@ -620,7 +628,7 @@
             
             const actions = {};
             appState.rawData.forEach(r => {
-                const act = r.cr714_action || r.Action;
+                const act = r.cr714_action;
                 if(act) actions[act] = (actions[act]||0)+1;
             });
             if(mgrChart1) mgrChart1.destroy();
@@ -638,10 +646,11 @@
             document.getElementById('inspector-modal').classList.add('active');
             const tbody = document.getElementById('inspector-table-body');
             tbody.innerHTML = "";
-            const records = appState.rawData.filter(r => normalizeName(r.cr714_rep || r.Rep) === normalizeName(source));
+            // Uses normalized key
+            const records = appState.rawData.filter(r => normalizeName(r.cr714_rep) === normalizeName(source));
             records.forEach(r => {
                 const tr = document.createElement('tr');
-                tr.innerHTML = `<td class="font-mono text-blue-600">${r.cr714_id || '-'}</td><td>${r.cr714_company || '-'}</td><td>${r.cr714_action||r.Action||'-'}</td><td><span class="stat-badge ${r.cr714_recordstatus==='Help'?'critical':'good'}">${r.cr714_recordstatus||'Normal'}</span></td><td class="text-xs text-gray-500 max-w-xs truncate">${(r.cr714_qbnotes||"").substring(0,40)}</td><td><button onclick="downloadAx('${r.cr714_id}')" class="text-xs bg-blue-100 text-blue-800 px-2 rounded hover:bg-blue-200">AX</button></td>`;
+                tr.innerHTML = `<td class="font-mono text-blue-600">${r.cr714_id || '-'}</td><td>${r.cr714_company || '-'}</td><td>${r.cr714_action||'-'}</td><td><span class="stat-badge ${r.cr714_recordstatus==='Help'?'critical':'good'}">${r.cr714_recordstatus||'Normal'}</span></td><td class="text-xs text-gray-500 max-w-xs truncate">${(r.cr714_qbnotes||"").substring(0,40)}</td><td><button onclick="downloadAx('${r.cr714_id}')" class="text-xs bg-blue-100 text-blue-800 px-2 rounded hover:bg-blue-200">AX</button></td>`;
                 tbody.appendChild(tr);
             });
         }
