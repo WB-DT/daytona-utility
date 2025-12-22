@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v42.0</title>
+    <title>Daytona Reassignment v42.1 (Stable)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -152,7 +152,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.0</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.1</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -270,7 +270,8 @@
             const progressBar = document.getElementById('loading-progress-bar');
             document.getElementById('global-loader').style.display = 'flex';
             document.getElementById('global-loader').style.opacity = '1';
-            let progress = 0; const timer = setInterval(() => { if(progress < 90) { progress += 1; progressBar.style.width = `${progress}%`; } }, 100);
+            let progress = 0; 
+            const timer = setInterval(() => { if(progress < 90) { progress += 1; progressBar.style.width = `${progress}%`; } }, 100);
             window.clearSelection();
 
             try {
@@ -297,25 +298,80 @@
             }
         }
 
-        // --- RETRY LOGIC (FIX FOR 502 ERRORS) ---
+        // --- NEW ROBUST RETRY & POLLING LOGIC ---
+        
         async function fetchWithRetry(url, payload, retries = 3) {
+            // STEP 1: INITIAL TRIGGER
+            let locationUrl = null;
+            
             for (let i = 0; i < retries; i++) {
                 try {
-                    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                    if(res.status === 502 || res.status === 504) {
-                         if(i === retries - 1) throw new Error("Server Timeout (502)");
-                         await new Promise(r => setTimeout(r, 2000)); // Wait before retry
+                    console.log(`Attempting trigger ${i+1}/${retries}...`);
+                    const res = await fetch(url, { 
+                        method: 'POST', 
+                        headers: { 'Content-Type': 'application/json' }, 
+                        body: JSON.stringify(payload) 
+                    });
+
+                    // Handle Gateway Timeout during trigger phase
+                    if (res.status === 502 || res.status === 504) {
+                         if(i === retries - 1) throw new Error("Server Timeout (Trigger Phase)");
+                         console.warn("Gateway timeout during trigger. Retrying...");
+                         await new Promise(r => setTimeout(r, 5000)); // Wait 5s before retrying trigger
                          continue;
                     }
+                    
                     if (res.status === 202) {
-                        const loc = res.headers.get('location');
-                        if(!loc) return {};
-                        let p = 0; while(p < 100) { await new Promise(r => setTimeout(r, 3000)); const r2 = await fetch(loc); if(r2.status === 200) return await r2.json(); p++; }
+                        locationUrl = res.headers.get('location');
+                        console.log("Trigger successful (202). Location received.");
+                        break; 
+                    } else if (res.ok) {
+                        return await res.json(); // Synchronous success
+                    } else {
+                        throw new Error(`Trigger failed with status: ${res.status}`);
                     }
-                    if (!res.ok) throw new Error(res.status);
-                    return await res.json();
                 } catch (err) {
                     if (i === retries - 1) throw err;
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+            }
+
+            if (!locationUrl) return {};
+
+            // STEP 2: POLLING FOR RESULTS (Handles 502/504 Gracefully)
+            return await pollForResults(locationUrl);
+        }
+
+        async function pollForResults(url) {
+            const POLL_INTERVAL = 3000;   // Check every 3 seconds
+            const ERROR_BACKOFF = 15000;  // If 502, wait 15 seconds
+            
+            console.log("Starting polling sequence...");
+            
+            while(true) {
+                try {
+                    const res = await fetch(url);
+                    
+                    if (res.status === 200) {
+                        console.log("Polling complete (200 OK).");
+                        return await res.json();
+                    } else if (res.status === 202) {
+                        // Still running
+                        console.log("Still running (202)...");
+                        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+                    } else if (res.status === 502 || res.status === 504) {
+                        // Gateway Timeout - Wait longer then retry
+                        console.warn(`Gateway Timeout (${res.status}). Backing off for 15s...`);
+                        await new Promise(r => setTimeout(r, ERROR_BACKOFF));
+                    } else {
+                        // Fatal error
+                        throw new Error(`Polling failed with status: ${res.status}`);
+                    }
+                } catch (e) {
+                    console.error("Network error during polling", e);
+                    // Decide if you want to throw or keep trying. 
+                    // For safety, we wait a bit and try again (network blip)
+                    await new Promise(r => setTimeout(r, ERROR_BACKOFF));
                 }
             }
         }
@@ -572,7 +628,7 @@
             });
         }
 
-        window.exportGridCSV = function() { window.exportCSV(); } 
+        window.exportGridCSV = function() { window.exportCSV(); } 
         window.downloadAx = function(id) { const blob = new Blob([AX_CONFIG], { type: 'application/x-axc' }); const url = window.URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `AX_${id}.axc`; document.body.appendChild(a); a.click(); document.body.removeChild(a); showToast("AX File Downloaded", "success"); }
 
         function showToast(msg, type="success") {
