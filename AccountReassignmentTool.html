@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Reassignment v42.5 (Deep Search)</title>
+    <title>Daytona Reassignment v42.7 (Universal Mapper)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
@@ -65,6 +65,9 @@
         input:focus, select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.15); }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        
+        #debug-footer { position: fixed; bottom: 0; right: 0; padding: 5px 10px; font-size: 10px; color: #ccc; cursor: pointer; z-index: 11000; }
+        #debug-footer:hover { color: #000; background: rgba(255,255,255,0.8); }
     </style>
 </head>
 <body>
@@ -152,7 +155,7 @@
     <div id="main-app-container" class="hidden">
         <div class="card mb-3 p-3 flex-row justify-between items-center" style="background: rgba(255,255,255,0.9);">
             <div class="flex items-center gap-4">
-                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.5</span></h1>
+                <h1 class="text-xl font-bold text-blue-800"><i class="fas fa-layer-group mr-2"></i>Daytona Suite <span class="text-xs font-normal text-gray-500">v42.6</span></h1>
                 <button onclick="window.fetchData()" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200"><i class="fas fa-sync-alt"></i> Refresh</button>
             </div>
             <div class="flex items-center gap-3">
@@ -229,6 +232,8 @@
             </div>
         </div>
     </div>
+    
+    <div id="debug-footer" onclick="alert(JSON.stringify(appState.rawData.slice(0,2), null, 2))">DEBUG DATA</div>
 
     <script>
         const GLOBAL_ADMINS = ["Matt Bleakley", "Anslee Erickson", "Vanessa Parette"];
@@ -282,21 +287,20 @@
                 let totalsRes = null;
                 try { totalsRes = await fetchWithRetry(GET_TOTALS_URL, {}); } catch(e) { console.warn("Totals skipped", e); }
 
-                // --- DATA EXTRACTION (V42.5 FIX: DEEP SEARCH) ---
-                console.log("Raw Response:", rowsRes); // Debugging
-                const parsedRows = extractListsDeep(rowsRes);
-                appState.rawData = normalizeData(parsedRows.accounts);
+                // --- DATA EXTRACTION (V42.6 FIX: UNIVERSAL SEARCH) ---
+                console.log("Raw Response:", rowsRes);
+                const parsedRows = extractListsUniversal(rowsRes);
+                appState.rawData = normalizeDataUniversal(parsedRows.accounts);
                 appState.roster = parsedRows.reps;
 
-                // Toast to confirm data loaded (helps debug blank screen)
                 if (appState.rawData.length > 0) {
                      showToast(`Loaded ${appState.rawData.length} accounts`, "info");
                 } else {
-                     showToast("Warning: 0 accounts loaded", "error");
+                     showToast("Warning: 0 accounts loaded (Check DEBUG footer)", "error");
                 }
 
-                const parsedTotals = extractListsDeep(totalsRes);
-                appState.totalsData = normalizeData(parsedTotals.accounts);
+                const parsedTotals = extractListsUniversal(totalsRes);
+                appState.totalsData = normalizeDataUniversal(parsedTotals.accounts);
                 
                 appState.totalsLoaded = (appState.totalsData.length > 0);
 
@@ -310,57 +314,61 @@
             }
         }
 
-        // --- DEEP EXTRACTOR HELPER (Case Insensitive + Recursive) ---
-        function extractListsDeep(jsonResponse) {
+        // --- UNIVERSAL EXTRACTOR (Scans recursively for ANY array) ---
+        function extractListsUniversal(obj) {
             let accounts = [];
             let reps = [];
 
-            // 1. Direct Path (Most likely based on your file)
-            if (jsonResponse) {
-                // Check for accountList/repList (Case Insensitive)
-                const accKey = Object.keys(jsonResponse).find(k => k.toLowerCase() === 'accountlist');
-                const repKey = Object.keys(jsonResponse).find(k => k.toLowerCase() === 'replist');
-                
-                if (accKey && Array.isArray(jsonResponse[accKey])) accounts = jsonResponse[accKey];
-                if (repKey && Array.isArray(jsonResponse[repKey])) reps = jsonResponse[repKey];
+            // 1. Try known keys first
+            if (obj && obj.body) {
+                const bKeys = Object.keys(obj.body);
+                const accKey = bKeys.find(k => k.toLowerCase().includes('account'));
+                const repKey = bKeys.find(k => k.toLowerCase().includes('rep'));
+                if (accKey && Array.isArray(obj.body[accKey])) accounts = obj.body[accKey];
+                if (repKey && Array.isArray(obj.body[repKey])) reps = obj.body[repKey];
+            }
 
-                // Check inside 'body' if not found
-                if (accounts.length === 0 && jsonResponse.body) {
-                    const bAccKey = Object.keys(jsonResponse.body).find(k => k.toLowerCase() === 'accountlist');
-                    const bRepKey = Object.keys(jsonResponse.body).find(k => k.toLowerCase() === 'replist');
-                    if (bAccKey && Array.isArray(jsonResponse.body[bAccKey])) accounts = jsonResponse.body[bAccKey];
-                    if (bRepKey && Array.isArray(jsonResponse.body[bRepKey])) reps = jsonResponse.body[bRepKey];
+            // 2. If nothing, recursively find largest array
+            if (accounts.length === 0) {
+                const allArrays = findAllArrays(obj);
+                // Sort by length desc, assume longest array is the data
+                if (allArrays.length > 0) {
+                    allArrays.sort((a,b) => b.length - a.length);
+                    accounts = allArrays[0]; 
                 }
             }
-            
-            // 2. Fallback: Recursive Search for ANY array with known keys
-            if (accounts.length === 0) {
-                 accounts = findArrayWithKeyDeep(jsonResponse, ['cr714_id', 'cr714_rep', 'Rep', 'rep']) || [];
-            }
-
             return { accounts, reps };
         }
 
-        // --- DATA NORMALIZER (Case Insensitive Keys) ---
-        function normalizeData(data) {
+        function findAllArrays(obj, found = []) {
+            if (!obj) return found;
+            if (Array.isArray(obj)) { found.push(obj); return found; }
+            if (typeof obj === 'object') {
+                for (let k in obj) findAllArrays(obj[k], found);
+            }
+            return found;
+        }
+
+        // --- FUZZY MATCH NORMALIZER (Adapts to column renames) ---
+        function normalizeDataUniversal(data) {
             if (!Array.isArray(data)) return [];
             return data.map(item => {
-                // Helper to get value case-insensitively
-                const getVal = (keys) => {
-                    for (let k of keys) {
-                        const foundKey = Object.keys(item).find(ik => ik.toLowerCase() === k.toLowerCase());
-                        if (foundKey && item[foundKey]) return item[foundKey];
-                    }
-                    return null;
-                };
+                const keys = Object.keys(item);
+                
+                // Fuzzy Matchers
+                const repKey = keys.find(k => /rep|owner|employee|name/i.test(k) && !/company/i.test(k) && !/note/i.test(k));
+                const actionKey = keys.find(k => /action/i.test(k));
+                const idKey = keys.find(k => /id|account/i.test(k) && !/guide|guid/i.test(k));
+                const companyKey = keys.find(k => /company|customer|business/i.test(k));
+                const statusKey = keys.find(k => /status|state/i.test(k));
 
                 return {
                     ...item,
-                    cr714_rep: getVal(['cr714_rep', 'rep']) || "Unknown",
-                    cr714_action: getVal(['cr714_action', 'action']) || "No Action",
-                    cr714_id: getVal(['cr714_id', 'id']) || "-",
-                    cr714_company: getVal(['cr714_company', 'company']) || "Unknown Company",
-                    cr714_recordstatus: getVal(['cr714_recordstatus', 'status']) || "Active"
+                    cr714_rep: item[repKey] || "Unknown",
+                    cr714_action: item[actionKey] || "No Action",
+                    cr714_id: item[idKey] || "-",
+                    cr714_company: item[companyKey] || "Unknown Company",
+                    cr714_recordstatus: item[statusKey] || "Active"
                 };
             });
         }
@@ -409,18 +417,14 @@
             }
         }
 
-        // Recursive finder that accepts multiple candidate keys
-        function findArrayWithKeyDeep(obj, candidates) {
+        function findArrayWithKey(obj, key) {
             if (!obj) return null;
             if (Array.isArray(obj)) {
-                if (obj.length > 0 && obj[0]) {
-                     // Check if any candidate key exists in the first item
-                     const hasKey = candidates.some(c => Object.keys(obj[0]).some(k => k.toLowerCase() === c.toLowerCase()));
-                     if(hasKey) return obj;
-                }
-                for (let item of obj) { const found = findArrayWithKeyDeep(item, candidates); if (found) return found; }
+                if (obj.length > 0 && obj[0] && (Object.prototype.hasOwnProperty.call(obj[0], key) || Object.prototype.hasOwnProperty.call(obj[0], 'Rep'))) return obj;
+                for (let item of obj) { const found = findArrayWithKey(item, key); if (found) return found; }
             } else if (typeof obj === 'object') {
-                for (let k in obj) { const found = findArrayWithKeyDeep(obj[k], candidates); if (found) return found; }
+                if (obj.body) { const foundInBody = findArrayWithKey(obj.body, key); if (foundInBody) return foundInBody; }
+                for (let k in obj) { const found = findArrayWithKey(obj[k], key); if (found) return found; }
             }
             return null;
         }
