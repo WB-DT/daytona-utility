@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Command Center v2.3</title>
+    <title>Daytona Command Center v2.4 (Enterprise)</title>
     
     <script src="https://alcdn.msauth.net/browser/2.30.0/js/msal-browser.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
@@ -98,7 +98,7 @@
 <div class="grid-container">
     
     <aside class="sidebar">
-        <h2><i class="fa-solid fa-bolt"></i> Daytona v2.3</h2>
+        <h2><i class="fa-solid fa-bolt"></i> Daytona v2.4</h2>
         <nav>
             <button class="nav-btn active" onclick="showSection('dashboard')"><i class="fa-solid fa-chart-pie"></i> Dashboard</button>
             <button class="nav-btn" onclick="showSection('data')"><i class="fa-solid fa-table"></i> Account Data</button>
@@ -262,7 +262,6 @@
         ui.loader.style.display = "block";
         ui.text.innerText = "Initializing Flow...";
         
-        // Load Local History
         const storageKey = "daytona_last_snapshot";
         const storedJson = localStorage.getItem(storageKey);
         STATE.previousData = storedJson ? JSON.parse(storedJson) : [];
@@ -279,10 +278,7 @@
             if (response.status === 202) {
                 const locationUrl = response.headers.get("Location");
                 if (!locationUrl) throw new Error("Flow returned 202 but no Location header.");
-
-                ui.text.innerText = "Flow running. Polling for results...";
-                
-                // Start Polling Loop
+                ui.text.innerText = "Processing large dataset. Polling...";
                 response = await pollForData(locationUrl, ui);
             }
 
@@ -290,30 +286,61 @@
 
             const rawJson = await response.json();
             
-            // --- FIX: UNWRAP ASYNC RESPONSE ---
-            // When polling finishes, the result is often wrapped in { status: "Succeeded", outputs: { body: ... } }
+            // --- FIX 1: UNWRAP ASYNC RESPONSE ---
             let cleanData = rawJson;
             if (rawJson.status === "Succeeded" && rawJson.outputs && rawJson.outputs.body) {
                 console.log("Unwrapping Polling Response...");
                 cleanData = rawJson.outputs.body;
             }
 
-            // 3. Process Data
-            const liveList = cleanData.customers || cleanData.dataverseAccounts || []; 
-            
-            console.log("Records received:", liveList.length);
+            // --- FIX 2: NORMALIZE DATA ARRAY ---
+            // 1. Check if it's a string
+            if (typeof cleanData === 'string') {
+                try { cleanData = JSON.parse(cleanData); } 
+                catch(e) { console.error("Could not parse JSON string"); }
+            }
 
-            if(liveList.length === 0) {
-                 console.warn("Full JSON received:", rawJson);
-                 throw new Error("Flow finished but returned 0 records. Check Console (F12) for details.");
+            // 2. Locate the Array
+            let liveList = [];
+            if (Array.isArray(cleanData)) {
+                liveList = cleanData;
+            } else if (cleanData.customers && Array.isArray(cleanData.customers)) {
+                liveList = cleanData.customers;
+            } else if (cleanData.dataverseAccounts && Array.isArray(cleanData.dataverseAccounts)) {
+                liveList = cleanData.dataverseAccounts;
+            } else if (cleanData.value && Array.isArray(cleanData.value)) {
+                liveList = cleanData.value;
+            } else if (typeof cleanData === 'object') {
+                // Last ditch effort: find ANY array property
+                const arr = Object.values(cleanData).find(v => Array.isArray(v));
+                if(arr) liveList = arr;
+            }
+
+            if (!Array.isArray(liveList)) {
+                console.error("DATA STRUCTURE ERROR. Received:", cleanData);
+                throw new Error("Could not find an array in the response.");
+            }
+
+            console.log(`Records received: ${liveList.length}`);
+            
+            // Performance Warning
+            if (liveList.length > 50000) {
+                ui.text.innerText = `Large dataset (${liveList.length} rows). Processing comparisons...`;
+                // Allow UI render
+                await new Promise(r => setTimeout(r, 100)); 
             }
 
             STATE.currentData = liveList;
             
             processComparison(STATE.previousData, STATE.currentData);
 
-            // Save Snapshot
-            localStorage.setItem(storageKey, JSON.stringify(liveList));
+            // Save Snapshot (Try/Catch because 15M records won't fit in LocalStorage)
+            try {
+                localStorage.setItem(storageKey, JSON.stringify(liveList));
+            } catch (e) {
+                console.warn("Dataset too large for local history storage. Comparison works for this session only.");
+            }
+            
             logHistoryEvent(liveList.length, STATE.newAccounts.length, STATE.lostAccounts.length);
 
             ui.text.innerText = "Sync Complete. Dashboard Updated.";
@@ -340,7 +367,7 @@
     // --- POLLING HELPER ---
     async function pollForData(url, ui) {
         let attempts = 0;
-        const maxAttempts = 60; // 5 mins max (60 * 5s)
+        const maxAttempts = 60; // 5 mins max
         
         while (attempts < maxAttempts) {
             attempts++;
@@ -353,9 +380,9 @@
             const resp = await fetch(url);
             
             if (resp.status === 200) {
-                return resp; // Success!
+                return resp; 
             } else if (resp.status === 202) {
-                continue; // Still running...
+                continue; 
             } else {
                 throw new Error("Polling stopped. Status: " + resp.status);
             }
@@ -364,14 +391,23 @@
     }
 
     function processComparison(prev, curr) {
-        // ID Getter handles various field names
-        const getId = (item) => {
-            const val = item.AccountNum || item.cr714_accountnum;
-            return val ? String(val).trim() : "UNKNOWN";
-        };
+        // --- FIX 3: SAFETY CHECK FOR ARRAYS ---
+        if (!Array.isArray(prev)) prev = [];
+        if (!Array.isArray(curr)) {
+            console.error("Current data is not an array:", curr);
+            return;
+        }
 
-        STATE.newAccounts = curr.filter(c => !prev.some(p => getId(p) === getId(c)));
-        STATE.lostAccounts = prev.filter(p => !curr.some(c => getId(c) === getId(p)));
+        // Optimization: Use Sets for O(1) lookups (Critical for 15M records)
+        const getKey = (item) => String(item.AccountNum || item.cr714_accountnum || "UNKNOWN").trim();
+
+        // 1. Build Sets (Heavy Operation)
+        const prevSet = new Set(prev.map(getKey));
+        const currSet = new Set(curr.map(getKey));
+
+        // 2. Filter using Sets
+        STATE.newAccounts = curr.filter(c => !prevSet.has(getKey(c)));
+        STATE.lostAccounts = prev.filter(p => !currSet.has(getKey(p)));
 
         renderTable();
         updateCharts();
@@ -383,10 +419,13 @@
         const tbody = document.getElementById("tableBody");
         tbody.innerHTML = "";
 
+        // Limit display to 100 rows to prevent DOM freeze
+        const MAX_DISPLAY = 100;
+        
         const rows = [
-            ...STATE.newAccounts.map(x => ({...x, _status: 'new'})),
-            ...STATE.lostAccounts.map(x => ({...x, _status: 'lost'})),
-            ...STATE.currentData.slice(0, 50).map(x => ({...x, _status: 'active'}))
+            ...STATE.newAccounts.slice(0, MAX_DISPLAY).map(x => ({...x, _status: 'new'})),
+            ...STATE.lostAccounts.slice(0, MAX_DISPLAY).map(x => ({...x, _status: 'lost'})),
+            ...STATE.currentData.slice(0, MAX_DISPLAY).map(x => ({...x, _status: 'active'}))
         ];
 
         if(rows.length === 0) {
@@ -399,7 +438,6 @@
             if (row._status === 'new') badge = `<span class="badge bg-new">NEW</span>`;
             if (row._status === 'lost') badge = `<span class="badge bg-lost">DROPPED</span>`;
 
-            // Normalized Accessors
             const acctNum = row.AccountNum || row.cr714_accountnum || 'N/A';
             const name = row.Name_CustTable || row.Name || row.cr714_accountname || 'Unknown';
             const rep = row.SalesRepName || row.cr714_rep || 'Unassigned';
@@ -415,6 +453,15 @@
             `;
             tbody.appendChild(tr);
         });
+        
+        // Add "Show more" hint if data was truncated
+        if(STATE.newAccounts.length > MAX_DISPLAY || STATE.lostAccounts.length > MAX_DISPLAY) {
+            const tr = document.createElement("tr");
+            tr.innerHTML = `<td colspan="5" style="text-align:center; font-style:italic; color:#666;">
+                Showing first ${MAX_DISPLAY} rows. Use "Export" to see full list.
+            </td>`;
+            tbody.appendChild(tr);
+        }
     }
 
     function initCharts() {
@@ -444,11 +491,15 @@
         STATE.charts.change.data.datasets[0].data = [STATE.newAccounts.length, STATE.lostAccounts.length, stable];
         STATE.charts.change.update();
 
+        // Sample Rep data to avoid looping 15M times for charts
+        const sampleLimit = Math.min(STATE.currentData.length, 50000); 
         const repCounts = {};
-        STATE.currentData.forEach(acc => {
+        
+        for(let i=0; i<sampleLimit; i++) {
+            const acc = STATE.currentData[i];
             const rep = acc.SalesRepName || acc.cr714_rep || "Unassigned";
             repCounts[rep] = (repCounts[rep] || 0) + 1;
-        });
+        }
 
         const sortedReps = Object.entries(repCounts).sort(([,a],[,b]) => b-a).slice(0, 10);
 
@@ -535,6 +586,7 @@
     }
 
     function logHistoryEvent(total, isNew, isLost) {
+        // Only log if data size is manageable
         const history = JSON.parse(localStorage.getItem("daytona_history_log") || "[]");
         history.unshift({ date: new Date().toLocaleString(), total, isNew, isLost });
         if(history.length > 20) history.pop(); 
