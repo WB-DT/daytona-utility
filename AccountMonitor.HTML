@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daytona Utility: Account Monitor</title>
+    <script type="text/javascript" src="https://alcdn.msauth.net/browser/2.30.0/js/msal-browser.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; padding: 20px; background-color: #f4f4f4; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        button { padding: 10px 20px; background-color: #0078D4; color: white; border: none; cursor: pointer; border-radius: 4px; font-size: 16px; margin-right: 10px; }
+        button:hover { background-color: #005a9e; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        .card { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 4px; }
+        .new-acc { border-left: 5px solid #28a745; background-color: #f0fff4; }
+        .reassigned-acc { border-left: 5px solid #dc3545; background-color: #fff0f0; }
+        h2 { margin-top: 20px; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        #status { margin-bottom: 15px; font-weight: bold; color: #555; }
+        pre { background: #eee; padding: 10px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Inside Sales Account Monitor</h1>
+    <div id="authSection">
+        <button id="signInBtn" onclick="signIn()">Sign In</button>
+    </div>
+    
+    <div id="appSection" style="display:none; margin-top: 20px;">
+        <div id="status">Ready to sync.</div>
+        <button id="syncBtn" onclick="triggerFlow()">Sync Daily Accounts</button>
+        <button onclick="clearHistory()">Clear Local History</button>
+        
+        <div id="results">
+            </div>
+    </div>
+</div>
+
+<script>
+    // 1. MSAL Configuration
+    const msalConfig = {
+        auth: {
+            clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee",
+            authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401",
+            redirectUri: "https://WB-DT.github.io/daytona-utility/"
+        },
+        cache: {
+            cacheLocation: "localStorage",
+            storeAuthStateInCookie: false
+        }
+    };
+
+    const myMSALObj = new msal.PublicClientApplication(msalConfig);
+    let username = "";
+
+    // 2. Authentication Logic
+    async function signIn() {
+        try {
+            const loginResponse = await myMSALObj.loginPopup({ scopes: ["User.Read"] });
+            username = loginResponse.account.username;
+            showApp();
+        } catch (error) {
+            console.error(error);
+            document.getElementById("status").innerText = "Login Failed: " + error.message;
+        }
+    }
+
+    function showApp() {
+        document.getElementById("authSection").style.display = "none";
+        document.getElementById("appSection").style.display = "block";
+        document.getElementById("status").innerText = `Welcome, ${username}`;
+    }
+
+    // 3. The Core Logic: Trigger Flow & Compare Data
+    async function triggerFlow() {
+        const btn = document.getElementById("syncBtn");
+        btn.disabled = true;
+        btn.innerText = "Running Flow...";
+        const statusDiv = document.getElementById("status");
+
+        // REPLACE THIS URL with your actual Power Automate HTTP Post URL
+        const FLOW_URL = "YOUR_POWER_AUTOMATE_HTTP_POST_URL_HERE"; 
+
+        try {
+            // A. Call the Flow
+            statusDiv.innerText = "Fetching data from Power Automate...";
+            const response = await fetch(FLOW_URL, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                // Sending RepID if flow logic uses it, otherwise generic payload
+                body: JSON.stringify({ repID: "ALL", text: "ALL" }) 
+            });
+
+            if (!response.ok) throw new Error(`Flow Error: ${response.statusText}`);
+            
+            const flowData = await response.json();
+            
+            // B. Extract Data (Assuming we fixed the flow to return 'dataverseAccounts')
+            // If the flow isn't fixed yet, this part will be undefined.
+            const currentAccounts = flowData.dataverseAccounts || []; 
+            
+            if (currentAccounts.length === 0) {
+                statusDiv.innerText = "Warning: No Dataverse accounts returned. Did you update the Flow Response?";
+            }
+
+            // C. Run Comparison
+            processAccounts(currentAccounts);
+            
+            btn.innerText = "Sync Complete";
+        } catch (error) {
+            console.error(error);
+            statusDiv.innerText = "Error: " + error.message;
+            btn.innerText = "Retry Sync";
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function processAccounts(currentList) {
+        const STORAGE_KEY = "inside_sales_accounts_history";
+        const todayStr = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+        
+        // Retrieve yesterday's data
+        const storedData = localStorage.getItem(STORAGE_KEY);
+        let previousList = [];
+        let lastRunDate = "Never";
+
+        if (storedData) {
+            const parsed = JSON.parse(storedData);
+            previousList = parsed.accounts;
+            lastRunDate = parsed.date;
+        }
+
+        // Logic: Compare Lists
+        // 1. New Accounts: In Current but NOT in Previous
+        const newAccounts = currentList.filter(curr => 
+            !previousList.some(prev => prev.cr714_accountnum === curr.cr714_accountnum)
+        );
+
+        // 2. Reassigned (Outside): In Previous but NOT in Current
+        // Assumption: The Flow filters for "Inside Sales". If an account vanishes, it moved Outside.
+        const reassignedAccounts = previousList.filter(prev => 
+            !currentList.some(curr => curr.cr714_accountnum === prev.cr714_accountnum)
+        );
+
+        // Render Results
+        renderResults(newAccounts, reassignedAccounts, lastRunDate);
+
+        // Save Current data for tomorrow
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+            date: todayStr,
+            accounts: currentList
+        }));
+    }
+
+    function renderResults(newAccs, reassignedAccs, lastDate) {
+        const container = document.getElementById("results");
+        container.innerHTML = `<h3>Changes since: ${lastDate}</h3>`;
+
+        if (newAccs.length === 0 && reassignedAccs.length === 0) {
+            container.innerHTML += "<p>No changes found.</p>";
+            return;
+        }
+
+        // Render New
+        if (newAccs.length > 0) {
+            container.innerHTML += `<h4>New Inside Accounts (${newAccs.length})</h4>`;
+            newAccs.forEach(acc => {
+                container.innerHTML += `
+                    <div class="card new-acc">
+                        <strong>${acc.cr714_accountname}</strong> (${acc.cr714_accountnum})<br>
+                        Rep: ${acc.cr714_rep || 'Unassigned'}
+                    </div>`;
+            });
+        }
+
+        // Render Reassigned
+        if (reassignedAccs.length > 0) {
+            container.innerHTML += `<h4>Reassigned / Moved to Outside (${reassignedAccs.length})</h4>`;
+            reassignedAccs.forEach(acc => {
+                container.innerHTML += `
+                    <div class="card reassigned-acc">
+                        <strong>${acc.cr714_accountname}</strong> (${acc.cr714_accountnum})<br>
+                        Previous Rep: ${acc.cr714_rep || 'Unknown'}
+                    </div>`;
+            });
+        }
+    }
+
+    function clearHistory() {
+        localStorage.removeItem("inside_sales_accounts_history");
+        document.getElementById("status").innerText = "History cleared.";
+        document.getElementById("results").innerHTML = "";
+    }
+</script>
+
+</body>
+</html>
