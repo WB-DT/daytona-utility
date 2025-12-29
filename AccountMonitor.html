@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Command Center v2.2</title>
+    <title>Daytona Command Center v2.3</title>
     
     <script src="https://alcdn.msauth.net/browser/2.30.0/js/msal-browser.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
@@ -98,7 +98,7 @@
 <div class="grid-container">
     
     <aside class="sidebar">
-        <h2><i class="fa-solid fa-bolt"></i> Daytona v2.2</h2>
+        <h2><i class="fa-solid fa-bolt"></i> Daytona v2.3</h2>
         <nav>
             <button class="nav-btn active" onclick="showSection('dashboard')"><i class="fa-solid fa-chart-pie"></i> Dashboard</button>
             <button class="nav-btn" onclick="showSection('data')"><i class="fa-solid fa-table"></i> Account Data</button>
@@ -288,14 +288,25 @@
 
             if (!response.ok) throw new Error(`Flow failed with status: ${response.status}`);
 
-            const json = await response.json();
+            const rawJson = await response.json();
             
+            // --- FIX: UNWRAP ASYNC RESPONSE ---
+            // When polling finishes, the result is often wrapped in { status: "Succeeded", outputs: { body: ... } }
+            let cleanData = rawJson;
+            if (rawJson.status === "Succeeded" && rawJson.outputs && rawJson.outputs.body) {
+                console.log("Unwrapping Polling Response...");
+                cleanData = rawJson.outputs.body;
+            }
+
             // 3. Process Data
-            // We look for 'customers' (PowerBI) or 'dataverseAccounts'. 
-            // If the flow returns both, we prioritize PowerBI (customers) for live status.
-            const liveList = json.customers || json.dataverseAccounts || []; 
+            const liveList = cleanData.customers || cleanData.dataverseAccounts || []; 
             
-            if(liveList.length === 0) console.warn("Warning: Received empty list from Flow.");
+            console.log("Records received:", liveList.length);
+
+            if(liveList.length === 0) {
+                 console.warn("Full JSON received:", rawJson);
+                 throw new Error("Flow finished but returned 0 records. Check Console (F12) for details.");
+            }
 
             STATE.currentData = liveList;
             
@@ -333,19 +344,16 @@
         
         while (attempts < maxAttempts) {
             attempts++;
-            // Update UI Progress roughly
             let percent = Math.min(90, attempts * 2); 
             ui.bar.style.width = percent + "%";
             ui.text.innerText = `Processing... (${attempts * 5}s)`;
 
-            // Wait 5 seconds
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5s
 
-            // Check Status
             const resp = await fetch(url);
             
             if (resp.status === 200) {
-                return resp; // Success! Return the final response object
+                return resp; // Success!
             } else if (resp.status === 202) {
                 continue; // Still running...
             } else {
@@ -356,8 +364,11 @@
     }
 
     function processComparison(prev, curr) {
-        // Normalizes IDs regardless of source (Dataverse vs PBI)
-        const getId = (item) => String(item.AccountNum || item.cr714_accountnum).trim();
+        // ID Getter handles various field names
+        const getId = (item) => {
+            const val = item.AccountNum || item.cr714_accountnum;
+            return val ? String(val).trim() : "UNKNOWN";
+        };
 
         STATE.newAccounts = curr.filter(c => !prev.some(p => getId(p) === getId(c)));
         STATE.lostAccounts = prev.filter(p => !curr.some(c => getId(c) === getId(p)));
@@ -388,7 +399,7 @@
             if (row._status === 'new') badge = `<span class="badge bg-new">NEW</span>`;
             if (row._status === 'lost') badge = `<span class="badge bg-lost">DROPPED</span>`;
 
-            // Field mapping: handles both Power BI (Name, AccountNum) and Dataverse (cr714_*) names
+            // Normalized Accessors
             const acctNum = row.AccountNum || row.cr714_accountnum || 'N/A';
             const name = row.Name_CustTable || row.Name || row.cr714_accountname || 'Unknown';
             const rep = row.SalesRepName || row.cr714_rep || 'Unassigned';
@@ -439,10 +450,7 @@
             repCounts[rep] = (repCounts[rep] || 0) + 1;
         });
 
-        // Sort by count descending
-        const sortedReps = Object.entries(repCounts)
-            .sort(([,a],[,b]) => b-a)
-            .slice(0, 10);
+        const sortedReps = Object.entries(repCounts).sort(([,a],[,b]) => b-a).slice(0, 10);
 
         STATE.charts.rep.data.labels = sortedReps.map(x => x[0]);
         STATE.charts.rep.data.datasets[0].data = sortedReps.map(x => x[1]);
