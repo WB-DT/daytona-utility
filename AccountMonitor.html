@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Command Center v2.1</title>
+    <title>Daytona Command Center v2.2</title>
     
     <script src="https://alcdn.msauth.net/browser/2.30.0/js/msal-browser.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
@@ -98,7 +98,7 @@
 <div class="grid-container">
     
     <aside class="sidebar">
-        <h2><i class="fa-solid fa-bolt"></i> Daytona v2.0</h2>
+        <h2><i class="fa-solid fa-bolt"></i> Daytona v2.2</h2>
         <nav>
             <button class="nav-btn active" onclick="showSection('dashboard')"><i class="fa-solid fa-chart-pie"></i> Dashboard</button>
             <button class="nav-btn" onclick="showSection('data')"><i class="fa-solid fa-table"></i> Account Data</button>
@@ -217,20 +217,20 @@
     // --- 2. STATE MANAGEMENT ---
     let STATE = {
         currentUser: null,
-        currentData: [],     // Today's fresh data from Flow
-        previousData: [],    // Yesterday's data from LocalStorage
+        currentData: [],     
+        previousData: [],    
         newAccounts: [],
         lostAccounts: [],
-        charts: {}           // Store chart instances to destroy/redraw
+        charts: {}           
     };
 
     const msalInstance = new msal.PublicClientApplication(CONFIG.msal);
 
     // --- 3. INITIALIZATION ---
     window.onload = () => {
-        loadTheme();      // Now properly defined
+        loadTheme();
         loadHistory();
-        initCharts();     // Initializes the charts so updateCharts can use them
+        initCharts();
     };
 
     // --- 4. AUTHENTICATION ---
@@ -249,7 +249,7 @@
         location.reload();
     }
 
-    // --- 5. CORE LOGIC: SYNC ---
+    // --- 5. CORE LOGIC: POLLING SYNC ---
     async function runSync() {
         const ui = {
             btn: document.getElementById("syncBtn"),
@@ -260,71 +260,103 @@
 
         ui.btn.disabled = true;
         ui.loader.style.display = "block";
-        ui.text.innerText = "Connecting to Power Automate...";
+        ui.text.innerText = "Initializing Flow...";
         
-        // Load "Yesterday's" Snapshot from LocalStorage
+        // Load Local History
         const storageKey = "daytona_last_snapshot";
         const storedJson = localStorage.getItem(storageKey);
         STATE.previousData = storedJson ? JSON.parse(storedJson) : [];
 
-        // Progress Simulation
-        let progress = 10;
-        ui.bar.style.width = "10%";
-        const timer = setInterval(() => {
-            if(progress < 90) {
-                progress += Math.random() * 5;
-                ui.bar.style.width = progress + "%";
-                if(progress > 30) ui.text.innerText = "Executing DAX Queries...";
-                if(progress > 60) ui.text.innerText = "Processing Dataverse Records...";
-            }
-        }, 1000);
-
         try {
-            // CALL FLOW
-            const response = await fetch(CONFIG.flowUrl, {
+            // 1. Initial Trigger
+            let response = await fetch(CONFIG.flowUrl, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ user: STATE.currentUser?.username || "Anon" })
             });
 
-            clearInterval(timer);
-            ui.bar.style.width = "100%";
-            
-            if (!response.ok) throw new Error("Flow execution failed");
-            
+            // 2. Handle Asynchronous Polling (Status 202)
+            if (response.status === 202) {
+                const locationUrl = response.headers.get("Location");
+                if (!locationUrl) throw new Error("Flow returned 202 but no Location header.");
+
+                ui.text.innerText = "Flow running. Polling for results...";
+                
+                // Start Polling Loop
+                response = await pollForData(locationUrl, ui);
+            }
+
+            if (!response.ok) throw new Error(`Flow failed with status: ${response.status}`);
+
             const json = await response.json();
             
-            // PARSE DATA
-            // Expecting: { "customers": [...], "dataverseAccounts": [...] }
-            const liveList = json.customers || []; 
+            // 3. Process Data
+            // We look for 'customers' (PowerBI) or 'dataverseAccounts'. 
+            // If the flow returns both, we prioritize PowerBI (customers) for live status.
+            const liveList = json.customers || json.dataverseAccounts || []; 
             
+            if(liveList.length === 0) console.warn("Warning: Received empty list from Flow.");
+
             STATE.currentData = liveList;
             
             processComparison(STATE.previousData, STATE.currentData);
 
-            // SAVE SNAPSHOT
+            // Save Snapshot
             localStorage.setItem(storageKey, JSON.stringify(liveList));
             logHistoryEvent(liveList.length, STATE.newAccounts.length, STATE.lostAccounts.length);
 
             ui.text.innerText = "Sync Complete. Dashboard Updated.";
+            ui.bar.style.width = "100%";
             
-            // Enable Next Steps
             document.getElementById("exportBtn").disabled = false;
             document.getElementById("updateBtn").disabled = (STATE.lostAccounts.length === 0 && STATE.newAccounts.length === 0);
 
         } catch (error) {
-            clearInterval(timer);
             ui.bar.style.background = "var(--danger)";
             ui.text.innerText = "Error: " + error.message;
             console.error(error);
         } finally {
             ui.btn.disabled = false;
-            setTimeout(() => { ui.loader.style.display = "none"; ui.bar.style.width="0%"; }, 3000);
+            setTimeout(() => { 
+                if(ui.bar.style.background !== "var(--danger)") {
+                   ui.loader.style.display = "none"; 
+                   ui.bar.style.width="0%"; 
+                }
+            }, 5000);
         }
     }
 
+    // --- POLLING HELPER ---
+    async function pollForData(url, ui) {
+        let attempts = 0;
+        const maxAttempts = 60; // 5 mins max (60 * 5s)
+        
+        while (attempts < maxAttempts) {
+            attempts++;
+            // Update UI Progress roughly
+            let percent = Math.min(90, attempts * 2); 
+            ui.bar.style.width = percent + "%";
+            ui.text.innerText = `Processing... (${attempts * 5}s)`;
+
+            // Wait 5 seconds
+            await new Promise(resolve => setTimeout(resolve, 5000));
+
+            // Check Status
+            const resp = await fetch(url);
+            
+            if (resp.status === 200) {
+                return resp; // Success! Return the final response object
+            } else if (resp.status === 202) {
+                continue; // Still running...
+            } else {
+                throw new Error("Polling stopped. Status: " + resp.status);
+            }
+        }
+        throw new Error("Timeout: Flow took too long to respond.");
+    }
+
     function processComparison(prev, curr) {
-        // Helper to normalize IDs (handle strings/ints)
+        // Normalizes IDs regardless of source (Dataverse vs PBI)
         const getId = (item) => String(item.AccountNum || item.cr714_accountnum).trim();
 
         STATE.newAccounts = curr.filter(c => !prev.some(p => getId(p) === getId(c)));
@@ -340,25 +372,35 @@
         const tbody = document.getElementById("tableBody");
         tbody.innerHTML = "";
 
-        // Combine for display: New first, then Lost, then others
         const rows = [
             ...STATE.newAccounts.map(x => ({...x, _status: 'new'})),
             ...STATE.lostAccounts.map(x => ({...x, _status: 'lost'})),
-            ...STATE.currentData.slice(0, 50).map(x => ({...x, _status: 'active'})) // Limit display
+            ...STATE.currentData.slice(0, 50).map(x => ({...x, _status: 'active'}))
         ];
+
+        if(rows.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px;">No Data Found</td></tr>`;
+            return;
+        }
 
         rows.forEach(row => {
             let badge = `<span class="badge" style="background:#eee; color:#666">Active</span>`;
             if (row._status === 'new') badge = `<span class="badge bg-new">NEW</span>`;
             if (row._status === 'lost') badge = `<span class="badge bg-lost">DROPPED</span>`;
 
+            // Field mapping: handles both Power BI (Name, AccountNum) and Dataverse (cr714_*) names
+            const acctNum = row.AccountNum || row.cr714_accountnum || 'N/A';
+            const name = row.Name_CustTable || row.Name || row.cr714_accountname || 'Unknown';
+            const rep = row.SalesRepName || row.cr714_rep || 'Unassigned';
+            const date = row.LastOrderDate || '-';
+
             const tr = document.createElement("tr");
             tr.innerHTML = `
                 <td>${badge}</td>
-                <td>${row.AccountNum || 'N/A'}</td>
-                <td>${row.Name_CustTable || row.Name || 'Unknown'}</td>
-                <td>${row.SalesRepName || row.cr714_rep || 'Unassigned'}</td>
-                <td>${row.LastOrderDate || '-'}</td>
+                <td>${acctNum}</td>
+                <td>${name}</td>
+                <td>${rep}</td>
+                <td>${date}</td>
             `;
             tbody.appendChild(tr);
         });
@@ -368,7 +410,6 @@
         const ctx1 = document.getElementById('changeChart').getContext('2d');
         const ctx2 = document.getElementById('repChart').getContext('2d');
 
-        // Initialize Change Chart
         STATE.charts.change = new Chart(ctx1, {
             type: 'doughnut',
             data: {
@@ -378,7 +419,6 @@
             options: { responsive: true, maintainAspectRatio: false }
         });
 
-        // Initialize Rep Chart
         STATE.charts.rep = new Chart(ctx2, {
             type: 'bar',
             data: { labels: [], datasets: [] },
@@ -387,29 +427,25 @@
     }
 
     function updateCharts() {
-        if (!STATE.charts.change || !STATE.charts.rep) {
-            console.error("Charts not initialized");
-            return;
-        }
+        if (!STATE.charts.change || !STATE.charts.rep) return;
 
-        // 1. Change Chart
         const stable = Math.max(0, STATE.currentData.length - STATE.newAccounts.length);
         STATE.charts.change.data.datasets[0].data = [STATE.newAccounts.length, STATE.lostAccounts.length, stable];
         STATE.charts.change.update();
 
-        // 2. Rep Chart
         const repCounts = {};
         STATE.currentData.forEach(acc => {
-            const rep = acc.SalesRepName || "Unassigned";
+            const rep = acc.SalesRepName || acc.cr714_rep || "Unassigned";
             repCounts[rep] = (repCounts[rep] || 0) + 1;
         });
 
-        STATE.charts.rep.data.labels = Object.keys(repCounts).slice(0, 10); // Top 10 reps
-        STATE.charts.rep.data.datasets = [{
-            label: 'Accounts per Rep',
-            data: Object.values(repCounts).slice(0, 10),
-            backgroundColor: '#0078D4'
-        }];
+        // Sort by count descending
+        const sortedReps = Object.entries(repCounts)
+            .sort(([,a],[,b]) => b-a)
+            .slice(0, 10);
+
+        STATE.charts.rep.data.labels = sortedReps.map(x => x[0]);
+        STATE.charts.rep.data.datasets[0].data = sortedReps.map(x => x[1]);
         STATE.charts.rep.update();
     }
 
@@ -425,12 +461,11 @@
             { header: 'Rep', key: 'rep', width: 20 }
         ];
 
-        // Header Style (Blue)
         ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0078D4' } };
         ws.getRow(1).font = { color: { argb: 'FFFFFFFF' }, bold: true };
 
-        STATE.newAccounts.forEach(x => ws.addRow({ status: 'NEW', acct: x.AccountNum, name: x.Name_CustTable, rep: x.SalesRepName }));
-        STATE.lostAccounts.forEach(x => ws.addRow({ status: 'LOST', acct: x.AccountNum, name: x.Name_CustTable, rep: x.SalesRepName }));
+        STATE.newAccounts.forEach(x => ws.addRow({ status: 'NEW', acct: x.AccountNum || x.cr714_accountnum, name: x.Name_CustTable || x.cr714_accountname, rep: x.SalesRepName || x.cr714_rep }));
+        STATE.lostAccounts.forEach(x => ws.addRow({ status: 'LOST', acct: x.AccountNum || x.cr714_accountnum, name: x.Name_CustTable || x.cr714_accountname, rep: x.SalesRepName || x.cr714_rep }));
 
         const buf = await wb.xlsx.writeBuffer();
         saveAs(new Blob([buf]), `Daytona_Analysis_${new Date().toISOString().slice(0,10)}.xlsx`);
@@ -465,12 +500,10 @@
     function showSection(id) {
         ['dashboard', 'data', 'history'].forEach(s => document.getElementById(s+'Section').classList.add('hidden'));
         document.getElementById(id+'Section').classList.remove('hidden');
-        
         document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
         event.currentTarget.classList.add('active');
     }
 
-    // MISSING FUNCTION FIXED HERE
     function loadTheme() {
         const savedTheme = localStorage.getItem('daytona_theme') || 'light';
         document.body.setAttribute('data-theme', savedTheme);
@@ -493,11 +526,10 @@
         });
     }
 
-    // History Log Logic
     function logHistoryEvent(total, isNew, isLost) {
         const history = JSON.parse(localStorage.getItem("daytona_history_log") || "[]");
         history.unshift({ date: new Date().toLocaleString(), total, isNew, isLost });
-        if(history.length > 20) history.pop(); // Keep last 20
+        if(history.length > 20) history.pop(); 
         localStorage.setItem("daytona_history_log", JSON.stringify(history));
         loadHistory();
     }
