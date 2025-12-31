@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-    <title>WB Mason Hub v22.0 (Long-Polling)</title>
+    <title>WB Mason Hub v23.0 (Structure Fix)</title>
     <script type="text/javascript" src="https://alcdn.msauth.net/browser/2.35.0/js/msal-browser.min.js"></script>
     <style>
-        /* --- THEME ENGINE v22 --- */
+        /* --- THEME ENGINE v23 --- */
         :root {
             --radius: 8px; 
             --header-h: 64px; 
@@ -183,7 +183,7 @@
 
     <div id="loader">
         <div class="spinner"></div>
-        <p style="margin-top:20px; font-weight:700; color:var(--text-muted); animation: pulse 1.5s infinite;">Starting WB Mason Hub v22.0...</p>
+        <p style="margin-top:20px; font-weight:700; color:var(--text-muted); animation: pulse 1.5s infinite;">Starting WB Mason Hub v23.0...</p>
         <p id="cache-msg" style="font-size:11px; color:#94a3b8; margin-top:5px;"></p>
     </div>
     <style>@keyframes pulse { 0%{opacity:0.6} 50%{opacity:1} 100%{opacity:0.6} }</style>
@@ -245,7 +245,7 @@
                     <div class="card">
                         <div class="card-header open">System Health</div>
                         <div class="card-body open" style="display:flex; align-items:center; justify-content:center; height:150px; color:var(--text-muted); font-size:13px;">
-                            System Operational • v22.0
+                            System Operational • v23.0
                         </div>
                     </div>
                 </div>
@@ -468,7 +468,7 @@
         };
 
         const state = { 
-            user: null, employees: [], timeOff: [], selectedId: null, sortAsc: true, isDirty: false, tempLogs: [], filteredLogs: [], cacheKey: 'wb_hub_v22_0_data', originalEmp: null
+            user: null, employees: [], timeOff: [], selectedId: null, sortAsc: true, isDirty: false, tempLogs: [], filteredLogs: [], cacheKey: 'wb_hub_v23_0_data', originalEmp: null
         };
 
         // --- FETCH WITH LONG-POLLING TIMEOUT ---
@@ -489,9 +489,9 @@
                     const data = JSON.parse(cached);
                     state.employees = data.employees;
                     state.timeOff = data.timeOff;
-                    document.getElementById('cache-msg').innerText = "Loaded from cache. Syncing...";
+                    document.getElementById('cache-msg').innerText = "Loaded from cache. Updating...";
                     initUI();
-                } catch(e) {}
+                } catch(e) { console.warn("Cache Corrupt"); }
             }
 
             try {
@@ -511,7 +511,6 @@
             const btn = document.getElementById('btn-save');
             if(action === 'SAVE') btn.innerText = "SAVING...";
             
-            // UI Timer for Long Polling
             let seconds = 0;
             const timer = setInterval(() => {
                 seconds++;
@@ -531,10 +530,15 @@
                     let raw = await res.json();
                     if(raw.body) raw = raw.body; 
                     
-                    state.employees = raw.employees || [];
+                    // HANDLE ODATA/DATAVERSE ARRAY STRUCTURES
+                    const empData = raw.employees && raw.employees.value ? raw.employees.value : (raw.employees || []);
+                    state.employees = Array.isArray(empData) ? empData : [];
+                    
+                    const toData = raw.timeOff && raw.timeOff.value ? raw.timeOff.value : (raw.timeOff || []);
+                    const toArray = Array.isArray(toData) ? toData : [];
                     
                     // --- MAPPING ENGINE ---
-                    state.timeOff = (raw.timeOff || []).map(row => {
+                    state.timeOff = toArray.map(row => {
                         const keys = Object.keys(row);
                         const findKey = (str) => keys.find(k => k.toLowerCase().includes(str.toLowerCase()));
                         
@@ -550,13 +554,9 @@
                         }
 
                         // DIRECT MAP for messy keys
-                        const reqDateKey = "Request date(s)? \ni_x002e_e_x002e_ (Single day = mm/dd/yyyy) (Multiple days = mm/dd/yyyy - mm/dd/yyyy)";
-                        const hoursKey = "PTO hours requested? \n('OTHER'_x003a_ Use this for  requesting multiple days off)\ni_x002e_e_x002e_ (\"16\" or \"40\")";
-                        const partialKey = "Hours of partial shift requesting to work?\ni_x002e_e_x002e_(8_x003a_00-12_x003a_00) or (10_x003a_00-2_x003a_00) ";
-
-                        const reqDates = row[reqDateKey] || row[findKey("Request date")] || "";
-                        const hours = row[hoursKey] || row[findKey("PTO hours")] || "";
-                        const partial = row[partialKey] || "";
+                        const reqDateKey = keys.find(k => k.includes("Request date")) || "Request Dates";
+                        const hoursKey = keys.find(k => k.includes("PTO hours")) || "PTO Hours";
+                        const partialKey = keys.find(k => k.includes("Hours of partial shift")) || "Partial Shift";
 
                         return {
                             id: row[findKey("ID")] || row["ID"] || "",
@@ -565,12 +565,12 @@
                             type: row[findKey("Leave Type")] || "Unknown",
                             startDate: row[findKey("Start time")] || "",
                             completionDate: row[findKey("Completion time")] || "",
-                            requestDates: reqDates,
+                            requestDates: row[reqDateKey] || "",
                             notes: row[findKey("Request Notes")] || "",
                             approval: approval,
                             approvalNotes: notes,
-                            hours: hours,
-                            partial: partial,
+                            hours: row[hoursKey] || "",
+                            partial: row[partialKey] || "",
                             occurrence: row[findKey("Occurrence")] || "No",
                             completed: row[findKey("Completed")] || "",
                             ultipro: row[findKey("Ultipro")] || "",
@@ -686,8 +686,9 @@
                 const eStatus = e.cr714_status == 1 ? '1' : '0';
                 const mS = s === 'All' || s === eStatus;
                 const mD = d === 'All' || e.cr714_departmentname === d;
-                const mQ = (e.cr714_employeename || '').toLowerCase().includes(q) || (e.cr714_employee || '').toLowerCase().includes(q);
-                return mS && mD && mQ;
+                const matchName = (e.cr714_employeename || '').toLowerCase().includes(q);
+                const matchId = (e.cr714_employee || '').toLowerCase().includes(q);
+                return mS && mD && (matchName || matchId);
             });
 
             list.sort((a,b) => (a.cr714_employeename||'').localeCompare(b.cr714_employeename||''));
@@ -702,8 +703,8 @@
                 else if(e.cr714_managerflag === 'Y') ringClass = 'ring-mgr';
 
                 return `<div class="gallery-item ${state.selectedId === e.id ? 'selected' : ''}" id="row-${e.id}" onclick="selectEmp('${e.id}')">
-                    <div class="avatar-circle ${ringClass}">
-                        ${getInitials(name)}
+                    <div class="avatar-box ${ringClass}">
+                        <div style="font-size:16px;">${getInitials(name)}</div>
                     </div>
                     <div style="flex-grow:1; min-width:0;">
                         <div style="font-weight:600; font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${name}</div>
