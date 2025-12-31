@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daytona Enterprise v22 (Prod)</title>
+    <title>Daytona Enterprise v21.10 (Stable)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -179,7 +179,15 @@
         /* --- UTILS --- */
         .badge { padding: 2px 8px; border-radius: 99px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
         .bg-ok { background: #dcfce7; color: #15803d; }
+        .bg-warn { background: #fef3c7; color: #b45309; }
         .bg-err { background: #fee2e2; color: #b91c1c; }
+
+        /* --- TABS (Restored) --- */
+        .tabs-header { display: flex; gap: 2px; padding: 8px 8px 0 8px; background: #f1f5f9; border-bottom: 1px solid #cbd5e1; flex-shrink: 0; }
+        .tab-btn { padding: 6px 12px; background: #cbd5e1; border-radius: 6px 6px 0 0; font-size: 0.75rem; font-weight: bold; color: #475569; cursor: pointer; border: 1px solid transparent; margin-bottom: -1px; }
+        .tab-btn.active { background: #ffffff; color: var(--primary); border-top: 2px solid var(--primary); border-bottom: 1px solid #ffffff; }
+        .tab-content { padding: 16px; flex-grow: 1; overflow-y: auto; background: white; display: none; }
+        .tab-content.active { display: block; }
         
         /* --- LOADING --- */
         #global-loader { position: fixed; inset: 0; z-index: 10000; background: linear-gradient(135deg, #0ea5e9, #2563eb); display: flex; align-items: center; justify-content: center; transition: opacity 0.5s ease; }
@@ -516,6 +524,35 @@
         </div>
     </div>
 
+    <div id="reviews-modal" class="modal-overlay">
+        <div class="modal-window">
+            <div class="modal-header bg-slate-800 text-white">
+                <div class="font-bold">Reviews & Performance</div>
+                <div class="modal-controls flex gap-3">
+                    <button onclick="window.exportReviewsToExcel()" class="hover:text-white"><i class="fas fa-file-excel"></i></button>
+                    <button onclick="document.getElementById('reviews-modal').classList.remove('active')" class="hover:text-white"><i class="fas fa-times"></i></button>
+                </div>
+            </div>
+            <div class="modal-body flex-grow flex flex-col bg-white">
+                <div class="grid grid-cols-3 gap-2 p-2 bg-gray-50 border-b">
+                    <div class="bg-red-50 p-2 text-center rounded border border-red-200"><div class="text-xl font-bold text-red-700" id="rev-overdue">0</div><div class="text-[10px] uppercase text-red-500 font-bold">Overdue</div></div>
+                    <div class="bg-yellow-50 p-2 text-center rounded border border-yellow-200"><div class="text-xl font-bold text-yellow-700" id="rev-upcoming">0</div><div class="text-[10px] uppercase text-yellow-500 font-bold">Upcoming</div></div>
+                    <div class="bg-green-50 p-2 text-center rounded border border-green-200"><div class="text-xl font-bold text-green-700" id="rev-completed">0</div><div class="text-[10px] uppercase text-green-500 font-bold">Completed</div></div>
+                </div>
+                <div class="bg-gray-100 pt-2 px-2 border-b border-gray-300">
+                    <div class="tabs-header">
+                        <div class="tab-btn active" onclick="window.switchTab('tab-annual', this)">Annual</div>
+                        <div class="tab-btn" onclick="window.switchTab('tab-regular', this)">New Hire</div>
+                        <div class="tab-btn" onclick="window.switchTab('tab-promo-time', this)">Promo Timeline</div>
+                    </div>
+                </div>
+                <div id="tab-annual" class="tab-content active"><table class="data-table"><thead><tr><th>Employee</th><th>Target</th><th>Status</th></tr></thead><tbody id="tbody-annual"></tbody></table></div>
+                <div id="tab-regular" class="tab-content"><table class="data-table"><thead><tr><th>Employee</th><th>Type</th><th>Status</th></tr></thead><tbody id="tbody-regular"></tbody></table></div>
+                <div id="tab-promo-time" class="tab-content"><table class="data-table"><thead><tr><th>Employee</th><th>Date</th></tr></thead><tbody id="tbody-promo-time"></tbody></table></div>
+            </div>
+        </div>
+    </div>
+
     <div class="toast-container" id="toastContainer"></div>
 
     <script>
@@ -554,9 +591,10 @@
         // --- INITIALIZATION ---
         document.addEventListener('DOMContentLoaded', async () => {
             try {
+                // FIXED: Just create the instance, NO initialize() call for v2.x
                 msalInstance = new msal.PublicClientApplication(CONFIG.MSAL);
-                await msalInstance.initialize(); 
                 
+                // Handle Redirects
                 const response = await msalInstance.handleRedirectPromise();
                 if(response) {
                     handleLoginSuccess(response.account);
@@ -567,10 +605,10 @@
                 }
             } catch(e) {
                 console.error("Auth Init Failed:", e);
+                // Even on error, ensure loader is hidden so user sees the login/error UI
                 showLoginScreen();
             }
             
-            // UI Listeners
             document.getElementById('gallery-list').addEventListener('scroll', handleScroll);
         });
 
@@ -593,7 +631,6 @@
             document.getElementById('user-auth-status').innerText = `Authenticated: ${appState.user}`;
             document.getElementById('login-container').classList.add('hidden');
             
-            // Reset loader for Data fetch
             const loader = document.getElementById('global-loader');
             loader.style.display = 'flex';
             loader.style.opacity = '1';
@@ -609,47 +646,50 @@
             }
         }
 
-        // --- DATA FETCHING (LONG WAIT LOGIC) ---
+        // --- DATA FETCHING (RESTORED POLLING LOGIC) ---
         async function fetchMasterData() {
             const progressBar = document.getElementById('loading-progress-bar');
             const statusText = document.getElementById('loading-status-text');
             
-            // UX: Fake progress for long load (2 minutes)
+            // UX Timer (updates message every 4s)
             let progress = 0;
             const messages = [
                 "Connecting to Dataverse...", 
                 "Authenticating Request...", 
-                "Retrieving Account Records (0%)...", 
-                "Querying large dataset, please wait...", 
-                "Still processing (this takes about 2 mins)...", 
-                "Downloading CRM Data...", 
-                "Optimizing Local Cache...",
-                "Almost there..."
+                "Querying large dataset (this takes 2 minutes)...", 
+                "Still waiting on server...", 
+                "Data extraction in progress...",
+                "Downloading CRM Data..."
             ];
-            
             let msgIndex = 0;
-            
-            // Slow timer to move bar to 90% over 100 seconds
             const timer = setInterval(() => { 
-                if(progress < 90) { 
-                    progress += 0.5; 
-                    progressBar.style.width = `${progress}%`; 
-                }
-                
-                // Update text every 4 seconds (approx 20 ticks)
+                if(progress < 90) { progress += 0.5; progressBar.style.width = `${progress}%`; }
                 if(Math.floor(progress) % 5 === 0 && progress < 85) {
                     statusText.innerText = messages[msgIndex % messages.length];
                     msgIndex++;
                 }
-            }, 500); // Update every half second
+            }, 500);
 
             try {
-                // REAL FETCH - Waits for Flow response
+                // 1. Initial Request
                 let response = await fetch(CONFIG.FLOW_URL, { 
                     method: 'POST', 
                     headers: {'Content-Type': 'application/json'}, 
                     body: JSON.stringify({ repName: appState.user }) 
                 });
+
+                // 2. Handle 202 Polling (CRITICAL FIX based on HAR logs)
+                if (response.status === 202) {
+                    statusText.innerText = "Request Accepted. Waiting for data generation...";
+                    const location = response.headers.get('location');
+                    let retries = 0;
+                    while (retries < 60) { // Poll for up to 2 mins
+                        await new Promise(r => setTimeout(r, 2000));
+                        response = await fetch(location);
+                        if (response.status === 200) break;
+                        retries++;
+                    }
+                }
                 
                 if (!response.ok) throw new Error(`API Error: ${response.status}`);
                 
@@ -662,7 +702,7 @@
                 const uniqueReps = [...new Set(appState.rawData.map(i => i.cr714_rep).filter(Boolean))];
                 appState.roster = uniqueReps.map(r => ({ cr714_name: r }));
 
-                // Completion Animation
+                // Completion
                 clearInterval(timer);
                 progressBar.style.width = '100%';
                 statusText.innerText = "Data Loaded Successfully!";
@@ -670,7 +710,6 @@
                 setupUI();
                 populateActionFilter();
                 
-                // Transition to Gateway after slight delay to show 100%
                 setTimeout(() => {
                     const loader = document.getElementById('global-loader');
                     loader.style.opacity = '0';
@@ -684,7 +723,7 @@
                 clearInterval(timer);
                 progressBar.style.backgroundColor = "red";
                 statusText.innerText = "Error Loading Data";
-                alert("Data Load Error: " + e.message + "\nPlease refresh to try again.");
+                alert("Data Load Error: " + e.message);
             }
         }
         
@@ -704,7 +743,6 @@
             document.getElementById('main-app-container').classList.remove('hidden');
             document.getElementById('main-app-container').classList.add('app-visible');
             
-            // Clean Reset
             appState.filterHelp = false; 
             appState.currentRepView = null;
             document.getElementById('bell-icon').classList.remove('text-blue-500');
@@ -724,7 +762,7 @@
             else if (mode === 'REP') { 
                 populateRepModal();
                 document.getElementById('rep-select-modal').classList.add('active'); 
-                return; // Stop here, wait for modal
+                return;
             }
             else if (mode === 'HELP') { 
                 appState.filterHelp = true; 
@@ -738,9 +776,7 @@
             initListRender(); 
         }
 
-        function setupUI() {
-            // Manager logic setup
-        }
+        function setupUI() {}
 
         function populateActionFilter() {
             const dd = document.getElementById('filter-action-dropdown');
@@ -785,21 +821,13 @@
 
             let filtered = appState.rawData;
 
-            // 1. Filter by User/Rep
             if (targetRep !== "ALL") {
                 filtered = filtered.filter(r => (r.cr714_rep && r.cr714_rep.toLowerCase() === targetRep.toLowerCase()));
             }
-
-            // 2. Filter by Search
             if(search) filtered = filtered.filter(r => JSON.stringify(r).toLowerCase().includes(search));
-            
-            // 3. Filter by Action
             if(actionFilter) filtered = filtered.filter(r => r.cr714_action === actionFilter);
-            
-            // 4. Filter by Help
             if(appState.filterHelp) filtered = filtered.filter(r => (r.cr714_recordstatus||"").includes("Help"));
 
-            // 5. Sort
             filtered.sort((a,b) => {
                 const getVal = (obj, k) => (obj[k] || "").toString().toLowerCase();
                 if(sort === 'followup-desc') return new Date(b.cr714_followup || 0) - new Date(a.cr714_followup || 0);
@@ -817,7 +845,6 @@
             if(filtered.length === 0) listEl.innerHTML = `<div class="text-center p-8 text-gray-400 italic">No records match filters.</div>`;
             else appendItems(0, 50);
 
-            // Update Global Help Badge
             const helpCount = appState.rawData.filter(r => (r.cr714_recordstatus||"").includes("Help")).length;
             const badge = document.getElementById('bell-badge');
             if(helpCount > 0) {
@@ -865,14 +892,11 @@
             }
         }
 
-        // --- RECORD SELECTION & EDITING ---
+        // --- RECORD SELECTION ---
         function selectRecord(r) {
             appState.selectedRecord = r;
-            
-            // Highlight in list
             document.querySelectorAll('.gallery-item').forEach(el => el.classList.remove('is-selected'));
             
-            // Populate Fields
             document.getElementById('detail-company').innerText = r.cr714_company || "No Company";
             document.getElementById('detail-id').innerText = r.cr714_id;
             document.getElementById('detail-rep-name').innerText = r.cr714_rep;
@@ -890,10 +914,8 @@
             
             document.getElementById('qb-notes-input').value = r.cr714_qbnotes || "";
 
-            // Enable Buttons
             document.querySelectorAll('.tool-btn, #editModeButton, #help-button, #noopp-button').forEach(b => b.disabled = false);
 
-            // Manager Logic
             const mgrPanel = document.getElementById('manager-action-panel');
             if(appState.isManager) {
                 mgrPanel.classList.remove('hidden');
@@ -906,8 +928,6 @@
                     document.getElementById('mgr-notes-text').innerText = r.cr714_managernotes;
                 } else display.classList.add('hidden');
             }
-            
-            // Reset Edit Mode if open
             if(appState.isEditMode) toggleEditMode();
         }
 
@@ -937,7 +957,6 @@
 
         async function handleCustomSave() {
             if(!appState.selectedRecord) return;
-            
             showToast("Saving changes to Power Platform...", "info");
             
             const updatedData = {
@@ -955,10 +974,8 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(updatedData)
                 });
-
                 if(!res.ok) throw new Error("Save Failed");
 
-                // Optimistic Local Update
                 appState.selectedRecord.cr714_namelatest = updatedData.namelatest;
                 appState.selectedRecord.cr714_primaryphone = updatedData.primaryphone;
                 appState.selectedRecord.cr714_emaillatest = updatedData.emaillatest;
@@ -967,10 +984,50 @@
                 showToast("Changes saved successfully!", "success");
                 toggleEditMode();
                 initListRender(); 
+            } catch(e) { showToast("Save Error: " + e.message, "error"); }
+        }
 
-            } catch(e) {
-                showToast("Save Error: " + e.message, "error");
-            }
+        // --- RESTORED REVIEW FUNCTIONS ---
+        function openReviewModal() { document.getElementById('reviews-modal').classList.add('active'); loadReviewData(); }
+        
+        function loadReviewData() {
+            ['tbody-annual', 'tbody-regular', 'tbody-promo-time'].forEach(id => document.getElementById(id).innerHTML = "");
+            const team = appState.roster.filter(e => e.cr714_managerassigned === appState.user || appState.isManager);
+            
+            team.forEach(emp => {
+                const name = emp.cr714_name || emp.cr714_employeename || "Unknown";
+                if(emp.cr714_annualreview) addReviewRow('tbody-annual', name, "Annual", emp.cr714_annualreview, emp.cr714_annualreviewdeliverydate);
+                if(emp.cr714_30dayreview) addReviewRow('tbody-regular', name, "30 Day", emp.cr714_30dayreview, emp.cr714_30deliverydate);
+                if(emp.cr714_90dayreview) addReviewRow('tbody-regular', name, "90 Day", emp.cr714_90dayreview, emp.cr714_90deliverydate);
+                if(emp.cr714_promotiondate) {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td class="font-bold">${name}</td><td>${new Date(emp.cr714_promotiondate).toLocaleDateString()}</td>`;
+                    document.getElementById('tbody-promo-time').appendChild(tr);
+                }
+            });
+        }
+
+        function addReviewRow(tableId, name, type, targetDate, actualDate) {
+            const target = new Date(targetDate);
+            const isCompleted = !!actualDate;
+            const isOverdue = !isCompleted && target < new Date();
+            const badgeClass = isCompleted ? 'bg-ok' : (isOverdue ? 'bg-err' : 'bg-warn');
+            const statusText = isCompleted ? 'Completed' : (isOverdue ? 'Overdue' : 'Upcoming');
+            
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td class="font-bold text-gray-700">${name}</td>
+                ${tableId !== 'tbody-annual' ? `<td>${type}</td>` : `<td>${target.toLocaleDateString()}</td>`}
+                <td><span class="badge ${badgeClass}">${statusText}</span></td>
+            `;
+            document.getElementById(tableId).appendChild(tr);
+        }
+
+        function switchTab(tabId, btn) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            btn.classList.add('active');
         }
 
         // --- SIDE PANELS (FRAMES) ---
@@ -979,7 +1036,6 @@
             document.getElementById('side-panel-frame').src = url;
             document.getElementById('side-panel-container').classList.add('active');
         }
-
         function openMasonvilleSummaryModal() { if(appState.selectedRecord) openSidePanel("Summary", `https://www.bing.com/search?q=${appState.selectedRecord.cr714_company}`); }
         function openSalesReportModal() { if(appState.selectedRecord) openSidePanel("Sales Report", `about:blank`); }
         function openCSWModal() { openSidePanel("Customer Service", "https://www.wbmason.com"); }
@@ -989,13 +1045,10 @@
         function toggleManagerDashboard() {
             const modal = document.getElementById('manager-dashboard-overlay');
             modal.classList.add('active');
-            
             const total = appState.rawData.length;
             const help = appState.rawData.filter(r => (r.cr714_recordstatus||"").includes("Help"));
-            
             document.getElementById('mgr-q1-total').innerText = total;
             document.getElementById('mgr-q2-count').innerText = help.length;
-            
             const list = document.getElementById('mgr-help-list');
             list.innerHTML = "";
             help.forEach(r => {
@@ -1005,68 +1058,40 @@
                 div.onclick = () => { modal.classList.remove('active'); selectRecord(r); };
                 list.appendChild(div);
             });
-
             if(chartActions) chartActions.destroy();
-            
             const ctx = document.getElementById('mgrChartActions').getContext('2d');
             chartActions = new Chart(ctx, {
                 type: 'doughnut',
                 data: {
                     labels: ['Normal', 'Help Needed', 'No Opp'],
-                    datasets: [{
-                        data: [total - help.length, help.length, 0],
-                        backgroundColor: ['#e2e8f0', '#ef4444', '#94a3b8']
-                    }]
+                    datasets: [{ data: [total - help.length, help.length, 0], backgroundColor: ['#e2e8f0', '#ef4444', '#94a3b8'] }]
                 },
                 options: { responsive: true, maintainAspectRatio: false }
             });
         }
 
-        function openDataGrid() {
-            document.getElementById('data-grid-modal').classList.add('active');
-            renderDataTable();
-        }
-
+        function openDataGrid() { document.getElementById('data-grid-modal').classList.add('active'); renderDataTable(); }
         function renderDataTable() {
             const term = document.getElementById('grid-search').value.toLowerCase();
             const tbody = document.getElementById('data-table-body');
             tbody.innerHTML = "";
-            
-            const subset = appState.rawData
-                .filter(r => !term || JSON.stringify(r).toLowerCase().includes(term))
-                .slice(0, 100);
-
+            const subset = appState.rawData.filter(r => !term || JSON.stringify(r).toLowerCase().includes(term)).slice(0, 100);
             subset.forEach(r => {
                 const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td class="font-mono text-blue-600">${r.cr714_id}</td>
-                    <td class="font-bold text-gray-700">${r.cr714_company}</td>
-                    <td>${r.cr714_rep}</td>
-                    <td><span class="bg-gray-100 px-2 rounded-full text-[10px]">${r.cr714_action || '-'}</span></td>
-                    <td><span class="${(r.cr714_recordstatus||"").includes('Help') ? 'text-red-600 font-bold' : 'text-green-600'}">${r.cr714_recordstatus}</span></td>
-                    <td class="truncate max-w-xs text-gray-400 italic">${r.cr714_qbnotes ? 'Has Notes' : ''}</td>
-                    <td><button onclick="document.getElementById('data-grid-modal').classList.remove('active'); selectRecord(appState.rawData.find(x=>x.cr714_id=='${r.cr714_id}'))" class="bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200 font-bold text-xs">GO</button></td>
-                `;
+                tr.innerHTML = `<td class="font-mono text-blue-600">${r.cr714_id}</td><td class="font-bold text-gray-700">${r.cr714_company}</td><td>${r.cr714_rep}</td><td><span class="bg-gray-100 px-2 rounded-full text-[10px]">${r.cr714_action || '-'}</span></td><td><span class="${(r.cr714_recordstatus||"").includes('Help') ? 'text-red-600 font-bold' : 'text-green-600'}">${r.cr714_recordstatus}</span></td><td class="truncate max-w-xs text-gray-400 italic">${r.cr714_qbnotes ? 'Has Notes' : ''}</td><td><button onclick="document.getElementById('data-grid-modal').classList.remove('active'); selectRecord(appState.rawData.find(x=>x.cr714_id=='${r.cr714_id}'))" class="bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200 font-bold text-xs">GO</button></td>`;
                 tbody.appendChild(tr);
             });
         }
 
-        // --- UTILITIES ---
         function showToast(msg, type) {
             const container = document.getElementById('toastContainer');
             const toast = document.createElement('div');
             toast.className = `toast border-l-4 ${type === 'success' ? 'border-green-500' : 'border-blue-500'}`;
             toast.innerHTML = `<span>${msg}</span>`;
             container.appendChild(toast);
-            setTimeout(() => {
-                toast.style.opacity = '0';
-                setTimeout(() => toast.remove(), 300);
-            }, 3000);
+            setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 3000);
         }
-
-        function toggleUserMenu() {
-            if(confirm("Sign out?")) location.reload();
-        }
+        function toggleUserMenu() { if(confirm("Sign out?")) location.reload(); }
     </script>
 </body>
 </html>
