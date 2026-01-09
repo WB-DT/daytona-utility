@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mentor Tracker V8 (Full Feature)</title>
+    <title>Mentor Tracker V9 (Auto-Poll Fixed)</title>
     
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -94,7 +94,7 @@
                 <i class="fab fa-microsoft"></i> Sign In
             </button>
             <div class="mt-4 pt-4 border-t border-gray-100">
-                <button onclick="skipLogin()" class="text-xs text-gray-400 hover:text-gray-600">Skip to Manual Upload</button>
+                <button onclick="skipLogin()" class="text-xs text-gray-400 hover:text-gray-600">Skip (Try Auto-Fetch as Guest)</button>
             </div>
         </div>
     </div>
@@ -102,6 +102,7 @@
     <div id="loader" class="overlay hidden">
         <div class="animate-spin rounded-full h-16 w-16 border-4 border-blue-600 border-t-transparent mb-4"></div>
         <h2 class="text-xl font-bold text-gray-700" id="loader-title">Processing...</h2>
+        <p class="text-sm text-gray-500 font-mono mt-2" id="loader-status">Initializing...</p>
     </div>
 
     <header class="bg-surface border-b border-border shrink-0 z-30 flex flex-col">
@@ -180,7 +181,7 @@
         <div id="emptyState" class="absolute inset-0 z-0 flex flex-col items-center justify-center opacity-50">
             <i class="fas fa-folder-open fa-5x mb-4 text-gray-300"></i>
             <h2 class="text-2xl font-bold text-txt">Waiting for Data</h2>
-            <p class="text-txt">Upload JSON or Excel file to begin.</p>
+            <p class="text-txt">Attempting to poll data...</p>
         </div>
 
         <div id="view-dashboard" class="h-full overflow-y-auto hidden z-10 relative space-y-4">
@@ -290,11 +291,63 @@
     }).catch(e => console.log("Auth Error:", e));
 
     function login() { msalInstance.loginPopup({ scopes: ["User.Read"] }).then(res => { msalAccount = res.account; authSuccess(); }); }
-    function skipLogin() { document.getElementById('auth-overlay').classList.add('hidden'); }
+    
+    function skipLogin() { 
+        document.getElementById('auth-overlay').classList.add('hidden'); 
+        // AUTO-FETCH TRIGGER FOR GUEST
+        fetchCubeData(); 
+    }
+    
     function authSuccess() {
         document.getElementById('auth-overlay').classList.add('hidden');
         document.getElementById('user-display').textContent = msalAccount.name.split(' ')[0];
         document.getElementById('status-dot').classList.remove('hidden');
+        // AUTO-FETCH TRIGGER FOR LOGGED IN USER
+        fetchCubeData();
+    }
+
+    // --- DATA FETCHING (THE FIX) ---
+    async function fetchCubeData() {
+        showLoader(true, "Connecting to Power Automate...");
+        try {
+            console.log("Fetching data from Flow...");
+            let response = await fetch(FLOW_URL, { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ user: msalAccount.name, requestType: 'InitData' }) 
+            });
+
+            // Async pattern handling (202 Accepted)
+            if (response.status === 202) {
+                const loc = response.headers.get('location');
+                if(!loc) throw new Error("Async wait failed");
+                let ready = false;
+                while (!ready) {
+                    await new Promise(r => setTimeout(r, 2000));
+                    let poll = await fetch(loc);
+                    if (poll.status === 200) { response = poll; ready = true; }
+                }
+            }
+            
+            const payload = await response.json();
+            console.log("Data Received:", payload);
+            
+            // Handle different structure possibilities
+            const rows = payload.body?.value || payload.value || payload; 
+            if(!Array.isArray(rows) || rows.length === 0) throw new Error("No data returned or invalid format.");
+            
+            loadDataIntoEngine(rows);
+            
+        } catch (e) {
+            console.error(e);
+            alert("Connection Error: " + e.message + "\n\nTry uploading the Excel/JSON file manually.");
+            showLoader(false);
+            document.getElementById('emptyState').innerHTML = `
+                <i class="fas fa-exclamation-triangle fa-5x mb-4 text-red-300"></i>
+                <h2 class="text-2xl font-bold text-txt">Fetch Failed</h2>
+                <p class="text-txt">Please upload file manually.</p>
+            `;
+        }
     }
 
     // --- FILE PARSING ---
@@ -359,7 +412,7 @@
                 }
             }
             
-            // 3. TEXT FIELDS & MAPPING (Including New Columns)
+            // 3. TEXT FIELDS & MAPPING
             let mentor = row['Mentor Name'] || row['Mentor'] || 'Unknown';
             let mentee = row['Mentee Name'] || row['Mentee'] || 'Unknown';
             let topic = row['Skill Focus'] || row['Session Type '] || row['Topic'] || 'Coaching';
@@ -403,7 +456,7 @@
         else if(range==='ytd') start = new Date(today.getFullYear(), 0, 1);
         else { start=null; end=null; }
         
-        // Global Filters (Date + Dropdowns)
+        // Global Filters
         const mentorFilter = document.getElementById('assignedGlobal').value;
         const deptFilter = document.getElementById('deptGlobal').value;
         
@@ -415,7 +468,6 @@
             return true;
         });
 
-        // Clear column filters on global change
         COLUMN_FILTERS = {};
         runColumnFilters();
     }
@@ -599,9 +651,7 @@
         document.getElementById('rowCount').innerText = FINAL_DATA.length;
     }
 
-    // --- RESTORED UTILITIES (Export, Sort, Filter) ---
-    
-    // 1. Export
+    // --- RESTORED UTILITIES ---
     function exportFilteredData() {
         if(!FINAL_DATA.length) return alert("No data to export");
         const exportData = FINAL_DATA.map(r => {
@@ -615,7 +665,6 @@
         XLSX.writeFile(wb, "Mentor_Export.xlsx");
     }
 
-    // 2. Sorting
     function sortGrid(idx) {
         const h = HEADERS[idx];
         if(SORT_CONFIG.col === idx) SORT_CONFIG.dir = SORT_CONFIG.dir==='asc'?'desc':'asc';
@@ -633,12 +682,10 @@
         renderGrid();
     }
 
-    // 3. Column Filtering
     function openFilterMenu(idx, e) {
         e.stopPropagation();
         CURRENT_FILTER_COL = idx;
         const vals = new Set();
-        // Get unique values from GLOBAL set (to allow narrowing)
         GLOBAL_FILTERED.forEach(r => vals.add(String(formatVal(r._raw[HEADERS[idx]], HEADERS[idx]))));
         
         const list = document.getElementById('filterList');
@@ -673,7 +720,6 @@
     }
     function clearAllFilters() { COLUMN_FILTERS = {}; runColumnFilters(); }
 
-    // 4. Drag & Drop
     function dragStart(e, idx) { e.dataTransfer.setData("colIdx", idx); }
     function dragOver(e) { e.preventDefault(); }
     function drop(e, targetIdx) {
@@ -689,11 +735,9 @@
     function formatVal(v, h) {
         if(v === undefined || v === null) return "";
         const lower = String(h).toLowerCase();
-        // Date Fix
         if(lower.includes('date') && !isNaN(v) && parseFloat(v) > 20000) {
             return new Date(Math.round((parseFloat(v)-25569)*86400*1000)).toLocaleDateString();
         }
-        // Time Fix
         if(lower.includes('time') && String(v).includes(':')) return v;
         if(lower.includes('time') && !isNaN(v) && v < 1) return (v*24).toFixed(2) + 'h';
         return v;
