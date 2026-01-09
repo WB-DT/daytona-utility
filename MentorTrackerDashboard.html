@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mentor Tracker V9 (Auto-Poll Fixed)</title>
+    <title>Mentor Tracker V10 (Final Data Fix)</title>
     
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -29,7 +29,7 @@
     </script>
 
     <style>
-        /* --- CSS VARIABLES & THEMES --- */
+        /* --- CSS VARIABLES --- */
         :root { --brand: #1e3a8a; --accent: #3b82f6; --bg: #f3f4f6; --text: #1f2937; --card-bg: #ffffff; --border: #e5e7eb; }
         
         [data-theme="midnight"] { --brand: #312e81; --accent: #6366f1; --bg: #0f172a; --text: #f1f5f9; --card-bg: #1e293b; --border: #334155; }
@@ -49,11 +49,7 @@
         /* Table Styles */
         .table-container { overflow: auto; height: 100%; border-radius: 0 0 12px 12px; }
         table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
-        
-        /* Sticky Header */
         th { background-color: var(--brand); color: white; padding: 12px; text-align: left; font-weight: 600; position: sticky; top: 0; z-index: 20; white-space: nowrap; }
-        
-        /* Cells */
         td { padding: 8px 12px; border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); vertical-align: top; }
         tr:hover td { background-color: rgba(0,0,0,0.03); }
         
@@ -291,22 +287,18 @@
     }).catch(e => console.log("Auth Error:", e));
 
     function login() { msalInstance.loginPopup({ scopes: ["User.Read"] }).then(res => { msalAccount = res.account; authSuccess(); }); }
-    
     function skipLogin() { 
         document.getElementById('auth-overlay').classList.add('hidden'); 
-        // AUTO-FETCH TRIGGER FOR GUEST
         fetchCubeData(); 
     }
-    
     function authSuccess() {
         document.getElementById('auth-overlay').classList.add('hidden');
         document.getElementById('user-display').textContent = msalAccount.name.split(' ')[0];
         document.getElementById('status-dot').classList.remove('hidden');
-        // AUTO-FETCH TRIGGER FOR LOGGED IN USER
         fetchCubeData();
     }
 
-    // --- DATA FETCHING (THE FIX) ---
+    // --- DATA FETCHING ---
     async function fetchCubeData() {
         showLoader(true, "Connecting to Power Automate...");
         try {
@@ -317,7 +309,6 @@
                 body: JSON.stringify({ user: msalAccount.name, requestType: 'InitData' }) 
             });
 
-            // Async pattern handling (202 Accepted)
             if (response.status === 202) {
                 const loc = response.headers.get('location');
                 if(!loc) throw new Error("Async wait failed");
@@ -330,12 +321,8 @@
             }
             
             const payload = await response.json();
-            console.log("Data Received:", payload);
-            
-            // Handle different structure possibilities
             const rows = payload.body?.value || payload.value || payload; 
             if(!Array.isArray(rows) || rows.length === 0) throw new Error("No data returned or invalid format.");
-            
             loadDataIntoEngine(rows);
             
         } catch (e) {
@@ -355,7 +342,6 @@
         const file = e.target.files[0];
         if(!file) return;
         showLoader(true, "Parsing...");
-        
         const reader = new FileReader();
         reader.onload = (evt) => {
             try {
@@ -374,7 +360,6 @@
                 showLoader(false);
             }
         };
-        
         if(file.name.endsWith('.json')) reader.readAsText(file);
         else reader.readAsArrayBuffer(file);
     }
@@ -383,15 +368,17 @@
     function loadDataIntoEngine(json) {
         if(!json.length) return;
         
-        // Grab headers
         HEADERS = Object.keys(json[0]);
 
         RAW_DATA = json.map(row => {
-            // 1. DATE PARSING
+            // 1. DATE PARSING (FIXED: Removing extra characters)
             let rawDate = row['Date'] || row['Session Date'] || row['Week Of'];
             let parsedDate = null;
             if (rawDate) {
-                const sDate = String(rawDate).replace(/['"]/g, '').trim();
+                // Strip non-numeric/date chars (like backticks or weird spaces)
+                // We keep letters/numbers/slashes/dashes
+                const sDate = String(rawDate).replace(/['"`]/g, '').trim(); 
+                
                 if (!isNaN(sDate) && parseFloat(sDate) > 20000) {
                     parsedDate = new Date(Math.round((parseFloat(sDate) - 25569) * 86400 * 1000));
                 } else {
@@ -408,7 +395,12 @@
                     const parts = sTime.split(':');
                     hours = parseFloat(parts[0]) + (parseFloat(parts[1])/60);
                 } else if(!isNaN(parseFloat(sTime))) {
-                    hours = parseFloat(sTime);
+                    // Excel decimal time (e.g. 0.0416 = 1 hour)
+                    if(parseFloat(sTime) < 1.0 && sTime.includes('.')) {
+                        hours = parseFloat(sTime) * 24; 
+                    } else {
+                        hours = parseFloat(sTime);
+                    }
                 }
             }
             
@@ -456,7 +448,6 @@
         else if(range==='ytd') start = new Date(today.getFullYear(), 0, 1);
         else { start=null; end=null; }
         
-        // Global Filters
         const mentorFilter = document.getElementById('assignedGlobal').value;
         const deptFilter = document.getElementById('deptGlobal').value;
         
@@ -508,7 +499,7 @@
         Array.from(depts).sort().forEach(d => selD.innerHTML += `<option value="${d}">${d}</option>`);
     }
 
-    // --- VISUALIZATION ---
+    // --- VISUALIZATION (Fixed NaN Issue) ---
     function updateDashboard() {
         if(!document.getElementById('chartTrend').offsetParent) return;
         
@@ -532,7 +523,8 @@
         document.getElementById('kpiHours').innerText = hours.toFixed(1);
         document.getElementById('kpiCount').innerText = count;
         document.getElementById('kpiMentors').innerText = activeMentors.size;
-        document.getElementById('kpiAvg').innerText = count ? (hours/count).toFixed(1) : '0';
+        // FIX FOR NaN
+        document.getElementById('kpiAvg').innerText = (count > 0) ? (hours/count).toFixed(1) : '0.0';
 
         const style = getComputedStyle(document.body);
         const brandColor = style.getPropertyValue('--brand').trim();
@@ -556,6 +548,7 @@
         });
     }
 
+    // --- RENDERERS ---
     function renderTeamTable() {
         GROUPS = {};
         FINAL_DATA.forEach(r => {
@@ -589,11 +582,11 @@
                     <table class="w-full">
                         <thead class="text-xs uppercase opacity-50 bg-gray-100">
                              <tr>
-                                <th class="w-1 whitespace-nowrap px-4 py-2">Date</th>
-                                <th class="w-1 whitespace-nowrap px-4 py-2">Mentee</th>
-                                <th class="w-1 whitespace-nowrap px-4 py-2">Focus</th>
-                                <th class="w-1 whitespace-nowrap px-4 py-2">Signed</th>
-                                <th class="px-4 py-2">Notes</th>
+                                <th class="cell-fit px-4 py-2">Date</th>
+                                <th class="cell-fit px-4 py-2">Mentee</th>
+                                <th class="cell-fit px-4 py-2">Focus</th>
+                                <th class="cell-fit px-4 py-2">Signed</th>
+                                <th class="cell-notes px-4 py-2">Notes</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -735,8 +728,12 @@
     function formatVal(v, h) {
         if(v === undefined || v === null) return "";
         const lower = String(h).toLowerCase();
-        if(lower.includes('date') && !isNaN(v) && parseFloat(v) > 20000) {
-            return new Date(Math.round((parseFloat(v)-25569)*86400*1000)).toLocaleDateString();
+        // Date Fix for Grid Display
+        if(lower.includes('date')) {
+            const sVal = String(v).replace(/['"`]/g, '').trim();
+            if(!isNaN(sVal) && parseFloat(sVal) > 20000) {
+                return new Date(Math.round((parseFloat(sVal)-25569)*86400*1000)).toLocaleDateString();
+            }
         }
         if(lower.includes('time') && String(v).includes(':')) return v;
         if(lower.includes('time') && !isNaN(v) && v < 1) return (v*24).toFixed(2) + 'h';
