@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Logistics Manager v35.0 (Focus Mode)</title>
+    <title>Logistics Manager v39.0 (Power User)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -13,7 +13,8 @@
     <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/toastify-js/src/toastify.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/dexie/dist/dexie.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
 
     <script>
         tailwind.config = {
@@ -36,12 +37,7 @@
         body { font-family: 'Inter', sans-serif; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
         
         /* GRID LAYOUT */
-        .app-grid { 
-            display: grid; 
-            grid-template-columns: 260px 1fr; /* Removed right panel, now uses Overlay */
-            height: 100%; 
-            transition: all 0.3s ease; 
-        }
+        .app-grid { display: grid; grid-template-columns: 260px 1fr; height: 100%; transition: all 0.3s ease; }
         
         /* SCROLLBARS */
         .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -61,18 +57,21 @@
         .dark .ticket-card:hover { background-color: #1e293b; }
         .ticket-card.selected { border-left-color: #3b82f6; background-color: #eff6ff; }
         .dark .ticket-card.selected { background-color: #1e3a8a; border-left-color: #60a5fa; }
-        
-        /* FOCUS MODE OVERLAY */
-        #focus-overlay { 
-            position: fixed; inset: 0; background: #f8fafc; z-index: 50; 
-            display: grid; grid-template-rows: 60px 1fr 70px;
-            transform: translateY(100%); transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-        }
+        .stale-ticket { background-color: #fff1f2; }
+        .dark .stale-ticket { background-color: #450a0a; }
+
+        /* FOCUS OVERLAY */
+        #focus-overlay { position: fixed; inset: 0; background: #f8fafc; z-index: 50; display: grid; grid-template-rows: 60px 1fr 70px; transform: translateY(100%); transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
         .dark #focus-overlay { background: #020617; }
         #focus-overlay.active { transform: translateY(0); }
 
-        /* ANIMATIONS */
-        .animate-pulse-slow { animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        /* RESTORE PROMPT */
+        #restore-toast { position: fixed; top: 20px; left: 50%; transform: translateX(-50%) translateY(-100px); background: #334155; color: white; padding: 12px 24px; rounded-lg; display: flex; align-items: center; gap: 15px; z-index: 10000; transition: transform 0.5s; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        #restore-toast.visible { transform: translateX(-50%) translateY(0); }
+
+        /* PROGRESS RING */
+        .progress-ring__circle { transition: stroke-dashoffset 0.35s; transform: rotate(-90deg); transform-origin: 50% 50%; }
+
         #drop-zone { pointer-events: none; opacity: 0; transition: opacity 0.2s; z-index: 9999; backdrop-filter: blur(4px); }
         #drop-zone.active { opacity: 1; pointer-events: all; }
 
@@ -82,22 +81,33 @@
 </head>
 <body class="bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-200" ondragover="window.dragOverHandler(event);" ondrop="window.dropHandler(event);" ondragleave="window.dragLeaveHandler(event);">
 
+    <div id="restore-toast">
+        <div class="flex flex-col">
+            <span class="font-bold text-sm">Unsaved Session Found</span>
+            <span class="text-[10px] opacity-70">Recover your work?</span>
+        </div>
+        <div class="flex gap-2">
+            <button onclick="window.restoreSession()" class="bg-green-500 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-green-600 transition">RESTORE</button>
+            <button onclick="window.discardSession()" class="bg-gray-600 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-gray-500 transition">DISCARD</button>
+        </div>
+    </div>
+
     <div id="drop-zone" class="fixed inset-0 bg-blue-500/20 flex flex-col items-center justify-center border-4 border-blue-500 border-dashed m-4 rounded-3xl">
         <div class="bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-2xl text-center transform scale-110 border border-slate-200 dark:border-slate-700">
-            <i class="fas fa-file-import text-5xl text-blue-500 animate-bounce mb-4"></i>
+            <i class="fas fa-save text-5xl text-blue-500 animate-bounce mb-4"></i>
             <h2 class="text-2xl font-bold">Import Data</h2>
-            <p class="text-sm opacity-70">Release to process file</p>
+            <p class="text-sm opacity-70">Release to process</p>
         </div>
     </div>
 
     <div id="auth-screen" class="fixed inset-0 bg-white dark:bg-slate-950 z-50 flex flex-col items-center justify-center p-4 transition-opacity duration-500">
         <div class="max-w-md w-full text-center space-y-8 animate-fade-in-up">
             <div class="inline-flex p-5 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 text-white text-5xl shadow-2xl shadow-blue-500/30">
-                <i class="fas fa-expand-arrows-alt"></i>
+                <i class="fas fa-crown"></i>
             </div>
             <div>
                 <h1 class="text-3xl font-black tracking-tight text-slate-900 dark:text-white">Logistics Manager</h1>
-                <p class="text-slate-500 dark:text-slate-400 mt-2 font-medium">v35.0 Focus Mode</p>
+                <p class="text-slate-500 dark:text-slate-400 mt-2 font-medium">v39.0 Power User Edition</p>
             </div>
             
             <div id="login-container" class="space-y-4">
@@ -135,25 +145,36 @@
         <div class="bg-slate-900 border-r border-slate-800 flex flex-col z-20 shadow-2xl relative">
             <div class="p-6">
                 <div class="text-lg font-black text-white tracking-tight flex items-center gap-2">
-                    <span class="text-blue-500 text-2xl"><i class="fas fa-cube"></i></span> LOGI<span class="text-slate-500">FOCUS</span>
+                    <span class="text-blue-500 text-2xl"><i class="fas fa-cube"></i></span> LOGI<span class="text-slate-500">MGR</span>
                 </div>
             </div>
 
             <div class="flex-grow px-4 space-y-6 overflow-y-auto custom-scroll">
                 
+                <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700 flex items-center gap-4">
+                    <div class="relative w-12 h-12">
+                        <svg class="w-full h-full" viewBox="0 0 100 100">
+                            <circle class="text-slate-700 stroke-current" stroke-width="10" cx="50" cy="50" r="40" fill="transparent"></circle>
+                            <circle id="goal-ring" class="text-blue-500 progress-ring__circle stroke-current" stroke-width="10" stroke-linecap="round" cx="50" cy="50" r="40" fill="transparent" stroke-dasharray="251.2" stroke-dashoffset="251.2"></circle>
+                        </svg>
+                        <div class="absolute top-0 left-0 w-full h-full flex items-center justify-center text-[10px] font-bold text-white" id="goal-percent">0%</div>
+                    </div>
+                    <div>
+                        <div class="text-[10px] text-slate-400 uppercase font-bold">Daily Goal</div>
+                        <div class="text-xs font-bold text-white"><span id="goal-current">0</span> / <span id="goal-target">50</span></div>
+                    </div>
+                </div>
+
                 <div class="space-y-1">
                     <div class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 pl-2">Dashboards</div>
-                    
                     <button onclick="window.setFilterMode('today')" id="nav-today" class="w-full text-left px-3 py-2.5 rounded-lg text-xs font-bold text-slate-400 hover:bg-slate-800 hover:text-white transition flex items-center justify-between group">
                         <span class="flex items-center gap-3"><i class="fas fa-calendar-day text-blue-500"></i> Live Today</span>
                         <span id="count-today" class="bg-slate-800 group-hover:bg-blue-600 text-white px-2 py-0.5 rounded text-[10px]">0</span>
                     </button>
-
                     <button onclick="window.setFilterMode('urgent')" id="nav-urgent" class="w-full text-left px-3 py-2.5 rounded-lg text-xs font-bold text-slate-400 hover:bg-slate-800 hover:text-white transition flex items-center justify-between group">
                         <span class="flex items-center gap-3"><i class="fas fa-fire text-red-500 animate-pulse"></i> Urgent</span>
                         <span id="count-urgent" class="bg-slate-800 group-hover:bg-red-600 text-white px-2 py-0.5 rounded text-[10px]">0</span>
                     </button>
-
                     <button onclick="window.setFilterMode('all')" id="nav-all" class="w-full text-left px-3 py-2.5 rounded-lg text-xs font-bold text-white bg-blue-600 shadow-lg shadow-blue-900/20 flex items-center justify-between group mt-2">
                         <span class="flex items-center gap-3"><i class="fas fa-database"></i> Database</span>
                         <span id="count-all" class="bg-white/20 text-white px-2 py-0.5 rounded text-[10px]">0</span>
@@ -162,14 +183,19 @@
 
                 <div class="space-y-4 pt-4 border-t border-slate-800">
                     <div class="text-[10px] font-bold text-slate-500 uppercase tracking-widest pl-2">Filters</div>
-                    
+                    <div>
+                        <label class="text-[10px] text-slate-400 mb-1.5 block pl-1">Ownership</label>
+                        <select id="filter-owner" onchange="window.triggerRender()" class="w-full bg-slate-800 text-slate-200 text-xs rounded-lg p-2.5 border border-slate-700 focus:border-blue-500 outline-none transition cursor-pointer">
+                            <option value="all">Show Everyone</option>
+                            <option value="me">My Queue Only</option>
+                        </select>
+                    </div>
                     <div>
                         <label class="text-[10px] text-slate-400 mb-1.5 block pl-1">Route</label>
                         <select id="filter-route" onchange="window.triggerRender()" class="w-full bg-slate-800 text-slate-200 text-xs rounded-lg p-2.5 border border-slate-700 focus:border-blue-500 outline-none transition cursor-pointer">
                             <option value="all">All Routes</option>
                         </select>
                     </div>
-
                     <div>
                         <label class="text-[10px] text-slate-400 mb-1.5 block pl-1">Date Range</label>
                         <input type="text" id="date-picker" placeholder="Filter by Date..." class="w-full bg-slate-800 text-slate-200 text-xs rounded-lg p-2.5 pl-8 border border-slate-700 focus:border-blue-500 outline-none transition cursor-pointer">
@@ -185,9 +211,11 @@
                         <div class="text-[10px] text-slate-400 truncate" id="user-email">user@wbmason.com</div>
                     </div>
                 </div>
-                <button onclick="window.exportData()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold py-2 rounded-lg transition shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2">
-                    <i class="fas fa-file-export"></i> Export Excel
-                </button>
+                <div class="flex gap-2">
+                    <button onclick="window.exportData(false)" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-bold py-2 rounded-lg transition shadow-lg">Export All</button>
+                    <button onclick="window.exportData(true)" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold py-2 rounded-lg transition shadow-lg" title="Export Only Changes">Diff</button>
+                </div>
+                <button onclick="window.resetApp()" class="w-full text-xs text-slate-600 hover:text-red-400 mt-4 underline">Reset Application</button>
             </div>
         </div>
 
@@ -195,15 +223,9 @@
             <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center gap-3 bg-white dark:bg-slate-900 sticky top-0 z-20">
                 <div class="relative flex-grow group">
                     <i class="fas fa-search absolute left-3 top-2.5 text-slate-400 text-xs group-focus-within:text-blue-500 transition"></i>
-                    <input type="text" id="search-input" onkeyup="window.triggerRender()" placeholder="Search..." class="w-full bg-slate-100 dark:bg-slate-800 pl-9 pr-4 py-2 rounded-lg text-xs font-medium focus:ring-2 focus:ring-blue-500 outline-none dark:text-white transition-all border border-transparent focus:bg-white dark:focus:bg-slate-900">
+                    <input type="text" id="search-input" onkeyup="window.triggerRender()" placeholder="Search... (Try 'route:BOY', 'status:Escalated')" class="w-full bg-slate-100 dark:bg-slate-800 pl-9 pr-4 py-2 rounded-lg text-xs font-medium focus:ring-2 focus:ring-blue-500 outline-none dark:text-white transition-all border border-transparent focus:bg-white dark:focus:bg-slate-900">
                 </div>
-                
-                <select id="group-select" onchange="window.setGrouping(this.value)" class="bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-xs font-bold py-2 px-3 rounded-lg border-none outline-none cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-700 transition">
-                    <option value="none">Group: None</option>
-                    <option value="whs">Group: Warehouse</option>
-                    <option value="route">Group: Route</option>
-                    <option value="status">Group: Status</option>
-                </select>
+                <button onclick="window.toggleHelp()" class="p-2 text-slate-400 hover:text-blue-500"><i class="fas fa-question-circle"></i></button>
             </div>
 
             <div class="flex border-b border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-500 overflow-x-auto custom-scroll bg-slate-50 dark:bg-slate-950">
@@ -225,107 +247,99 @@
                 <span>Synced: <span id="last-sync">--</span></span>
             </div>
         </div>
-    </div>
 
-    <div id="focus-overlay" class="bg-white dark:bg-slate-900 shadow-2xl">
-        <div class="h-[60px] border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-6 bg-white dark:bg-slate-900 z-10">
-            <div class="flex items-center gap-4">
-                <button onclick="window.closeFocus()" class="text-slate-400 hover:text-slate-600 dark:hover:text-white transition flex items-center gap-2 text-xs font-bold uppercase">
-                    <i class="fas fa-arrow-left"></i> Back to List
-                </button>
-                <div class="h-6 w-px bg-slate-200 dark:border-slate-700"></div>
-                <h2 class="text-xl font-black text-slate-800 dark:text-white tracking-tight" id="f-id">--</h2>
-                <span id="f-badge" class="px-2.5 py-1 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-600 tracking-wide">--</span>
-            </div>
-            
-            <div class="flex items-center gap-2">
-                <span class="text-xs text-slate-400 mr-4 font-mono hidden md:inline">Ticket <span id="f-index">0</span> of <span id="f-total">0</span></span>
-                <button onclick="window.navTicket(-1)" class="w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 flex items-center justify-center hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-500 transition" title="Previous (Left Arrow)">
-                    <i class="fas fa-chevron-left"></i>
-                </button>
-                <button onclick="window.navTicket(1)" class="w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 flex items-center justify-center hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-500 transition" title="Next (Right Arrow)">
-                    <i class="fas fa-chevron-right"></i>
-                </button>
-            </div>
-        </div>
-
-        <div class="grid grid-cols-1 lg:grid-cols-2 h-full overflow-hidden">
-            <div class="p-8 overflow-y-auto border-r border-slate-200 dark:border-slate-700 custom-scroll bg-slate-50 dark:bg-slate-950/50">
-                <div class="max-w-2xl mx-auto space-y-8">
-                    <div>
-                        <h1 class="text-3xl font-bold text-slate-800 dark:text-white leading-tight mb-2" id="f-customer">--</h1>
-                        <div class="flex flex-wrap gap-3 text-xs font-medium text-slate-500 dark:text-slate-400">
-                            <span class="flex items-center gap-1.5"><i class="fas fa-hashtag"></i> <span id="f-acct">--</span></span>
-                            <span class="flex items-center gap-1.5"><i class="fas fa-receipt"></i> <span id="f-so">--</span></span>
-                            <span class="flex items-center gap-1.5"><i class="fas fa-route"></i> <span id="f-route">--</span></span>
-                            <span class="flex items-center gap-1.5"><i class="fas fa-warehouse"></i> <span id="f-whs">--</span></span>
-                        </div>
-                    </div>
-
-                    <div class="bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30 rounded-2xl p-6">
-                        <div class="text-[10px] font-bold text-red-400 uppercase tracking-wide mb-2 flex justify-between">
-                            <span>Reported Issue</span>
-                            <span id="f-date">--</span>
-                        </div>
-                        <div class="text-lg font-bold text-red-900 dark:text-red-100 leading-snug" id="f-desc">--</div>
-                    </div>
-
-                    <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl p-6 shadow-sm">
-                        <div class="grid grid-cols-2 gap-6">
-                            <div>
-                                <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1">Driver</div>
-                                <div class="font-bold text-slate-700 dark:text-slate-200 text-lg" id="f-driver">--</div>
-                                <a id="f-btn-call" href="#" class="inline-flex items-center gap-2 text-green-600 font-bold text-xs mt-2 hover:underline"><i class="fas fa-phone"></i> Call Driver</a>
-                            </div>
-                            <div>
-                                <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1">Site Contact</div>
-                                <div class="font-bold text-slate-700 dark:text-slate-200 text-lg" id="f-contact">--</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div>
-                         <label class="text-[10px] font-bold text-slate-400 uppercase mb-2 block">Internal Logistics Notes</label>
-                         <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 text-sm text-slate-600 dark:text-slate-300 font-mono whitespace-pre-wrap" id="f-log-notes">--</div>
-                    </div>
+        <div id="focus-overlay" class="bg-white dark:bg-slate-900 shadow-2xl">
+            <div class="h-[60px] border-b border-slate-200 dark:border-slate-800 flex items-center justify-between px-6 bg-white dark:bg-slate-900 z-10">
+                <div class="flex items-center gap-4">
+                    <button onclick="window.closeFocus()" class="text-slate-400 hover:text-slate-600 dark:hover:text-white transition flex items-center gap-2 text-xs font-bold uppercase"><i class="fas fa-arrow-left"></i> Back</button>
+                    <div class="h-6 w-px bg-slate-200 dark:border-slate-700"></div>
+                    <h2 class="text-xl font-black text-slate-800 dark:text-white tracking-tight" id="f-id">--</h2>
+                    <span id="f-badge" class="px-2.5 py-1 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-600 tracking-wide">--</span>
+                    <span id="focus-timer" class="text-xs font-mono text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">00:00</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="text-xs text-slate-400 mr-4 font-mono hidden md:inline">Ticket <span id="f-index">0</span> of <span id="f-total">0</span></span>
+                    <button onclick="window.navTicket(-1)" class="w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 flex items-center justify-center hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-500 transition"><i class="fas fa-chevron-left"></i></button>
+                    <button onclick="window.navTicket(1)" class="w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 flex items-center justify-center hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-500 transition"><i class="fas fa-chevron-right"></i></button>
                 </div>
             </div>
 
-            <div class="p-8 overflow-y-auto custom-scroll bg-white dark:bg-slate-900">
-                 <div class="max-w-xl mx-auto flex flex-col h-full">
-                     
-                     <div class="mb-6">
-                        <label class="text-[10px] font-bold text-slate-400 uppercase mb-2 block">Assignment</label>
-                        <select id="f-owner" class="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-3 text-sm font-bold text-blue-600 dark:text-blue-400 cursor-pointer outline-none focus:ring-2 focus:ring-blue-500">
-                             <option value="">Unassigned</option>
-                        </select>
-                     </div>
+            <div class="grid grid-cols-1 lg:grid-cols-2 h-full overflow-hidden">
+                <div class="p-8 overflow-y-auto border-r border-slate-200 dark:border-slate-700 custom-scroll bg-slate-50 dark:bg-slate-950/50">
+                    <div class="max-w-2xl mx-auto space-y-8">
+                        <div>
+                            <h1 class="text-3xl font-bold text-slate-800 dark:text-white leading-tight mb-2" id="f-customer">--</h1>
+                            <div class="flex flex-wrap gap-3 text-xs font-medium text-slate-500 dark:text-slate-400">
+                                <span class="flex items-center gap-1.5"><i class="fas fa-hashtag"></i> <span id="f-acct">--</span></span>
+                                <span class="flex items-center gap-1.5"><i class="fas fa-route"></i> <span id="f-route">--</span></span>
+                                <span class="flex items-center gap-1.5"><i class="fas fa-warehouse"></i> <span id="f-whs">--</span></span>
+                            </div>
+                        </div>
+                        <div class="bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/30 rounded-2xl p-6">
+                            <div class="text-[10px] font-bold text-red-400 uppercase tracking-wide mb-2 flex justify-between"><span>Reported Issue</span><span id="f-date">--</span></div>
+                            <div class="text-lg font-bold text-red-900 dark:text-red-100 leading-snug" id="f-desc">--</div>
+                        </div>
+                        <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl p-6 shadow-sm">
+                            <div class="grid grid-cols-2 gap-6">
+                                <div>
+                                    <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1">Driver</div>
+                                    <div class="font-bold text-slate-700 dark:text-slate-200 text-lg" id="f-driver">--</div>
+                                </div>
+                                <div>
+                                    <div class="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-1">Contact</div>
+                                    <div class="font-bold text-slate-700 dark:text-slate-200 text-lg" id="f-contact">--</div>
+                                    <div class="flex gap-2 mt-2">
+                                        <button onclick="window.copyText('f-contact')" class="text-xs text-blue-500 hover:underline">Copy Name</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
 
-                     <div class="flex-grow flex flex-col mb-6">
-                        <label class="text-[10px] font-bold text-slate-400 uppercase mb-2">Resolution Notes</label>
-                        <textarea id="f-notes" class="flex-grow w-full border border-slate-200 dark:border-slate-700 rounded-xl p-4 text-base leading-relaxed focus:ring-2 focus:ring-blue-500 outline-none resize-none bg-slate-50 dark:bg-slate-800 dark:text-white shadow-inner" placeholder="Type notes here..."></textarea>
-                     </div>
+                <div class="p-8 overflow-y-auto custom-scroll bg-white dark:bg-slate-900">
+                     <div class="max-w-xl mx-auto flex flex-col h-full">
+                         <div class="mb-6"><label class="text-[10px] font-bold text-slate-400 uppercase mb-2 block">Assignment</label><select id="f-owner" class="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-3 text-sm font-bold text-blue-600 dark:text-blue-400 cursor-pointer outline-none"><option value="">Unassigned</option></select></div>
+                         
+                         <div class="flex-grow flex flex-col mb-6">
+                            <div class="flex justify-between items-center mb-2">
+                                <label class="text-[10px] font-bold text-slate-400 uppercase">Resolution Notes</label>
+                                <div class="flex gap-2" id="snippet-container">
+                                    </div>
+                                <button onclick="window.addSnippet()" class="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded font-bold hover:bg-blue-200">+</button>
+                            </div>
+                            <textarea id="f-notes" class="flex-grow w-full border border-slate-200 dark:border-slate-700 rounded-xl p-4 text-base leading-relaxed focus:ring-2 focus:ring-blue-500 outline-none resize-none bg-slate-50 dark:bg-slate-800 dark:text-white shadow-inner"></textarea>
+                         </div>
 
-                     <div class="mb-20"> <label class="text-[10px] font-bold text-slate-400 uppercase mb-2 block">Update Status</label>
-                        <div class="grid grid-cols-2 gap-3">
+                         <div class="mb-20"><label class="text-[10px] font-bold text-slate-400 uppercase mb-2 block">Update Status</label><div class="grid grid-cols-2 gap-3">
                              <button onclick="window.setFocusStatus('Pending')" class="py-3 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition">Pending</button>
                              <button onclick="window.setFocusStatus('Completed')" class="py-3 rounded-xl bg-green-600 text-white text-sm font-bold hover:bg-green-700 shadow-md transition">Completed</button>
                              <button onclick="window.setFocusStatus('Escalated')" class="py-3 rounded-xl bg-red-600 text-white text-sm font-bold hover:bg-red-700 shadow-md transition">Escalate</button>
                              <button onclick="window.setFocusStatus('Working on')" class="py-3 rounded-xl border border-blue-200 dark:border-blue-900 text-blue-600 text-sm font-bold hover:bg-blue-50 dark:hover:bg-blue-900/30 transition">Working</button>
-                        </div>
+                         </div></div>
                      </div>
-                 </div>
+                </div>
+            </div>
+            <div class="h-[70px] border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between px-8 z-10 absolute bottom-0 w-full">
+                <div class="text-xs text-slate-400"><span class="hidden md:inline">Use Arrow Keys to Navigate</span></div>
+                <div class="flex gap-3"><button onclick="window.saveAndNext()" class="bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-xl text-sm font-bold shadow-lg shadow-blue-500/30 transition transform active:scale-95 flex items-center gap-2"><i class="fas fa-save"></i> Save & Next</button></div>
             </div>
         </div>
 
-        <div class="h-[70px] border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between px-8 z-10 absolute bottom-0 w-full">
-            <div class="text-xs text-slate-400">
-                <span class="hidden md:inline">Use Arrow Keys to Navigate</span>
-            </div>
-            <div class="flex gap-3">
-                 <button onclick="window.saveAndNext()" class="bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-xl text-sm font-bold shadow-lg shadow-blue-500/30 transition transform active:scale-95 flex items-center gap-2">
-                    <i class="fas fa-save"></i> Save & Next
-                 </button>
+        <div id="help-modal" class="hidden fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/50" onclick="this.classList.add('hidden')">
+            <div class="bg-white dark:bg-slate-900 p-6 rounded-2xl shadow-2xl max-w-sm w-full" onclick="event.stopPropagation()">
+                <h3 class="text-lg font-bold mb-4">Keyboard Shortcuts</h3>
+                <div class="space-y-2 text-sm text-slate-600 dark:text-slate-300">
+                    <div class="flex justify-between"><span>Save</span><span class="font-mono bg-slate-100 px-2 rounded">Ctrl + S</span></div>
+                    <div class="flex justify-between"><span>Search</span><span class="font-mono bg-slate-100 px-2 rounded">Ctrl + /</span></div>
+                    <div class="flex justify-between"><span>Next Ticket</span><span class="font-mono bg-slate-100 px-2 rounded">→</span></div>
+                    <div class="flex justify-between"><span>Prev Ticket</span><span class="font-mono bg-slate-100 px-2 rounded">←</span></div>
+                    <div class="flex justify-between"><span>Close</span><span class="font-mono bg-slate-100 px-2 rounded">Esc</span></div>
+                </div>
+                <div class="mt-6 pt-4 border-t border-slate-200 dark:border-slate-700">
+                    <h3 class="text-lg font-bold mb-2">Smart Search</h3>
+                    <p class="text-xs text-slate-500">Try typing: <span class="font-mono text-blue-500">status:pending</span>, <span class="font-mono text-blue-500">route:BOY</span>, <span class="font-mono text-blue-500">is:urgent</span>, <span class="font-mono text-blue-500">driver:John</span></p>
+                </div>
             </div>
         </div>
     </div>
@@ -337,12 +351,9 @@
                 try {
                     const raw = payload.data;
                     self.postMessage({ type: 'PROGRESS', step: 'Parsing...', percent: 20 });
-                    
                     const now = new Date();
                     const val = (obj, k) => { if(!obj) return ""; const m = Object.keys(obj).reduce((a,b)=>{a[b.toLowerCase().replace(/[^a-z0-9]/g,'')]=b;return a},{}); for(let i of k){let c=i.toLowerCase().replace(/[^a-z0-9]/g,'');if(m[c])return obj[m[c]]} return ""; };
                     const safeDate = (v) => { if(!v) return ""; if(typeof v === 'number') { const d = new Date(Math.round((v - 25569)*86400000)); return d.toISOString().split('T')[0]; } return String(v).substring(0, 10); };
-
-                    self.postMessage({ type: 'PROGRESS', step: 'Mapping...', percent: 40 });
 
                     const db = raw.map(r => {
                         const dateStr = safeDate(val(r, ['starttime','start_time','date']));
@@ -352,13 +363,9 @@
                         const desc = val(r, ['description','description_x003a_','desc']);
                         const issue = val(r, ['issue','issue_x003f_']);
                         const isUrgent = (desc+issue).toLowerCase().match(/asap|refused|urgent|missing|return/);
-                        const driver = val(r, ['drivernamenumber','driver_name','driver']);
-
                         return {
                             id: val(r, ['id','ticket']),
-                            date: dateStr,
-                            isStale: isStale,
-                            isUrgent: !!isUrgent,
+                            date: dateStr, isStale, isUrgent,
                             cust: val(r, ['companynameandordeliverylocationname','company','company_name','name']),
                             acct: val(r, ['accountnumber','account_number','account','acct']),
                             so: val(r, ['salesordernumber','sales_order','so']),
@@ -366,69 +373,60 @@
                             contact: val(r, ['contactnamenumberincludeext','contact','contact_name']),
                             route: val(r, ['route']),
                             whs: val(r, ['warehousexxxxxinthisformatpleasex002e','warehouse','whs']),
-                            driverRaw: driver,
-                            issue: issue,
-                            desc: desc,
+                            driverRaw: val(r, ['drivernamenumber','driver_name','driver']),
+                            issue: issue, desc: desc,
                             owner: val(r, ['logisticsowner','owner','logistics_owner']),
                             notes: val(r, ['receivedtextfromdrivernotes','receivedtext','driver_notes']),
                             lNotes: val(r, ['logisticsnotes','logisticsnotes_x003a_','logistics_notes']),
                             wrhNotes: val(r, ['receivedemailfromwrhnotes']),
-                            email: val(r, ['email']),
-                            escTo: val(r, ['previouslyescalatedifyestowhohollykariorwayne']),
-                            status: status,
-                            searchStr: (val(r, ['id'])+val(r, ['company'])+val(r, ['issue'])).toLowerCase() 
+                            email: val(r, ['email']), status: status,
+                            searchStr: (val(r, ['id'])+val(r, ['company'])+val(r, ['issue'])+val(r, ['route'])+val(r, ['drivernamenumber'])).toLowerCase() 
                         };
                     });
                     
-                    self.postMessage({ type: 'PROGRESS', step: 'Finishing...', percent: 90 });
-                    
+                    self.postMessage({ type: 'PROGRESS', step: 'Indexing...', percent: 80 });
                     const owners = [...new Set(db.map(x=>x.owner).filter(x=>x))];
                     const routes = [...new Set(db.map(x=>x.route).filter(x=>x))].sort((a,b)=>a.toString().localeCompare(b.toString(),undefined,{numeric:true}));
-                    
-                    const counts = {
-                        today: db.filter(x => x.date === new Date().toISOString().split('T')[0]).length,
-                        urgent: db.filter(x => x.isUrgent && x.status !== 'Completed').length,
-                        all: db.length
-                    };
-
+                    const counts = { today: db.filter(x => x.date === new Date().toISOString().split('T')[0]).length, urgent: db.filter(x => x.isUrgent && x.status !== 'Completed').length, all: db.length };
                     self.postMessage({ type: 'PARSE_COMPLETE', db, owners, routes, counts });
-
                 } catch(e) { self.postMessage({ type: 'ERROR', message: e.message }); }
             }
             else if (type === 'FILTER') {
-                const { db, filters, grouping } = payload;
+                const { db, filters } = payload;
                 const { search, route, owner, status, dateRange, mode, userEmail } = filters;
                 const todayStr = new Date().toISOString().split('T')[0];
                 
+                let searchTerms = search;
+                let sRoute=null, sStatus=null, sDriver=null, sIsUrgent=false;
+                if(search.includes(':')) {
+                    const parts = search.split(' ');
+                    searchTerms = "";
+                    parts.forEach(p => {
+                        if(p.startsWith('route:')) sRoute = p.split(':')[1];
+                        else if(p.startsWith('status:')) sStatus = p.split(':')[1];
+                        else if(p.startsWith('driver:')) sDriver = p.split(':')[1];
+                        else if(p.startsWith('is:urgent')) sIsUrgent = true;
+                        else searchTerms += p + " ";
+                    });
+                    searchTerms = searchTerms.trim();
+                }
+
                 let filtered = db.filter(t => {
                     if(mode === 'today' && t.date !== todayStr) return false;
                     if(mode === 'urgent' && (!t.isUrgent || t.status === 'Completed')) return false;
                     if(mode === 'mine' && (!t.owner || !t.owner.toLowerCase().includes(userEmail.split('@')[0]))) return false;
-
                     if(status !== 'all' && t.status !== status) return false;
                     if(mode !== 'mine' && owner !== 'all' && owner !== 'me' && t.owner !== owner) return false;
                     if(route !== 'all' && t.route != route) return false;
-                    
+                    if(sRoute && !t.route.toLowerCase().includes(sRoute)) return false;
+                    if(sStatus && !t.status.toLowerCase().includes(sStatus)) return false;
+                    if(sDriver && !t.driverRaw.toLowerCase().includes(sDriver)) return false;
+                    if(sIsUrgent && !t.isUrgent) return false;
                     if(dateRange.length > 0) { const d = new Date(t.date); if(d < new Date(dateRange[0]) || d > new Date(dateRange[1] || dateRange[0])) return false; }
-                    if(search && !t.searchStr.includes(search)) return false;
+                    if(searchTerms && !t.searchStr.includes(searchTerms)) return false;
                     return true;
                 });
-
-                let displayData = [];
-                if(grouping !== 'none') {
-                    const groups = {};
-                    filtered.forEach(t => {
-                        let k = t[grouping] || 'Unknown';
-                        if(!groups[k]) groups[k] = [];
-                        groups[k].push(t);
-                    });
-                    Object.keys(groups).sort().forEach(key => {
-                        displayData.push({ type: 'header', title: key, count: groups[key].length });
-                        displayData.push(...groups[key]);
-                    });
-                } else { displayData = filtered; }
-                
-                self.postMessage({ type: 'FILTER_COMPLETE', filtered: displayData, rawCount: filtered.length });
+                self.postMessage({ type: 'FILTER_COMPLETE', filtered, rawCount: filtered.length });
             }
         };
     </script>
@@ -436,17 +434,22 @@
     <script>
         const blob = new Blob([document.getElementById('worker-script').textContent], { type: "text/javascript" });
         const worker = new Worker(URL.createObjectURL(blob));
-        
+        const dbVault = new Dexie("LogisticsVault");
+        dbVault.version(1).stores({ tickets: "id, modifiedAt" });
+
         const FLOW_URL = "https://49b71dde44f8e78e89bc0440816209.07.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/c8534a1735ca463d9386ac5ab1c89fcf/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=X3TCIX7rLqKbo5iiDAOozZ-JchO3BuPK5H8DW4aruAA";
         const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: window.location.href }, cache: { cacheLocation: "localStorage" } };
         const msalInstance = new msal.PublicClientApplication(msalConfig);
         
         let fullDB = [], displayDB = [];
         let currentUserEmail = "", currentTicketId = null;
-        let currentMode = 'all', currentStatus = 'all', currentGrouping = 'none';
+        let currentMode = 'all', currentStatus = 'all';
         let dateFilter = null;
         let selectedIndex = -1;
-        const ROW_HEIGHT = 80; const HEADER_HEIGHT = 40;
+        let focusTimerInterval = null;
+        let ticketsDoneSession = 0;
+        let userSnippets = JSON.parse(localStorage.getItem('logi_snippets') || '["Left VM", "Wrong Addr", "Completed"]');
+        const ROW_HEIGHT = 80;
 
         worker.onmessage = function(e) {
             const { type, db, filtered, rawCount, owners, routes, counts, step, percent, message } = e.data;
@@ -457,6 +460,7 @@
             }
             else if (type === 'PARSE_COMPLETE') {
                 fullDB = db;
+                checkVault();
                 updateFiltersUI(owners, routes);
                 updateCountsUI(counts);
                 document.getElementById('auth-screen').classList.add('hidden');
@@ -477,10 +481,9 @@
         document.addEventListener('DOMContentLoaded', () => {
             if(window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.classList.add('dark');
             dateFilter = flatpickr("#date-picker", { mode: "range", dateFormat: "Y-m-d", onChange: () => window.triggerRender() });
-            
             document.getElementById('virtual-list').addEventListener('scroll', handleScroll);
+            renderSnippets();
             
-            // KEYBOARD NAVIGATION
             document.addEventListener('keydown', (e) => {
                 const overlay = document.getElementById('focus-overlay');
                 if (overlay.classList.contains('active')) {
@@ -488,8 +491,46 @@
                     if (e.key === 'ArrowLeft') { e.preventDefault(); navTicket(-1); }
                     if (e.key === 'Escape') { e.preventDefault(); closeFocus(); }
                 }
+                if(e.shiftKey && e.key === '?') { window.toggleHelp(); }
             });
         });
+
+        // --- SNIPPETS ---
+        function renderSnippets() {
+            const container = document.getElementById('snippet-container');
+            container.innerHTML = userSnippets.map((s,i) => `
+                <button onclick="window.insertNote('${s}')" oncontextmenu="window.removeSnippet(${i}); return false;" class="text-[9px] bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded hover:bg-blue-100 text-slate-500">${s}</button>
+            `).join('');
+        }
+        function addSnippet() {
+            const s = prompt("Enter text for new quick note:");
+            if(s) { userSnippets.push(s); localStorage.setItem('logi_snippets', JSON.stringify(userSnippets)); renderSnippets(); }
+        }
+        function removeSnippet(i) {
+            if(confirm("Delete this snippet?")) { userSnippets.splice(i,1); localStorage.setItem('logi_snippets', JSON.stringify(userSnippets)); renderSnippets(); }
+        }
+
+        async function checkVault() {
+            const count = await dbVault.tickets.count();
+            if(count > 0) document.getElementById('restore-toast').classList.add('visible');
+        }
+        async function restoreSession() {
+            const edits = await dbVault.tickets.toArray();
+            edits.forEach(e => {
+                const t = fullDB.find(x => x.id === e.id);
+                if(t) { t.notes = e.notes; t.status = e.status; t.owner = e.owner; }
+            });
+            triggerRender();
+            document.getElementById('restore-toast').classList.remove('visible');
+            Toastify({ text: `♻️ Restored`, duration: 3000, style: { background: "#10b981" } }).showToast();
+        }
+        async function discardSession() {
+            await dbVault.tickets.clear();
+            document.getElementById('restore-toast').classList.remove('visible');
+        }
+        async function persistToVault(ticket) {
+            await dbVault.tickets.put({ id: ticket.id, notes: ticket.notes, status: ticket.status, owner: ticket.owner, modifiedAt: new Date() });
+        }
 
         async function login() { try { const r = await msalInstance.loginPopup({ scopes: ["User.Read"] }); init(r.account.name, r.account.username); } catch (e) { document.getElementById('file-upload-fallback').classList.remove('hidden'); } }
         function bypassAuth() { init("Offline Manager", "manager@wbmason.com"); }
@@ -534,13 +575,13 @@
             const filters = {
                 search: document.getElementById('search-input').value.toLowerCase(),
                 route: document.getElementById('filter-route').value,
-                owner: document.getElementById('filter-owner').value,
+                owner: document.getElementById('filter-owner').value, 
                 status: currentStatus,
                 dateRange: dateFilter.selectedDates,
                 mode: currentMode,
                 userEmail: currentUserEmail
             };
-            worker.postMessage({ type: 'FILTER', payload: { db: fullDB, filters, grouping: currentGrouping } });
+            worker.postMessage({ type: 'FILTER', payload: { db: fullDB, filters } });
         }
 
         function setFilterMode(m) { 
@@ -550,11 +591,9 @@
             triggerRender(); 
         }
         function setStatusFilter(s) { currentStatus = s; document.querySelectorAll('.nav-item').forEach(e => e.classList.toggle('active', e.innerText === (s === 'all' ? 'All' : s))); triggerRender(); }
-        function setGrouping(g) { currentGrouping = g; triggerRender(); }
 
         function initVirtualScroll() {
-            let h = 0;
-            displayDB.forEach(item => { h += item.type === 'header' ? HEADER_HEIGHT : ROW_HEIGHT; });
+            let h = displayDB.length * ROW_HEIGHT;
             document.getElementById('virtual-height').style.height = `${h}px`;
         }
         function handleScroll() { requestAnimationFrame(renderVirtualList); }
@@ -567,14 +606,9 @@
             const content = document.getElementById('virtual-content');
             content.innerHTML = "";
             let currentY = 0;
-            for(let i=0; i<startIndex; i++) currentY += displayDB[i].type==='header' ? HEADER_HEIGHT : ROW_HEIGHT;
+            for(let i=0; i<startIndex; i++) currentY += ROW_HEIGHT;
             content.style.transform = `translateY(${currentY}px)`;
-            for(let i=startIndex; i<endIndex; i++) {
-                const item = displayDB[i];
-                if(item.type === 'header') {
-                    const el = document.createElement('div'); el.className = 'group-header'; el.innerText = `${item.title} (${item.count})`; content.appendChild(el);
-                } else { content.appendChild(createCard(item)); }
-            }
+            for(let i=startIndex; i<endIndex; i++) { content.appendChild(createCard(displayDB[i])); }
         }
 
         function createCard(t) {
@@ -582,81 +616,102 @@
             el.className = `ticket-card p-4 border-b border-slate-100 dark:border-slate-800 ${t.id === currentTicketId ? 'selected' : ''} ${t.isStale && t.status==='Pending' ? 'stale-ticket' : ''}`;
             el.onclick = () => loadTicket(t.id);
             const badgeClass = t.status === 'Completed' ? 'bg-green-100 text-green-700' : (t.status === 'Escalated' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700');
-            el.innerHTML = `<div class="flex justify-between items-start mb-1"><span class="font-bold text-slate-800 dark:text-white text-xs">#${t.id}</span><span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded ${badgeClass}">${t.status}</span></div><div class="font-bold text-sm text-slate-700 dark:text-slate-300 truncate mb-1" title="${t.cust}">${t.cust}</div><div class="flex justify-between items-center text-[10px] text-slate-400"><span class="truncate max-w-[120px]">${t.issue}</span><span>${t.date.substring(5)}</span></div>`;
+            el.innerHTML = `<div class="flex justify-between items-start mb-1"><span class="font-bold text-slate-800 dark:text-white text-xs">#${t.id} ${t.isUrgent?'🔥':''}</span><span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded ${badgeClass}">${t.status}</span></div><div class="font-bold text-sm text-slate-700 dark:text-slate-300 truncate mb-1" title="${t.cust}">${t.cust}</div><div class="flex justify-between items-center text-[10px] text-slate-400"><span class="truncate max-w-[120px]">${t.issue}</span><span>${t.date.substring(5)}</span></div>`;
             return el;
         }
 
-        // --- FOCUS MODE LOGIC ---
         function loadTicket(id) {
             currentTicketId = id;
             selectedIndex = displayDB.findIndex(x => x.id === id);
-            
-            // Open Focus Overlay
-            const overlay = document.getElementById('focus-overlay');
-            overlay.classList.add('active');
+            document.getElementById('focus-overlay').classList.add('active');
             
             const t = fullDB.find(x => x.id === id);
             if(!t) return;
             
-            // Populate Data
             const set = (i,v) => document.getElementById(i).innerText = v || '--';
             set('f-id', '#'+t.id); set('f-customer', t.cust); set('f-acct', t.acct); set('f-so', t.so); set('f-route', t.route); set('f-whs', t.whs);
-            set('f-desc', t.issue + (t.desc ? "\n\n" + t.desc : "")); set('f-date', t.date); set('f-driver', t.driverRaw); set('f-log-notes', t.lNotes);
-            set('f-contact', t.contact || ""); 
-
-            // Counters
+            set('f-desc', t.issue + (t.desc ? "\n\n" + t.desc : "")); set('f-date', t.date); set('f-driver', t.driverRaw); set('f-contact', t.contact || ""); 
             document.getElementById('f-index').innerText = selectedIndex + 1;
-            document.getElementById('f-total').innerText = displayDB.filter(x => x.type !== 'header').length;
-
+            document.getElementById('f-total').innerText = displayDB.length;
             document.getElementById('f-owner').value = t.owner || "";
             document.getElementById('f-notes').value = t.notes || "";
             
             const b = document.getElementById('f-badge'); b.innerText = t.status; b.className = t.status === 'Completed' ? 'px-2.5 py-1 rounded text-[10px] font-bold uppercase bg-green-100 text-green-700' : 'px-2.5 py-1 rounded text-[10px] font-bold uppercase bg-yellow-100 text-yellow-700';
-
-            const ph = t.driverRaw ? t.driverRaw.match(/[\d\-\.\s]{10,}/) : null;
-            if(ph) document.getElementById('f-btn-call').href = `tel:${ph[0].replace(/[^0-9]/g,'')}`;
+            
+            // Start Timer
+            startFocusTimer();
         }
 
-        function closeFocus() {
-            document.getElementById('focus-overlay').classList.remove('active');
-            renderVirtualList(); // Refresh list to show selection
+        function startFocusTimer() {
+            clearInterval(focusTimerInterval);
+            let seconds = 0;
+            const display = document.getElementById('focus-timer');
+            display.innerText = "00:00";
+            focusTimerInterval = setInterval(() => {
+                seconds++;
+                const mins = Math.floor(seconds / 60).toString().padStart(2, '0');
+                const secs = (seconds % 60).toString().padStart(2, '0');
+                display.innerText = `${mins}:${secs}`;
+            }, 1000);
         }
 
+        function insertNote(text) {
+            const field = document.getElementById('f-notes');
+            const now = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+            field.value += (field.value ? "\n" : "") + `[${now}] ${text}`;
+        }
+
+        function closeFocus() { 
+            document.getElementById('focus-overlay').classList.remove('active'); 
+            clearInterval(focusTimerInterval);
+            renderVirtualList(); 
+        }
         function navTicket(dir) {
             if(selectedIndex === -1) return;
             let newIndex = selectedIndex + dir;
-            // Skip headers
-            while(newIndex >= 0 && newIndex < displayDB.length && displayDB[newIndex].type === 'header') {
-                newIndex += dir;
-            }
-            if(newIndex >= 0 && newIndex < displayDB.length) {
-                loadTicket(displayDB[newIndex].id);
-            }
+            if(newIndex >= 0 && newIndex < displayDB.length) loadTicket(displayDB[newIndex].id);
         }
-
-        function setFocusStatus(s) {
-            const t = fullDB.find(x => x.id === currentTicketId);
-            if(t) { t.status = s; saveLocal(false); loadTicket(t.id); } // Refresh badge
+        
+        function setFocusStatus(s) { 
+            const t = fullDB.find(x => x.id === currentTicketId); 
+            if(t) { 
+                t.status = s; 
+                if(s === 'Completed') {
+                    confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+                    ticketsDoneSession++;
+                    updateGoalRing();
+                }
+                saveLocal(false); loadTicket(t.id); 
+            } 
         }
-
-        function saveAndNext() {
-            saveLocal(false);
-            navTicket(1);
-        }
-
+        function saveAndNext() { saveLocal(false); navTicket(1); }
         function saveLocal(refresh = false) {
             const t = fullDB.find(x => x.id === currentTicketId);
             if(t) {
                 t.notes = document.getElementById('f-notes').value;
                 t.owner = document.getElementById('f-owner').value;
+                persistToVault(t);
                 Toastify({ text: "💾 Saved", duration: 1000, style: { background: "#10b981" }, position: "bottom-center" }).showToast();
                 if(refresh) triggerRender(); 
             }
         }
 
+        function updateGoalRing() {
+            const percent = Math.min(100, (ticketsDoneSession / 50) * 100);
+            const offset = 251.2 - (251.2 * percent / 100);
+            document.getElementById('goal-ring').style.strokeDashoffset = offset;
+            document.getElementById('goal-current').innerText = ticketsDoneSession;
+            document.getElementById('goal-percent').innerText = Math.round(percent) + "%";
+        }
+
+        function copyText(id) {
+            const txt = document.getElementById(id).innerText;
+            navigator.clipboard.writeText(txt);
+            Toastify({ text: "📋 Copied", duration: 1000 }).showToast();
+        }
+
         function updateFiltersUI(owners, routes) {
-            const ownerSel = document.getElementById('filter-owner');
-            const fOwner = document.getElementById('f-owner');
+            const ownerSel = document.getElementById('filter-owner'), fOwner = document.getElementById('f-owner');
             if(ownerSel.options.length < 3) {
                 const o = owners.sort().map(i => `<option value="${i}">${i}</option>`).join('');
                 ownerSel.innerHTML += o; fOwner.innerHTML = `<option value="">Unassigned</option>` + o;
@@ -673,13 +728,25 @@
         function dragOverHandler(ev) { ev.preventDefault(); document.getElementById('drop-zone').classList.add('active'); }
         function dragLeaveHandler(ev) { ev.preventDefault(); document.getElementById('drop-zone').classList.remove('active'); }
         function dropHandler(ev) { ev.preventDefault(); document.getElementById('drop-zone').classList.remove('active'); if (ev.dataTransfer.items && ev.dataTransfer.items[0].kind === 'file') handleFile({files: [ev.dataTransfer.items[0].getAsFile()]}); }
-
-        function exportData() {
-            const ws = XLSX.utils.json_to_sheet(fullDB);
+        function generateCustomerEmail() { const t = fullDB.find(x => x.id === currentTicketId); if(t) window.location.href = `mailto:?subject=Update Order #${t.so||t.id}&body=Hello,\n\nRegarding ${t.issue}...`; }
+        function generateDriverText() { const t = fullDB.find(x => x.id === currentTicketId); if(t) { navigator.clipboard.writeText(`Order: ${t.so||t.id}\nAcct: ${t.cust}\nAddress: ${t.address}\nNotes: ${t.notes}`); Toastify({ text: "📱 Copied", duration: 2000 }).showToast(); } }
+        
+        async function exportData(changesOnly = false) {
+            let dataToExport = fullDB;
+            if(changesOnly) {
+                const edits = await dbVault.tickets.toArray();
+                const ids = new Set(edits.map(e => e.id));
+                dataToExport = fullDB.filter(t => ids.has(t.id));
+                if(dataToExport.length === 0) return alert("No changes found to export.");
+            }
+            const ws = XLSX.utils.json_to_sheet(dataToExport);
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, "Logistics_Export");
-            XLSX.writeFile(wb, `Logistics_Export_${new Date().toISOString().split('T')[0]}.xlsx`);
+            XLSX.writeFile(wb, `Logistics_Export_${changesOnly?'DIFF':'FULL'}_${new Date().toISOString().split('T')[0]}.xlsx`);
         }
+        
+        function resetApp() { if(confirm("Reset entire app state?")) { localStorage.clear(); dbVault.delete().then(() => window.location.reload()); } }
+        function toggleHelp() { const el=document.getElementById('help-modal'); if(el.classList.contains('hidden')) el.classList.remove('hidden'); else el.classList.add('hidden'); }
     </script>
 </body>
 </html>
