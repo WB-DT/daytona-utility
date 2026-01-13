@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Logistics Manager v40.5 (Protocol Fix)</title>
+    <title>Logistics Manager v40.6 (All Views Restored)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -69,6 +69,14 @@
         .kanban-card { background: white; padding: 10px; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); cursor: pointer; border: 1px solid transparent; flex-shrink: 0; }
         .dark .kanban-card { background: #0f172a; border-color: #334155; }
 
+        /* GRID */
+        .data-table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+        .data-table th { position: sticky; top: 0; background: #f8fafc; z-index: 10; text-align: left; padding: 8px; font-weight: 700; color: #64748b; border-bottom: 2px solid var(--border); }
+        .dark .data-table th { background: #1e293b; color: #94a3b8; }
+        .data-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+        .data-table tr:hover { background: #eff6ff; cursor: pointer; }
+        .dark .data-table tr:hover { background: #1e3a8a; }
+
         /* ROUTE (Grouped) */
         .route-container { height: 100%; overflow-y: auto; padding: 16px; min-height: 0; }
         .state-group { margin-bottom: 16px; background: #f8fafc; border-radius: 12px; border: 1px solid var(--border); overflow: hidden; flex-shrink: 0; }
@@ -89,11 +97,6 @@
         #focus-overlay { position: fixed; inset: 0; background: #f8fafc; z-index: 50; display: grid; grid-template-rows: 60px 1fr 70px; transform: translateY(100%); transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1); overflow: hidden; }
         .dark #focus-overlay { background: #020617; }
         #focus-overlay.active { transform: translateY(0); }
-
-        /* SKELETON LOADER */
-        .skeleton { background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 4px; }
-        .dark .skeleton { background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%); }
-        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
         #drop-zone { pointer-events: none; opacity: 0; transition: opacity 0.2s; z-index: 9999; backdrop-filter: blur(4px); }
         #drop-zone.active { opacity: 1; pointer-events: all; }
@@ -132,7 +135,7 @@
             </div>
             <div>
                 <h1 class="text-3xl font-black tracking-tight text-slate-900 dark:text-white">Logistics Manager</h1>
-                <p class="text-slate-500 dark:text-slate-400 mt-2 font-medium">v40.5 Protocol Fix</p>
+                <p class="text-slate-500 dark:text-slate-400 mt-2 font-medium">v40.6 All Views Restored</p>
             </div>
             
             <div id="login-container" class="space-y-4">
@@ -484,10 +487,26 @@
                 self.postMessage({ type: 'FILTER_COMPLETE', count: filteredDB.length });
             }
             else if (type === 'GET_CHUNK') {
-                // Return data for the viewport
                 const { start, end } = payload;
                 const chunk = filteredDB.slice(start, end);
                 self.postMessage({ type: 'CHUNK_DATA', chunk, start });
+            }
+            else if (type === 'GET_KANBAN_DATA') {
+                const cols = { 'Pending': [], 'Working on': [], 'Escalated': [], 'Completed': [] };
+                const colCounts = { 'Pending': 0, 'Working on': 0, 'Escalated': 0, 'Completed': 0 };
+                // Single pass for speed
+                filteredDB.forEach(t => {
+                    if (cols[t.status]) {
+                        colCounts[t.status]++;
+                        if (cols[t.status].length < 20) cols[t.status].push(t); // Limit to top 20 for memory
+                    }
+                });
+                self.postMessage({ type: 'KANBAN_DATA', cols, colCounts });
+            }
+            else if (type === 'GET_GRID_DATA') {
+                // Limit to top 100 for memory safety
+                const chunk = filteredDB.slice(0, 100);
+                self.postMessage({ type: 'GRID_DATA', chunk });
             }
             else if (type === 'GET_DETAIL') {
                 const id = payload.id;
@@ -535,7 +554,7 @@
         
         // --- WORKER HANDLER ---
         worker.onmessage = function(e) {
-            const { type, count, chunk, start, ticket, index, groups, owners, routes, counts, step, percent, message } = e.data;
+            const { type, count, chunk, start, ticket, index, groups, cols, colCounts, owners, routes, counts, step, percent, message } = e.data;
             if (type === 'PROGRESS') {
                 document.getElementById('progress-step').innerText = step;
                 document.getElementById('progress-bar').style.width = percent + "%";
@@ -555,15 +574,25 @@
                 document.getElementById('list-count-display').innerText = `${count} Matches`;
                 if(currentView === 'list') {
                     const list = document.getElementById('virtual-list');
-                    if(list) list.scrollTop = 0; // Reset scroll on filter
+                    if(list) list.scrollTop = 0; 
                     initVirtualScroll(); 
-                    renderVirtualList(); // Will trigger get_chunk
+                    renderVirtualList();
+                } else if (currentView === 'kanban') {
+                    worker.postMessage({ type: 'GET_KANBAN_DATA' });
+                } else if (currentView === 'grid') {
+                    worker.postMessage({ type: 'GET_GRID_DATA' });
                 } else if (currentView === 'route') {
                     worker.postMessage({ type: 'GET_GROUPED_ROUTES' });
                 }
             }
             else if (type === 'CHUNK_DATA') {
                 fillVirtualContent(chunk, start);
+            }
+            else if (type === 'KANBAN_DATA') {
+                renderKanbanDOM(cols, colCounts);
+            }
+            else if (type === 'GRID_DATA') {
+                renderGridDOM(chunk);
             }
             else if (type === 'DETAIL_DATA') {
                 openTicketOverlay(ticket, index);
@@ -601,10 +630,12 @@
                 document.getElementById('virtual-list').addEventListener('scroll', handleScroll);
                 initVirtualScroll();
                 renderVirtualList();
+            } else if (currentView === 'kanban') {
+                worker.postMessage({ type: 'GET_KANBAN_DATA' });
+            } else if (currentView === 'grid') {
+                worker.postMessage({ type: 'GET_GRID_DATA' });
             } else if (currentView === 'route') {
                 worker.postMessage({ type: 'GET_GROUPED_ROUTES' });
-            } else {
-                container.innerHTML = '<div class="p-10 text-center text-slate-400">View not available in Zero-Copy mode yet</div>';
             }
         }
 
@@ -612,9 +643,7 @@
         function initVirtualScroll() { 
             if(document.getElementById('virtual-height')) document.getElementById('virtual-height').style.height = `${totalRecords * ROW_HEIGHT}px`; 
         }
-        
         function handleScroll() { requestAnimationFrame(renderVirtualList); }
-        
         function renderVirtualList() {
             const list = document.getElementById('virtual-list');
             if(!list) return;
@@ -622,32 +651,36 @@
             const h = list.clientHeight;
             const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 2);
             const endIndex = Math.min(totalRecords, Math.ceil((scrollTop + h) / ROW_HEIGHT) + 2); 
-            
-            // 1. Position the content container
             const content = document.getElementById('virtual-content');
             content.style.transform = `translateY(${startIndex * ROW_HEIGHT}px)`;
-
-            // 2. Request Data from Worker (Async)
             worker.postMessage({ type: 'GET_CHUNK', payload: { start: startIndex, end: endIndex } });
         }
-
         function fillVirtualContent(chunk, start) {
             const content = document.getElementById('virtual-content');
             if(!content) return;
             content.innerHTML = "";
-
             chunk.forEach((t) => {
                 const el = document.createElement('div');
                 el.className = `ticket-card p-4 border-b border-slate-100 dark:border-slate-800 ${t.id === currentTicketId ? 'selected' : ''} ${t.isStale && t.status==='Pending' ? 'stale-ticket' : ''}`;
                 el.onclick = () => loadTicket(t.id);
                 const badgeClass = t.status === 'Completed' ? 'bg-green-100 text-green-700' : (t.status === 'Escalated' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700');
-                // Updated Date Styling here:
                 el.innerHTML = `<div class="flex-grow min-w-0 pr-4"><div class="flex justify-between items-start mb-1"><span class="font-bold text-slate-800 dark:text-white text-xs">#${t.id} ${t.isUrgent?'🔥':''} <span class="text-[9px] bg-gray-100 dark:bg-gray-800 px-1 rounded text-gray-500">${t.recordType === 'Text-A-Driver' ? 'TAD' : 'TKT'}</span></span><span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded ${badgeClass}">${t.status}</span></div><div class="font-bold text-sm text-slate-700 dark:text-slate-300 truncate mb-1" title="${t.cust}">${t.cust}</div><div class="flex justify-between items-center text-[10px] text-slate-400"><span class="truncate max-w-[120px]">${t.issue}</span><span class="font-bold text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded">${t.date.substring(5)}</span></div></div>`;
                 content.appendChild(el);
             });
         }
 
-        // --- ROUTE VIEW RENDERER ---
+        // --- RENDERERS ---
+        function renderKanbanDOM(cols, counts) {
+            const container = document.getElementById('main-view-area');
+            container.innerHTML = `<div class="kanban-board">${Object.keys(cols).map(k => `<div class="kanban-col"><div class="kanban-header"><span>${k}</span><span class="text-xs bg-slate-200 dark:bg-slate-700 px-2 py-1 rounded">${counts[k]}</span></div><div class="kanban-body">${cols[k].map(t => `<div class="kanban-card" onclick="window.loadTicket('${t.id}')"><div class="font-bold text-xs mb-1">#${t.id}</div><div class="text-xs truncate mb-1">${t.cust}</div><div class="text-[10px] text-slate-400">${t.issue}</div></div>`).join('')}</div></div>`).join('')}</div>`;
+        }
+
+        function renderGridDOM(chunk) {
+            const container = document.getElementById('main-view-area');
+            const rows = chunk.map(t => `<tr onclick="window.loadTicket('${t.id}')"><td class="font-bold">#${t.id}</td><td><span class="text-[10px] bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded">${t.status}</span></td><td>${t.cust}</td><td>${t.route}</td><td>${t.driverRaw||'-'}</td><td>${t.issue}</td></tr>`).join('');
+            container.innerHTML = `<div class="h-full overflow-auto"><table class="data-table"><thead><tr><th>ID</th><th>Status</th><th>Customer</th><th>Route</th><th>Driver</th><th>Issue</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        }
+
         function renderRouteDOM(groups) {
             const container = document.getElementById('main-view-area');
             const html = Object.keys(groups).sort().map(state => {
@@ -781,13 +814,8 @@
         function removeSnippet(i) { if(confirm("Delete this snippet?")) { userSnippets.splice(i,1); localStorage.setItem('logi_snippets', JSON.stringify(userSnippets)); renderSnippets(); } }
         function insertNote(text) { const f = document.getElementById('f-notes'); f.value += (f.value ? "\n" : "") + `[${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}] ${text}`; }
         function startFocusTimer() { clearInterval(focusTimerInterval); let seconds = 0; const display = document.getElementById('focus-timer'); display.innerText = "00:00"; focusTimerInterval = setInterval(() => { seconds++; display.innerText = `${Math.floor(seconds/60).toString().padStart(2,'0')}:${(seconds%60).toString().padStart(2,'0')}`; }, 1000); }
-        function closeFocus() { document.getElementById('focus-overlay').classList.remove('active'); clearInterval(focusTimerInterval); triggerRender(); } // Re-trigger to update list if changed
+        function closeFocus() { document.getElementById('focus-overlay').classList.remove('active'); clearInterval(focusTimerInterval); triggerRender(); } 
         function navTicket(dir) { 
-            // We need a way to navigate linearly without the full DB in main thread.
-            // Simplified: Close and let user click next, or implement GET_NEXT_ID in worker. 
-            // For v40.3 simplicity, we disabled linear nav via keys inside focus mode, 
-            // but we can request neighbors from worker.
-            // Placeholder:
             alert("Navigation requires re-fetching. Please close and select next item.");
         }
         function setFocusStatus(s) { 
@@ -800,7 +828,7 @@
         function dragOverHandler(ev) { ev.preventDefault(); document.getElementById('drop-zone').classList.add('active'); }
         function dragLeaveHandler(ev) { ev.preventDefault(); document.getElementById('drop-zone').classList.remove('active'); }
         function dropHandler(ev) { ev.preventDefault(); document.getElementById('drop-zone').classList.remove('active'); if (ev.dataTransfer.items && ev.dataTransfer.items[0].kind === 'file') handleFile({files: [ev.dataTransfer.items[0].getAsFile()]}); }
-        function exportData(changesOnly) { alert("Export requires Worker logic update. Coming in v40.4"); } // Simplified for this file limit
+        function exportData(changesOnly) { alert("Export requires Worker logic update. Coming in v40.7"); } 
         function resetApp() { if(confirm("Reset app?")) { localStorage.clear(); dbVault.delete().then(() => window.location.reload()); } }
         function toggleAnalytics() {
              const overlay = document.getElementById('analytics-overlay');
