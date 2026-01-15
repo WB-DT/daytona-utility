@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dataverse Audit Pro Exporter</title>
+    <script src="https://alcdn.msauth.net/browser/2.38.2/js/msal-browser.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+    
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; background-color: #f0f2f5; color: #333; }
+        .container { max-width: 1300px; margin: auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #eee; padding-bottom: 15px; margin-bottom: 20px; }
+        
+        .filter-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        .filter-group { display: flex; flex-direction: column; gap: 5px; }
+        label { font-size: 12px; font-weight: bold; color: #666; text-transform: uppercase; }
+        input, select { padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+
+        .btn-group { display: flex; gap: 10px; margin-top: 10px; }
+        button { padding: 10px 24px; cursor: pointer; border: none; border-radius: 6px; font-weight: 600; transition: 0.2s; }
+        #fetchBtn { background-color: #0078d4; color: white; }
+        #fetchBtn:hover { background-color: #005a9e; }
+        #exportBtn { background-color: #217346; color: white; display: none; }
+        #exportBtn:hover { background-color: #1a5c38; }
+        
+        .table-wrapper { overflow-x: auto; max-height: 500px; border: 1px solid #eee; border-radius: 4px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { background: #f4f4f4; padding: 12px; text-align: left; position: sticky; top: 0; z-index: 10; border-bottom: 2px solid #ddd; }
+        td { padding: 10px; border-bottom: 1px solid #eee; }
+        tr:hover { background: #f9f9f9; }
+        
+        #status { font-size: 13px; color: #0078d4; font-weight: 500; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h2>Dataverse Audit History</h2>
+        <div id="status">Please Sign In...</div>
+    </div>
+
+    <div id="loginSection">
+        <button id="fetchBtn" onclick="signIn()">Sign In to Microsoft</button>
+    </div>
+    
+    <div id="appSection" class="hidden">
+        <div class="filter-bar">
+            <div class="filter-group">
+                <label>Entity Logical Name</label>
+                <input type="text" id="filterEntity" placeholder="e.g. cadence, contact">
+            </div>
+            <div class="filter-group">
+                <label>User (Full Name)</label>
+                <input type="text" id="filterUser" placeholder="e.g. Anslee Erickson">
+            </div>
+            <div class="filter-group">
+                <label>Action</label>
+                <select id="filterAction">
+                    <option value="">All Actions</option>
+                    <option value="1">Create</option>
+                    <option value="2">Update</option>
+                    <option value="3">Delete</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Max Records</label>
+                <input type="number" id="topCount" value="100" min="1" max="5000">
+            </div>
+        </div>
+
+        <div class="btn-group">
+            <button id="fetchBtn" onclick="loadAuditData()">Fetch Records</button>
+            <button id="exportBtn" onclick="exportToExcel()">Export to Excel (.xlsx)</button>
+        </div>
+
+        <div class="table-wrapper" style="margin-top: 20px;">
+            <table id="auditTable">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Event</th>
+                        <th>User</th>
+                        <th>Entity</th>
+                        <th>Operation</th>
+                        <th>Record ID</th>
+                    </tr>
+                </thead>
+                <tbody id="auditBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+    const msalConfig = { 
+        auth: { 
+            clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
+            authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", 
+            redirectUri: window.location.href 
+        }, 
+        cache: { cacheLocation: "localStorage" } 
+    };
+
+    const msalInstance = new msal.PublicClientApplication(msalConfig);
+    const orgUrl = "https://org23279050.crm.dynamics.com";
+    const apiUri = `${orgUrl}/api/data/v9.2`;
+    let auditData = [];
+
+    const actionMap = { 1: "Create", 2: "Update", 3: "Delete", 4: "Activate", 5: "Deactivate", 64: "Web Access" };
+    const operationMap = { 1: "Create", 2: "Update", 3: "Delete", 4: "Access" };
+
+    window.onload = async () => {
+        const resp = await msalInstance.handleRedirectPromise();
+        if (resp) msalInstance.setActiveAccount(resp.account);
+        checkAccount();
+    };
+
+    function checkAccount() {
+        const account = msalInstance.getActiveAccount() || msalInstance.getAllAccounts()[0];
+        if (account) {
+            msalInstance.setActiveAccount(account);
+            document.getElementById('loginSection').classList.add('hidden');
+            document.getElementById('appSection').classList.remove('hidden');
+            document.getElementById('status').innerText = `Logged in: ${account.username}`;
+        }
+    }
+
+    async function signIn() {
+        await msalInstance.loginRedirect({ scopes: [`${orgUrl}/user_impersonation`] });
+    }
+
+    async function getToken() {
+        const request = { scopes: [`${orgUrl}/user_impersonation`], account: msalInstance.getActiveAccount() };
+        const resp = await msalInstance.acquireTokenSilent(request).catch(() => msalInstance.acquireTokenPopup(request));
+        return resp.accessToken;
+    }
+
+    async function loadAuditData() {
+        const status = document.getElementById('status');
+        status.innerText = "Querying Dataverse...";
+        
+        try {
+            const token = await getToken();
+            const top = document.getElementById('topCount').value;
+            const entityFilter = document.getElementById('filterEntity').value;
+            const actionFilter = document.getElementById('filterAction').value;
+            
+            // Base OData query
+            let query = `${apiUri}/audits?$select=createdon,action,operation,objecttypecode,_objectid_value,_userid_value&$orderby=createdon desc&$top=${top}`;
+            
+            // Dynamic Filtering
+            let filters = [];
+            if (entityFilter) filters.push(`contains(objecttypecode, '${entityFilter}')`);
+            if (actionFilter) filters.push(`action eq ${actionFilter}`);
+            
+            if (filters.length > 0) {
+                query += `&$filter=${filters.join(' and ')}`;
+            }
+
+            const response = await fetch(query, {
+                headers: {
+                    "Authorization": `Bearer ${token}`,
+                    "Accept": "application/json",
+                    "Prefer": 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
+                }
+            });
+
+            const data = await response.json();
+            auditData = data.value;
+            renderTable(auditData);
+            
+            status.innerText = `Found ${auditData.length} records.`;
+            document.getElementById('exportBtn').style.display = "inline-block";
+        } catch (e) {
+            status.innerText = "Error: " + e.message;
+        }
+    }
+
+    function renderTable(data) {
+        const body = document.getElementById('auditBody');
+        body.innerHTML = data.map(item => `
+            <tr>
+                <td>${new Date(item.createdon).toLocaleString()}</td>
+                <td>${actionMap[item.action] || item.action}</td>
+                <td>${item["_userid_value@OData.Community.Display.V1.FormattedValue"] || 'System'}</td>
+                <td>${item.objecttypecode}</td>
+                <td>${operationMap[item.operation] || item.operation}</td>
+                <td>${item._objectid_value}</td>
+            </tr>
+        `).join('');
+    }
+
+    function exportToExcel() {
+        if (!auditData.length) return;
+
+        // Prepare data for SheetJS (flattening and mapping labels)
+        const worksheetData = auditData.map(item => ({
+            "Changed Date": new Date(item.createdon).toLocaleString(),
+            "Event": actionMap[item.action] || item.action,
+            "User": item["_userid_value@OData.Community.Display.V1.FormattedValue"] || "System",
+            "Entity": item.objecttypecode,
+            "Operation": operationMap[item.operation] || item.operation,
+            "Record ID": item._objectid_value
+        }));
+
+        const worksheet = XLSX.utils.json_to_sheet(worksheetData);
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, worksheet, "Audit History");
+
+        // Download the file
+        XLSX.writeFile(workbook, `Dataverse_Audit_${new Date().getTime()}.xlsx`);
+    }
+</script>
+</body>
+</html>
