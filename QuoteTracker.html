@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>W.B. Mason Quote Tracker v9.2 (Cross-Ref)</title>
+    <title>W.B. Mason Quote Tracker v9.3 (Resilient)</title>
     
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -89,8 +89,11 @@
 
     <div id="loader">
         <div class="loader-ring"></div>
-        <h2 class="text-white text-2xl font-bold mt-4 tracking-tight">Initializing v9.2...</h2>
+        <h2 class="text-white text-2xl font-bold mt-4 tracking-tight">Initializing v9.3...</h2>
         <p class="text-gray-400 text-sm mt-2 font-mono" id="loader-msg">Connecting to Power Automate...</p>
+        <div class="w-64 h-1 bg-gray-700 rounded mt-4 overflow-hidden">
+            <div class="h-full bg-white animate-pulse w-full"></div>
+        </div>
         <button onclick="skipToManual()" class="mt-8 text-xs text-gray-500 hover:text-white underline transition-colors">Switch to Manual Upload</button>
     </div>
 
@@ -206,7 +209,7 @@
                 <div>
                     <h1 class="text-2xl font-bold leading-none text-[var(--text)]">Quote Tracker</h1>
                     <div class="flex items-center gap-2 mt-1">
-                        <span class="text-[10px] font-bold uppercase tracking-wider text-gray-500 border border-gray-300 px-1.5 rounded">v9.2 Cross-Ref</span>
+                        <span class="text-[10px] font-bold uppercase tracking-wider text-gray-500 border border-gray-300 px-1.5 rounded">v9.3 Resilient</span>
                         <div class="flex items-center gap-1.5 px-2 py-0.5 rounded bg-gray-100">
                             <div class="w-2 h-2 rounded-full bg-red-500 animate-pulse" id="status-dot"></div>
                             <span class="text-xs font-medium text-gray-500" id="status-text">Offline</span>
@@ -395,6 +398,7 @@
         let POLL_TIMER = null;
         let REFRESH_INTERVAL = null;
         let CURRENT_FILTERS = { category: 'all' };
+        let POLL_START_TIME = 0;
 
         // INIT
         document.addEventListener('DOMContentLoaded', () => { 
@@ -414,7 +418,7 @@
             try {
                 let res = await fetch(FLOW_URL, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ requestType: "InitData", version: "9.2" })
+                    body: JSON.stringify({ requestType: "InitData", version: "9.3" })
                 });
                 
                 if (res.status === 202) {
@@ -443,7 +447,7 @@
             try {
                 let res = await fetch(FLOW_URL, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ requestType: "BackgroundSync", version: "9.2" })
+                    body: JSON.stringify({ requestType: "BackgroundSync", version: "9.3" })
                 });
                 if (res.status === 202) {
                     const loc = res.headers.get('location');
@@ -460,50 +464,70 @@
             }
         }
 
-        // CORRECTED POLLING LOGIC
+        // --- RESILIENT POLLING LOGIC ---
         function startPolling(url, isBackground = false) {
-            let attempts = 0;
-            const maxAttempts = 300; // 10 Minutes initially
-            
+            POLL_START_TIME = Date.now();
+            const MAX_WAIT_MS = 600000; // 10 Minutes
+            let retryCount = 0;
+
             const poll = async () => {
-                attempts++;
+                const elapsed = Date.now() - POLL_START_TIME;
+                
+                // Update Loader Message for long waits
+                if(!isBackground && elapsed > 5000) {
+                    const secs = Math.floor(elapsed / 1000);
+                    document.getElementById('loader-msg').innerText = `Backend Processing (${secs}s)...`;
+                }
+
+                // CHECK TIMEOUT
+                if (elapsed > MAX_WAIT_MS) {
+                    if (!isBackground) {
+                        setLoader(false);
+                        if(confirm("Sync is taking longer than 10 minutes. The backend is likely still working.\n\nDo you want to continue waiting?")) {
+                            setLoader(true, "Waiting...", "Extending timeout...");
+                            POLL_START_TIME = Date.now(); // Reset timer
+                            POLL_TIMER = setTimeout(poll, 2000);
+                            return;
+                        } else {
+                            alert("Sync Cancelled.");
+                            return;
+                        }
+                    } else {
+                        // Silent timeout in background
+                        return;
+                    }
+                }
+
+                // PERFORM FETCH
                 try {
                     const res = await fetch(url);
                     
                     if (res.status === 200) {
                         processData(await res.json(), isBackground);
-                        return; // Done
-                    } else if (res.status === 202) {
-                        // Still waiting, continue loop
-                    } else if (res.status === 502 || res.status === 504) {
-                        // Gateway timeout, assume flow is still running on backend, retry
-                        console.warn("Gateway Timeout, retrying...");
-                    } else {
-                        throw new Error("Polling Error: " + res.status);
+                        return; // SUCCESS - EXIT LOOP
+                    } 
+                    else if (res.status === 202) {
+                        // STILL RUNNING - CONTINUE
+                        POLL_TIMER = setTimeout(poll, 3000); 
+                    } 
+                    else if (res.status === 502 || res.status === 504 || res.status === 500) {
+                        // GATEWAY TIMEOUT / ERROR - RETRY AGGRESSIVELY
+                        console.warn(`Gateway Error ${res.status}, retrying...`);
+                        retryCount++;
+                        POLL_TIMER = setTimeout(poll, 5000); 
+                    } 
+                    else {
+                        throw new Error(`Unexpected Status: ${res.status}`);
                     }
                 } catch(e) {
-                    console.warn("Poll warning: ", e);
-                }
-                
-                if (attempts > maxAttempts) {
-                    if (!isBackground) {
-                        setLoader(false); // Hide loader to show alert
-                        if(confirm("Sync is taking longer than 10 minutes. The backend is still processing.\n\nDo you want to keep waiting?")) {
-                            setLoader(true, "Waiting...", "Extending timeout...");
-                            attempts = 0; // Reset counter
-                            POLL_TIMER = setTimeout(poll, 2000);
-                        } else {
-                            alert("Sync Cancelled.");
-                        }
-                    } else {
-                        // Stop silent polling
-                    }
-                } else {
-                    POLL_TIMER = setTimeout(poll, 2000); // Recursive call
+                    // NETWORK ERROR (e.g. WiFi drop) - RETRY
+                    console.warn("Poll Network Error (swallowed):", e);
+                    retryCount++;
+                    POLL_TIMER = setTimeout(poll, 5000); 
                 }
             };
             
-            poll(); // Start
+            poll(); // Start Loop
         }
 
         function skipToManual() {
@@ -543,7 +567,6 @@
                 dateComplete: parseExcelDate(r["Completion Date"] || r["Completion time"] || r["Closed Date"]),
                 rep: r["Furn Rep"] || r["Name"] || r["Furniture Rep"] || r["Created By"] || "Unassigned",
                 accountRep: r["Account Rep"] || r["Sales Rep"] || "N/A",
-                // Capture Account # for Cross-Reference
                 accountNum: r["Account _x0023_"] || r["Account Number"] || r["CustNum"] || "", 
                 entryName: r["Entry Name"] || r["Created By"] || "",
                 customer: (r["Company \nName"] || r["Company Name"] || r["Customer"] || r["Client"] || "N/A").replace(/\n/g, " "),
