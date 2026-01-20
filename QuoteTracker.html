@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>W.B. Mason Quote Tracker v30.0 (Full Spectrum)</title>
+    <title>W.B. Mason Quote Tracker v31.0 (Final Audit)</title>
     
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -53,8 +53,6 @@
 
         /* Smart Grid */
         .smart-table th { position: sticky; top: 0; background-color: #f8fafc; z-index: 20; user-select: none; border-bottom: 2px solid #e2e8f0; }
-        .smart-table th.dragging { opacity: 0.5; background: #e5e7eb; }
-        .smart-table th.drag-over { border-left: 2px solid #cc0000; }
         .filter-row th { top: 41px; z-index: 19; background-color: #f1f5f9; padding: 4px; border-bottom: 1px solid #e2e8f0; }
         .filter-input { width: 100%; font-size: 0.75rem; padding: 2px 6px; border: 1px solid #cbd5e1; border-radius: 3px; color: #475569; }
         .filter-input:focus { outline: none; border-color: #cc0000; box-shadow: 0 0 0 1px #cc0000; }
@@ -106,7 +104,7 @@
 
     <div id="loader">
         <div class="spinner"></div>
-        <h2 class="text-white text-lg font-medium mt-6 tracking-wide">INITIALIZING V30.0</h2>
+        <h2 class="text-white text-lg font-medium mt-6 tracking-wide">INITIALIZING V31.0</h2>
         <p class="text-gray-500 text-xs mt-2 font-mono" id="loader-msg">Connecting to Dataverse...</p>
         <button onclick="skipToManual()" class="mt-8 text-xs text-gray-600 hover:text-white underline transition-colors">Switch to Local File</button>
     </div>
@@ -154,7 +152,7 @@
                 <div class="hidden md:block">
                     <h1 class="font-bold text-lg leading-tight text-gray-900">Quote Tracker</h1>
                     <div class="flex items-center gap-2">
-                        <span class="text-[10px] font-bold bg-gray-100 text-gray-600 px-1.5 rounded border border-gray-200">v30.0 Full Spectrum</span>
+                        <span class="text-[10px] font-bold bg-gray-100 text-gray-600 px-1.5 rounded border border-gray-200">v31.0 Final Audit</span>
                         <span class="w-1.5 h-1.5 rounded-full bg-red-500" id="status-dot"></span>
                         <span class="text-[10px] text-gray-400 font-mono" id="last-updated">OFFLINE</span>
                     </div>
@@ -295,6 +293,10 @@
                         if(!term) return true;
                         const col = this.columns.find(c => c.key === key);
                         let val = row[key];
+                        // If searching entire string for row (global search logic)
+                        if (key === 'global') {
+                             return Object.values(row).some(v => String(v||'').toLowerCase().includes(term));
+                        }
                         if(col && col.render) val = col.render(val, row).replace(/<[^>]*>?/gm, '');
                         return String(val || '').toLowerCase().includes(term.toLowerCase());
                     });
@@ -499,7 +501,7 @@
             }, 10000); 
 
             try {
-                let res = await fetch(FLOW_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestType: "InitData", version: "30.0" }) });
+                let res = await fetch(FLOW_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestType: "InitData", version: "31.0" }) });
                 if (res.status === 202) startPolling(res.headers.get('location'));
                 else if (res.ok) processData(await res.json());
                 else throw new Error(res.status);
@@ -544,10 +546,7 @@
             return found;
         }
 
-        function normalizeKey(key) { 
-            // V30 Fix: Handle encoded colon _x003a_
-            return key ? key.replace(/_x003a_/gi, '').replace(/:/g, '').replace(/\n/g, '').trim() : ''; 
-        }
+        function normalizeKey(key) { return key ? key.replace(/_x003a_/gi, '').replace(/:/g, '').replace(/\n/g, '').trim() : ''; }
         function getValue(row, possibleKeys) {
             for (let key of possibleKeys) {
                 if (row[key] !== undefined && row[key] !== null) return row[key];
@@ -557,7 +556,7 @@
             return null;
         }
 
-        function processData(input, isBg = false) {
+        function processData(input, isBg = false, isBatch = false) {
             let rows = [];
             if (!Array.isArray(input) && typeof input === 'object' && (input.ID || input['Q-Number'] || input.Id)) {
                 rows = [input];
@@ -566,12 +565,12 @@
                 rows = allArrays.flat(); 
             }
 
-            if (!rows.length) { if(!isBg) setLoader(false); return; }
+            if (!rows.length && !isBatch) { if(!isBg) setLoader(false); return; }
 
             if (window.pendingUploadType) {
                 if (window.pendingUploadType === 'replace') RAW_DATA = [];
                 window.pendingUploadType = null;
-            } else if (!isBg) { RAW_DATA = []; }
+            } else if (!isBg && !isBatch) { RAW_DATA = []; }
 
             const now = new Date();
             const newRows = rows.map(r => {
@@ -644,6 +643,9 @@
                 const manager = getValue(r, ["Manager that Approved ASAP"]) || "";
                 const vendor = getValue(r, ["Vendor ID"]) || "";
                 const prevOrder = getValue(r, ["Previous Order Number", "If yes, previous order number_x003a_"]) || "";
+                const competitor = getValue(r, ["Competitor"]) || "";
+                const cost = getValue(r, ["Cost"]) || 0;
+                const margin = getValue(r, ["Margin"]) || 0;
 
                 const uniqueId = `${src.substring(0,4).toUpperCase()}-${id}`;
 
@@ -679,7 +681,10 @@
                     attachments: attachments,
                     manager: manager,
                     vendor: vendor,
-                    prevOrder: prevOrder
+                    prevOrder: prevOrder,
+                    competitor: competitor,
+                    cost: cost,
+                    margin: margin
                 };
             }).filter(r => r !== null && r.originalId !== "UNK");
 
@@ -691,31 +696,33 @@
                 return true;
             });
 
-            localStorage.setItem('qt_data', JSON.stringify(RAW_DATA));
-            localStorage.setItem('qt_last_sync', new Date().toISOString());
+            if (!isBatch) {
+                localStorage.setItem('qt_data', JSON.stringify(RAW_DATA));
+                localStorage.setItem('qt_last_sync', new Date().toISOString());
 
-            if(RAW_DATA.length > 0) {
-                const dates = RAW_DATA.map(r => r.date).filter(d => d).sort((a,b)=>a-b);
-                if(dates.length > 0) {
-                    document.getElementById('dateStart').valueAsDate = dates[0];
-                    document.getElementById('dateEnd').valueAsDate = dates[dates.length-1];
+                if(RAW_DATA.length > 0) {
+                    const dates = RAW_DATA.map(r => r.date).filter(d => d).sort((a,b)=>a-b);
+                    if(dates.length > 0) {
+                        document.getElementById('dateStart').valueAsDate = dates[0];
+                        document.getElementById('dateEnd').valueAsDate = dates[dates.length-1];
+                    }
+                    document.getElementById('emptyState').classList.add('hidden-force');
                 }
-                document.getElementById('emptyState').classList.add('hidden-force');
+
+                const sel = document.getElementById('catFilter');
+                const cats = new Set(RAW_DATA.map(r => r.category));
+                sel.innerHTML = '<option value="all">All Categories</option>';
+                Array.from(cats).sort().forEach(c => sel.innerHTML += `<option value="${c}">${c}</option>`);
+
+                applyFilters();
+
+                if(!isBg) {
+                    setLoader(false);
+                    switchTab(CURRENT_TAB);
+                }
+                document.getElementById('status-dot').className = "w-1.5 h-1.5 rounded-full bg-green-500";
+                document.getElementById('last-updated').innerText = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
             }
-
-            const sel = document.getElementById('catFilter');
-            const cats = new Set(RAW_DATA.map(r => r.category));
-            sel.innerHTML = '<option value="all">All Categories</option>';
-            Array.from(cats).sort().forEach(c => sel.innerHTML += `<option value="${c}">${c}</option>`);
-
-            applyFilters();
-
-            if(!isBg) {
-                setLoader(false);
-                switchTab(CURRENT_TAB);
-            }
-            document.getElementById('status-dot').className = "w-1.5 h-1.5 rounded-full bg-green-500";
-            document.getElementById('last-updated').innerText = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
         }
 
         // --- UTILS ---
@@ -736,7 +743,7 @@
             FILTERED_DATA = RAW_DATA.filter(r => {
                 if(src !== 'all' && r.source !== src) return false;
                 if(cat !== 'all' && r.category !== cat) return false;
-                const searchStr = (r.id+r.rep+r.customer+r.accountNum+r.route+r.contract+r.notes).toLowerCase();
+                const searchStr = (r.id+r.rep+r.customer+r.accountNum+r.route+r.contract+r.notes+r.vendor+r.prevOrder+r.competitor).toLowerCase();
                 if(term && !searchStr.includes(term)) return false;
                 if(start && (!r.date || r.date < start)) return false;
                 if(end && (!r.date || r.date > end)) return false;
@@ -891,10 +898,13 @@
                 <div><span class="block text-gray-400 mb-1">Shipping</span><div>${r.delAddr || r.delInfo || 'N/A'}</div>${r.route !== 'N/A' ? `<div class="mt-2 text-gray-400">Route: <span class="text-gray-900 font-mono">${r.route}</span></div>` : ''}${r.contract !== 'N/A' ? `<div class="mt-1 text-gray-400">Contract: <span class="text-gray-900 font-mono">${r.contract}</span></div>` : ''}
                 ${r.prevOrder ? `<div class="mt-2 text-gray-500 font-bold">Prev Order: ${r.prevOrder}</div>` : ''}
                 ${r.vendor ? `<div class="mt-1 text-gray-500">Vendor ID: ${r.vendor}</div>` : ''}
+                ${r.competitor ? `<div class="mt-2 text-purple-600 font-bold">Competitor: ${r.competitor}</div>` : ''}
                 </div>
                 <div><span class="block text-gray-400 mb-1">Contact</span><div class="font-bold">${r.contact}</div><div class="cursor-pointer hover:text-brand" onclick="copyText('${r.email}')">${r.email}</div><div class="cursor-pointer hover:text-brand" onclick="copyText('${r.phone}')">${r.phone}</div></div></div></div>
                 
                 ${r.manager ? `<div class="bg-red-50 border border-red-200 p-3 rounded mb-4 text-xs text-red-800 font-bold"><i class="fas fa-user-shield mr-2"></i>Approved by: ${r.manager}</div>` : ''}
+                
+                ${r.cost > 0 ? `<div class="grid grid-cols-2 gap-4 mb-4 text-xs font-mono"><div class="bg-gray-100 p-2 rounded">Cost: ${fmtMoney(r.cost)}</div><div class="bg-blue-50 p-2 rounded text-blue-700">Margin: ${fmtMoney(r.margin)}</div></div>` : ''}
 
                 <div class="grid grid-cols-2 gap-6 h-48"><div class="flex flex-col h-full"><h4 class="text-xs font-bold text-gray-500 uppercase mb-2">Notes</h4><div class="bg-white border p-3 rounded text-xs text-gray-600 flex-1 overflow-y-auto whitespace-pre-wrap">${r.notes}</div></div><div class="flex flex-col h-full"><h4 class="text-xs font-bold text-gray-500 uppercase mb-2">Resolution</h4><div class="bg-yellow-50 border border-yellow-200 p-3 rounded text-xs text-yellow-800 flex-1 overflow-y-auto whitespace-pre-wrap">${r.qNotes}</div></div></div>`;
                 
@@ -919,7 +929,22 @@
         function setLoader(s,m) { document.getElementById('loader').style.display = s?'flex':'none'; if(m) document.getElementById('loader-msg').innerText = m; }
         function switchTab(id) { CURRENT_TAB = id; document.querySelectorAll('.view-panel').forEach(p => { p.classList.add('hidden'); p.classList.remove('flex'); }); const v = document.getElementById('view-'+id); v.classList.remove('hidden'); if(id !== 'kanban') v.classList.add('flex'); document.querySelectorAll('nav button').forEach(b => { b.classList.remove('border-brand', 'text-brand'); b.classList.add('border-transparent', 'text-gray-500'); }); document.getElementById('tab-'+id).classList.remove('border-transparent', 'text-gray-500'); document.getElementById('tab-'+id).classList.add('border-brand', 'text-brand'); if(id === 'dashboard' || id === 'trends') renderStats(); }
         function resetGrid() { localStorage.clear(); window.location.reload(); }
-        function exportTable(id) { if(id === 'repTable' && REP_GRID) { const wb = XLSX.utils.table_to_book(document.getElementById(id)); XLSX.writeFile(wb, "Rep_Report.xlsx"); } else { const exportData = FILTERED_DATA.map(r => ({ Source: r.source, ID: r.id, Date: fmtDate(r.date), Status: r.status, Customer: r.customer, Rep: r.rep, Amount: r.amount, GP: r.gp, Age_Days: r.daysOpen, Route: r.route, Install: r.install, Contract: r.contract, Items: r.itemCount, Notes: r.notes })); const ws = XLSX.utils.json_to_sheet(exportData); const wb = XLSX.utils.book_new(); const summaryData = [["Metric", "Value"],["Total Quotes", FILTERED_DATA.length],["Total Value", document.getElementById('kpi-value').innerText],["Win Rate", document.getElementById('kpi-winrate').innerText]]; const wsSum = XLSX.utils.aoa_to_sheet(summaryData); XLSX.utils.book_append_sheet(wb, wsSum, "Summary"); XLSX.utils.book_append_sheet(wb, ws, "Raw_Data"); XLSX.writeFile(wb, "Quote_Tracker_Export.xlsx"); } }
+        function exportTable(id) { 
+            if(id === 'repTable' && REP_GRID) { 
+                const wb = XLSX.utils.table_to_book(document.getElementById(id)); XLSX.writeFile(wb, "Rep_Report.xlsx"); 
+            } else { 
+                const exportData = FILTERED_DATA.map(r => ({ 
+                    Source: r.source, ID: r.id, Date: fmtDate(r.date), Status: r.status, Customer: r.customer, Rep: r.rep, Amount: r.amount, GP: r.gp, Age_Days: r.daysOpen, 
+                    Route: r.route, Install: r.install, Contract: r.contract, Items: r.itemCount, Notes: r.notes, 
+                    Competitor: r.competitor, Vendor: r.vendor, PrevOrder: r.prevOrder, Cost: r.cost, Margin: r.margin 
+                })); 
+                const ws = XLSX.utils.json_to_sheet(exportData); const wb = XLSX.utils.book_new(); 
+                const summaryData = [["Metric", "Value"],["Total Quotes", FILTERED_DATA.length],["Total Value", document.getElementById('kpi-value').innerText],["Win Rate", document.getElementById('kpi-winrate').innerText]]; 
+                const wsSum = XLSX.utils.aoa_to_sheet(summaryData); 
+                XLSX.utils.book_append_sheet(wb, wsSum, "Summary"); XLSX.utils.book_append_sheet(wb, ws, "Raw_Data"); 
+                XLSX.writeFile(wb, "Quote_Tracker_Export.xlsx"); 
+            } 
+        }
     </script>
 </body>
 </html>
