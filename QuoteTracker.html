@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>W.B. Mason Quote Tracker v34.0 (Complete)</title>
+    <title>W.B. Mason Quote Tracker v35.0 (Extended Wait)</title>
     
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
@@ -37,15 +37,15 @@
         ::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
         
-        /* Loading Overlay */
+        /* Loading Overlay - Forced Unblocking */
         #loader { position: fixed; inset: 0; background: #111827; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; transition: opacity 0.3s; }
-        #loader.hidden-force { display: none !important; }
+        #loader.hidden-force { opacity: 0; pointer-events: none; }
         .spinner { width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s ease-in-out infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
 
         /* Empty State */
         #emptyState { position: absolute; inset: 0; z-index: 50; background: #f3f4f6; display: flex; flex-direction: column; align-items: center; justify-content: center; transition: opacity 0.3s; }
-        #emptyState.hidden-force { opacity: 0; pointer-events: none !important; display: none !important; visibility: hidden !important; }
+        #emptyState.hidden-force { display: none !important; opacity: 0 !important; pointer-events: none !important; visibility: hidden !important; }
 
         /* Cache Prompt */
         #cachePrompt { position: fixed; inset: 0; background: rgba(17, 24, 39, 0.9); z-index: 110; display: none; align-items: center; justify-content: center; backdrop-filter: blur(5px); }
@@ -105,7 +105,7 @@
 
     <div id="loader">
         <div class="spinner"></div>
-        <h2 class="text-white text-lg font-medium mt-6 tracking-wide">INITIALIZING V34.0</h2>
+        <h2 class="text-white text-lg font-medium mt-6 tracking-wide">INITIALIZING V35.0</h2>
         <p class="text-gray-500 text-xs mt-2 font-mono" id="loader-msg">Connecting to Dataverse...</p>
         <button onclick="skipToManual()" class="mt-8 text-xs text-gray-600 hover:text-white underline transition-colors">Switch to Local File</button>
     </div>
@@ -153,7 +153,7 @@
                 <div class="hidden md:block">
                     <h1 class="font-bold text-lg leading-tight text-gray-900">Quote Tracker</h1>
                     <div class="flex items-center gap-2">
-                        <span class="text-[10px] font-bold bg-gray-100 text-gray-600 px-1.5 rounded border border-gray-200">v34.0 Complete</span>
+                        <span class="text-[10px] font-bold bg-gray-100 text-gray-600 px-1.5 rounded border border-gray-200">v35.0 Extended Wait</span>
                         <span class="w-1.5 h-1.5 rounded-full bg-red-500" id="status-dot"></span>
                         <span class="text-[10px] text-gray-400 font-mono" id="last-updated">OFFLINE</span>
                     </div>
@@ -493,20 +493,24 @@
 
         async function initFlow() {
             setLoader(true, "Connecting...");
-            // FAILSAFE TIMEOUT - If Flow takes too long, unblock so user can upload
+            // FAILSAFE TIMEOUT - 180s for user's reported 2min flow time
             setTimeout(() => {
                 if(RAW_DATA.length === 0) {
                     setLoader(false);
                     document.getElementById('emptyState').classList.remove('hidden-force');
                 }
-            }, 10000); 
+            }, 180000); 
+
+            // Update loader text after 30s so user knows it's still alive
+            setTimeout(() => { document.getElementById('loader-msg').innerText = "Still waiting for Flow (2+ mins)..."; }, 30000);
 
             try {
-                let res = await fetch(FLOW_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestType: "InitData", version: "31.0" }) });
+                let res = await fetch(FLOW_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestType: "InitData", version: "35.0" }) });
                 if (res.status === 202) startPolling(res.headers.get('location'));
                 else if (res.ok) processData(await res.json());
                 else throw new Error(res.status);
             } catch (e) { 
+                // If network fails immediately, show manual upload
                 if(RAW_DATA.length === 0) { setLoader(false); document.getElementById('emptyState').classList.remove('hidden-force'); }
                 else { setLoader(false); }
             }
@@ -535,12 +539,13 @@
 
         function collectAllArrays(obj, found = []) {
             if (Array.isArray(obj)) {
+                // Heuristic: Schema arrays have "type" strings, Data arrays have objects
                 const isSchema = obj.length > 0 && (typeof obj[0] !== 'object' || (obj[0].type && (obj[0].type === 'string' || obj[0].type === 'integer')));
                 if (!isSchema && obj.length > 0) found.push(obj);
             }
             if (obj && typeof obj === 'object') {
                 for (let key in obj) {
-                    if(key === 'schema' || key === 'properties' || key === 'definitions') continue;
+                    if(key === 'schema' || key === 'properties' || key === 'definitions' || key === 'swagger') continue;
                     if (obj[key] && typeof obj[key] === 'object') { collectAllArrays(obj[key], found); }
                 }
             }
@@ -575,8 +580,11 @@
 
             const now = new Date();
             const newRows = rows.map(r => {
-                let id = getValue(r, ["ItemInternalId", "cr714_formfeedbacklogid", "Q-Number", "ID", "Id"]) || "UNK";
-                if(id === "UNK" && (r.type || r.properties)) return null; 
+                let id = getValue(r, ["ItemInternalId", "cr714_formfeedbacklogid", "Q-Number", "ID", "Id"]);
+                // V32: ID Fallback Generation
+                if (!id && getValue(r, ["Name"])) id = "GEN_" + Math.random().toString(36).substr(2,9);
+                
+                if(!id && (r.type || r.properties)) return null; 
 
                 const dateRaw = getValue(r, ["Start Date", "Start time", "Date Entered", "Created", "Date", "createdon", "modifiedon"]);
                 const closedRaw = getValue(r, ["Completion Date", "Completion time", "Closed Date"]);
