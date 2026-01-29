@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Account Reassignment - Remainder View</title>
+    <title>Account Reassignment Tool - Accurate Metrics</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     
     <style>
@@ -16,7 +16,7 @@
         
         .table-container { height: 500px; overflow-y: auto; border: 1px solid #ddd; background: white; border-radius: 4px; }
         table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-        th { position: sticky; top: 0; background: #0078d4; color: white; padding: 12px 10px; text-align: left; z-index: 10; font-size: 11px; cursor: pointer; user-select: none; }
+        th { position: sticky; top: 0; background: #0078d4; color: white; padding: 12px 10px; text-align: left; z-index: 10; font-size: 11px; cursor: pointer; user-select: none; text-transform: uppercase; }
         th:hover { background-color: #005a9e; }
         td { padding: 10px; border-bottom: 1px solid #eee; cursor: pointer; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         
@@ -34,6 +34,7 @@
         .badge-left { background: #a80000; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
         .badge-total { background: #0078d4; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
         .badge-done { background: #107c10; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; }
+        .loading { text-align: center; color: #0078d4; font-weight: bold; padding: 20px; }
     </style>
 </head>
 <body>
@@ -56,12 +57,12 @@
             </select>
         </div>
         <div class="form-group">
-            <label>2. Moving From (Remainder)</label>
+            <label>2. Source (Work Left to Move)</label>
             <input type="text" id="sourceRep" readonly placeholder="Click left table">
         </div>
         <div style="font-size: 24px; padding-bottom: 5px;">➔</div>
         <div class="form-group">
-            <label>3. Moving To (Target)</label>
+            <label>3. Target (Destination)</label>
             <input type="text" id="targetRepDisplay" readonly placeholder="Click right table">
             <input type="hidden" id="targetRep">
         </div>
@@ -72,15 +73,17 @@
         <button id="submitBtn" onclick="triggerFlow()" disabled>Execute Transfer</button>
     </div>
 
+    <div id="loader" class="loading" style="display:none;">Refreshing Live Data...</div>
+
     <div class="main-layout">
         <div>
-            <h3>From: Remaining Work</h3>
+            <h3>From: Remainder (Total - Sent)</h3>
             <div class="table-container">
                 <table>
                     <thead>
                         <tr>
                             <th onclick="toggleSort('source', 'name')">Rep Name <span id="source-name-sort"></span></th>
-                            <th onclick="toggleSort('source', 'remaining')">Emails Left <span id="source-remaining-sort">▼</span></th>
+                            <th onclick="toggleSort('source', 'remaining')">Accounts Left <span id="source-remaining-sort">▼</span></th>
                         </tr>
                     </thead>
                     <tbody id="sourceTableBody"></tbody>
@@ -89,7 +92,7 @@
         </div>
 
         <div>
-            <h3>To: Target Inventory</h3>
+            <h3>To: Current Inventory</h3>
             <div class="table-container">
                 <table>
                     <thead>
@@ -135,17 +138,21 @@
     }
 
     async function fetchData() {
-        const response = await fetch("https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/952746524c354ee8a4d335d24ce01d6d/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=wOEIjRMghIgIGX4GU85rwL1hLdIeFT8O0I44C9C0vSo", {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }, 
-            body: JSON.stringify({ repName: msalAccount.name })
-        });
-        const json = await response.json();
-        allAvailableRows = json.accountList || (json.body ? json.body.accountList : []);
-        allRepList = json.repList || (json.body ? json.body.repList : []);
-        
-        populateActionFilters();
-        applyListFilter();
+        document.getElementById('loader').style.display = 'block';
+        try {
+            const response = await fetch("https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/952746524c354ee8a4d335d24ce01d6d/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=wOEIjRMghIgIGX4GU85rwL1hLdIeFT8O0I44C9C0vSo", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ repName: msalAccount.name })
+            });
+            const json = await response.json();
+            allAvailableRows = json.accountList || (json.body ? json.body.accountList : []);
+            allRepList = json.repList || (json.body ? json.body.repList : []);
+            
+            populateActionFilters();
+            applyListFilter();
+        } catch (e) { alert("Load failed: " + e.message); }
+        document.getElementById('loader').style.display = 'none';
     }
 
     function populateActionFilters() {
@@ -162,17 +169,20 @@
         allAvailableRows.forEach(r => {
             if (selected === 'All' || r.cr714_action === selected) {
                 const rep = r.cr714_rep || "Unassigned";
-                const emails = parseInt(r.cr714_actionemailsent) || 0;
+                
+                // FIXED LOGIC: Binary check. 1 or more emails = 1 completed account for this row.
+                const rawEmailVal = parseInt(r.cr714_actionemailsent) || 0;
+                const isCompleted = rawEmailVal >= 1 ? 1 : 0; 
                 
                 if (!currentMetrics[rep]) {
                     currentMetrics[rep] = { total: 0, sent: 0, remaining: 0 };
                 }
                 currentMetrics[rep].total++;
-                currentMetrics[rep].sent += emails;
+                currentMetrics[rep].sent += isCompleted;
             }
         });
 
-        // Calculate Remaining (Work Left to do)
+        // Calculate Remaining exactly
         Object.keys(currentMetrics).forEach(rep => {
             currentMetrics[rep].remaining = currentMetrics[rep].total - currentMetrics[rep].sent;
         });
@@ -187,7 +197,18 @@
             sortConfig[side].column = column;
             sortConfig[side].direction = 'desc';
         }
+        updateSortIcons(side);
         renderTables();
+    }
+
+    function updateSortIcons(side) {
+        ['name', 'total', 'sent', 'remaining'].forEach(col => {
+            const el = document.getElementById(`${side}-${col}-sort`);
+            if (el) el.innerText = '';
+        });
+        const icon = sortConfig[side].direction === 'desc' ? '▼' : '▲';
+        const targetIcon = document.getElementById(`${side}-${sortConfig[side].column}-sort`);
+        if (targetIcon) targetIcon.innerText = icon;
     }
 
     function renderTables() {
@@ -209,10 +230,10 @@
             });
         };
 
-        // Source: Remaining Work
+        // Render From (Source) Table - Shows what is LEFT
         getSortedReps(Object.keys(currentMetrics), 'source').forEach(rep => {
             const m = currentMetrics[rep];
-            if (m.remaining <= 0) return; // Only show people with work left to move
+            if (m.remaining <= 0) return; 
             const tr = document.createElement('tr');
             tr.innerHTML = `<td>${rep}</td><td><span class="badge-left">${m.remaining}</span></td>`;
             tr.onclick = () => {
@@ -225,7 +246,7 @@
             sourceBody.appendChild(tr);
         });
 
-        // Target: Total and Done
+        // Render To (Target) Table - Shows Total and Completed
         getSortedReps(allRepList.map(r => r.cr714_name), 'target').forEach(name => {
             const m = currentMetrics[name] || { total: 0, sent: 0, remaining: 0 };
             const tr = document.createElement('tr');
@@ -248,9 +269,13 @@
         document.getElementById('submitBtn').disabled = !(s && t && c > 0 && s !== t);
     }
 
+    document.getElementById('count').oninput = validate;
+
     async function triggerFlow() {
         const btn = document.getElementById('submitBtn');
         btn.disabled = true;
+        btn.innerText = "Reassigning...";
+
         const payload = {
             sourceRep: document.getElementById('sourceRep').value,
             targetRep: document.getElementById('targetRep').value,
@@ -258,13 +283,20 @@
             actionFilter: document.getElementById('actionFilter').value,
             requestingUser: msalAccount.username
         };
-        await fetch("https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/ccd1e78456a4470c9bef267fc8b6ba77/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=delp7lT79GXjEHWIj9AHaxSmAyUrojFqAhNx0nsv0pM", { 
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload) 
-        });
-        alert("Transfer Initiated");
-        location.reload();
+
+        try {
+            await fetch("https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/ccd1e78456a4470c9bef267fc8b6ba77/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=delp7lT79GXjEHWIj9AHaxSmAyUrojFqAhNx0nsv0pM", { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload) 
+            });
+            alert("Success! Reassignment flow initiated.");
+            location.reload();
+        } catch (e) { 
+            alert("Error: " + e.message); 
+            btn.disabled = false;
+            btn.innerText = "Execute Transfer";
+        }
     }
 
     document.addEventListener('DOMContentLoaded', () => {
