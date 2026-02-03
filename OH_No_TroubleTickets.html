@@ -319,6 +319,11 @@
 
                 <div class="control-grid">
                     <div>
+                        <label class="form-label">Assigned To</label>
+                        <input type="text" id="inp-assigned" class="dark-input" placeholder="Unassigned">
+                    </div>
+
+                    <div>
                         <label class="form-label">Bucket</label>
                         <select id="inp-bucket" class="dark-select">
                             <option value="Matt">Matt</option>
@@ -395,10 +400,9 @@
 
     <script>
         // --- CONFIGURATION ---
-        // Replace with your actual Flow URLs
-        const POLL_FLOW_URL = "YOUR_POLLING_FLOW_URL"; 
-        const CREATE_FLOW_URL = "YOUR_CREATE_FLOW_URL";
-        const UPDATE_FLOW_URL = "YOUR_UPDATE_FLOW_URL";
+        const FLOW_CREATE = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/3aa4d4b11ac346d2b129df08e89ced84/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=A7K99hFNiPZdmnhNcZtdX-ddFle7H_TLHsV7Ck-Xx6M";
+        const FLOW_POLL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/8e66353b8e2b45618281c3301da22865/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=ma3tglDIraiozHcUL46tMT-qljPHrSyweRkIm2yfU2A";
+        const FLOW_UPDATE = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/305ddbb25dca43049427e3435723b6f1/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=emJDSrupKmGVFgiVuIQXYQSktIhuRuUSDecu69Wc59U";
 
         const msalConfig = { 
             auth: { 
@@ -413,6 +417,7 @@
         let username = "";
         let tickets = []; // Local cache
         let currentTicketId = null;
+        let lastPollTime = new Date(Date.now() - 86400000).toISOString(); // Default lookback 24hrs for first run
 
         // --- AUTH ---
         async function signIn() {
@@ -442,18 +447,22 @@
             if(btn) btn.classList.add('fa-spin');
 
             try {
-                // SIMULATION: In real use, fetch(POLL_FLOW_URL, ...)
-                // const res = await fetch(POLL_FLOW_URL, { method: 'POST', body: JSON.stringify({ user: username }) });
-                // const data = await res.json();
+                const payload = { lastCheck: lastPollTime, userEmail: username };
+                const res = await fetch(FLOW_POLL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
                 
-                // Mock Data for Demo
-                if(tickets.length === 0) {
-                    tickets = [
-                        { id: "101", title: "Fix Login Bug", bucket: "Triage", priority: "High", status: "In progress", description: "Login fails on iOS.", start: "2026-02-01", due: "2026-02-05" },
-                        { id: "102", title: "Update Planner UI", bucket: "Matt", priority: "Medium", status: "Not started", description: "Implement side-by-side view.", start: "2026-02-03", due: "2026-02-10" }
-                    ];
+                if (res.ok) {
+                    const data = await res.json();
+                    
+                    // Logic to merge new tickets
+                    if(data.tickets && Array.isArray(data.tickets)) {
+                        data.tickets.forEach(newT => {
+                            const existingIdx = tickets.findIndex(t => t.id === newT.id);
+                            if(existingIdx > -1) tickets[existingIdx] = newT; // Update
+                            else tickets.unshift(newT); // Add new
+                        });
+                        lastPollTime = new Date().toISOString();
+                    }
                 }
-
                 renderList();
             } catch (e) {
                 console.error("Poll error", e);
@@ -467,7 +476,7 @@
             const search = document.getElementById('search-box').value.toLowerCase();
             list.innerHTML = "";
 
-            const filtered = tickets.filter(t => t.title.toLowerCase().includes(search) || t.id.includes(search));
+            const filtered = tickets.filter(t => (t.title || "").toLowerCase().includes(search) || (t.id || "").includes(search));
 
             filtered.forEach(t => {
                 const div = document.createElement('div');
@@ -494,6 +503,7 @@
             document.getElementById('inp-bucket').value = "Triage";
             document.getElementById('inp-priority').value = "Medium";
             document.getElementById('inp-progress').value = "Not started";
+            document.getElementById('inp-assigned').value = ""; // Clear assigned
             document.getElementById('inp-start').value = new Date().toISOString().split('T')[0];
             document.getElementById('inp-due').value = "";
             document.getElementById('comments-list').innerHTML = "";
@@ -508,14 +518,15 @@
             const t = tickets.find(x => x.id === id);
             if(!t) return;
 
-            document.getElementById('inp-title').value = t.title;
+            document.getElementById('inp-title').value = t.title || "";
             document.getElementById('inp-notes').value = t.description || "";
-            document.getElementById('inp-bucket').value = t.bucket;
-            document.getElementById('inp-priority').value = t.priority;
-            document.getElementById('inp-progress').value = t.status;
-            document.getElementById('inp-start').value = t.start || "";
-            document.getElementById('inp-due').value = t.due || "";
-            document.getElementById('header-bucket-display').innerText = t.bucket;
+            document.getElementById('inp-bucket').value = t.bucket || "Triage";
+            document.getElementById('inp-priority').value = t.priority || "Medium";
+            document.getElementById('inp-progress').value = t.status || "Not started";
+            document.getElementById('inp-assigned').value = t.assignedTo || ""; // Load assigned
+            document.getElementById('inp-start').value = t.start ? t.start.split('T')[0] : "";
+            document.getElementById('inp-due').value = t.due ? t.due.split('T')[0] : "";
+            document.getElementById('header-bucket-display').innerText = t.bucket || "Ticket";
 
             renderList(); // Update active class
         }
@@ -525,40 +536,49 @@
             statusEl.innerText = "Saving...";
             
             const payload = {
-                id: currentTicketId, // Null if new
+                id: currentTicketId, 
                 title: document.getElementById('inp-title').value,
                 bucket: document.getElementById('inp-bucket').value,
                 priority: document.getElementById('inp-priority').value,
                 status: document.getElementById('inp-progress').value,
+                assignedTo: document.getElementById('inp-assigned').value, // Add assigned
                 description: document.getElementById('inp-notes').value,
-                start: document.getElementById('inp-start').value,
-                due: document.getElementById('inp-due').value,
+                startDate: document.getElementById('inp-start').value,
+                dueDate: document.getElementById('inp-due').value,
                 requester: username
             };
 
-            // Simulate Network Delay / Flow Call
-            await new Promise(r => setTimeout(r, 800));
+            const url = currentTicketId ? FLOW_UPDATE : FLOW_CREATE;
 
-            if (!currentTicketId) {
-                // Create New
-                const newId = "ID-" + Math.floor(Math.random() * 10000);
-                payload.id = newId;
-                tickets.unshift(payload);
-                currentTicketId = newId;
-            } else {
-                // Update
-                const idx = tickets.findIndex(x => x.id === currentTicketId);
-                if (idx > -1) tickets[idx] = { ...tickets[idx], ...payload };
+            try {
+                const res = await fetch(url, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+                if (!res.ok) throw new Error("Flow Failed");
+                
+                const responseData = await res.json(); // Expect flow to return ID if new
+
+                if (!currentTicketId) {
+                    // Created New
+                    payload.id = responseData.dataverseId || ("TEMP-" + Date.now()); 
+                    tickets.unshift(payload);
+                    currentTicketId = payload.id;
+                } else {
+                    // Updated
+                    const idx = tickets.findIndex(x => x.id === currentTicketId);
+                    if (idx > -1) tickets[idx] = { ...tickets[idx], ...payload };
+                }
+
+                statusEl.innerText = "Saved!";
+                setTimeout(() => statusEl.innerText = "", 3000);
+                renderList();
+            } catch (e) {
+                console.error(e);
+                statusEl.innerText = "Error Saving.";
             }
-
-            statusEl.innerText = "Saved to Planner & Dataverse.";
-            setTimeout(() => statusEl.innerText = "", 3000);
-            renderList();
         }
 
         function deleteTicket() {
             if(!currentTicketId) return;
-            if(confirm("Delete this ticket?")) {
+            if(confirm("Delete this ticket from view? (Note: This does not delete from Dataverse yet)")) {
                 tickets = tickets.filter(t => t.id !== currentTicketId);
                 createNewTicket();
                 renderList();
