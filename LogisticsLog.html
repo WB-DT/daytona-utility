@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLink v104.39 | Logistics Dashboard</title>
+    <title>LogiLink v104.29 | Optimized Performance</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -54,7 +54,6 @@
         #email-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(4px); z-index: 999; align-items: center; justify-content: center; padding: 20px; }
         .modal-container { background: var(--bg-surface); border: 1px solid var(--border); width: 100%; max-width: 550px; border-radius: 12px; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); }
 
-        /* Toast Styling */
         #toast-notice { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(100px); background: var(--brand); color: var(--bg-deep); padding: 12px 24px; border-radius: 8px; font-weight: 900; text-transform: uppercase; font-size: 12px; transition: 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); z-index: 9999; opacity: 0; pointer-events: none; }
         #toast-notice.show { transform: translateX(-50%) translateY(0); opacity: 1; }
 
@@ -74,7 +73,7 @@
                 <div class="w-8 h-8 bg-[var(--brand)] rounded-lg flex items-center justify-center shadow-lg"><i class="fa fa-layer-group text-[var(--bg-deep)] text-xs"></i></div>
                 <div class="text-lg font-black uppercase tracking-tighter text-[var(--brand)]">LOGILINK</div>
             </div>
-            <input type="text" id="global-search" oninput="render()" placeholder="Search company, order, or account..." class="w-80 bg-black/10 border border-[var(--border)] p-2 text-xs rounded text-[var(--text-main)] outline-none focus:border-[var(--brand)]">
+            <input type="text" id="global-search" oninput="debouncedRender()" placeholder="Search company, order, or account..." class="w-80 bg-black/10 border border-[var(--border)] p-2 text-xs rounded text-[var(--text-main)] outline-none focus:border-[var(--brand)]">
         </div>
         <div class="flex items-center gap-4">
             <div class="flex items-center gap-3 bg-black/10 p-2 rounded-full border border-[var(--border)]">
@@ -195,7 +194,7 @@
     <div id="toast-notice">Update Sent Successfully</div>
 
     <script>
-        let db = []; let currentMode = 'active'; let currentTicketId = null;
+        let db = []; let currentMode = 'active'; let currentTicketId = null; let renderTimeout;
         const HISTORY_URL = 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/43ca56b97e134123aceca13f64dc0572/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=DBzX1YaJjcrqEu6xxZfh72eF9B7qtsAU1kDOdCzWTG4';
         const SAVE_FLOW_URL = 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/23ece406df284beea868b1f389dc6c5f/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Q9LLMsjYRdrSbw6SGTmVkmXlfMiCWyscnTchK1sFtZY';
         const SEND_EMAIL_FLOW_URL = 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/5473f5a058f344eaaf1d5c2544baf437/triggers/manual/paths/invoke?api-version=1';
@@ -244,9 +243,21 @@
             render();
         }
 
+        function debouncedRender() {
+            clearTimeout(renderTimeout);
+            renderTimeout = setTimeout(render, 150);
+        }
+
         function render() {
             const list = document.getElementById('ticket-list');
             const search = document.getElementById('global-search').value.toLowerCase();
+            
+            // Optimization: Map duplicates once instead of inside filter loop
+            const orderCounts = db.reduce((acc, curr) => {
+                if(curr.order !== 'N/A') acc[curr.order] = (acc[curr.order] || 0) + 1;
+                return acc;
+            }, {});
+
             const filtered = db.filter(t => {
                 const matchSearch = (t.order + t.company + t.account + t.issue + t.rep).toLowerCase().includes(search);
                 const isFinished = t.status === 'Completed' || t.status === 'Sent Back';
@@ -254,7 +265,7 @@
             }).sort((a,b) => b.timestamp - a.timestamp);
             
             list.innerHTML = filtered.map(t => {
-                const isOrderDup = db.filter(x => x.order === t.order && x.order !== 'N/A').length > 1;
+                const isOrderDup = orderCounts[t.order] > 1;
                 const dupClass = isOrderDup ? 'order-duplicate-alert' : '';
                 return `
                 <div class="record-card ${currentTicketId === t.id ? 'active-card' : ''}" onclick="loadTicket('${t.id}')">
@@ -323,18 +334,13 @@
         function openDraftModal() {
             const t = db.find(x => x.id === currentTicketId);
             if(!t) return;
-            
-            // Format Rep Name to Email (firstname.lastname@wbmason.com)
             const cleanName = t.rep.toLowerCase().replace(/\s+/g, '.');
             const emailAddr = `${cleanName}@wbmason.com`;
-            
             const status = document.getElementById('d-disposition').value;
             const notes = document.getElementById('d-warehouse-input').value || "No warehouse notes recorded yet.";
-            
             document.getElementById('m-to-address').innerText = emailAddr;
             document.getElementById('m-subject').innerText = `Logistics Update: Order #${t.order} (${t.company})`;
             document.getElementById('m-body').value = `Hello,\n\nFollowing up on Order #${t.order} for ${t.company}.\n\nSTATUS: ${status}\n\nWAREHOUSE NOTES:\n${notes}\n\nPlease let us know if you have any questions.\n\nBest,\nLogistics Department`;
-            
             document.getElementById('email-modal-overlay').style.display = 'flex';
         }
 
@@ -342,26 +348,21 @@
             const btn = document.getElementById('confirm-send-btn');
             const originalText = btn.innerText;
             btn.innerText = "SENDING..."; btn.disabled = true;
-
             const payload = {
                 to: document.getElementById('m-to-address').innerText,
                 subject: document.getElementById('m-subject').innerText,
                 body: document.getElementById('m-body').value
             };
-
             try {
-                // This call triggers the Power Automate Outlook connector silently in the background
                 await fetch(SEND_EMAIL_FLOW_URL, {
                     method: 'POST',
                     mode: 'no-cors',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                
                 showToast("Email Sent Successfully");
                 setTimeout(() => { closeDraftModal(); btn.innerText = originalText; btn.disabled = false; }, 500);
             } catch (e) {
-                alert("Transmission failed.");
                 btn.innerText = "RETRY SEND"; btn.disabled = false;
             }
         }
@@ -383,7 +384,7 @@
                 });
                 showToast("Database Updated");
                 setTimeout(() => { btn.innerText = originalText; btn.disabled = false; fetchData(HISTORY_URL); }, 1000);
-            } catch (e) { alert("Save error."); btn.innerText = originalText; btn.disabled = false; }
+            } catch (e) { btn.innerText = originalText; btn.disabled = false; }
         }
 
         function showToast(msg) {
