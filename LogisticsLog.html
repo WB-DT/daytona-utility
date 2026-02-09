@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLink v104.36 | Logistics Dashboard</title>
+    <title>LogiLink v104.37 | Flow Integration</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -199,7 +199,10 @@
 
     <script>
         let db = []; let currentMode = 'active'; let currentTicketId = null;
+        
+        // PRODUCTION FLOW URLS [cite: 71]
         const HISTORY_URL = 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/43ca56b97e134123aceca13f64dc0572/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=DBzX1YaJjcrqEu6xxZfh72eF9B7qtsAU1kDOdCzWTG4';
+        const SAVE_FLOW_URL = 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/23ece406df284beea868b1f389dc6c5f/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Q9LLMsjYRdrSbw6SGTmVkmXlfMiCWyscnTchK1sFtZY';
         const SEND_EMAIL_FLOW_URL = 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/5473f5a058f344eaaf1d5c2544baf437/triggers/manual/paths/invoke?api-version=1';
 
         window.onload = () => { setMode('active'); fetchData(HISTORY_URL); };
@@ -220,7 +223,7 @@
                 const dateObj = r.createdon ? new Date(r.createdon) : null;
                 const dispositionLabel = r['cr714_disposition@OData.Community.Display.V1.FormattedValue'] || r.cr714_disposition || 'Pending';
                 return {
-                    id: r.cr714_id || 'N/A',
+                    id: r.cr714_logisticslog_2id || r.cr714_id || 'N/A', // Dataverse GUID [cite: 77]
                     order: (r.cr714_salesordernumber || 'N/A').trim(),
                     company: r.cr714_companyordeliveryname || 'Unknown', 
                     account: r.cr714_accountnumber || 'N/A',
@@ -251,7 +254,7 @@
             const list = document.getElementById('ticket-list');
             const search = document.getElementById('global-search').value.toLowerCase();
             const filtered = db.filter(t => {
-                const matchSearch = (t.order + t.company + t.account + t.issue).toLowerCase().includes(search);
+                const matchSearch = (t.order + t.company + t.account + t.issue + t.rep).toLowerCase().includes(search);
                 const isFinished = t.status === 'Completed' || t.status === 'Sent Back';
                 return currentMode === 'active' ? (matchSearch && !isFinished) : (matchSearch && isFinished);
             }).sort((a,b) => b.timestamp - a.timestamp);
@@ -262,7 +265,7 @@
                 return `
                 <div class="record-card ${currentTicketId === t.id ? 'active-card' : ''}" onclick="loadTicket('${t.id}')">
                     <div class="flex justify-between items-center mb-1">
-                        <span class="id-badge-ghost">${t.id}</span>
+                        <span class="id-badge-ghost">${t.id.substring(0,8)}...</span>
                         <div class="flex gap-2 items-center">
                             <span class="time-label-gallery">${t.fullStamp}</span>
                             <span class="wh-label">${t.warehouse}</span>
@@ -323,11 +326,33 @@
             } else { rail.classList.remove('is-visible'); }
         }
 
-        function copyToClipboard() {
-            navigator.clipboard.writeText(document.getElementById('d-order').innerText);
-            const toast = document.getElementById('copy-toast');
-            toast.style.opacity = '1';
-            setTimeout(() => { toast.style.opacity = '0'; }, 2000);
+        async function saveRecord() {
+            const btn = document.getElementById('save-btn');
+            const originalText = btn.innerText;
+            btn.innerText = "SAVING..."; btn.disabled = true;
+            
+            const payload = {
+                recordId: currentTicketId,
+                disposition: document.getElementById('d-disposition').value,
+                warehouseNotes: document.getElementById('d-warehouse-input').value,
+                driverNotes: document.getElementById('d-driver-input').value
+            };
+
+            try {
+                const response = await fetch(SAVE_FLOW_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if(response.ok) { 
+                    btn.innerText = "SAVED!";
+                    setTimeout(() => { btn.innerText = originalText; btn.disabled = false; fetchData(HISTORY_URL); }, 1500);
+                }
+            } catch (e) { 
+                console.error("Save Error:", e);
+                alert("Flow Error: Check connection.");
+                btn.innerText = originalText; btn.disabled = false;
+            }
         }
 
         function openDraftModal() {
@@ -335,56 +360,35 @@
             const company = document.getElementById('d-company').innerText;
             const status = document.getElementById('d-disposition').value;
             const notes = document.getElementById('d-warehouse-input').value || "No warehouse notes recorded yet.";
-
             document.getElementById('m-subject').innerText = `Logistics Update: Order #${order} (${company})`;
             document.getElementById('m-body').innerText = `Hello,\n\nFollowing up on Order #${order} for ${company}.\n\nSTATUS: ${status}\n\nWAREHOUSE NOTES:\n${notes}\n\nPlease let us know if you have any questions.\n\nBest,\nLogistics Department`;
-            
             document.getElementById('email-modal-overlay').style.display = 'flex';
         }
 
-        function closeDraftModal() {
-            document.getElementById('email-modal-overlay').style.display = 'none';
-        }
+        function closeDraftModal() { document.getElementById('email-modal-overlay').style.display = 'none'; }
 
         async function sendViaFlow() {
             const btn = document.getElementById('confirm-send-btn');
             const originalText = btn.innerText;
-            btn.innerText = "SENDING...";
-            btn.disabled = true;
-
-            const payload = {
-                to: "your_email@wbmason.com",
-                subject: document.getElementById('m-subject').innerText,
-                body: document.getElementById('m-body').innerText
-            };
-
+            btn.innerText = "SENDING..."; btn.disabled = true;
+            const payload = { to: "your_email@wbmason.com", subject: document.getElementById('m-subject').innerText, body: document.getElementById('m-body').innerText };
             try {
-                // Using 'no-cors' mode to attempt to bypass standard browser security blocks
-                const response = await fetch(SEND_EMAIL_FLOW_URL, {
-                    method: 'POST',
-                    mode: 'no-cors', 
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
-                // With 'no-cors', the browser will not provide a standard success response even if the request is received.
-                // We show success as long as no fatal network error is caught.
+                await fetch(SEND_EMAIL_FLOW_URL, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                 btn.innerText = "SENT SUCCESSFULLY";
-                setTimeout(() => { 
-                    closeDraftModal(); 
-                    btn.innerText = originalText;
-                    btn.disabled = false;
-                }, 1500);
-
+                setTimeout(() => { closeDraftModal(); btn.innerText = originalText; btn.disabled = false; }, 1500);
             } catch (e) {
-                console.error("Transmission error:", e);
-                alert("Flow Error: Check if the Flow is turned on and the URL is correct.");
-                btn.innerText = "RETRY SEND";
-                btn.disabled = false;
+                alert("Transmission error.");
+                btn.innerText = "RETRY SEND"; btn.disabled = false;
             }
         }
 
-        function saveRecord() { alert("Logistics update saved to database!"); }
+        function copyToClipboard() {
+            navigator.clipboard.writeText(document.getElementById('d-order').innerText);
+            const toast = document.getElementById('copy-toast');
+            toast.style.opacity = '1';
+            setTimeout(() => { toast.style.opacity = '0'; }, 2000);
+        }
+
         function setTheme(t) { document.body.setAttribute('data-theme', t); }
     </script>
 </body>
