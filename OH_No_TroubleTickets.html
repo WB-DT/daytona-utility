@@ -379,10 +379,24 @@
         const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: window.location.href }, cache: { cacheLocation: "localStorage" } };
         const myMSALObj = new msal.PublicClientApplication(msalConfig);
         
+        // --- MAPPINGS ---
+        const bucketMap = {
+            "Matt": "2t_X0ljqvkW0nkxKZ8Yv82UAAdUE",
+            "GUI Uploads": "KCRqjuJkqUqWK_XBvrFlxWUAPlAN",
+            "Anslee": "gtJqth6KWEy9WgPQ-gEATWUAG9WI",
+            "Lori": "M7zGXOQcuUW5-4F90qmbXGUAGVuZ",
+            "Unassigned": "cJn6qz4MukyZj3d2DbGUR2UAO8k-"
+        };
+        
+        // Reverse map for lookup (ID -> Name)
+        const bucketIdToName = Object.fromEntries(Object.entries(bucketMap).map(a => a.reverse()));
+
+        const dvPriorityMap = { "Low": 473930000, "Medium": 473930001, "High": 473930002, "Critical": 473930003 };
+        const dvStatusMap = { "Not started": 473930000, "In progress": 473930001, "Completed": 473930002, "Deferred": 473930003 };
+
         let username = "";
         let tickets = []; 
         let currentTicketId = null;
-        let lastPollTime = null; 
 
         // --- AUTH ---
         async function signIn() {
@@ -402,9 +416,31 @@
             setInterval(refreshTickets, 60000); 
         }
 
+        // --- DATA MAPPING HELPER ---
+        function mapDataverseToApp(item) {
+            // Helper to handle both formatted values and fallbacks
+            const bucketId = item['cr714_bucket'] || "";
+            const bucketName = bucketIdToName[bucketId] || "Triage";
+
+            return {
+                id: item['cr714_cr_bugtrackerid'],
+                title: item['cr714_topic'] || "No Title",
+                description: item['cr714_description'] || "",
+                // Bucket logic: store the Name in 'bucket' (for UI compatibility) and ID in 'bucketId'
+                bucket: bucketName, 
+                bucketName: bucketName,
+                bucketId: bucketId,
+                priority: item['cr714_priority@OData.Community.Display.V1.FormattedValue'] || "Medium",
+                status: item['cr714_status@OData.Community.Display.V1.FormattedValue'] || "Not started",
+                assignedTo: item['_ownerid_value@OData.Community.Display.V1.FormattedValue'] || item['_owninguser_value@OData.Community.Display.V1.FormattedValue'] || "",
+                requester: item['_createdby_value@OData.Community.Display.V1.FormattedValue'] || "",
+                startDate: item['createdon'] || "", // Using createdon as start date fallback
+                dueDate: item['cr714_duedate'] || ""
+            };
+        }
+
         // --- TICKET LOGIC ---
         function forceRefresh() {
-            lastPollTime = null; 
             refreshTickets();
         }
 
@@ -413,28 +449,38 @@
             if(btn) btn.classList.add('fa-spin');
 
             try {
-                const payload = { lastCheck: lastPollTime, userEmail: username };
+                // Send basic payload. LastCheck is removed as we now pull everything.
+                const payload = { userEmail: username };
                 const res = await fetch(FLOW_POLL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
                 
                 if (res.ok) {
                     const data = await res.json();
                     
-                    // SELF-HEALING: Force tickets to be an array if it isn't one
-                    if (!Array.isArray(tickets)) tickets = [];
-
-                    if (lastPollTime === null) {
-                        tickets = Array.isArray(data.tickets) ? data.tickets : [];
-                        showToast("Tickets loaded successfully", "success");
-                    } else if (data.tickets && Array.isArray(data.tickets) && data.tickets.length > 0) {
-                        data.tickets.forEach(newT => {
-                            const existingIdx = tickets.findIndex(t => t.id === newT.id);
-                            if(existingIdx > -1) tickets[existingIdx] = newT; 
-                            else tickets.unshift(newT);
-                        });
-                        showToast(`${data.tickets.length} updates found`, "info");
-                    }
+                    // The Flow now returns { body: { tickets: "STRINGIFIED_JSON" } }
+                    // We need to parse data.body.tickets safely
+                    let rawTickets = [];
                     
-                    lastPollTime = new Date().toISOString();
+                    if (data.body && data.body.tickets) {
+                        try {
+                            // The tickets field is a string containing JSON
+                            rawTickets = JSON.parse(data.body.tickets);
+                        } catch (parseErr) {
+                            console.error("Failed to parse tickets string:", parseErr);
+                            rawTickets = [];
+                        }
+                    } else if (data.tickets && Array.isArray(data.tickets)) {
+                        // Fallback for backward compatibility
+                        rawTickets = data.tickets;
+                    }
+
+                    if (Array.isArray(rawTickets)) {
+                        // Map the incoming Dataverse objects to our App schema
+                        // Since we are "passing everything", we replace the array entirely
+                        tickets = rawTickets.map(mapDataverseToApp);
+                        showToast(`Loaded ${tickets.length} tickets`, "success");
+                    } else {
+                        tickets = [];
+                    }
                 }
                 renderList();
             } catch (e) { console.error("Poll error", e); } 
@@ -455,7 +501,11 @@
             let filtered = tickets.filter(t => (t.title || "").toLowerCase().includes(search) || (t.id || "").includes(search));
 
             if (onlyMyTickets) {
-                filtered = filtered.filter(t => (t.requester || "").toLowerCase() === username.toLowerCase());
+                // Approximate "My Tickets" using requester or assignedTo logic
+                filtered = filtered.filter(t => 
+                    (t.requester || "").toLowerCase().includes(username.toLowerCase()) || 
+                    (t.assignedTo || "").toLowerCase().includes(username.toLowerCase())
+                );
             }
 
             if (sortMode === 'priority') {
@@ -513,6 +563,7 @@
             document.getElementById('inp-priority').value = t.priority || "Medium";
             document.getElementById('inp-progress').value = t.status || "Not started";
             document.getElementById('inp-assigned').value = t.assignedTo || "";
+            // Handle date parsing safely
             document.getElementById('inp-start').value = t.startDate ? t.startDate.split('T')[0] : "";
             document.getElementById('inp-due').value = t.dueDate ? t.dueDate.split('T')[0] : "";
             document.getElementById('header-bucket-display').innerText = t.bucketName || t.bucket || "Ticket";
@@ -542,18 +593,6 @@
             btn.classList.add('btn-loading');
             btn.innerHTML = '<i class="fas fa-spinner"></i> Saving...';
             
-            // --- MAPPINGS ---
-            const bucketMap = {
-                "Matt": "2t_X0ljqvkW0nkxKZ8Yv82UAAdUE",
-                "GUI Uploads": "KCRqjuJkqUqWK_XBvrFlxWUAPlAN",
-                "Anslee": "gtJqth6KWEy9WgPQ-gEATWUAG9WI",
-                "Lori": "M7zGXOQcuUW5-4F90qmbXGUAGVuZ",
-                "Unassigned": "cJn6qz4MukyZj3d2DbGUR2UAO8k-"
-            };
-
-            const dvPriorityMap = { "Low": 473930000, "Medium": 473930001, "High": 473930002, "Critical": 473930003 };
-            const dvStatusMap = { "Not started": 473930000, "In progress": 473930001, "Completed": 473930002, "Deferred": 473930003 };
-
             const selectedBucketName = document.getElementById('inp-bucket').value;
             const realBucketId = bucketMap[selectedBucketName] || bucketMap["Unassigned"]; 
             const selectedPriority = document.getElementById('inp-priority').value;
