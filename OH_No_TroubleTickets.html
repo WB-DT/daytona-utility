@@ -114,6 +114,11 @@
         .card-title { font-weight: 600; font-size: 14px; line-height: 1.4; }
         .card-meta { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); }
         .status-pill { padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.1); font-weight: 600; }
+        
+        /* New Source Badge */
+        .source-badge { font-size: 9px; padding: 1px 4px; border-radius: 3px; margin-left: 5px; opacity: 0.7; }
+        .source-dv { background-color: #744da9; color: white; } /* Dataverse Purple */
+        .source-pl { background-color: #0078d4; color: white; } /* Planner Blue */
 
         /* --- Main Content --- */
         #main-content {
@@ -226,7 +231,7 @@
             <div class="sidebar-title-row">
                 <div>
                     <h2>Bug Tracker</h2>
-                    <span class="count-badge" id="ticket-count-display">0 tickets</span>
+                    <span class="count-badge" id="ticket-count-display">0 items</span>
                 </div>
                 <div style="display:flex; gap:8px;">
                     <button class="btn" style="padding: 6px 10px; border:none;" onclick="exportToCSV()" title="Export to Excel"><i class="fas fa-file-csv"></i></button>
@@ -270,7 +275,7 @@
                 <label class="toggle-switch">
                     <input type="checkbox" class="toggle-checkbox" id="my-tickets-toggle" onchange="filterTickets()">
                     <div class="toggle-track"><div class="toggle-thumb"></div></div>
-                    <span>My Tickets</span>
+                    <span>My Items</span>
                 </label>
                 <select id="sort-select" onchange="sortTickets()">
                     <option value="newest">Newest First</option>
@@ -453,24 +458,54 @@
             setInterval(refreshTickets, 60000); 
         }
 
-        // --- DATA MAPPING HELPER ---
-        function mapDataverseToApp(item) {
+        // --- NORMALIZATION HELPERS ---
+        function normalizeDataverse(item) {
             const bucketId = item['cr714_bucket'] || "";
             const bucketName = bucketIdToName[bucketId] || "Triage";
-
             return {
                 id: item['cr714_cr_bugtrackerid'],
+                source: 'dataverse',
+                linkedPlannerId: item['cr714_plannertaskid'], // Used for deduplication
                 title: item['cr714_topic'] || "No Title",
                 description: item['cr714_description'] || "",
-                bucket: bucketName, 
-                bucketName: bucketName,
-                bucketId: bucketId,
+                bucket: bucketName, bucketName: bucketName, bucketId: bucketId,
                 priority: item['cr714_priority@OData.Community.Display.V1.FormattedValue'] || "Medium",
                 status: item['cr714_status@OData.Community.Display.V1.FormattedValue'] || "Not started",
                 assignedTo: item['_ownerid_value@OData.Community.Display.V1.FormattedValue'] || item['_owninguser_value@OData.Community.Display.V1.FormattedValue'] || "",
                 requester: item['_createdby_value@OData.Community.Display.V1.FormattedValue'] || "",
                 startDate: item['createdon'] || "", 
                 dueDate: item['cr714_duedate'] || ""
+            };
+        }
+
+        function normalizePlanner(item) {
+            // Priority mapping: Planner 0-1 (Critical), 2-4 (High), 5-8 (Medium), 9-10 (Low)
+            let prio = "Medium";
+            const p = item.priority || 5;
+            if(p <= 1) prio = "Critical";
+            else if(p <= 4) prio = "High";
+            else if(p > 8) prio = "Low";
+
+            // Status mapping
+            let stat = "Not started";
+            if(item.percentComplete === 100) stat = "Completed";
+            else if(item.percentComplete > 0) stat = "In progress";
+
+            const bucketName = bucketIdToName[item.bucketId] || "Triage";
+
+            return {
+                id: item.id,
+                source: 'planner',
+                linkedPlannerId: null,
+                title: item.title || "No Title",
+                description: item.hasDescription ? "(See Planner for details)" : "",
+                bucket: bucketName, bucketName: bucketName, bucketId: item.bucketId,
+                priority: prio,
+                status: stat,
+                assignedTo: "Planner User", // Planner doesn't give display names easily in this view
+                requester: "Planner",
+                startDate: item.startDateTime || item.createdDateTime || "",
+                dueDate: item.dueDateTime || ""
             };
         }
 
@@ -482,39 +517,36 @@
             if(btn) btn.classList.add('fa-spin');
 
             try {
-                // REMOVED USER EMAIL to prevent backend filtering
                 const payload = { }; 
-                
                 const res = await fetch(FLOW_POLL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
                 
                 if (res.ok) {
                     const data = await res.json();
-                    console.log("Response Data:", data); 
+                    
+                    let dvRaw = [];
+                    let plRaw = [];
 
-                    let rawTickets = [];
-                    let jsonString = null;
+                    // Handle keys based on the recommended Flow Response structure
+                    if (data.dataverse && Array.isArray(data.dataverse)) dvRaw = data.dataverse;
+                    else if (data.value && Array.isArray(data.value)) dvRaw = data.value; // Fallback if regular list rows
 
-                    // Robust parsing: Check multiple locations and types
-                    if (data.body && data.body.tickets) {
-                         if (typeof data.body.tickets === 'string') jsonString = data.body.tickets;
-                         else if (Array.isArray(data.body.tickets)) rawTickets = data.body.tickets;
-                    } 
-                    else if (data.tickets) {
-                         if (typeof data.tickets === 'string') jsonString = data.tickets;
-                         else if (Array.isArray(data.tickets)) rawTickets = data.tickets;
-                    }
+                    if (data.planner && Array.isArray(data.planner)) plRaw = data.planner;
 
-                    if (jsonString) {
-                        try { rawTickets = JSON.parse(jsonString); } catch (e) { console.error("JSON Parse Error:", e); }
-                    }
+                    // 1. Normalize
+                    const dvNormalized = dvRaw.map(normalizeDataverse);
+                    const plNormalized = plRaw.map(normalizePlanner);
 
-                    if (Array.isArray(rawTickets)) {
-                        tickets = rawTickets.map(mapDataverseToApp);
-                        showToast(`Fetched ${tickets.length} tickets`, "success");
-                    } else {
-                        console.warn("No valid ticket array found", data);
-                        tickets = [];
-                    }
+                    // 2. Deduplicate
+                    // Collect all linked IDs from Dataverse items to hide the raw Planner versions
+                    const linkedIds = new Set(dvNormalized.map(t => t.linkedPlannerId).filter(Boolean));
+                    
+                    // Filter Planner items: Only keep those NOT linked in Dataverse
+                    const plFiltered = plNormalized.filter(t => !linkedIds.has(t.id));
+
+                    // 3. Merge
+                    tickets = [...dvNormalized, ...plFiltered];
+                    
+                    showToast(`Fetched ${tickets.length} items (${dvNormalized.length} DB, ${plFiltered.length} Planner)`, "success");
                 }
                 renderList();
             } catch (e) { console.error("Poll error", e); } 
@@ -527,7 +559,6 @@
             const onlyMyTickets = document.getElementById('my-tickets-toggle').checked;
             const sortMode = document.getElementById('sort-select').value;
 
-            // Get new Filter Values
             const filterBucket = document.getElementById('filter-bucket').value;
             const filterStatus = document.getElementById('filter-status').value;
             const filterPriority = document.getElementById('filter-priority').value;
@@ -538,10 +569,8 @@
 
             let filtered = tickets.filter(t => {
                 const matchesSearch = (t.title || "").toLowerCase().includes(search) || (t.id || "").includes(search);
-                // "My Tickets" matches if UNCHECKED (show all) OR if signed in user matches
                 const matchesUser = !onlyMyTickets || (t.requester || "").toLowerCase().includes(username.toLowerCase()) || (t.assignedTo || "").toLowerCase().includes(username.toLowerCase());
                 
-                // Advanced Filters
                 const matchesBucket = filterBucket === "All" || t.bucketName === filterBucket;
                 const matchesStatus = filterStatus === "All" || (t.status || "Not started").toLowerCase() === filterStatus.toLowerCase();
                 const matchesPriority = filterPriority === "All" || t.priority === filterPriority;
@@ -549,7 +578,6 @@
                 return matchesSearch && matchesUser && matchesBucket && matchesStatus && matchesPriority;
             });
 
-            // Update Counter
             document.getElementById('ticket-count-display').innerText = `Showing ${filtered.length} of ${tickets.length}`;
 
             if (sortMode === 'priority') {
@@ -557,18 +585,27 @@
                 filtered.sort((a,b) => (pMap[a.priority] || 99) - (pMap[b.priority] || 99));
             } else if (sortMode === 'status') {
                 filtered.sort((a,b) => a.status.localeCompare(b.status));
+            } else {
+                // Newest first by default
+                filtered.sort((a,b) => new Date(b.startDate || 0) - new Date(a.startDate || 0));
             }
 
             filtered.forEach(t => {
                 const div = document.createElement('div');
                 div.className = `ticket-card priority-${t.priority} ${currentTicketId === t.id ? 'active' : ''}`;
                 div.onclick = () => loadTicket(t.id);
+                
+                // Add source badge
+                const sourceBadge = t.source === 'dataverse' 
+                    ? '<span class="source-badge source-dv">DB</span>' 
+                    : '<span class="source-badge source-pl">PL</span>';
+
                 div.innerHTML = `
                     <div class="card-header">
                         <span class="card-title">${t.title}</span>
                     </div>
                     <div class="card-meta">
-                        <span>${t.bucket || 'Triage'}</span>
+                        <span>${t.bucket || 'Triage'} ${sourceBadge}</span>
                         <span class="status-pill">${t.status}</span>
                     </div>
                 `;
@@ -607,13 +644,23 @@
             document.getElementById('inp-priority').value = t.priority || "Medium";
             document.getElementById('inp-progress').value = t.status || "Not started";
             document.getElementById('inp-assigned').value = t.assignedTo || "";
-            document.getElementById('inp-start').value = t.startDate ? t.startDate.split('T')[0] : "";
-            document.getElementById('inp-due').value = t.dueDate ? t.dueDate.split('T')[0] : "";
+            
+            // Safe date handling
+            const safeDate = (d) => d ? d.split('T')[0] : "";
+            document.getElementById('inp-start').value = safeDate(t.startDate);
+            document.getElementById('inp-due').value = safeDate(t.dueDate);
+            
             document.getElementById('header-bucket-display').innerText = t.bucketName || t.bucket || "Ticket";
             
             const commentsList = document.getElementById('comments-list');
             commentsList.innerHTML = "";
             document.getElementById('inp-title').classList.remove('input-error');
+            
+            // Visual indicator if source is Planner (read-only warning maybe?)
+            if(t.source === 'planner') {
+               showToast("Editing raw Planner tasks may not sync back fully.", "info");
+            }
+
             renderList(); 
         }
 
@@ -668,6 +715,7 @@
                 if (!currentTicketId) {
                     payload.id = responseData.dataverseId || ("TEMP-" + Date.now()); 
                     payload.bucket = selectedBucketName;
+                    payload.source = "dataverse"; // Assume new creates go to DB
                     tickets.unshift(payload);
                     currentTicketId = payload.id;
                     triggerConfetti(); 
@@ -691,11 +739,11 @@
 
         function deleteTicket() {
             if(!currentTicketId) return;
-            if(confirm("⚠️ DELETE TICKET?\n\nThis will remove it from your view. It remains in Dataverse history.")) {
+            if(confirm("⚠️ DELETE ITEM?\n\nThis will remove it from your view.")) {
                 tickets = tickets.filter(t => t.id !== currentTicketId);
                 createNewTicket();
                 renderList();
-                showToast("Ticket removed from view", "info");
+                showToast("Item removed from view", "info");
             }
         }
 
@@ -716,9 +764,9 @@
 
         function exportToCSV() {
             if(!tickets || tickets.length === 0) { showToast("No tickets to export", "info"); return; }
-            let csv = "ID,Title,Bucket,Status,Priority,AssignedTo,Date\n";
+            let csv = "ID,Source,Title,Bucket,Status,Priority,AssignedTo,Date\n";
             tickets.forEach(t => {
-                csv += `"${t.id}","${t.title}","${t.bucket || ''}","${t.status}","${t.priority}","${t.assignedTo || ''}","${t.startDate || ''}"\n`;
+                csv += `"${t.id}","${t.source}","${t.title}","${t.bucket || ''}","${t.status}","${t.priority}","${t.assignedTo || ''}","${t.startDate || ''}"\n`;
             });
             const blob = new Blob([csv], {type: 'text/csv'});
             const url = window.URL.createObjectURL(blob);
