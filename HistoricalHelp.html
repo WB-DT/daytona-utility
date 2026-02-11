@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pro-Contribution Tracker | WB-DT Edition</title>
+    <script src="https://alcdn.msauth.net/browser/2.30.0/js/msal-browser.min.js"></script>
+    <style>
+        :root {
+            --primary: #0078d4;
+            --teams: #6264a7;
+            --outlook: #0078d4;
+            --github: #24292e;
+            --kudos: #fff9e6;
+            --kudos-border: #ffeb3b;
+            --bg: #f3f2f1;
+        }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); margin: 0; padding: 20px; color: #323130; }
+        .container { max-width: 1100px; margin: 0 auto; }
+        
+        /* Header & Settings */
+        .header { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom: 20px; }
+        .controls-row { display: flex; flex-wrap: wrap; gap: 15px; margin-top: 15px; align-items: center; }
+        
+        .settings-pane { background: #faf9f8; border: 1px solid #edebe9; padding: 15px; border-radius: 8px; margin-top: 15px; }
+        input[type="text"], input[type="date"] { padding: 8px; border: 1px solid #8a8886; border-radius: 4px; }
+        
+        /* Buttons */
+        button { border: none; padding: 10px 18px; border-radius: 4px; cursor: pointer; font-weight: 600; transition: all 0.2s; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-github { background: var(--github); color: white; }
+        .btn-success { background: #107c10; color: white; }
+        .btn-outline { background: transparent; border: 1px solid var(--primary); color: var(--primary); }
+        button:hover { opacity: 0.85; transform: translateY(-1px); }
+
+        /* Cards */
+        .card { background: white; padding: 20px; margin-bottom: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); position: relative; border-left: 6px solid #ccc; transition: transform 0.1s; }
+        .card-email { border-left-color: var(--outlook); }
+        .card-teams { border-left-color: var(--teams); }
+        .card-github { border-left-color: var(--github); }
+        .card-kudos { background-color: var(--kudos); border-left-color: var(--kudos-border); border-right: 1px solid var(--kudos-border); }
+        
+        .tag { font-size: 10px; text-transform: uppercase; font-weight: 800; padding: 4px 8px; border-radius: 100px; margin-bottom: 10px; display: inline-block; }
+        .tag-email { background: #deecf9; color: var(--outlook); }
+        .tag-teams { background: #e7e8f4; color: var(--teams); }
+        .tag-github { background: #e1e4e8; color: var(--github); }
+        .tag-kudos { background: #fff200; color: #000; margin-left: 5px; }
+
+        .highlight-box { background: rgba(255,255,255,0.7); padding: 12px; border-radius: 6px; font-style: italic; margin: 12px 0; border: 1px dashed #ccc; line-height: 1.5; position: relative;}
+        .copy-btn { position: absolute; top: 5px; right: 5px; font-size: 10px; background: rgba(0,0,0,0.05); padding: 2px 5px; border-radius: 3px; cursor: pointer; }
+        
+        .timestamp { color: #605e5c; font-size: 0.8em; }
+        .loader { display: none; text-align: center; padding: 40px; font-size: 1.2em; color: var(--primary); font-weight: bold; }
+        #results-count { font-weight: bold; margin-bottom: 10px; color: #666; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>Contribution Tracker</h1>
+        <p id="status-msg">Unified Professional Brag Sheet Generator</p>
+        
+        <div class="settings-pane">
+            <strong>Contribution Keywords:</strong><br>
+            <input type="text" id="keyword-input" style="width: 80%; margin-bottom: 10px;" placeholder="fixed, help, flow, etc...">
+            <br>
+            <strong>Kudos/Sentiment Keywords:</strong><br>
+            <input type="text" id="kudos-input" style="width: 80%;" placeholder="thanks, great, saved, awesome...">
+            <button class="btn-outline" onclick="saveSettings()">Save Settings</button>
+        </div>
+
+        <div class="controls-row">
+            <input type="date" id="start-date">
+            <span>to</span>
+            <input type="date" id="end-date">
+            <button class="btn-primary" id="auth-btn">M365 Sync</button>
+            <button class="btn-github" id="github-btn">GitHub Sync</button>
+            <button class="btn-success" id="export-btn" style="display:none;">Export CSV</button>
+        </div>
+    </div>
+
+    <div id="loader" class="loader">⚙️ Scanning repositories and messages...</div>
+    <div id="results-count"></div>
+    <div id="results"></div>
+</div>
+
+<script>
+    // --- APP CONFIGURATION ---
+    const msalConfig = {
+        auth: {
+            clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee",
+            authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401",
+            redirectUri: window.location.origin 
+        },
+        cache: { cacheLocation: "sessionStorage" }
+    };
+
+    const msalInstance = new msal.PublicClientApplication(msalConfig);
+    let allEntries = [];
+
+    // --- SETTINGS MANAGEMENT ---
+    let keywords = JSON.parse(localStorage.getItem('contri_keywords')) || ["fixed", "resolved", "deployed", "help", "assistance", "flow", "app", "ui", "ux", "dashboard"];
+    let kudosKeywords = JSON.parse(localStorage.getItem('kudos_keywords')) || ["thank", "thanks", "great", "awesome", "perfect", "appreciate", "saved"];
+
+    document.getElementById('keyword-input').value = keywords.join(', ');
+    document.getElementById('kudos-input').value = kudosKeywords.join(', ');
+
+    // Set dates (last 30 days)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    document.getElementById('start-date').valueAsDate = thirtyDaysAgo;
+    document.getElementById('end-date').valueAsDate = new Date();
+
+    function saveSettings() {
+        keywords = document.getElementById('keyword-input').value.split(',').map(k => k.trim().toLowerCase());
+        kudosKeywords = document.getElementById('kudos-input').value.split(',').map(k => k.trim().toLowerCase());
+        localStorage.setItem('contri_keywords', JSON.stringify(keywords));
+        localStorage.setItem('kudos_keywords', JSON.stringify(kudosKeywords));
+        alert("Settings Saved Locally.");
+    }
+
+    const authBtn = document.getElementById('auth-btn');
+    const githubBtn = document.getElementById('github-btn');
+    const exportBtn = document.getElementById('export-btn');
+    const resultsDiv = document.getElementById('results');
+    const loader = document.getElementById('loader');
+
+    // --- M365 DATA FETCHING ---
+    authBtn.onclick = async () => {
+        try {
+            const loginRes = await msalInstance.loginPopup({ scopes: ["Mail.Read", "Chat.Read", "User.Read"] });
+            document.getElementById('status-msg').innerText = `Syncing M365: ${loginRes.account.name}`;
+            fetchM365();
+        } catch (err) { console.error(err); }
+    };
+
+    async function fetchM365() {
+        showLoader(true);
+        const account = msalInstance.getAllAccounts()[0];
+        const tokenRes = await msalInstance.acquireTokenSilent({ scopes: ["Mail.Read", "Chat.Read"], account });
+        const token = tokenRes.accessToken;
+
+        const graphQuery = keywords.map(k => `"${k}"`).join(' OR ');
+        
+        try {
+            // Outlook Search
+            const mailData = await (await fetch(`https://graph.microsoft.com/v1.0/me/messages?$search=${encodeURIComponent(graphQuery)}&$top=50`, { headers: { 'Authorization': `Bearer ${token}` } })).json();
+            processItems(mailData.value, 'Email');
+
+            // Teams Chat Scan
+            const chats = await (await fetch(`https://graph.microsoft.com/v1.0/me/chats?$top=15&$expand=lastMessagePreview`, { headers: { 'Authorization': `Bearer ${token}` } })).json();
+            for (const chat of chats.value) {
+                const msgs = await (await fetch(`https://graph.microsoft.com/v1.0/chats/${chat.id}/messages?$top=15`, { headers: { 'Authorization': `Bearer ${token}` } })).json();
+                const relevant = msgs.value.filter(m => [...keywords, ...kudosKeywords].some(k => m.body?.content?.toLowerCase().includes(k)));
+                processItems(relevant, 'Teams');
+            }
+        } catch (e) { console.error(e); }
+        showLoader(false);
+    }
+
+    // --- GITHUB DATA FETCHING ---
+    githubBtn.onclick = async () => {
+        showLoader(true);
+        const userOrOrg = "WB-DT";
+        const repos = ["daytona-utility", "Testing-Repository"];
+        
+        for (const repoName of repos) {
+            try {
+                const res = await fetch(`https://api.github.com/repos/${userOrOrg}/${repoName}/commits?per_page=30`);
+                const commits = await res.json();
+                const formatted = commits.map(c => ({
+                    subject: `Repo: ${repoName} | ${c.commit.message.split('\n')[0]}`,
+                    body: c.commit.message,
+                    receivedDateTime: c.commit.author.date,
+                    id: c.sha
+                }));
+                processItems(formatted, 'GitHub');
+            } catch (e) { console.error(`GitHub error on ${repoName}:`, e); }
+        }
+        showLoader(false);
+    };
+
+    // --- PROCESSING & UI LOGIC ---
+    function processItems(items, type) {
+        if (!items) return;
+        const startDate = new Date(document.getElementById('start-date').value);
+        const endDate = new Date(document.getElementById('end-date').value);
+        endDate.setHours(23, 59, 59);
+
+        items.forEach(item => {
+            const itemDate = new Date(item.receivedDateTime || item.createdDateTime);
+            if (itemDate >= startDate && itemDate <= endDate) {
+                const content = (item.body?.content || item.body || "").replace(/<[^>]*>?/gm, '').trim();
+                const snippet = extractSnippet(content);
+                const isKudos = kudosKeywords.some(k => content.toLowerCase().includes(k));
+
+                const entry = {
+                    type,
+                    subject: (item.subject || "Collaboration").replace(/[",]/g, ''),
+                    snippet: snippet.replace(/[",]/g, ''),
+                    date: itemDate.toLocaleString(),
+                    isKudos: isKudos,
+                    rawDate: itemDate
+                };
+
+                // Prevent duplicates
+                if (!allEntries.some(e => e.snippet === entry.snippet && e.date === entry.date)) {
+                    allEntries.push(entry);
+                    renderCard(entry);
+                }
+            }
+        });
+        updateCount();
+    }
+
+    function extractSnippet(text) {
+        const sentences = text.split(/[.!?]/);
+        const allTargetWords = [...keywords, ...kudosKeywords];
+        const match = sentences.find(s => allTargetWords.some(k => s.toLowerCase().includes(k)));
+        return (match ? match.trim() : text.substring(0, 150)).substring(0, 300);
+    }
+
+    function renderCard(item) {
+        const card = document.createElement('div');
+        card.className = `card card-${item.type.toLowerCase()} ${item.isKudos ? 'card-kudos' : ''}`;
+        card.innerHTML = `
+            <span class="tag tag-${item.type.toLowerCase()}">${item.type}</span>
+            ${item.isKudos ? '<span class="tag tag-kudos">⭐ Kudos/Positive</span>' : ''}
+            <div style="font-weight:bold; font-size: 1.1em;">${item.subject}</div>
+            <div class="highlight-box">
+                <span class="copy-btn" onclick="copyText(this)">Copy Snippet</span>
+                "${item.snippet}"
+            </div>
+            <span class="timestamp">${item.date}</span>
+        `;
+        resultsDiv.prepend(card);
+    }
+
+    function updateCount() {
+        document.getElementById('results-count').innerText = `Showing ${allEntries.length} contributions for selected date range.`;
+        if (allEntries.length > 0) exportBtn.style.display = 'inline-block';
+    }
+
+    function copyText(btn) {
+        const text = btn.parentElement.innerText.replace('Copy Snippet', '').trim();
+        navigator.clipboard.writeText(text);
+        btn.innerText = "Copied!";
+        setTimeout(() => btn.innerText = "Copy Snippet", 2000);
+    }
+
+    function showLoader(show) { loader.style.display = show ? 'block' : 'none'; }
+
+    exportBtn.onclick = () => {
+        let csv = "Type,Is_Kudos,Date,Subject,Snippet\n";
+        // Sort by date before export
+        allEntries.sort((a,b) => b.rawDate - a.rawDate).forEach(row => {
+            csv += `${row.type},${row.isKudos},${row.date},"${row.subject}","${row.snippet}"\n`;
+        });
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.setAttribute('href', url);
+        a.setAttribute('download', `Contribution_Report_${new Date().toISOString().split('T')[0]}.csv`);
+        a.click();
+    };
+</script>
+</body>
+</html>
