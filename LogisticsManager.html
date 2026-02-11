@@ -202,7 +202,7 @@
                 <div id="file-upload-fallback" class="hidden mt-6 text-center border-t border-slate-200 dark:border-slate-800 pt-4">
                      <p class="text-xs text-slate-400 mb-3">Live connection failed. Upload manually:</p>
                      <button onclick="document.getElementById('fileInput').click()" class="bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 px-4 py-2 rounded-lg text-xs font-bold transition">
-                        Select File
+                       Select File
                      </button>
                      <input type="file" id="fileInput" class="hidden" accept=".xlsx, .csv, .json" onchange="window.handleFile(this)">
                 </div>
@@ -414,7 +414,6 @@
         const ZIP_MAP = {'010':[42.1,-72.6],'021':[42.3,-71.0],'060':[41.8,-72.7],'070':[40.7,-74.2],'080':[39.9,-75.0],'100':[40.7,-74.0],'112':[40.6,-73.9],'117':[40.8,-73.1],'120':[42.6,-73.8],'131':[43.0,-76.1],'142':[42.9,-78.8],'152':[40.4,-80.0],'170':[40.3,-77.0],'191':[39.9,-75.1],'200':[38.9,-77.0],'212':[39.3,-76.6],'232':[37.5,-77.4],'275':[35.8,-78.6],'290':[34.0,-81.0],'303':[33.7,-84.3],'320':[30.3,-81.7],'331':[25.7,-80.2],'372':[36.2,-86.8],'402':[38.3,-85.8],'432':[40.0,-83.0],'462':[39.8,-86.1],'482':[42.3,-83.0],'532':[43.0,-87.9],'554':[45.0,-93.3],'606':[41.8,-87.6],'631':[38.6,-90.2],'641':[39.1,-94.6],'701':[29.9,-90.1],'731':[35.5,-97.5],'752':[32.7,-96.8],'770':[29.7,-95.4],'802':[39.7,-105.0],'841':[40.7,-111.9],'850':[33.4,-112.1],'891':[36.2,-115.1],'900':[34.0,-118.2],'941':[37.8,-122.4],'972':[45.5,-122.7],'981':[47.6,-122.3],'000':[39.8,-98.6]};
         let db = []; let filteredDB = []; let owners = []; let routes = []; let issues = []; let counts = { today: 0, urgent: 0, all: 0 };
 
-        // HELPER: Convert Excel Serial Date to JS Date String (Worker Side)
         function excelDateToJS(serial) {
             if (typeof serial === 'number') {
                const utc_days  = Math.floor(serial - 25569);
@@ -438,7 +437,6 @@
                 try {
                     const raw = payload.data;
                     self.postMessage({ type: 'PROGRESS', step: 'Parsing...', percent: 20 });
-                    const now = new Date();
                     
                     const val = (obj, k) => { 
                         if(!obj) return ""; const keys = Object.keys(obj); const cleanKeys = keys.reduce((acc, key) => { acc[key.toLowerCase().replace(/[^a-z0-9]/g, '')] = key; return acc; }, {});
@@ -449,8 +447,6 @@
 
                     db = raw.map(r => {
                         const dateStr = safeDate(val(r, ['starttime','start_time','date']));
-                        // Use Local Date for "Today" calc by comparing YYYY-MM-DD
-                        const isToday = new Date().toLocaleDateString('en-CA') === dateStr; 
                         const isStale = (new Date().getTime() - new Date(dateStr).getTime()) > (3 * 86400000);
                         let statusRaw = val(r, ['disposition','dispo','status']) || 'Pending';
                         let status = 'Pending';
@@ -465,10 +461,13 @@
                         let zip3 = "000"; const zipMatch = address.match(/\b\d{5}/); if(zipMatch) zip3 = zipMatch[0].substring(0, 3);
                         let state = "Other"; const stateMatch = address.match(/\b([A-Z]{2})\b\s+\d{5}/); if(stateMatch) state = stateMatch[1];
                         
-                        let rawRoute = String(val(r, ['route']));
-                        let route = rawRoute.replace(/[:;]/g, '').trim().replace(/^0+/, '') || "Unassigned";
+                        // --- ENHANCED ROUTE LOGIC ---
+                        let rawRoute = String(val(r, ['route'])).trim();
+                        let route = rawRoute.replace(/[:;]/g, '') || "Unassigned";
+                        // Root Route Logic: Strip leading zeros, ignore suffixes like -A, ,B etc.
+                        let cleanRoute = route.replace(/^0+/, '').split(/[-,\s]/)[0];
+                        if(cleanRoute === "") cleanRoute = "Unassigned";
 
-                        // Sanitization
                         const safeR = {};
                         for (let k in r) { safeR[k] = typeof r[k] === 'string' ? r[k].replace(/\\"/g, '"') : r[k]; }
 
@@ -476,7 +475,9 @@
                             id: val(r, ['id','ticket']), date: dateStr, isStale, isUrgent, recordType, zip3, state,
                             cust: val(r, ['companynameandordeliverylocationname','company']), acct: val(r, ['accountnumber','account']), so: val(r, ['salesordernumber','sales_order']),
                             address: address, contact: toProperCase(val(r, ['contactnamenumberincludeext','contact'])),
-                            route: route, whs: val(r, ['warehousexxxxxinthisformatpleasex002e','warehouse']),
+                            route: route, 
+                            rootRoute: cleanRoute, 
+                            whs: val(r, ['warehousexxxxxinthisformatpleasex002e','warehouse']),
                             driverRaw: toProperCase(val(r, ['drivernamenumber','driver'])), issue: issue,
                             owner: toProperCase(val(r, ['logisticsowner','owner'])), notes: tadNotes,
                             lNotes: val(r, ['haveyoureachedouttologistics','logisticsnotes']), email: val(r, ['email']), status: status,
@@ -490,7 +491,6 @@
                     routes = [...new Set(db.map(x=>x.route).filter(x=>x))].sort((a,b)=>a.toString().localeCompare(b.toString(),undefined,{numeric:true}));
                     issues = [...new Set(db.map(x=>x.recordType).filter(x=>x))].sort();
                     
-                    // Fixed Counts Logic (Local Time)
                     const todayStr = new Date().toLocaleDateString('en-CA');
                     counts = { 
                         today: db.filter(x => x.date === todayStr).length, 
@@ -505,10 +505,9 @@
             else if (type === 'FILTER') {
                 const { filters } = payload;
                 const { search, route, owner, status, dateRange, mode, userEmail, recordType, sort, colSearch } = filters;
-                const todayStr = new Date().toLocaleDateString('en-CA'); // Local time fix
                 
                 filteredDB = db.filter(t => {
-                    if(mode === 'today' && t.date !== todayStr) return false;
+                    if(mode === 'today' && t.date !== new Date().toLocaleDateString('en-CA')) return false;
                     if(mode === 'urgent' && (!t.isUrgent || t.status === 'Completed')) return false; 
                     if(mode === 'mine' && (!t.owner || !t.owner.toLowerCase().includes(userEmail.split('@')[0]))) return false;
                     if(status !== 'all' && t.status !== status) return false;
@@ -559,8 +558,9 @@
                 const { field } = payload; 
                 const groups = {};
                 filteredDB.forEach(t => {
-                   let k = t[field] || "Unassigned";
+                   let k = field === 'route' ? t.rootRoute : (t[field] || "Unassigned");
                    let groupKey = field === 'route' ? (t.state || "Other") : k;
+                   
                    if(!groups[groupKey]) groups[groupKey] = {};
                    if(!groups[groupKey][k]) groups[groupKey][k] = { total: 0, completed: 0, pending: 0 };
                    groups[groupKey][k].total++;
@@ -569,14 +569,14 @@
                 self.postMessage({ type: 'GROUPED_DATA', groups, field });
             }
             else if (type === 'GET_MAP_DATA') {
-                const mapData = {};
+                const mapPoints = [];
                 filteredDB.forEach(t => {
-                    if (t.isUrgent) {
-                        const coords = ZIP_MAP[t.zip3] || ZIP_MAP['000']; 
-                        if (!mapData[t.id]) mapData[t.id] = { lat: coords[0] + (Math.random()-0.5)*0.01, lon: coords[1] + (Math.random()-0.5)*0.01, count: 1, urgent: 1, sample: t };
+                    const coords = ZIP_MAP[t.zip3] || ZIP_MAP['000']; 
+                    if(t.status !== 'Completed') {
+                        mapPoints.push({ lat: coords[0], lon: coords[1], ticket: t });
                     }
                 });
-                self.postMessage({ type: 'MAP_DATA', points: Object.values(mapData) });
+                self.postMessage({ type: 'MAP_DATA', points: mapPoints });
             }
             else if (type === 'GET_CHART_DATA') {
                  const issues = {}; const routes = {}; const owners = {};
@@ -637,8 +637,17 @@
         dbVault.version(1).stores({ tickets: "id, modifiedAt" });
 
         const FLOW_URL = "https://49b71dde44f8e78e89bc0440816209.07.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/c8534a1735ca463d9386ac5ab1c89fcf/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=X3TCIX7rLqKbo5iiDAOozZ-JchO3BuPK5H8DW4aruAA";
-        const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: window.location.href }, cache: { cacheLocation: "localStorage" } };
+        
+        const msalConfig = { 
+            auth: { 
+                clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
+                authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", 
+                redirectUri: window.location.href
+            }, 
+            cache: { cacheLocation: "localStorage" } 
+        };
         const msalInstance = new msal.PublicClientApplication(msalConfig);
+        let msalInitialized = false; 
         
         let currentUserEmail = ""; let currentTicketId = null;
         let currentMode = 'all', currentStatus = 'all', currentView = 'list';
@@ -649,7 +658,6 @@
         const ROW_HEIGHT = 60;
         let chartInstances = {};
 
-        // HELPER: Convert Excel Serial Date to JS Date String
         function excelDateToJS(serial) {
             if (typeof serial === 'number') {
                const utc_days  = Math.floor(serial - 25569);
@@ -674,13 +682,11 @@
                 document.getElementById('progress-bar').style.width = percent + "%";
             }
             else if (type === 'INIT_COMPLETE') {
-                // HIDE AUTH SCREEN FIRST (Fail-Safe)
                 document.getElementById('auth-screen').classList.add('hidden');
                 document.getElementById('app-ui').classList.remove('hidden');
-                
                 try {
-                    updateFiltersUI(e.data.owners, e.data.routes, e.data.issues);
-                    updateCountsUI(e.data.counts);
+                    updateFiltersUI(owners, routes, issues);
+                    updateCountsUI(counts);
                     checkVault();
                     triggerRender();
                 } catch(err) { console.error("UI Update Failed", err); }
@@ -688,8 +694,8 @@
             else if (type === 'FILTER_COMPLETE') {
                 totalRecords = count;
                 document.getElementById('list-count-display').innerText = `${count} Matches`;
-                updateCountsUI(e.data.counts); 
-                worker.postMessage({ type: 'GET_CHART_DATA' }); // Always refresh charts
+                updateCountsUI(counts); 
+                worker.postMessage({ type: 'GET_CHART_DATA' }); 
                 if(currentView === 'list') { initVirtualScroll(); renderVirtualList(); }
                 else if (currentView === 'kanban') worker.postMessage({ type: 'GET_KANBAN_DATA' });
                 else if (currentView === 'grid') worker.postMessage({ type: 'GET_GRID_DATA' });
@@ -718,7 +724,6 @@
             renderSnippets();
         });
 
-        // --- VIEWS ---
         function changeView(v) {
             currentView = v;
             document.querySelectorAll('[id^="view-"]').forEach(el => { el.classList.remove('bg-slate-800', 'text-white'); el.classList.add('opacity-70'); });
@@ -754,47 +759,29 @@
             return currentSort.dir === 'asc' ? "fa-sort-up" : "fa-sort-down";
         }
 
-        // --- RESIZING LOGIC ---
         function initResize(idx) {
             const header = document.getElementById('grid-header-row');
             const cols = gridTemplate.split(' ');
             const startX = event.clientX;
             const startWidth = parseFloat(getComputedStyle(header.children[idx]).width);
-            
             const onMouseMove = (e) => {
                 const newWidth = startWidth + (e.clientX - startX);
-                cols[idx] = `${Math.max(50, newWidth)}px`; // Min width 50px
+                cols[idx] = `${Math.max(50, newWidth)}px`;
                 gridTemplate = cols.join(' ');
-                
-                // Update Header
                 header.style.gridTemplateColumns = gridTemplate;
-                
-                // Update Rows
-                document.querySelectorAll('.grid-layout').forEach(row => {
-                    row.style.gridTemplateColumns = gridTemplate;
-                });
+                document.querySelectorAll('.grid-layout').forEach(row => { row.style.gridTemplateColumns = gridTemplate; });
             };
-            
-            const onMouseUp = () => {
-                document.removeEventListener('mousemove', onMouseMove);
-                document.removeEventListener('mouseup', onMouseUp);
-            };
-            
-            document.addEventListener('mousemove', onMouseMove);
-            document.addEventListener('mouseup', onMouseUp);
+            const onMouseUp = () => { document.removeEventListener('mousemove', onMouseMove); document.removeEventListener('mouseup', onMouseUp); };
+            document.addEventListener('mousemove', onMouseMove); document.addEventListener('mouseup', onMouseUp);
         }
 
-        // --- VIRTUAL SCROLL ---
         function initVirtualScroll() { if(document.getElementById('virtual-height')) document.getElementById('virtual-height').style.height = `${totalRecords * ROW_HEIGHT}px`; }
         function handleScroll() { requestAnimationFrame(renderVirtualList); }
         function renderVirtualList() {
             const list = document.getElementById('virtual-list'); if(!list) return;
             const scrollTop = list.scrollTop;
-            
-            // Increased Buffer from 2 to 30 to ensure smooth scrolling
             const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 30);
             const endIndex = Math.min(totalRecords, Math.ceil((scrollTop + list.clientHeight) / ROW_HEIGHT) + 30); 
-            
             document.getElementById('virtual-content').style.transform = `translateY(${startIndex * ROW_HEIGHT}px)`;
             worker.postMessage({ type: 'GET_CHUNK', payload: { start: startIndex, end: endIndex } });
         }
@@ -805,16 +792,13 @@
                 const el = document.createElement('div');
                 el.className = `ticket-card ${t.id === currentTicketId ? 'selected' : ''} ${t.isStale && t.status==='Pending' ? 'stale-ticket' : ''}`;
                 el.onclick = () => loadTicket(t.id);
+                el.title = `ID: #${t.id}\nCustomer: ${t.cust}\nAddress: ${t.address}`;
                 const badgeClass = t.status === 'Completed' ? 'bg-green-100 text-green-700' : (t.status === 'Escalated' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700');
-                
-                // Excel Date Decoder on the Grid
                 let displayDate = t.date;
                 if (t.date.includes('T') || !isNaN(t.date)) {
                     const d = new Date(t.date);
                     if(!isNaN(d.getTime())) displayDate = d.toLocaleDateString();
                 }
-
-                // Use global gridTemplate variable
                 el.innerHTML = `<div class="grid-layout" style="grid-template-columns: ${gridTemplate};"><span class="font-bold text-xs">#${t.id} ${t.isUrgent?'<i class="fas fa-fire text-red-500"></i>':''}</span><span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded ${badgeClass} text-center">${t.status}</span><span class="font-bold text-sm truncate" title="${t.cust}">${t.cust}</span><div class="flex flex-col text-xs opacity-70"><span>${t.route}</span></div><span class="text-xs truncate">${t.owner || '-'}</span><span class="truncate text-xs opacity-70" title="${t.issue}">${t.issue}</span><span class="font-bold text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded border border-blue-100 dark:border-blue-900 text-center">${displayDate}</span></div>`;
                 content.appendChild(el);
             });
@@ -824,15 +808,10 @@
             currentSort.dir = (currentSort.field === field && currentSort.dir === 'asc') ? 'desc' : 'asc';
             currentSort.field = field;
             triggerRender();
-            // Refresh Header Icons
             changeView('list'); 
         }
-        function colFilter(field, val) {
-            colFilters[field] = val.toLowerCase();
-            debouncedSearch();
-        }
+        function colFilter(field, val) { colFilters[field] = val.toLowerCase(); debouncedSearch(); }
 
-        // --- GROUPED VIEW (Color Coded Bars) ---
         function renderGroupedDOM(groups, field) {
             const html = Object.keys(groups).sort().map(grpKey => {
                 const subItems = groups[grpKey];
@@ -841,12 +820,10 @@
                 const cards = subKeys.map(k => {
                     const d = subItems[k];
                     const pct = Math.round((d.completed / d.total) * 100);
-                    // Color Logic
                     let barColor = "bg-red-500";
                     if (pct >= 40) barColor = "bg-yellow-400";
                     if (pct >= 80) barColor = "bg-blue-500";
                     if (pct === 100) barColor = "bg-green-500";
-
                     return `<div class="stat-card" onclick="window.filterByField('${field}', '${k}')"><div class="flex justify-between font-bold text-sm mb-2"><span>${k}</span><span>${pct}%</span></div><div class="text-xs opacity-60 flex justify-between mb-2"><span>${d.completed}/${d.total} Done</span><span>${d.pending} Left</span></div><div class="progress-bar"><div class="progress-fill ${barColor}" style="width:${pct}%"></div></div></div>`;
                 }).join('');
                 return `<details class="expand-group" open><summary class="expand-summary"><span>${grpKey}</span><span class="text-xs bg-slate-200 dark:bg-slate-700 px-2 py-1 rounded">${totalTickets} Items</span></summary><div class="expand-grid">${cards}</div></details>`;
@@ -860,13 +837,11 @@
             triggerRender(); changeView('list'); 
         }
 
-        // --- KANBAN (Safety Fix) ---
         function renderKanbanDOM(cols, counts) {
              if (!cols) return; 
             document.getElementById('main-view-area').innerHTML = `<div class="kanban-board">${Object.keys(cols).map(k => `<div class="kanban-col"><div class="kanban-header"><span>${k}</span><span class="text-xs bg-slate-200 dark:bg-slate-700 px-2 py-1 rounded">${counts[k]}</span></div><div class="kanban-body">${cols[k].map(t => `<div class="kanban-card" onclick="window.loadTicket('${t.id}')"><div class="font-bold text-xs mb-1">#${t.id}</div><div class="text-xs truncate mb-1">${t.cust}</div><div class="text-[10px] opacity-70">${t.issue}</div></div>`).join('')}</div></div>`).join('')}</div>`;
         }
 
-        // --- MAP RENDERER (Leaflet) ---
         function renderLeafletMap(points) {
             document.getElementById('main-view-area').innerHTML = '<div id="map-container"></div>';
             setTimeout(() => {
@@ -874,31 +849,35 @@
                 const center = points.length > 0 ? [points[0].lat, points[0].lon] : [39.8, -98.6];
                 mapInstance = L.map('map-container').setView(center, 5);
                 L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(mapInstance);
-
+                const clusters = {};
                 points.forEach(p => {
-                    const color = '#ef4444'; 
-                    // Jitter for visibility
-                    const lat = p.lat + (Math.random()-0.5)*0.005;
-                    const lon = p.lon + (Math.random()-0.5)*0.005;
-                    const circle = L.circleMarker([lat, lon], { radius: 6, fillColor: color, color: color, weight: 1, opacity: 1, fillOpacity: 0.6 }).addTo(mapInstance);
-                    if (p.urgent > 0) circle._path.classList.add('marker-urgent'); 
-                    
-                    // FIXED: Click to filter List View
+                    const key = `${p.lat.toFixed(1)},${p.lon.toFixed(1)}`;
+                    if(!clusters[key]) clusters[key] = { lat: p.lat, lon: p.lon, items: [], urgentCount: 0 };
+                    clusters[key].items.push(p.ticket);
+                    if(p.ticket.isUrgent) clusters[key].urgentCount++;
+                });
+                Object.values(clusters).forEach(c => {
+                    const count = c.items.length;
+                    const urgentRatio = c.urgentCount / count;
+                    const radius = Math.min(30, 8 + Math.log2(count) * 4);
+                    let color = '#3b82f6'; let fillColor = '#93c5fd';
+                    if (urgentRatio > 0 && urgentRatio < 0.3) { color = '#eab308'; fillColor = '#fde047'; } 
+                    else if (urgentRatio >= 0.3) { color = '#ef4444'; fillColor = '#fca5a5'; }
+                    const circle = L.circleMarker([c.lat, c.lon], { radius: radius, fillColor: fillColor, color: color, weight: 2, opacity: 1, fillOpacity: 0.7 }).addTo(mapInstance);
+                    if (c.urgentCount > 0) circle._path.classList.add('marker-urgent'); 
                     circle.on('click', () => {
-                        Toastify({ text: `Filtering Region ${p.sample.zip3}...`, duration: 1000 }).showToast();
-                        document.getElementById('search-input').value = p.sample.zip3;
+                        const sample = c.items[0];
+                        Toastify({ text: `Filtering Region ${sample.zip3}...`, duration: 1000 }).showToast();
+                        document.getElementById('search-input').value = sample.zip3;
                         setStatusFilter('all');
                         changeView('list');
                     });
-                    
-                    circle.bindTooltip(`<b>Region ${p.sample.zip3}XX</b><br>Tickets: ${p.count}<br>Urgent: ${p.urgent}`);
+                    circle.bindTooltip(`<b>Region ${c.items[0].zip3}XX</b><br>Tickets: ${count}<br>Urgent: ${c.urgentCount}`);
                 });
-                
                 setTimeout(() => { mapInstance.invalidateSize(); }, 200);
             }, 50);
         }
         
-        // --- CHARTS (RESTORED) ---
         function renderCharts(issues, routes, owners) {
              const config = (ctx, type, data, label) => {
                  if (chartInstances[ctx.id]) chartInstances[ctx.id].destroy();
@@ -918,37 +897,28 @@
              }
         }
 
-        // --- LOGIC ---
         function loadTicket(id) { currentTicketId = id; worker.postMessage({ type: 'GET_DETAIL', payload: { id } }); }
         
         function openTicketOverlay(t, idx) {
             if(!t) return;
             currentTicketId = t.id;
-            
             document.getElementById('focus-overlay').classList.add('active');
             const set = (i,v) => { if(document.getElementById(i)) document.getElementById(i).innerText = v || '--'; };
             set('f-id', '#'+t.id); set('f-customer', t.cust); set('f-acct', t.acct); set('f-so', t.so); set('f-route', t.route); set('f-whs', t.whs);
             set('f-desc', t.issue + (t.desc ? "\n\n" + t.desc : "")); set('f-date', t.date); set('f-driver', t.driverRaw); set('f-contact', t.contact || ""); set('f-log-notes', t.lNotes);
             set('f-type', t.recordType);
-            
             if(document.getElementById('f-header-owner')) document.getElementById('f-header-owner').innerText = t.owner || "Unassigned";
-
             const sel = document.getElementById('f-owner');
-            if (t.owner && ![...sel.options].some(o => o.value === t.owner)) {
-                 sel.add(new Option(t.owner, t.owner));
-            }
+            if (t.owner && ![...sel.options].some(o => o.value === t.owner)) { sel.add(new Option(t.owner, t.owner)); }
             sel.value = t.owner || ""; 
-            
             document.getElementById('f-notes').value = t.notes || "";
             document.getElementById('f-badge').innerText = t.status;
             document.getElementById('f-index').innerText = idx + 1; document.getElementById('f-total').innerText = totalRecords;
-
             const rawContainer = document.getElementById('f-raw-grid');
             rawContainer.innerHTML = "";
             if (t.raw) {
                 const ignore = ['id','iteminternalid','@odata.etag'];
                 Object.entries(t.raw).sort().forEach(([k, v]) => {
-                    // Sorting keys for readability
                     if (v && String(v).trim() !== "" && !ignore.includes(k.toLowerCase())) {
                         let displayVal = v;
                         if (typeof v === 'number' && (k.toLowerCase().includes('time') || k.toLowerCase().includes('date'))) {
@@ -971,7 +941,22 @@
             document.body.className = `theme-${t} ` + (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : '');
             localStorage.setItem('logi_theme', t);
         }
-        async function login() { try { const r = await msalInstance.loginPopup({ scopes: ["User.Read"] }); init(r.account.name, r.account.username); } catch (e) { document.getElementById('file-upload-fallback').classList.remove('hidden'); } }
+
+        async function login() { 
+            try { 
+                if(!msalInitialized) {
+                    await msalInstance.initialize(); 
+                    msalInitialized = true;
+                }
+                const r = await msalInstance.loginPopup({ scopes: ["User.Read"] }); 
+                init(r.account.name, r.account.username); 
+            } catch (e) { 
+                console.error(e);
+                document.getElementById('error-display').innerText = "Auth Failed: " + e.message;
+                document.getElementById('error-display').classList.remove('hidden');
+                document.getElementById('file-upload-fallback').classList.remove('hidden'); 
+            } 
+        }
         function bypassAuth() { init("Offline Manager", "manager@wbmason.com"); }
         function init(name, email) { currentUserEmail = email; document.getElementById('user-name').innerText = name; document.getElementById('login-container').classList.add('hidden'); document.getElementById('progress-container').classList.remove('hidden'); fetchLiveData(); }
         async function fetchLiveData() { try { const r = await fetch(FLOW_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ action: "Refresh", userEmail: currentUserEmail }) }); if(r.ok) { let j = JSON.parse(await r.text()); worker.postMessage({ type: 'PARSE', payload: { data: j.value || j.data } }); } else throw new Error(); } catch(e) { document.getElementById('file-upload-fallback').classList.remove('hidden'); } }
@@ -1001,7 +986,6 @@
         async function checkVault() { if(await dbVault.tickets.count() > 0) document.getElementById('restore-toast').classList.add('visible'); }
         async function restoreSession() { (await dbVault.tickets.toArray()).forEach(e => worker.postMessage({ type: 'UPDATE_TICKET', payload: { id: e.id, updates: { notes: e.notes, status: e.status, owner: e.owner } } })); triggerRender(); document.getElementById('restore-toast').classList.remove('visible'); }
         async function discardSession() { await dbVault.tickets.clear(); document.getElementById('restore-toast').classList.remove('visible'); }
-        
         function clearAllFilters() {
             document.getElementById('search-input').value = '';
             document.getElementById('filter-type').value = 'all';
@@ -1025,14 +1009,22 @@
              if (address) navigator.clipboard.writeText(address[1]);
              Toastify({ text: "Address Copied", duration: 1000 }).showToast();
         }
-
         function updateFiltersUI(owners, routes, issues) { 
             document.getElementById('filter-owner').innerHTML = `<option value="all">Show Everyone</option><option value="me">My Queue</option>` + owners.map(i => `<option value="${i}">${i}</option>`); 
             document.getElementById('f-owner').innerHTML = `<option value="">Unassigned</option>` + owners.map(i => `<option value="${i}">${i}</option>`); 
             document.getElementById('filter-route').innerHTML = `<option value="all">All Routes</option>` + routes.map(i => `<option value="${i}">${i}</option>`); 
             document.getElementById('filter-type').innerHTML = `<option value="all">All Issues</option>` + issues.map(i => `<option value="${i}">${i}</option>`);
         }
-        function updateCountsUI(c) { if(c) { document.getElementById('count-today').innerText = c.today; document.getElementById('count-urgent').innerText = c.urgent; document.getElementById('count-all').innerText = c.all; } }
+        function updateCountsUI(c) { 
+            if(c) { 
+                document.getElementById('count-today').innerText = c.today; 
+                document.getElementById('count-urgent').innerText = c.urgent; 
+                document.getElementById('count-all').innerText = c.all; 
+                document.getElementById('nav-today').title = `${c.today} records from today`;
+                document.getElementById('nav-urgent').title = `${c.urgent} records require attention`;
+                document.getElementById('nav-all').title = `${c.all} total database records`;
+            } 
+        }
         function debouncedSearch() { clearTimeout(searchTimeout); searchTimeout = setTimeout(triggerRender, 300); }
         function setFilterMode(m) { 
             currentMode = m; 
@@ -1047,10 +1039,8 @@
         function removeSnippet(i) { userSnippets.splice(i,1); localStorage.setItem('logi_snippets', JSON.stringify(userSnippets)); renderSnippets(); }
         function insertNote(t) { document.getElementById('f-notes').value += `\n[${new Date().toLocaleTimeString()}] ${t}`; }
         
-        // TIMER LOGIC
         let focusTimerInterval;
         function startFocusTimer() { clearInterval(focusTimerInterval); let seconds = 0; const display = document.getElementById('focus-timer'); display.innerText = "00:00"; focusTimerInterval = setInterval(() => { seconds++; display.innerText = `${Math.floor(seconds/60).toString().padStart(2,'0')}:${(seconds%60).toString().padStart(2,'0')}`; }, 1000); }
-        
         function closeFocus() { document.getElementById('focus-overlay').classList.remove('active'); clearInterval(focusTimerInterval); triggerRender(); }
         function navTicket(dir) { worker.postMessage({ type: 'NAV_TICKET', payload: { currentId: currentTicketId, dir } }); }
         function setFocusStatus(s) { worker.postMessage({ type: 'UPDATE_TICKET', payload: { id: currentTicketId, updates: { status: s } } }); document.getElementById('f-badge').innerText = s; if(s==='Completed') confetti({ particleCount: 50, spread: 60, origin: { y: 0.6 } }); saveLocal(); }
