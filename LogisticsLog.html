@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLog v104.99 | Logistics Dashboard</title>
+    <title>LogiLog v105.00 | Logistics Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -39,7 +39,7 @@
         .disp-pill { font-size: 9px; font-weight: 900; padding: 1px 6px; border-radius: 4px; text-transform: uppercase; border: 1px solid currentColor; }
         .issue-card-tag { font-size: 10px; font-weight: 700; color: var(--text-accent); text-transform: uppercase; letter-spacing: 0.5px; }
 
-        /* Error States & Validation Shake */
+        /* Validation States */
         .input-error-highlight { 
             border-color: var(--danger) !important; 
             box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.2) !important; 
@@ -55,7 +55,7 @@
         #email-modal-overlay, #coaching-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); z-index: 999; align-items: center; justify-content: center; padding: 20px; }
         .modal-container { background: var(--bg-surface); border: 1px solid var(--border); width: 100%; max-width: 550px; border-radius: 12px; overflow: hidden; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.2); }
 
-        /* Toast UI System */
+        /* Toast Notification System */
         #toast-container { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 10px; z-index: 9999; pointer-events: none; }
         .toast { pointer-events: auto; min-width: 280px; padding: 16px 20px; border-radius: 8px; background: var(--bg-surface); border: 1px solid var(--border); color: var(--text-main); font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 12px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); animation: toast-slide 0.3s ease-out; border-left: 4px solid var(--brand); }
         @keyframes toast-slide { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
@@ -85,7 +85,7 @@
         <div class="flex items-center gap-6">
             <div class="flex items-center gap-3">
                 <i class="fa-solid fa-frog frog-mascot"></i>
-                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v104.99</span></div>
+                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v105.00</span></div>
             </div>
             <input type="text" id="global-search" oninput="render()" placeholder="Search company, order, or account..." class="w-80 bg-black/5 border border-[var(--border)] p-2 text-xs rounded text-[var(--text-main)] outline-none focus:border-[var(--brand)]">
         </div>
@@ -308,19 +308,32 @@
         }
 
         function identifyUser() { 
-            try { 
-                // Checks for MSAL instance injected by the host environment
-                if (window.msalInstance) { 
-                    const acc = window.msalInstance.getAllAccounts()[0]; 
-                    if (acc) { 
-                        currentUser.name = acc.name || "User"; 
-                        currentUser.email = acc.username; 
-                        // Update UI header with the retrieved name
-                        const nameLabel = document.getElementById('user-name-text');
-                        if(nameLabel) nameLabel.innerText = currentUser.name;
+            const checkMSAL = () => {
+                try { 
+                    if (window.msalInstance) { 
+                        const active = window.msalInstance.getActiveAccount();
+                        const all = window.msalInstance.getAllAccounts();
+                        const acc = active || all[0];
+                        if (acc) { 
+                            currentUser.name = acc.name || acc.username.split('@')[0] || "User"; 
+                            currentUser.email = acc.username; 
+                            const nameLabel = document.getElementById('user-name-text');
+                            if(nameLabel) nameLabel.innerText = currentUser.name;
+                            return true; // Found identity
+                        } 
                     } 
-                } 
-            } catch(e) { console.warn("MSAL Identity Check Failed", e); } 
+                } catch(e) { console.warn("MSAL Poll Error", e); }
+                return false;
+            };
+
+            // Initial immediate check
+            if (!checkMSAL()) {
+                let attempts = 0;
+                const msalPoller = setInterval(() => {
+                    attempts++;
+                    if (checkMSAL() || attempts > 10) clearInterval(msalPoller);
+                }, 500);
+            }
         }
 
         function setupRepView() {
@@ -427,21 +440,16 @@
 
         function loadTicket(id) {
             const dispoInput = document.getElementById('d-disposition');
-            
-            // STICKY VALIDATION: Check existing record before switching
             if (currentTicketId) {
                 const currentT = db.find(x => x.id === currentTicketId);
                 const isAdmin = document.getElementById('admin-bypass-toggle').checked;
                 const isAssigned = currentT && currentT.logisticsOwner !== 'Unassigned';
-                
                 if (!isAdmin && isAssigned && !dispoInput.value) {
                     showToast("Disposition is required before switching records.", "error");
                     dispoInput.classList.add('input-error-highlight');
                     return;
                 }
             }
-
-            // SUCCESSFUL LOAD: Remove any error highlights
             dispoInput.classList.remove('input-error-highlight');
             currentTicketId = id;
             const t = db.find(x => x.id === id);
@@ -490,41 +498,24 @@
             const btn = document.getElementById('save-coaching-btn');
             if(isTrue) { btn.innerText = "SAVING..."; btn.disabled = true; }
             try {
-                const response = await fetch(SAVE_COACHING_URL, { 
-                    method: 'POST', 
-                    headers: { 'Content-Type': 'application/json' }, 
-                    body: JSON.stringify({ recordId: t.guid, isCoaching: isTrue, coachingNotes: isTrue ? notes : "" }) 
-                });
+                const response = await fetch(SAVE_COACHING_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recordId: t.guid, isCoaching: isTrue, coachingNotes: isTrue ? notes : "" }) });
                 if (!response.ok) throw new Error();
-                t.isCoaching = isTrue; 
-                showToast(isTrue ? "Coaching status saved" : "Coaching status removed");
+                t.isCoaching = isTrue; showToast(isTrue ? "Coaching status saved" : "Coaching status removed");
                 document.getElementById('coaching-modal-overlay').style.display = 'none';
                 if(isTrue) { btn.innerText = "SAVE COACHING"; btn.disabled = false; }
                 render();
-            } catch (e) { 
-                showToast("Save failed", "error"); 
-                if(isTrue) { btn.innerText = "SAVE COACHING"; btn.disabled = false; } 
-            }
+            } catch (e) { showToast("Save failed", "error"); if(isTrue) { btn.innerText = "SAVE COACHING"; btn.disabled = false; } }
         }
 
         async function autoSaveDisposition() {
             const t = db.find(x => x.id === currentTicketId);
             const input = document.getElementById('d-disposition');
             const newDispo = input.value;
-            
             if(newDispo) input.classList.remove('input-error-highlight');
-
             t.status = newDispo;
             try {
-                const response = await fetch(AUTO_SAVE_DISPO_URL, { 
-                    method: 'POST', 
-                    headers: { 'Content-Type': 'application/json' }, 
-                    body: JSON.stringify({ recordId: t.guid, disposition: newDispo }) 
-                });
-                if (response.ok) { 
-                    showToast(`Status updated: ${newDispo}`); 
-                    render(); 
-                }
+                const response = await fetch(AUTO_SAVE_DISPO_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recordId: t.guid, disposition: newDispo }) });
+                if (response.ok) { showToast(`Status updated: ${newDispo}`); render(); }
             } catch (e) { showToast("Auto-save failed.", "error"); }
         }
 
@@ -533,31 +524,19 @@
             const t = db.find(x => x.id === currentTicketId);
             const dispoVal = document.getElementById('d-disposition').value;
             const isAdmin = document.getElementById('admin-bypass-toggle').checked;
-            
             if (!isAdmin && t.logisticsOwner !== 'Unassigned' && !dispoVal) { 
                 showToast("Select a Disposition first.", "error"); 
                 document.getElementById('d-disposition').classList.add('input-error-highlight'); 
                 return; 
             }
-            
             btn.innerText = "SAVING..."; btn.disabled = true;
             const payload = { recordId: t.guid, disposition: dispoVal, warehouseNotes: document.getElementById('d-warehouse-input').value, driverNotes: document.getElementById('d-driver-input').value, isCoaching: t.isCoaching };
             try {
-                const response = await fetch(SAVE_FLOW_URL, { 
-                    method: 'POST', 
-                    headers: { 'Content-Type': 'application/json' }, 
-                    body: JSON.stringify(payload) 
-                });
+                const response = await fetch(SAVE_FLOW_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                 if (!response.ok) throw new Error();
-                t.warehouseNotes = payload.warehouseNotes; 
-                t.driverNotes = payload.driverNotes; 
-                showToast("Saved successfully");
+                t.warehouseNotes = payload.warehouseNotes; t.driverNotes = payload.driverNotes; showToast("Saved successfully");
                 setTimeout(() => { btn.innerText = "Save Logistics Update"; btn.disabled = false; render(); }, 1500);
-            } catch (e) { 
-                btn.innerText = "RETRY SAVE"; 
-                btn.disabled = false; 
-                showToast("Save error", "error"); 
-            }
+            } catch (e) { btn.innerText = "RETRY SAVE"; btn.disabled = false; showToast("Save error", "error"); }
         }
 
         function updateSidebar(orderNumber) { const rail = document.getElementById('account-rail'); const content = document.getElementById('rail-content'); const matches = db.filter(x => x.order === orderNumber && orderNumber !== 'N/A'); if (matches.length > 1) { rail.classList.add('is-visible'); content.innerHTML = matches.map(m => createCardHTML(m)).join(''); } else { rail.classList.remove('is-visible'); } }
