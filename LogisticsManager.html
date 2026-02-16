@@ -956,14 +956,35 @@
             }
         };
 
-        document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', () => {
             setTheme(localStorage.getItem('logi_theme') || 'dark');
             dateFilter = flatpickr("#date-picker", { mode: "range", dateFormat: "Y-m-d", onChange: () => window.triggerRender() });
             renderSnippets();
+
+            // FIX: Handle the return from the loginRedirect
+            if (msalInstance) {
+                msalInstance.handleRedirectPromise().then(tokenResponse => {
+                    if (tokenResponse !== null) {
+                        // User is back from login
+                        init(tokenResponse.account.name, tokenResponse.account.username);
+                    } else {
+                        // No user returned, check if we have an active account cached
+                        const currentAccounts = msalInstance.getAllAccounts();
+                        if (currentAccounts.length > 0) {
+                            init(currentAccounts[0].name, currentAccounts[0].username);
+                        }
+                    }
+                }).catch(err => {
+                    console.error("MSAL Redirect Error:", err);
+                    document.getElementById('error-display').innerText = "Auth Error: " + err.message;
+                    document.getElementById('error-display').classList.remove('hidden');
+                });
+            }
+
             // Initialize SharePoint polling
             setTimeout(window.pollSharePointFiles, 2000);
             setInterval(window.pollSharePointFiles, 3600000);
-        });
+        });;
 
         function changeView(v) {
             currentView = v;
@@ -1269,11 +1290,12 @@
             localStorage.setItem('logi_theme', t);
         }
 
-        async function login() { 
+async function login() { 
             try { 
                 if (msalInstance) {
-                    const r = await msalInstance.loginPopup({ scopes: ["User.Read"], prompt: "select_account" }); 
-                    init(r.account.name, r.account.username); 
+                    // FIX: Changed to loginRedirect to bypass COOP/Pop-up blockers
+                    await msalInstance.loginRedirect({ scopes: ["User.Read"], prompt: "select_account" });
+                    // The page will now reload, and the 'handleRedirectPromise' block below will catch the login
                 } else {
                     throw new Error("MSAL not loaded");
                 }
@@ -1292,7 +1314,32 @@
         }
         function bypassAuth() { init("Offline Manager", "manager@wbmason.com"); }
         function init(name, email) { currentUserEmail = email; document.getElementById('user-name').innerText = name; document.getElementById('login-container').classList.add('hidden'); document.getElementById('progress-container').classList.remove('hidden'); fetchLiveData(); }
-        async function fetchLiveData() { try { const r = await fetch(FLOW_URL, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ action: "Refresh", userEmail: currentUserEmail }) }); if(r.ok) { let j = JSON.parse(await r.text()); worker.postMessage({ type: 'PARSE', payload: { data: j.value || j.data } }); } else throw new Error(); } catch(e) { document.getElementById('file-upload-fallback').classList.remove('hidden'); } }
+        async function fetchLiveData() { 
+            try { 
+                // FIX: Added error logging to see WHY the flow failed (500 error body)
+                if (!currentUserEmail) console.warn("Fetching data without email...");
+                
+                const r = await fetch(FLOW_URL, { 
+                    method: 'POST', 
+                    headers: {'Content-Type': 'application/json'}, 
+                    body: JSON.stringify({ action: "Refresh", userEmail: currentUserEmail }) 
+                }); 
+                
+                if(r.ok) { 
+                    let j = JSON.parse(await r.text()); 
+                    worker.postMessage({ type: 'PARSE', payload: { data: j.value || j.data } }); 
+                } else {
+                    const errText = await r.text();
+                    console.error("Flow Error:", r.status, errText); // This will show in Console
+                    throw new Error(`Server ${r.status}: ${errText}`);
+                } 
+            } catch(e) { 
+                console.error("Fetch Failed:", e);
+                document.getElementById('error-display').innerText = "Data Load Failed: " + e.message;
+                document.getElementById('error-display').classList.remove('hidden');
+                document.getElementById('file-upload-fallback').classList.remove('hidden'); 
+            } 
+        }
         function handleFile(input) { 
             const file = input.files[0];
             const reader = new FileReader();
