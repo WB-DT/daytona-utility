@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLog v105.41 | Logistics Dashboard</title>
+    <title>LogiLog v105.42 | Logistics Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -140,7 +140,7 @@
         <div class="flex items-center gap-6">
             <div class="flex items-center gap-3">
                 <i class="fa-solid fa-frog frog-mascot"></i>
-                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v105.40</span></div>
+                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v105.42</span></div>
             </div>
             <input type="text" id="global-search" oninput="render()" placeholder="Search..." class="input-racing w-80 p-2 text-xs rounded text-[var(--text-main)]">
         </div>
@@ -389,6 +389,7 @@
         let db = []; let orderCounts = {}; let currentMode = 'active'; let currentTicketId = null;
         let currentUser = { name: "User", email: "" };
         let currentUserProfileData = null;
+        let dynamicsUserId = null; // Store fetched SystemUser ID
         const NAME_MAP = { "Kari": "Kari Westervelt", "Holly": "Holly Evans", "Courtney": "Courtney Youngblood", "Jewel": "Jewel Jenkins", "Noah": "Noah Comans", "Wayne": "Wayne Rendt", "Rachel": "Rachel Kaiser", "Tobbitha": "Tobbitha Bishoff", "Paula": "Paula Bowen", "Jessica": "Jessica Pauley" };
         
         const HISTORY_URL = 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/43ca56b97e134123aceca13f64dc0572/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=DBzX1YaJjcrqEu6xxZfh72eF9B7qtsAU1kDOdCzWTG4';
@@ -434,10 +435,15 @@
             msalAccount = account; currentUser.name = account.name; currentUser.email = account.username;
             document.getElementById('user-name-text').innerText = account.name;
             try {
+                // Fetch Graph Profile
                 const tokenResponse = await msalInstance.acquireTokenSilent({ scopes: ["User.Read"], account: msalAccount });
                 const res = await fetch("https://graph.microsoft.com/v1.0/me", { headers: { "Authorization": `Bearer ${tokenResponse.accessToken}` } });
                 currentUserProfileData = await res.json();
+                
+                // NEW: Fetch Dynamics SystemUser ID for Tracking
+                await getDynamicsUserId();
             } catch(e) { console.warn("Profile fetch fail", e); }
+            
             const repSelector = document.getElementById('rep-view-filter');
             if (repSelector) {
                 const options = Array.from(repSelector.options);
@@ -446,7 +452,21 @@
             }
         }
 
-        // CORRECTED: 'RegardingObjectId' MUST be PascalCase for OData Activity Binding
+        // NEW: Fetch Dynamics User ID (Required for 'From' field binding)
+        async function getDynamicsUserId() {
+            try {
+                const resp = await msalInstance.acquireTokenSilent({ 
+                    scopes: ["https://wbmasonco.crm.dynamics.com/user_impersonation"], account: msalAccount 
+                });
+                const response = await fetch(`${DYNAMICS_API_BASE}WhoAmI`, {
+                    headers: { "Authorization": `Bearer ${resp.accessToken}` }
+                });
+                const data = await response.json();
+                if(data.UserId) dynamicsUserId = data.UserId;
+            } catch (e) { console.error("Failed to get Dynamics User ID", e); }
+        }
+
+        // FIXED: Using 'RegardingObjectId' (PascalCase) + 'partyid_systemuser' (resolved sender)
         async function trackEmailInDynamics(ticket, subject, body, recipient) {
             let accessToken;
             try {
@@ -463,19 +483,30 @@
                 } catch (popupErr) { console.error("Dynamics Auth Failed", popupErr); return false; }
             }
 
+            // Build Participants
+            const activityParties = [
+                { "participationtypemask": 2, "addressused": recipient } // To: Unresolved is fine
+            ];
+            
+            // Add From: SystemUser if available, else try unresolved
+            if (dynamicsUserId) {
+                activityParties.push({ 
+                    "participationtypemask": 1, 
+                    "partyid_systemuser@odata.bind": `/systemusers(${dynamicsUserId})` 
+                });
+            } else {
+                activityParties.push({ "participationtypemask": 1, "addressused": currentUser.email });
+            }
+
+            const emailActivity = {
+                "subject": subject,
+                "description": body,
+                // CRITICAL FIX: PascalCase property, no quotes in GUID
+                "RegardingObjectId@odata.bind": `/cr714_logisticslog_2s(${ticket.guid})`,
+                "email_activity_parties": activityParties
+            };
+
             try {
-                if (!ticket.guid) throw new Error("Missing Record GUID");
-                
-                // ADDED: Quotes binding based on your prompt (though unusual, handling as requested)
-                // Also ensuring using PascalCase "RegardingObjectId" as per standard OData Activity Schema
-                const emailActivity = {
-                    "subject": subject, "description": body,
-                    "RegardingObjectId@odata.bind": `/cr714_logisticslog_2s('${ticket.guid}')`,
-                    "email_activity_parties": [
-                        { "participationtypemask": 1, "addressused": currentUser.email }, 
-                        { "participationtypemask": 2, "addressused": recipient }
-                    ]
-                };
                 const response = await fetch(`${DYNAMICS_API_BASE}emails`, {
                     method: "POST", 
                     headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json", "x-ms-app-id": DYNAMICS_APP_ID },
