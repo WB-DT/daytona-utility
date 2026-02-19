@@ -75,8 +75,9 @@
         });
     }
 
-    window.login = function() {
-        msalInstance.loginPopup({ scopes: ["User.Read"] }).then(resp => {
+window.login = function() {
+        // ADDED: Calendars.ReadWrite required for silent calendar integration
+        msalInstance.loginPopup({ scopes: ["User.Read", "Calendars.ReadWrite"] }).then(resp => {
             msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
         }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
     }
@@ -100,6 +101,21 @@
             if(data.body) data = data.body;
             
             let rawList = (data.accountList || data || []);
+            
+            // FIX: Safely parse to handle stringified JSON array wrappers from Power Automate preventing `.filter` crashes
+            if (typeof rawList === 'string') {
+                try { rawList = JSON.parse(rawList); } catch(e) { rawList = []; }
+            }
+            if (!Array.isArray(rawList)) {
+                if (rawList && rawList.value && Array.isArray(rawList.value)) {
+                    rawList = rawList.value;
+                } else if (rawList && typeof rawList === 'object') {
+                    rawList = [rawList]; 
+                } else {
+                    rawList = [];
+                }
+            }
+
             if(data.userProfile) currentUserProfile = data.userProfile;
 
             // Dedupe
@@ -2083,33 +2099,37 @@
         if(elDate) elDate.checked = prefs.showDate;
         }
 
-        window.createCalendarEvent = async function() {
-            if(!currentSelectedRecord) { window.showToast("Select a record first", "error");
-        return; }
-            const dateStr = document.getElementById('follow-up-date').value;
-        const timeStr = document.getElementById('follow-up-time').value;
-            if(!dateStr || !timeStr) { window.showToast("Set Date & Time first", "error"); return;
-        }
+window.createCalendarEvent = async function() {
+            if(!currentSelectedRecord) { window.showToast("Select a record first", "error"); return; }
+            const dateVal = document.getElementById('follow-up-date').value; 
+            const timeVal = document.getElementById('follow-up-time').value;
+            if(!dateVal || !timeVal) { window.showToast("Please select a date and time.", "error"); return; }
             
-            const start = `${dateStr}T${timeStr}:00`;
-        const data = { 
-                recordId: currentRecordId, 
-                action: 'CalendarInvite', 
-                notes: start, 
-                repName: currentUserRepName,
-                details: `Follow Up: ${currentSelectedRecord.cr714_company}`
-      
-              };
-            
-            window.showToast("Scheduling...", "processing");
+            window.showToast("Creating calendar event silently...", "processing");
             try {
-                // Using ACTION_BUTTON_FLOW_URL as the backend handler for calendar invites per logic request
-                const res = await fetch(ACTION_BUTTON_FLOW_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-        if(!res.ok) throw new Error("Calendar API Error");
-                window.showToast("Calendar Invite Sent", "success");
-        } catch(e) {
-                window.showToast("Failed to schedule", "error");
-        }
+                const tokenResponse = await msalInstance.acquireTokenSilent({ scopes: ["Calendars.ReadWrite"], account: msalAccount });
+                const startDateTime = `${dateVal}T${timeVal}:00`; 
+                const endDateTimeObj = new Date(new Date(startDateTime).getTime() + 30*60000); 
+                const endDateTime = endDateTimeObj.toISOString().slice(0, 19);
+                
+                const latestNote = (document.getElementById('qb-notes-input').value || "").trim(); 
+                const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                
+                const event = {
+                    subject: `Follow up: ${currentSelectedRecord.cr714_company || 'Account'} (${currentSelectedRecord.cr714_id})`,
+                    body: { contentType: "HTML", content: `<b>Account:</b> ${currentSelectedRecord.cr714_company}<br><b>ID:</b> ${currentSelectedRecord.cr714_id}<br><b>Contact:</b> ${currentSelectedRecord.cr714_namemost || 'N/A'}<br><b>Phone:</b> ${currentSelectedRecord.cr714_primaryphone || 'N/A'}<br><br><b>Latest Note:</b><br>${latestNote.replace(/\n/g, '<br>')}` },
+                    start: { dateTime: startDateTime, timeZone: timeZone }, end: { dateTime: endDateTime, timeZone: timeZone }
+                };
+                
+                const res = await fetch("https://graph.microsoft.com/v1.0/me/events", { method: "POST", headers: { "Authorization": `Bearer ${tokenResponse.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify(event) });
+                
+                if(res.ok) { window.showToast("Calendar event synced to Outlook!", "success"); } 
+                else { const err = await res.json(); throw new Error(err.error?.message || "Failed to create event via Graph API"); }
+            } catch(e) {
+                console.error(e);
+                if(e.name === "InteractionRequiredAuthError") { msalInstance.acquireTokenPopup({scopes: ["Calendars.ReadWrite"]}).then(() => window.createCalendarEvent()); } 
+                else { window.showToast("Error syncing event: " + e.message, "error"); }
+            }
         }
 
         const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: "https://WB-DT.github.io/daytona-utility/" }, cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false } };
@@ -3311,8 +3331,12 @@ if(sort.includes('rep')) return sort === 'rep-asc' ?
         window.handleMsalResponse = function(resp) { if(resp && resp.account) { msalAccount = resp.account;
         currentUserRepName = msalAccount.name; window.initializeApp(); } }
         
-        window.login = function() { msalInstance.loginPopup({ scopes: ["User.Read"] }).then(resp => window.handleMsalResponse(resp)).catch(err => { console.error(err); document.getElementById('login-error').innerText = "Login Failed: " + err.message; document.getElementById('login-error').classList.remove('hidden'); });
-        }
+window.login = function() {
+        // ADDED: Calendars.ReadWrite required for silent calendar integration
+        msalInstance.loginPopup({ scopes: ["User.Read", "Calendars.ReadWrite"] }).then(resp => {
+            msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
+        }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
+    }
         
         window.openCallScript = function() {
             document.getElementById('script-content').innerText = "Simple Script Example: Hello, I'm {Rep}, I'd like to speak to you about an awesome promotion we're running!";
