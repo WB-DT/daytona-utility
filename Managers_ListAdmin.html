@@ -6,6 +6,20 @@
     <title>A.C.T. 1.0</title>
     
 <script>
+    // --- CONFIGURATION & CONSTANTS ---
+   
+    // --- UTILS ---
+    window.escapeHTML = function(str) { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'})[m]); }
+    window.getElementValue = function(id) { const el=document.getElementById(id); if(!el) return null; return el.value?.trim() ?? el.textContent?.trim() ?? null; }
+    window.safeJSONParse = function(str) { try { if (typeof str === 'object' && str !== null) return str; const parsed = JSON.parse(str); if (typeof parsed === 'string') return JSON.parse(parsed); return parsed; } catch (e) { return null; } };
+    window.debounce = function(func, wait) { let timeout; return function(...args) { clearTimeout(timeout); timeout = setTimeout(() => func.apply(this, args), wait); }; };
+    window.showToast = function(m, t='info') {
+        let c = document.querySelector('.toast-container'); if(!c){c=document.createElement('div');c.className='toast-container';document.body.appendChild(c);}
+        const toast = document.createElement('div'); toast.className = `toast ${t}`; let icon = t==='success'?'✅':(t==='error'?'❌':'ℹ️');
+        toast.innerHTML = `<span>${icon}</span> <span>${m}</span>`; c.appendChild(toast);
+        requestAnimationFrame(() => toast.classList.add('show')); setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 300); }, 3000);
+    }
+
     // --- INITIALIZATION ---
     window.initializeApp = function() {
         document.getElementById('login-container').classList.add('hidden');
@@ -43,9 +57,8 @@
         });
     }
 
-window.login = function() {
-        // ADDED: Calendars.ReadWrite required for silent calendar integration
-        msalInstance.loginPopup({ scopes: ["User.Read", "Calendars.ReadWrite"] }).then(resp => {
+    window.login = function() {
+        msalInstance.loginPopup({ scopes: ["User.Read"] }).then(resp => {
             msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
         }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
     }
@@ -69,21 +82,6 @@ window.login = function() {
             if(data.body) data = data.body;
             
             let rawList = (data.accountList || data || []);
-            
-            // FIX: Safely parse to handle stringified JSON array wrappers from Power Automate preventing `.filter` crashes
-            if (typeof rawList === 'string') {
-                try { rawList = JSON.parse(rawList); } catch(e) { rawList = []; }
-            }
-            if (!Array.isArray(rawList)) {
-                if (rawList && rawList.value && Array.isArray(rawList.value)) {
-                    rawList = rawList.value;
-                } else if (rawList && typeof rawList === 'object') {
-                    rawList = [rawList]; 
-                } else {
-                    rawList = [];
-                }
-            }
-
             if(data.userProfile) currentUserProfile = data.userProfile;
 
             // Dedupe
@@ -242,7 +240,7 @@ window.login = function() {
             const pulse = (r.cr714_actionmessage && r.cr714_actionmessage.trim().length > 0) && isToday(r.modifiedon) ? 'response-pulse' : '';
             div.className = `gallery-item ${currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${isSent ? 'has-sent-email' : ''} ${pulse}`;
             div.onclick = () => window.selectRecord(r.cr714_id);
-            div.innerHTML = `<div class="flex justify-between w-full"><span class="gallery-item-id">${r.cr714_id}</span><i class="fas fa-envelope-circle-check sent-indicator"></i></div><div class="gallery-item-company truncate">${(r.cr714_company)}</div>`;
+            div.innerHTML = `<div class="flex justify-between w-full"><span class="gallery-item-id">${r.cr714_id}</span><i class="fas fa-envelope-circle-check sent-indicator"></i></div><div class="gallery-item-company truncate">${window.escapeHTML(r.cr714_company)}</div>`;
             list.appendChild(div);
         });
         window.updateMiniCounter();
@@ -2067,37 +2065,33 @@ window.login = function() {
         if(elDate) elDate.checked = prefs.showDate;
         }
 
-window.createCalendarEvent = async function() {
-            if(!currentSelectedRecord) { window.showToast("Select a record first", "error"); return; }
-            const dateVal = document.getElementById('follow-up-date').value; 
-            const timeVal = document.getElementById('follow-up-time').value;
-            if(!dateVal || !timeVal) { window.showToast("Please select a date and time.", "error"); return; }
+        window.createCalendarEvent = async function() {
+            if(!currentSelectedRecord) { window.showToast("Select a record first", "error");
+        return; }
+            const dateStr = document.getElementById('follow-up-date').value;
+        const timeStr = document.getElementById('follow-up-time').value;
+            if(!dateStr || !timeStr) { window.showToast("Set Date & Time first", "error"); return;
+        }
             
-            window.showToast("Creating calendar event silently...", "processing");
+            const start = `${dateStr}T${timeStr}:00`;
+        const data = { 
+                recordId: currentRecordId, 
+                action: 'CalendarInvite', 
+                notes: start, 
+                repName: currentUserRepName,
+                details: `Follow Up: ${currentSelectedRecord.cr714_company}`
+      
+              };
+            
+            window.showToast("Scheduling...", "processing");
             try {
-                const tokenResponse = await msalInstance.acquireTokenSilent({ scopes: ["Calendars.ReadWrite"], account: msalAccount });
-                const startDateTime = `${dateVal}T${timeVal}:00`; 
-                const endDateTimeObj = new Date(new Date(startDateTime).getTime() + 30*60000); 
-                const endDateTime = endDateTimeObj.toISOString().slice(0, 19);
-                
-                const latestNote = (document.getElementById('qb-notes-input').value || "").trim(); 
-                const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-                
-                const event = {
-                    subject: `Follow up: ${currentSelectedRecord.cr714_company || 'Account'} (${currentSelectedRecord.cr714_id})`,
-                    body: { contentType: "HTML", content: `<b>Account:</b> ${currentSelectedRecord.cr714_company}<br><b>ID:</b> ${currentSelectedRecord.cr714_id}<br><b>Contact:</b> ${currentSelectedRecord.cr714_namemost || 'N/A'}<br><b>Phone:</b> ${currentSelectedRecord.cr714_primaryphone || 'N/A'}<br><br><b>Latest Note:</b><br>${latestNote.replace(/\n/g, '<br>')}` },
-                    start: { dateTime: startDateTime, timeZone: timeZone }, end: { dateTime: endDateTime, timeZone: timeZone }
-                };
-                
-                const res = await fetch("https://graph.microsoft.com/v1.0/me/events", { method: "POST", headers: { "Authorization": `Bearer ${tokenResponse.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify(event) });
-                
-                if(res.ok) { window.showToast("Calendar event synced to Outlook!", "success"); } 
-                else { const err = await res.json(); throw new Error(err.error?.message || "Failed to create event via Graph API"); }
-            } catch(e) {
-                console.error(e);
-                if(e.name === "InteractionRequiredAuthError") { msalInstance.acquireTokenPopup({scopes: ["Calendars.ReadWrite"]}).then(() => window.createCalendarEvent()); } 
-                else { window.showToast("Error syncing event: " + e.message, "error"); }
-            }
+                // Using ACTION_BUTTON_FLOW_URL as the backend handler for calendar invites per logic request
+                const res = await fetch(ACTION_BUTTON_FLOW_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+        if(!res.ok) throw new Error("Calendar API Error");
+                window.showToast("Calendar Invite Sent", "success");
+        } catch(e) {
+                window.showToast("Failed to schedule", "error");
+        }
         }
 
         const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: "https://WB-DT.github.io/daytona-utility/" }, cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false } };
@@ -3299,12 +3293,8 @@ if(sort.includes('rep')) return sort === 'rep-asc' ?
         window.handleMsalResponse = function(resp) { if(resp && resp.account) { msalAccount = resp.account;
         currentUserRepName = msalAccount.name; window.initializeApp(); } }
         
-window.login = function() {
-        // ADDED: Calendars.ReadWrite required for silent calendar integration
-        msalInstance.loginPopup({ scopes: ["User.Read", "Calendars.ReadWrite"] }).then(resp => {
-            msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
-        }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
-    }
+        window.login = function() { msalInstance.loginPopup({ scopes: ["User.Read"] }).then(resp => window.handleMsalResponse(resp)).catch(err => { console.error(err); document.getElementById('login-error').innerText = "Login Failed: " + err.message; document.getElementById('login-error').classList.remove('hidden'); });
+        }
         
         window.openCallScript = function() {
             document.getElementById('script-content').innerText = "Simple Script Example: Hello, I'm {Rep}, I'd like to speak to you about an awesome promotion we're running!";
