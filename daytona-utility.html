@@ -398,6 +398,39 @@
             SP_POLL_URL: 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/36fb43cdfdc7468caa8ab8a030ae37c4/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=hIs9EOaXqy3U3R9_HO4K7fe0_XrSgYBhoUF1bZRPoCg',
             SAVE_COACHING_URL: 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/6afccf18907044be84f3e5e730791862/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=PocwedtZlC03FH-FJhfj1_Cj_dVaYUmQMddL4XpvdMI'
         };
+
+        // --- MSAL CONFIGURATION & TOKEN ACQUISITION ---
+        const d365OrgUrl = "https://wbmasonco.crm.dynamics.com/"; // TODO: Replace with your D365 Org URL
+
+const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: "https://WB-DT.github.io/daytona-utility/" }, cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false } };
+        const msalInstance = new msal.PublicClientApplication(msalConfig);
+        let msalAccount = null;
+
+
+        async function getToken() {
+            const request = { scopes: [`${d365OrgUrl}//user_impersonation`] };
+            try {
+                const accounts = msalInstance.getAllAccounts();
+                if (accounts.length > 0) {
+                    msalInstance.setActiveAccount(accounts[0]);
+                    request.account = accounts[0];
+                } else {
+                    const loginResponse = await msalInstance.loginPopup(request);
+                    msalInstance.setActiveAccount(loginResponse.account);
+                    request.account = loginResponse.account;
+                }
+                const response = await msalInstance.acquireTokenSilent(request);
+                return response.accessToken;
+            } catch (error) {
+                if (error instanceof msal.InteractionRequiredAuthError) {
+                    const response = await msalInstance.acquireTokenPopup(request);
+                    return response.accessToken;
+                }
+                throw error;
+            }
+        }
+        // ----------------------------------------------
+
         const worker = new Worker(URL.createObjectURL(new Blob([document.getElementById('worker-script').textContent], { type: "text/javascript" })));
         let fullData = [], filteredData = [], currentView = 'assign', showMine = false, userProfile = { name: "Guest" }, currentId = null, searchTimeout;
         let mapInstance = null, chartInstances = {}, mapLayerGroup = null;
@@ -415,6 +448,7 @@
                 if(e.key === 'Escape') closeDetail();
             });
         });
+        
         async function identifyUser() {
             try { const r = await fetch(CONFIG.WHOAMI_URL, {method:'POST'});
             const d = await r.json(); if(d.displayName) { userProfile.name = d.displayName; document.getElementById('user-display-name').innerText = d.displayName; } } catch(e){}
@@ -449,6 +483,7 @@
                 renderView();
             }
         };
+        
         function switchView(v) {
             currentView = v;
             document.querySelectorAll('.view-section').forEach(el => el.classList.add('hidden'));
@@ -608,7 +643,6 @@
         function initMap() { if(!mapInstance) { mapInstance=L.map('map-container').setView([39.8,-98.6],4); L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{attribution:'&copy; OpenStreetMap, CartoDB'}).addTo(mapInstance); mapLayerGroup = L.layerGroup().addTo(mapInstance); } mapInstance.invalidateSize(); }
         function updateMap(points) { if(!mapInstance || !mapLayerGroup) return; mapLayerGroup.clearLayers(); points.forEach(p => { L.circleMarker([p.lat,p.lon], { color: '#2dd4bf', fillColor: '#2dd4bf', fillOpacity: 0.6, radius: 6 }).bindPopup(`<b>Ticket #${p.id}</b>`).addTo(mapLayerGroup); }); }
 
-        // --- UPDATED EMAIL MODAL LOGIC ---
         function openEmailModal() { 
             const guid = document.getElementById('sys-guid').innerText;
             const t = fullData.find(x => x.id === currentId);
@@ -638,7 +672,6 @@
                 return;
             }
 
-            // Dynamics 365 specific payload with the correct plural entity set based on our recent chat
             const payload = {
                 "subject": subject,
                 "description": body,
@@ -649,33 +682,41 @@
                 "RegardingObjectId@odata.bind": `/cr714_logisticslog_2s(${guid})`
             };
 
-            console.log("[DEBUG: Dynamics 365 Email Binding]");
-            console.log("Target GUID:", guid);
-            console.log("Payload:", JSON.stringify(payload, null, 2));
-
-            closeEmailModal(); 
-            Toastify({text:"Logging to CSW Action History...", style:{background:"#fbbf24"}}).showToast(); 
+            Toastify({text:"Authenticating & Logging...", style:{background:"#fbbf24"}}).showToast(); 
             
             try {
-                // TODO: Insert your MSAL token acquisition and Web API fetch call here using the 'payload' above.
-                // Example:
-                // const res = await fetch(`https://[YOUR_ORG].crm.dynamics.com/api/data/v9.2/emails`, { ... });
+                // MSAL Token Fetch & Dynamics 365 Web API Call
+                const token = await getToken();
                 
-                // Simulating successful D365 fetch
-                setTimeout(() => {
-                    console.log("[DEBUG: Dynamics 365] Successfully bound email to regarding object.");
-                    Toastify({text:"Activity Linked in Dynamics", style:{background:"#10b981"}}).showToast();
-                }, 1000);
+                const response = await fetch(`${d365OrgUrl}/api/data/v9.2/emails`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                        'OData-MaxVersion': '4.0',
+                        'OData-Version': '4.0',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.error?.message || "Failed to bind record to D365.");
+                }
+
+                console.log("[DEBUG: Dynamics 365] Successfully bound email to regarding object.");
+                Toastify({text:"Activity Linked in Dynamics", style:{background:"#10b981"}}).showToast();
                 
-                // Clear the form for the next time
+                closeEmailModal();
                 document.getElementById('em-to').value = '';
                 document.getElementById('em-body').value = '';
+
             } catch (err) {
                 console.error("[DEBUG: Dynamics 365] Error linking activity:", err);
-                Toastify({text:"Failed to bind record", style:{background:"#ef4444"}}).showToast();
+                Toastify({text:`Failed: ${err.message}`, style:{background:"#ef4444"}}).showToast();
             }
         }
-        // --------------------------------
 
         async function autoSelectManifest() { try { const res = await fetch(CONFIG.SP_POLL_URL, { method:'POST', body: JSON.stringify({action:"poll"}), headers:{'Content-Type':'application/json'} }); const files = await res.json(); const today = new Date().toISOString().split('T')[0]; const match = files.find(f => f.name.includes(today)); const sel = document.getElementById('manifest-selector'); files.forEach(f => sel.add(new Option(f.name, f.id))); if(match) { sel.value = match.id; loadManifest(); } } catch(e){} }
         function renderSnippets() { const s = ["Left VM", "Called Driver", "Completed", "Wrong Addr"]; document.getElementById('snippet-bar').innerHTML = s.map(x => `<button onclick="insertSnippet('${x}')" class="filter-btn hover:bg-[var(--brand)] hover:text-black">${x}</button>`).join(''); }
