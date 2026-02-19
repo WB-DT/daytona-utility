@@ -347,7 +347,9 @@
                 const issueList = [...new Set(db.map(x=>x.issue).filter(x=>x))].sort();
                 const ownerList = [...new Set(db.map(x=>x.owner).filter(x=>x))].sort();
                 const statusList = [...new Set(db.map(x=>x.status).filter(x=>x))].sort();
-                self.postMessage({ type: 'RENDER', data: db, stats, whsList, issueList, ownerList, statusList });
+                
+                // Use INIT here so we don't trigger the logic bug on filtered data
+                self.postMessage({ type: 'INIT', data: db, stats, whsList, issueList, ownerList, statusList });
             }
             else if(type === 'FILTER') {
                 const { search, wh, issue, status, fullData, mine, user, quickFilters, timeFrame, sortField, sortDir, viewFilterOwner, viewFilterStatus, customDate } = payload;
@@ -398,10 +400,20 @@
                     });
                 }
 
+                // Send back re-calculated stats so the dashboard updates live
+                const stats = { 
+                    total: filtered.length, 
+                    urgent: filtered.filter(x=>x.issue?.match(/Urg|Crit/)).length, 
+                    active: filtered.filter(x=>x.status!=='Completed').length, 
+                    closed: filtered.filter(x=>x.status==='Completed').length 
+                };
+
                 const mapPoints = filtered
                     .filter(t => ZIP_MAP[t.zip3])
                     .map(t => ({ lat: ZIP_MAP[t.zip3][0], lng: ZIP_MAP[t.zip3][1], id: t.id }));
-                self.postMessage({ type: 'RENDER', data: filtered, mapPoints });
+                
+                // RENDER is now safely reserved for filtered data only
+                self.postMessage({ type: 'RENDER', data: filtered, stats, mapPoints });
             }
         };
     </script>
@@ -428,7 +440,6 @@
         let globalOwners = [], globalStatuses = [], viewFilterOwner = "", viewFilterStatus = "";
         let originalRecordState = {};
         
-        // Cache object to hold the manifest files and their base64 payloads received from the updated Flow
         let cachedManifests = [];
 
         const CACHE_TTL = 3 * 24 * 60 * 60 * 1000;
@@ -475,9 +486,6 @@
             });
         });
 
-        // -------------------------------------------------------------
-        // NEW EXCEL MODAL LOGIC
-        // -------------------------------------------------------------
         function openDriverInfoModal() {
             if (!currentId) return;
             const t = fullData.find(x => x.id === currentId);
@@ -496,9 +504,8 @@
             modal.classList.add('flex');
 
             setTimeout(() => {
-                // Dynamically find matching manifest by cross-referencing Ticket fields against Filename
                 const match = cachedManifests.find(f => {
-                    const fname = f.name ? f.name.toLowerCase() : '';
+                    const fname = f.fileName ? f.fileName.toLowerCase() : '';
                     const mWhs = t.whs && t.whs.trim() !== "" ? fname.includes(t.whs.toLowerCase()) : false;
                     const mDrv = t.driver && t.driver.trim() !== "" ? fname.includes(t.driver.toLowerCase()) : false;
                     const mRt = t.route && t.route.trim() !== "" ? fname.includes(t.route.toLowerCase()) : false;
@@ -508,13 +515,12 @@
 
                 if (match && match.fileContent) {
                     try {
-                        title.innerText = match.name;
+                        title.innerText = match.fileName;
                         subTitle.innerText = `Matched via Ticket ${t.id} Parameters`;
                         
-                        // Let SheetJS Parse the Raw Base64 string directly into an HTML Table
                         const wb = XLSX.read(match.fileContent, { type: 'base64' });
                         const ws = wb.Sheets[wb.SheetNames[0]];
-                        const html = XLSX.utils.sheet_to_html(ws);
+                        const html = XLSX.utils.sheet_to_html(ws, { blankrows: false });
                         
                         content.innerHTML = html;
                     } catch (e) {
@@ -525,7 +531,7 @@
                     subTitle.innerText = "Check Search Logic";
                     
                     let availableHtml = cachedManifests.length > 0 
-                        ? `<br><div class="text-left bg-black/30 p-4 rounded text-[10px] mt-4 max-h-[200px] overflow-auto"><b>Available Files:</b><br>${cachedManifests.map(f => f.name).join('<br>')}</div>`
+                        ? `<br><div class="text-left bg-black/30 p-4 rounded text-[10px] mt-4 max-h-[200px] overflow-auto"><b>Available Files:</b><br>${cachedManifests.map(f => f.fileName).join('<br>')}</div>`
                         : `<br><div class="text-left bg-black/30 p-4 rounded text-[10px] mt-4 text-[var(--danger)]">No files are currently cached. The manifest sync may have failed or no files were uploaded today.</div>`;
                     
                     content.innerHTML = `
@@ -548,7 +554,6 @@
             modal.classList.remove('flex');
             document.getElementById('driver-info-content').innerHTML = '';
         }
-        // -------------------------------------------------------------
 
         function clearAllFilters() {
             document.getElementById('global-search').value = '';
@@ -708,53 +713,54 @@
 
         worker.onmessage = (e) => {
             const { type, data, stats, whsList, issueList, statusList, ownerList, mapPoints } = e.data;
-            if(type === 'RENDER') {
-                if(fullData.length === 0 || fullData.length !== data.length) { 
-                    fullData = data;
-                    globalOwners = ownerList;
-                    globalStatuses = statusList;
-                    document.getElementById('loading-screen').style.display = 'none';
-                    
-                    if(document.getElementById('filter-wh')) {
-                        document.getElementById('filter-wh').innerHTML = '<option value="">Warehouse</option>';
-                        whsList.forEach(w => document.getElementById('filter-wh').add(new Option(w, w)));
-                    }
-                    if(document.getElementById('filter-issue')) {
-                        document.getElementById('filter-issue').innerHTML = '<option value="">Issue</option>';
-                        issueList.forEach(i => document.getElementById('filter-issue').add(new Option(i, i)));
-                    }
-                    if(document.getElementById('filter-status')) {
-                        document.getElementById('filter-status').innerHTML = '<option value="">Status</option>';
-                        statusList.forEach(s => document.getElementById('filter-status').add(new Option(s, s)));
-                    }
-                    
-                    const savedRaw = localStorage.getItem('logilink_state');
-                    if (savedRaw) {
-                        try {
-                            const saved = JSON.parse(savedRaw);
-                            if (saved.filters) {
-                                if (saved.filters.wh) document.getElementById('filter-wh').value = saved.filters.wh;
-                                if (saved.filters.issue) document.getElementById('filter-issue').value = saved.filters.issue;
-                                if (saved.filters.status) document.getElementById('filter-status').value = saved.filters.status;
-                            }
-                        } catch(err) {}
-                    }
-
-                    autoSelectManifest();
-                    switchView(currentView);
-                    
-                    if (currentId) {
-                        openDetail(currentId);
-                    } else {
-                        applyFilters();
-                    }
-                } else {
-                    filteredData = data;
-                    document.getElementById('count-display').innerText = data.length;
-                    if(stats) updateDashboard(stats, data);
-                    if(mapPoints) updateMap(mapPoints);
-                    renderView();
+            
+            // Replaces the buggy array length check with proper type verification
+            if(type === 'INIT') {
+                fullData = data;
+                globalOwners = ownerList;
+                globalStatuses = statusList;
+                document.getElementById('loading-screen').style.display = 'none';
+                
+                if(document.getElementById('filter-wh')) {
+                    document.getElementById('filter-wh').innerHTML = '<option value="">Warehouse</option>';
+                    whsList.forEach(w => document.getElementById('filter-wh').add(new Option(w, w)));
                 }
+                if(document.getElementById('filter-issue')) {
+                    document.getElementById('filter-issue').innerHTML = '<option value="">Issue</option>';
+                    issueList.forEach(i => document.getElementById('filter-issue').add(new Option(i, i)));
+                }
+                if(document.getElementById('filter-status')) {
+                    document.getElementById('filter-status').innerHTML = '<option value="">Status</option>';
+                    statusList.forEach(s => document.getElementById('filter-status').add(new Option(s, s)));
+                }
+                
+                const savedRaw = localStorage.getItem('logilink_state');
+                if (savedRaw) {
+                    try {
+                        const saved = JSON.parse(savedRaw);
+                        if (saved.filters) {
+                            if (saved.filters.wh) document.getElementById('filter-wh').value = saved.filters.wh;
+                            if (saved.filters.issue) document.getElementById('filter-issue').value = saved.filters.issue;
+                            if (saved.filters.status) document.getElementById('filter-status').value = saved.filters.status;
+                        }
+                    } catch(err) {}
+                }
+
+                autoSelectManifest();
+                switchView(currentView);
+                
+                if (currentId) {
+                    openDetail(currentId);
+                } else {
+                    applyFilters();
+                }
+            } else if(type === 'RENDER') {
+                // RENDER only handles parsing the filtered records
+                filteredData = data;
+                document.getElementById('count-display').innerText = data.length;
+                if(stats) updateDashboard(stats, data);
+                if(mapPoints) updateMap(mapPoints);
+                renderView();
             }
         };
 
@@ -1042,12 +1048,12 @@
             try { 
                 const res = await fetch(CONFIG.SP_POLL_URL, { method:'POST', body: JSON.stringify({action:"poll"}), headers:{'Content-Type':'application/json'} }); 
                 const files = await res.json(); 
-                cachedManifests = files; // Cache the response array to retrieve base64 data without a second call
+                cachedManifests = files; 
                 const today = new Date().toISOString().split('T')[0]; 
-                const match = files.find(f => f.name.includes(today)); 
+                const match = files.find(f => f.fileName.includes(today)); 
                 const sel = document.getElementById('manifest-selector'); 
-                files.forEach(f => sel.add(new Option(f.name, f.id))); 
-                if(match) { sel.value = match.id; loadManifest(); } 
+                files.forEach(f => sel.add(new Option(f.fileName, f.fileName))); 
+                if(match) { sel.value = match.fileName; loadManifest(); } 
             } catch(e){} 
         }
 
@@ -1057,16 +1063,14 @@
             document.getElementById('manifest-preview').innerText = "Processing manifest data..."; 
             
             try { 
-                const selectedFile = cachedManifests.find(f => String(f.id) === String(sel));
+                const selectedFile = cachedManifests.find(f => f.fileName === sel);
 
                 if (selectedFile && selectedFile.fileContent) {
-                    // Render the Excel Sheet directly from the returned base64 string
                     const wb = XLSX.read(selectedFile.fileContent, { type: 'base64' });
                     const sheetName = wb.SheetNames[0];
                     const json = XLSX.utils.sheet_to_json(wb.Sheets[sheetName]);
                     document.getElementById('manifest-preview').innerText = JSON.stringify(json, null, 2);
                 } else {
-                    // Fallback to fetch if the payload doesn't contain the file content
                     const res = await fetch(CONFIG.SP_POLL_URL, { 
                         method: 'POST', 
                         body: JSON.stringify({ action: "read", fileId: sel }), 
