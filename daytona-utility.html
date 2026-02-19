@@ -95,7 +95,7 @@
     <div id="loading-screen">
         <i class="fa-solid fa-frog frog-icon"></i>
         <div class="mt-6 font-black uppercase tracking-widest text-[var(--brand)] animate-pulse">Initializing LogiLink...</div>
-        <div id="loading-status" class="text-[10px] text-[var(--text-dim)] mt-2 font-mono">Loading Dataverse (3-Month Cap)</div>
+        <div id="loading-status" class="text-[10px] text-[var(--text-dim)] mt-2 font-mono">Loading Offline Cache & Fetching Dataverse...</div>
     </div>
 
     <div id="email-modal">
@@ -149,7 +149,7 @@
         </div>
 
         <div class="flex gap-2">
-            <input type="text" id="filter-date" class="input-dark h-10 text-[10px] text-center cursor-pointer w-28" placeholder="Date Range">
+            <input type="text" id="filter-date" class="input-dark h-10 text-[10px] text-center cursor-pointer w-36" placeholder="Custom Range">
             <select id="filter-wh" onchange="handleFilterDropdowns()" class="input-dark h-10 text-[10px] font-bold uppercase w-32"><option value="">Warehouse</option></select>
             <select id="filter-issue" onchange="handleFilterDropdowns()" class="input-dark h-10 text-[10px] font-bold uppercase w-32"><option value="">Issue</option></select>
             <select id="filter-status" onchange="handleFilterDropdowns()" class="input-dark h-10 text-[10px] font-bold uppercase w-28"><option value="">Status</option></select>
@@ -160,6 +160,7 @@
             <button onclick="toggleMyTickets()" id="btn-mine" class="h-10 bg-[var(--bg-surface)] border border-[var(--border)] rounded text-[9px] font-black uppercase text-[var(--text-dim)] hover:text-white transition flex items-center gap-2 px-4 group">
                 <i class="fas fa-user-circle"></i> MINE <i id="mine-check" class="fa fa-check-circle text-[var(--brand)] hidden"></i>
             </button>
+            <button onclick="clearAllFilters()" class="h-10 px-3 border border-[var(--border)] rounded text-[9px] font-black uppercase text-[var(--text-dim)] hover:text-white transition" title="Clear Filters"><i class="fas fa-times"></i></button>
             <button onclick="exportExcel()" class="h-10 px-3 bg-[var(--brand)] text-black rounded text-[9px] font-black uppercase hover:brightness-110" title="Export to Excel"><i class="fas fa-download"></i></button>
         </div>
         <div class="ml-auto text-[10px] font-mono text-[var(--text-dim)]"><span id="count-display" class="text-[var(--brand)] font-bold text-sm">0</span> Recs</div>
@@ -316,7 +317,7 @@
                 self.postMessage({ type: 'RENDER', data: db, stats, whsList, issueList, ownerList, statusList });
             }
             else if(type === 'FILTER') {
-                const { search, wh, issue, status, fullData, mine, user, quickFilters, timeFrame, sortField, sortDir, viewFilterOwner, viewFilterStatus } = payload;
+                const { search, wh, issue, status, fullData, mine, user, quickFilters, timeFrame, sortField, sortDir, viewFilterOwner, viewFilterStatus, customDate } = payload;
                 const today = new Date().toISOString().split('T')[0];
                 const d = new Date();
                 
@@ -325,6 +326,14 @@
                 else if(timeFrame === '7d') { d.setDate(d.getDate()-7); minDate = d.toISOString().split('T')[0]; }
                 else if(timeFrame === '30d') { d.setDate(d.getDate()-30); minDate = d.toISOString().split('T')[0]; }
                 else if(timeFrame === '90d') { d.setDate(d.getDate()-90); minDate = d.toISOString().split('T')[0]; }
+
+                // Parse custom date picker values if they exist
+                let customStart = null, customEnd = null;
+                if (customDate && customDate.includes(' to ')) {
+                    const parts = customDate.split(' to ');
+                    customStart = parts[0];
+                    customEnd = parts[1];
+                }
 
                 let filtered = fullData.filter(t => {
                     const s = [t.order, t.company, t.owner, t.driver, t.address, t.zip3].join(' ').toLowerCase();
@@ -339,7 +348,14 @@
 
                     const matchUrgent = quickFilters.urgent ? t.issue?.match(/Crit|Urg/) : true;
                     const matchHideCompleted = quickFilters.hideCompleted ? t.status !== 'Completed' : true;
-                    const matchTime = t.date >= minDate;
+                    
+                    let matchTime = true;
+                    if (customStart && customEnd) {
+                        matchTime = (t.date >= customStart && t.date <= customEnd);
+                    } else {
+                        matchTime = t.date >= minDate;
+                    }
+                    
                     return matchSearch && matchMine && matchWh && matchIssue && matchStatus && matchUrgent && matchHideCompleted && matchTime && matchViewOwner && matchViewStatus;
                 });
 
@@ -368,6 +384,11 @@
             EMAIL_LOG_URL: 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/email_log_placeholder/triggers/manual/paths/invoke?api-version=1',
             DELETE_URL: 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/delete_placeholder/triggers/manual/paths/invoke?api-version=1'
         };
+        
+        // Initialize Dexie Offline Cache DB
+        const offlineDB = new Dexie("LogiLinkRawDB");
+        offlineDB.version(1).stores({ rawPayload: 'id' });
+
         const worker = new Worker(URL.createObjectURL(new Blob([document.getElementById('worker-script').textContent], { type: "text/javascript" })));
         let fullData = [], filteredData = [], currentView = 'assign', showMine = false, userProfile = { name: "Guest" }, currentId = null, searchTimeout;
         let mapInstance = null, chartInstances = {}, mapLayerGroup = null;
@@ -412,7 +433,7 @@
                     });
                     Toastify({text:"Coaching Updated in Dynamics", style:{background:"#10b981"}}).showToast();
                     originalRecordState.coaching = isChecked;
-                    checkDirtyState(); // Re-eval dirty state after successful isolated save
+                    checkDirtyState(); 
                 } catch(err) {
                     Toastify({text:"Error updating coaching status", style:{background:"#ef4444"}}).showToast();
                     e.target.checked = !isChecked; 
@@ -420,6 +441,21 @@
                 }
             });
         });
+
+        function clearAllFilters() {
+            document.getElementById('global-search').value = '';
+            document.getElementById('filter-wh').value = '';
+            document.getElementById('filter-issue').value = '';
+            document.getElementById('filter-status').value = '';
+            document.getElementById('filter-date').value = '';
+            
+            viewFilterOwner = '';
+            viewFilterStatus = '';
+            if (document.getElementById('v-filter-owner')) document.getElementById('v-filter-owner').value = '';
+            if (document.getElementById('v-filter-status')) document.getElementById('v-filter-status').value = '';
+
+            setTimeFrame('today'); // Will implicitly call applyFilters()
+        }
 
         function checkDirtyState() {
             if (!currentId) return;
@@ -436,6 +472,10 @@
                 btnSave.removeAttribute('disabled');
                 btnSaveNext.classList.remove('opacity-50', 'cursor-not-allowed');
                 btnSaveNext.removeAttribute('disabled');
+                
+                // Ensure text is reset in case we just came back from a "Saving..." state
+                if(btnSave.innerText === "SAVING...") btnSave.innerText = "SAVE";
+                if(btnSaveNext.innerText === "SAVING...") btnSaveNext.innerText = "SAVE & NEXT";
             } else {
                 btnSave.classList.add('opacity-50', 'cursor-not-allowed');
                 btnSave.setAttribute('disabled', 'true');
@@ -455,6 +495,7 @@
                     wh: document.getElementById('filter-wh') ? document.getElementById('filter-wh').value : '',
                     issue: document.getElementById('filter-issue') ? document.getElementById('filter-issue').value : '',
                     status: document.getElementById('filter-status') ? document.getElementById('filter-status').value : '',
+                    customDate: document.getElementById('filter-date') ? document.getElementById('filter-date').value : '',
                     viewOwner: viewFilterOwner,
                     viewStatus: viewFilterStatus
                 },
@@ -472,7 +513,7 @@
                 const saved = JSON.parse(savedRaw);
                 if (Date.now() - saved.timestamp > CACHE_TTL) {
                     localStorage.removeItem('logilink_state');
-                    return; // Cache expired
+                    return; 
                 }
 
                 currentView = saved.currentView || 'assign';
@@ -485,6 +526,10 @@
 
                 if (saved.searchQuery && document.getElementById('global-search')) {
                     document.getElementById('global-search').value = saved.searchQuery;
+                }
+
+                if (saved.filters?.customDate && document.getElementById('filter-date')) {
+                    document.getElementById('filter-date').value = saved.filters.customDate;
                 }
                 
                 document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active')); 
@@ -510,37 +555,74 @@
         async function identifyUser() {
             try { 
                 const r = await fetch(CONFIG.WHOAMI_URL, {
-                    method:'POST', 
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({})
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: "whoami", email: "", user: "" }) 
                 });
+                
+                if (!r.ok) {
+                    throw new Error(`HTTP Error: ${r.status}`);
+                }
+                
                 const d = await r.json(); 
-                if(d.displayName) { 
+                if(d && d.displayName) { 
                     userProfile.name = d.displayName; 
                     document.getElementById('user-display-name').innerText = d.displayName; 
                 } 
-            } catch(e){}
+            } catch(e) {
+                console.warn("WHOAMI Flow error. Defaulting to 'Guest Rep'.");
+            }
         }
 
         async function refreshData() {
             document.getElementById('loading-screen').style.display = 'flex';
-            try { const r = await fetch(CONFIG.HISTORY_URL, {method:'POST'}); const j = await r.json();
-            worker.postMessage({ type: 'PARSE', payload: { data: j.value || [] } });
-            } catch(e) { document.getElementById('loading-status').innerText = "Retry..."; setTimeout(refreshData, 3000); }
+            
+            // 1. Instantly boot from Dexie Offline Cache if available
+            try {
+                const cached = await offlineDB.rawPayload.get(1);
+                if (cached && cached.data) {
+                    worker.postMessage({ type: 'PARSE', payload: { data: cached.data } });
+                }
+            } catch(e) {
+                console.warn("Could not read from Dexie cache");
+            }
+
+            // 2. Fetch fresh data from Network in background
+            try { 
+                const r = await fetch(CONFIG.HISTORY_URL, {method:'POST'}); 
+                const j = await r.json();
+                if(j.value) {
+                    await offlineDB.rawPayload.put({ id: 1, data: j.value }); // update local cache
+                    worker.postMessage({ type: 'PARSE', payload: { data: j.value } });
+                }
+            } catch(e) { 
+                document.getElementById('loading-status').innerText = "Network unreachable. Using offline cache."; 
+                setTimeout(() => document.getElementById('loading-screen').style.display = 'none', 2000);
+            }
         }
 
         worker.onmessage = (e) => {
             const { type, data, stats, whsList, issueList, statusList, ownerList, mapPoints } = e.data;
             if(type === 'RENDER') {
-                if(fullData.length === 0) { 
+                if(fullData.length === 0 || fullData.length !== data.length) { 
+                    // Initial load or network payload differs from offline cache payload
                     fullData = data;
                     globalOwners = ownerList;
                     globalStatuses = statusList;
                     document.getElementById('loading-screen').style.display = 'none';
                     
-                    if(document.getElementById('filter-wh')) whsList.forEach(w => document.getElementById('filter-wh').add(new Option(w, w)));
-                    if(document.getElementById('filter-issue')) issueList.forEach(i => document.getElementById('filter-issue').add(new Option(i, i)));
-                    if(document.getElementById('filter-status')) statusList.forEach(s => document.getElementById('filter-status').add(new Option(s, s)));
+                    if(document.getElementById('filter-wh')) {
+                        document.getElementById('filter-wh').innerHTML = '<option value="">Warehouse</option>';
+                        whsList.forEach(w => document.getElementById('filter-wh').add(new Option(w, w)));
+                    }
+                    if(document.getElementById('filter-issue')) {
+                        document.getElementById('filter-issue').innerHTML = '<option value="">Issue</option>';
+                        issueList.forEach(i => document.getElementById('filter-issue').add(new Option(i, i)));
+                    }
+                    if(document.getElementById('filter-status')) {
+                        document.getElementById('filter-status').innerHTML = '<option value="">Status</option>';
+                        statusList.forEach(s => document.getElementById('filter-status').add(new Option(s, s)));
+                    }
                     
                     const savedRaw = localStorage.getItem('logilink_state');
                     if (savedRaw) {
@@ -614,13 +696,81 @@
             applyFilters();
         }
 
+        function toggleAllBulkCheckboxes(source) {
+            const checkboxes = document.querySelectorAll('.row-check');
+            checkboxes.forEach(cb => cb.checked = source.checked);
+        }
+
+        async function applyBulkAssign() {
+            const selectedRep = document.getElementById('bulk-rep-sel').value;
+            const checkboxes = document.querySelectorAll('.row-check:checked');
+            
+            if (checkboxes.length === 0) {
+                Toastify({text:"Select at least one record.", style:{background:"#ef4444"}}).showToast();
+                return;
+            }
+            if (!selectedRep) {
+                Toastify({text:"Select a rep from the dropdown.", style:{background:"#ef4444"}}).showToast();
+                return;
+            }
+
+            Toastify({text:`Assigning ${checkboxes.length} records to ${selectedRep}...`, style:{background:"#fbbf24"}}).showToast();
+
+            const updatePromises = [];
+            checkboxes.forEach(cb => {
+                const rowId = cb.getAttribute('data-id');
+                const t = fullData.find(x => x.id === rowId);
+                if (t && t.guid) {
+                    const payload = { 
+                        recordId: t.guid, 
+                        disposition: t.status, 
+                        owner: selectedRep, 
+                        notes: t.notes || "" 
+                    };
+                    updatePromises.push(
+                        fetch(CONFIG.SAVE_URL, { 
+                            method: 'POST', 
+                            body: JSON.stringify(payload), 
+                            headers: {'Content-Type': 'application/json'} 
+                        }).then(() => {
+                            t.owner = selectedRep; 
+                        })
+                    );
+                }
+            });
+
+            try {
+                await Promise.all(updatePromises);
+                Toastify({text:"Bulk assignment complete!", style:{background:"#10b981"}}).showToast();
+                
+                document.getElementById('bulk-select-all').checked = false;
+                checkboxes.forEach(cb => cb.checked = false);
+                document.getElementById('bulk-rep-sel').value = "";
+                
+                applyFilters(); 
+            } catch (err) {
+                Toastify({text:"Some assignments failed.", style:{background:"#ef4444"}}).showToast();
+            }
+        }
+
         function renderAssign(data) {
             const container = document.getElementById('container-assign');
             if(!container) return;
             const repOptions = globalOwners.map(o => `<option value="${o}" ${o === viewFilterOwner ? 'selected' : ''}>${o}</option>`).join('');
             const statusOptions = globalStatuses.map(s => `<option value="${s}" ${s === viewFilterStatus ? 'selected' : ''}>${s}</option>`).join('');
             const bulkOptions = globalOwners.map(o => `<option value="${o}">${o}</option>`).join('');
-            const rows = data.map(t => `<tr class="${t.id === currentId ? 'selected' : ''}" onclick="openDetail('${t.id}')"><td><input type="checkbox" class="custom-check" onclick="event.stopPropagation()"></td><td>${t.id}</td><td>${t.date}</td><td>${t.owner}</td><td class="font-mono text-[var(--brand)]">${t.order}</td><td>${t.company}</td><td>${t.issue}</td><td>${t.status}</td></tr>`).join('');
+            
+            const rows = data.map(t => `
+                <tr class="${t.id === currentId ? 'selected' : ''}" onclick="openDetail('${t.id}')">
+                    <td onclick="event.stopPropagation()"><input type="checkbox" class="custom-check row-check" data-id="${t.id}"></td>
+                    <td>${t.id}</td>
+                    <td>${t.date}</td>
+                    <td>${t.owner}</td>
+                    <td class="font-mono text-[var(--brand)]">${t.order}</td>
+                    <td>${t.company}</td>
+                    <td>${t.issue}</td>
+                    <td>${t.status}</td>
+                </tr>`).join('');
             
             container.innerHTML = `
                 <div class="p-4 border-b border-[var(--border)] bg-black/10 flex gap-4">
@@ -628,13 +778,13 @@
                     <select id="v-filter-status" onchange="handleViewFilter('status', this.value)" class="input-dark flex-1 h-9 text-xs"><option value="">Disposition (Filter)</option>${statusOptions}</select>
                     <div class="h-9 w-px bg-[var(--border)] mx-2"></div>
                     <select id="bulk-rep-sel" class="input-dark flex-1 h-9 text-xs"><option value="">Assign Selected To...</option>${bulkOptions}</select>
-                    <button class="px-6 bg-[var(--brand)] text-black font-black text-xs rounded uppercase">Apply Bulk</button>
+                    <button onclick="applyBulkAssign()" class="px-6 bg-[var(--brand)] text-black font-black text-xs rounded uppercase hover:brightness-110 shadow transition">Apply Bulk</button>
                 </div>
                 <div class="flex-1 overflow-auto">
                     <table class="bulk-assign-table">
                         <thead>
                             <tr>
-                                <th></th>
+                                <th style="width: 40px;"><input type="checkbox" id="bulk-select-all" class="custom-check" onclick="toggleAllBulkCheckboxes(this)"></th>
                                 <th>ID</th>
                                 <th>Date</th>
                                 <th onclick="setSort('owner')" class="sort-header">Rep <i class="fas fa-sort text-[8px] ml-1"></i></th>
@@ -713,10 +863,19 @@
             const guid = document.getElementById('sys-guid').innerText;
             if(!guid) return;
 
+            const btnSave = document.getElementById('btn-save');
+            const btnSaveNext = document.getElementById('btn-save-next');
+            
+            btnSave.innerText = "SAVING...";
+            btnSaveNext.innerText = "SAVING...";
+            btnSave.classList.add('opacity-50', 'cursor-not-allowed');
+            btnSaveNext.classList.add('opacity-50', 'cursor-not-allowed');
+            btnSave.setAttribute('disabled', 'true');
+            btnSaveNext.setAttribute('disabled', 'true');
+
             const payload = { recordId: guid, disposition: document.getElementById('m-status').value, owner: document.getElementById('m-owner').value, notes: document.getElementById('m-notes').value };
             
             try {
-                Toastify({text:"Saving...", style:{background:"#fbbf24"}}).showToast();
                 await fetch(CONFIG.SAVE_URL, { method: 'POST', body: JSON.stringify(payload), headers:{'Content-Type':'application/json'} });
                 
                 if(document.getElementById('m-status').value === 'Completed') confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
@@ -731,7 +890,10 @@
                 originalRecordState.status = payload.disposition;
                 originalRecordState.owner = payload.owner;
                 originalRecordState.notes = payload.notes;
-                checkDirtyState();
+                
+                btnSave.innerText = "SAVE";
+                btnSaveNext.innerText = "SAVE & NEXT";
+                checkDirtyState(); 
 
                 if(autoNext) { 
                     const fIdx = filteredData.findIndex(x => x.id === currentId); 
@@ -739,6 +901,9 @@
                 }
             } catch (err) {
                 Toastify({text:"Error Saving Record", style:{background:"#ef4444"}}).showToast();
+                btnSave.innerText = "SAVE";
+                btnSaveNext.innerText = "SAVE & NEXT";
+                checkDirtyState();
             }
         }
 
@@ -825,6 +990,12 @@
             activeTimeFrame = tf; 
             document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active')); 
             document.getElementById(`tf-${tf}`).classList.add('active'); 
+            
+            // Clear custom date picker if a pre-set button is clicked
+            if (document.getElementById('filter-date')) {
+                document.getElementById('filter-date').value = '';
+            }
+            
             applyFilters(); 
         }
         
@@ -834,6 +1005,7 @@
                 wh: document.getElementById('filter-wh') ? document.getElementById('filter-wh').value : '', 
                 issue: document.getElementById('filter-issue') ? document.getElementById('filter-issue').value : '', 
                 status: document.getElementById('filter-status') ? document.getElementById('filter-status').value : '', 
+                customDate: document.getElementById('filter-date') ? document.getElementById('filter-date').value : '',
                 viewFilterOwner,
                 viewFilterStatus,
                 fullData, mine: showMine, user: userProfile.name, quickFilters, timeFrame: activeTimeFrame, sortField, sortDir 
