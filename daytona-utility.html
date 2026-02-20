@@ -105,7 +105,7 @@
                 <div class="flex justify-end gap-3 mt-6 pt-4 border-t border-[var(--border)]">
                     <button onclick="closeEmailModal()" class="px-6 py-2 rounded border border-[var(--border)] text-[var(--text-dim)] hover:text-white text-xs font-bold uppercase transition">Discard</button>
                     <button onclick="confirmEmailLog()" class="px-8 py-2 rounded bg-[var(--brand)] text-black text-xs font-black uppercase shadow-lg hover:brightness-110 transition flex items-center gap-2">
-                        <i class="fas fa-paper-plane"></i> Send & Log to D365
+                        <i class="fas fa-paper-plane"></i> Send & Log to Account
                     </button>
                 </div>
             </div>
@@ -121,7 +121,7 @@
         <div class="flex-1 max-w-2xl mx-12">
             <div class="relative group">
                 <i class="fas fa-search absolute left-4 top-1/2 -translate-y-1/2 text-[var(--text-dim)] group-focus-within:text-[var(--brand)] transition-colors"></i>
-                <input type="text" id="global-search" onkeyup="debouncedSearch()" placeholder="Omni-Search order#, driver, customer, rep, issue..." class="input-dark pl-12 h-11 text-sm w-full bg-black/20 border-[var(--border)] rounded-xl">
+                <input type="text" id="global-search" onkeyup="debouncedSearch()" placeholder="Omni-Search order#, customer, account#, rep, issue..." class="input-dark pl-12 h-11 text-sm w-full bg-black/20 border-[var(--border)] rounded-xl">
             </div>
         </div>
 
@@ -204,6 +204,7 @@
                         <div class="flex items-center gap-3 text-xs text-[var(--text-dim)] font-bold uppercase tracking-widest">
                             <span id="d-id-badge" class="bg-black/30 px-2 py-0.5 rounded border border-[var(--border)]"></span>
                             <span id="d-so" class="text-[var(--brand)] font-mono"></span>
+                            <span id="d-accountnum" class="font-mono bg-[var(--bg-deep)] px-2 py-0.5 rounded border border-[var(--border)] text-[var(--text-main)]"></span>
                         </div>
                     </div>
                     <div id="d-status-pill" class="px-5 py-2 rounded-full border-2 text-xs font-black uppercase tracking-widest bg-black/20 text-white"></div>
@@ -268,6 +269,7 @@
                         id: val(r,['ticket','id']) || Math.random().toString(36).substr(2,6),
                         guid: (val(r,['logisticslog_2id'])||'').replace(/[{}]/g,''),
                         order: val(r,['salesordernumber','sales_order']) || 'N/A',
+                        accountNum: val(r,['accountnum', 'accountnumber']) || '',
                         company: val(r,['companyordeliveryname','company']) || 'Unknown',
                         address: addr, 
                         whs: val(r,['warehouse','whs']),
@@ -288,7 +290,7 @@
                 const { search, wh, status, fullData, mine, user, timeFrame } = payload;
                 const today = new Date().toISOString().split('T')[0];
                 let filtered = fullData.filter(t => {
-                    const sStr = [t.order, t.company, t.owner, t.address, t.id, t.issue].join(' ').toLowerCase();
+                    const sStr = [t.order, t.company, t.owner, t.address, t.id, t.issue, t.accountNum].join(' ').toLowerCase();
                     const matchSearch = sStr.includes(search);
                     const matchWh = !wh || t.whs === wh;
                     const matchStatus = !status || t.status === status;
@@ -368,7 +370,6 @@
             if(type === 'RENDER') { 
                 fullData = data; filteredData = data; globalReps = ownerList || [];
                 
-                // Populate Dropdowns
                 const wSel = document.getElementById('filter-wh'); const sSel = document.getElementById('filter-status');
                 wSel.innerHTML = '<option value="">All Warehouses</option>'; sSel.innerHTML = '<option value="">All Statuses</option>';
                 whsList?.forEach(w => wSel.add(new Option(w, w))); statusList?.forEach(s => sSel.add(new Option(s, s)));
@@ -465,6 +466,7 @@
             const t = fullData.find(x => x.id === id); if(!t) return;
             document.getElementById('d-company').innerText = t.company;
             document.getElementById('d-so').innerText = `SO: ${t.order}`;
+            document.getElementById('d-accountnum').innerText = `Acc: ${t.accountNum || 'N/A'}`;
             document.getElementById('d-id-badge').innerText = `#${t.id}`;
             document.getElementById('d-address').innerText = t.address;
             document.getElementById('d-status-pill').innerText = t.status;
@@ -525,7 +527,7 @@
             
             if (!to) { Toastify({text:"Recipient Required", style:{background:"#ef4444"}}).showToast(); return; }
 
-            Toastify({text:"Logging to Main D365...", style:{background:"#fbbf24"}}).showToast(); 
+            Toastify({text:"Logging to Account Timeline...", style:{background:"#fbbf24"}}).showToast(); 
             try {
                 const token = await getToken(ENV_D365);
                 
@@ -539,31 +541,29 @@
                     ]
                 };
 
-                // Fallback Binding Engine (Accounts if SalesOrder forbidden)
                 let bound = false;
-                try {
-                    const soRes = await fetch(`${D365_API}/salesorders?$filter=ordernumber eq '${t.order}'&$select=salesorderid`, { headers: { 'Authorization': `Bearer ${token}` } });
-                    if(soRes.ok) {
-                        const soData = await soRes.json();
-                        if(soData.value && soData.value.length > 0) { payload[`regardingobjectid_salesorder@odata.bind`] = `/salesorders(${soData.value[0].salesorderid})`; bound = true; }
-                    }
-                } catch(e) { console.warn("SO Access Denied. Trying Account binding..."); }
-
-                if(!bound && t.company) {
+                if(t.accountNum) {
                     try {
-                        const cleanCompany = t.company.replace(/'/g, "''");
-                        const accRes = await fetch(`${D365_API}/accounts?$filter=name eq '${cleanCompany}'&$select=accountid`, { headers: { 'Authorization': `Bearer ${token}` } });
+                        const accRes = await fetch(`${D365_API}/accounts?$filter=accountnumber eq '${t.accountNum}'&$select=accountid`, { headers: { 'Authorization': `Bearer ${token}` } });
                         if(accRes.ok) {
                             const accData = await accRes.json();
-                            if(accData.value && accData.value.length > 0) { payload[`regardingobjectid_account@odata.bind`] = `/accounts(${accData.value[0].accountid})`; }
+                            if(accData.value && accData.value.length > 0) { 
+                                payload[`regardingobjectid_account@odata.bind`] = `/accounts(${accData.value[0].accountid})`; 
+                                bound = true;
+                            }
                         }
-                    } catch(e) {}
+                    } catch(e) { console.warn("Failed to retrieve Account by number."); }
+                }
+
+                if (!bound) {
+                    console.warn("Account Number not found or query failed. Sending email unbound.");
                 }
 
                 const res = await fetch(`${D365_API}/emails`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' }, body: JSON.stringify(payload) });
                 if (!res.ok) throw new Error("D365 API Rejected Payload");
                 
-                Toastify({text:"Logged to D365 Timeline!", style:{background:"#10b981"}}).showToast(); closeEmailModal(); fetchD365EmailFeed(t.order);
+                Toastify({text:"Logged to Customer Timeline!", style:{background:"#10b981"}}).showToast(); 
+                closeEmailModal(); fetchD365EmailFeed(t.order);
             } catch (err) { Toastify({text:`Error: ${err.message}`, style:{background:"#ef4444"}}).showToast(); }
         }
 
