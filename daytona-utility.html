@@ -85,8 +85,8 @@
 
     <div id="loading-screen">
         <div class="relative w-32 h-32 flex justify-center items-center">
-            <i class="fa-solid fa-frog text-[var(--brand)] text-1xl absolute z-20 frog-icon"></i>
-            
+            <i class="fa-solid fa-frog text-[var(--brand)] text-5xl absolute z-20 frog-icon"></i>
+            <i class="fa-solid fa-truck-fast text-white text-6xl absolute z-10" style="margin-top: 30px;"></i>
         </div>
         <div class="mt-6 font-black uppercase tracking-widest text-[var(--brand)] animate-pulse">Initializing LogiLeap...</div>
         <div id="loading-status" class="text-[10px] text-[var(--text-dim)] mt-2 font-mono">Syncing Dual Environments & Employee Rosters</div>
@@ -313,7 +313,10 @@
                 </div>
                 
                 <div id="d-hierarchy-box" class="bg-black/20 p-4 rounded-xl border border-[var(--border)] mt-4 hidden">
-                    <div class="text-[9px] font-black uppercase text-[var(--text-accent)] mb-2 tracking-widest border-b border-[var(--border)] pb-2"><i class="fa fa-sitemap mr-1"></i> Requestor Hierarchy</div>
+                    <div class="text-[9px] font-black uppercase text-[var(--text-accent)] mb-2 tracking-widest border-b border-[var(--border)] pb-2 flex justify-between items-center">
+                        <span><i class="fa fa-sitemap mr-1"></i> Requestor Hierarchy</span>
+                        <span id="d-h-status"></span>
+                    </div>
                     <div class="grid grid-cols-2 gap-3 text-[10px] uppercase tracking-wider">
                         <div><span class="opacity-50 block text-[8px]">Title</span> <span id="d-h-title" class="font-bold text-white"></span></div>
                         <div><span class="opacity-50 block text-[8px]">Department</span> <span id="d-h-dept" class="font-bold text-white"></span></div>
@@ -360,10 +363,12 @@
             return name.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
         };
 
+        let globalDb = [];
+
         self.onmessage = function(e) {
             const { type, payload } = e.data;
-            if(type === 'PARSE') {
-                const db = payload.data.map(r => {
+            if(type === 'PARSE' || type === 'MERGE') {
+                const parsed = payload.data.map(r => {
                     const addr = val(r,['shippingaddress','address']) || '';
                     return {
                         id: val(r,['ticket','id']) || Math.random().toString(36).substr(2,6),
@@ -379,21 +384,34 @@
                         notes: val(r,['logisticsnotes','notes']),
                         issue: val(r,['issue']) || 'Generic',
                         date: val(r,['createdon','date']) ? new Date(val(r,['createdon','date'])).toLocaleDateString('en-CA') : '',
+                        timestamp: val(r,['createdon','date']) ? new Date(val(r,['createdon','date'])).getTime() : 0,
                         zip3: (addr.match(/\b\d{3}/)||['000'])[0],
                         isCoaching: (r.cr714_coachingopp === true || r.cr714_coachingopp === 1 || r['cr714_coachingopp@OData.Community.Display.V1.FormattedValue'] === 'Yes' || r.cr714_coachingopportunity === true || r.cr714_coachingopportunity === 1 || r['cr714_coachingopportunity@OData.Community.Display.V1.FormattedValue'] === 'Yes') || false,
                         coachingNotes: val(r,['coachingnotes']) || ''
                     };
                 });
-                const whsList = [...new Set(db.map(x=>x.whs).filter(x=>x))].sort();
-                const statusList = [...new Set(db.map(x=>x.status).filter(x=>x))].sort();
-                const ownerList = ["Unassigned", ...new Set(db.map(x=>x.owner).filter(x=>x!=="Unassigned"))].sort();
-                self.postMessage({ type: 'RENDER', data: db, whsList, statusList, ownerList });
+
+                if (type === 'PARSE') {
+                    globalDb = parsed;
+                } else if (type === 'MERGE') {
+                    const newItems = [];
+                    parsed.forEach(p => {
+                        const idx = globalDb.findIndex(g => g.guid === p.guid);
+                        if(idx > -1) globalDb[idx] = p; // Update existing
+                        else newItems.push(p); // Add new
+                    });
+                    globalDb = [...newItems, ...globalDb].sort((a,b) => b.timestamp - a.timestamp);
+                }
+
+                const whsList = [...new Set(globalDb.map(x=>x.whs).filter(x=>x))].sort();
+                const statusList = [...new Set(globalDb.map(x=>x.status).filter(x=>x))].sort();
+                const ownerList = ["Unassigned", ...new Set(globalDb.map(x=>x.owner).filter(x=>x!=="Unassigned"))].sort();
+                self.postMessage({ type: 'RENDER', data: globalDb, whsList, statusList, ownerList });
             }
             else if(type === 'FILTER') {
                 const { search, wh, status, fullData, mine, user, timeFrame, dateRange } = payload;
                 const today = new Date().toLocaleDateString('en-CA'); 
                 
-                // STRICT DATE OVERRIDE LOGIC
                 let minDate = '1900-01-01', maxDate = '2100-01-01';
                 if (dateRange && dateRange.trim() !== '') {
                     if (dateRange.includes(' to ')) {
@@ -410,7 +428,7 @@
                     }
                 }
 
-                let filtered = fullData.filter(t => {
+                let filtered = globalDb.filter(t => {
                     const sStr = [t.order, t.company, t.owner, t.address, t.id, t.issue, t.accountNum].join(' ').toLowerCase();
                     const matchSearch = sStr.includes(search);
                     const matchWh = !wh || t.whs === wh;
@@ -423,7 +441,7 @@
                 
                 const stats = { total: filtered.length, active: filtered.filter(x=>x.status !== 'Completed').length, closed: filtered.filter(x=>x.status === 'Completed').length };
                 const mapPoints = filtered.filter(t => ZIP_MAP[t.zip3]).map(t => ({ lat: ZIP_MAP[t.zip3][0], lng: ZIP_MAP[t.zip3][1], id: t.id, status: t.status }));
-                self.postMessage({ type: 'RENDER_FILTERED', data: filtered, stats, mapPoints, fullData });
+                self.postMessage({ type: 'RENDER_FILTERED', data: filtered, stats, mapPoints, fullData: globalDb });
             }
         };
     </script>
@@ -443,6 +461,7 @@
         let empHierarchyMap = {};
         let mapInstance = null, mapLayerGroup = null, chartInstances = {}, showMine = false, activeTimeFrame = '90d';
         let isSilentUpdate = false;
+        let isFetchingBackground = false;
         
         // CHUNKING CONFIG
         let assignLimit = 50;
@@ -494,17 +513,25 @@
         async function fetchEmployeeData() {
             try {
                 const token = await getToken(ENV_DATA);
-                const r = await fetch(`${DATA_API}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_srmanager,cr714_managerassigned,cr714_secondarymanager,cr714_supervisors,cr714_department,cr714_title`, { headers: { 'Authorization': `Bearer ${token}` }});
+                const r = await fetch(`${DATA_API}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_srmanager,cr714_managerassigned,cr714_secondarymanager,cr714_supervisors,cr714_department,cr174_department,cr714_title,cr714_status,statecode`, { 
+                    headers: { 
+                        'Authorization': `Bearer ${token}`,
+                        'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
+                    }
+                });
                 if(r.ok) {
                     const data = await r.json();
                     data.value.forEach(emp => {
                         if(emp.cr714_employeename) {
+                            const val = (field) => emp[`${field}@OData.Community.Display.V1.FormattedValue`] || emp[field] || 'N/A';
+                            
                             empHierarchyMap[emp.cr714_employeename.toLowerCase()] = {
-                                srManager: emp.cr714_srmanager || 'N/A',
-                                manager: emp.cr714_managerassigned || emp.cr714_secondarymanager || 'N/A',
-                                supervisor: emp.cr714_supervisors || 'N/A',
-                                department: emp.cr714_department || emp.cr174_department || 'N/A',
-                                title: emp.cr714_title || 'N/A'
+                                srManager: val('cr714_srmanager'),
+                                manager: val('cr714_managerassigned') !== 'N/A' ? val('cr714_managerassigned') : val('cr714_secondarymanager'),
+                                supervisor: val('cr714_supervisors'),
+                                department: val('cr714_department') !== 'N/A' ? val('cr714_department') : val('cr174_department'),
+                                title: val('cr714_title'),
+                                status: val('cr714_status') !== 'N/A' ? val('cr714_status') : val('statecode')
                             };
                         }
                     });
@@ -513,6 +540,7 @@
         }
 
         async function refreshData(silent = false) {
+            // Prevent refresh if a select dropdown is currently active to avoid closing it
             if (silent) {
                 const active = document.activeElement;
                 if (active && active.tagName === 'SELECT' && (active.closest('#assign-tbody') || active.closest('.kanban-board') || active.closest('#history-table-body'))) {
@@ -525,17 +553,60 @@
             
             try { 
                 const token = await getToken(ENV_DATA);
-                const r = await fetch(`${DATA_API}/${ENTITY_SET}?$orderby=createdon desc`, {
-                    headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' }
-                });
+                const headers = { 
+                    'Authorization': `Bearer ${token}`, 
+                    'Accept': 'application/json', 
+                    'OData-MaxVersion': '4.0', 
+                    'OData-Version': '4.0',
+                    'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
+                };
+                
+                // Fast Fetch: Top 200 items so UI loads instantly
+                const r = await fetch(`${DATA_API}/${ENTITY_SET}?$orderby=createdon desc&$top=200`, { headers });
                 
                 if(!r.ok) throw new Error("Dataverse API Error");
-                const j = await r.json(); worker.postMessage({ type: 'PARSE', payload: { data: j.value || [] } });
+                const j = await r.json(); 
+                
+                // If silent polling, merge. If initial load, parse fresh.
+                worker.postMessage({ type: silent ? 'MERGE' : 'PARSE', payload: { data: j.value || [] } });
+
+                // On initial load, trigger background pagination to pull full history silently
+                if (!silent && !isFetchingBackground && j['@odata.nextLink']) {
+                    isFetchingBackground = true;
+                    backgroundFetchAll(j['@odata.nextLink'], token);
+                }
+
             } catch(e){ 
                 if (!silent) {
                     document.getElementById('loading-status').innerText = "API Error. Retrying..."; 
                     setTimeout(() => refreshData(false), 3000); 
                 }
+            }
+        }
+
+        async function backgroundFetchAll(nextLink, token) {
+            try {
+                const headers = { 
+                    'Authorization': `Bearer ${token}`, 
+                    'Accept': 'application/json', 
+                    'OData-MaxVersion': '4.0', 
+                    'OData-Version': '4.0',
+                    'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
+                };
+                let currentLink = nextLink;
+                
+                while (currentLink) {
+                    let r = await fetch(currentLink, { headers });
+                    if (!r.ok) break;
+                    let j = await r.json();
+                    
+                    if (j.value && j.value.length > 0) {
+                        worker.postMessage({ type: 'MERGE', payload: { data: j.value } });
+                    }
+                    currentLink = j['@odata.nextLink'];
+                }
+            } catch(e) { console.warn("Background fetch error", e); } finally {
+                isFetchingBackground = false;
             }
         }
 
@@ -972,6 +1043,15 @@
                 document.getElementById('d-h-sup').innerText = h.supervisor;
                 document.getElementById('d-h-mgr').innerText = h.manager;
                 document.getElementById('d-h-srmgr').innerText = h.srManager;
+                
+                const statEl = document.getElementById('d-h-status');
+                statEl.innerText = h.status;
+                if(h.status.toLowerCase().includes('inactive') || h.status.toLowerCase().includes('term')) {
+                    statEl.className = "text-white px-2 py-0.5 rounded bg-red-500/50 border border-red-500 text-[8px]";
+                } else {
+                    statEl.className = "text-white px-2 py-0.5 rounded bg-black/40 border border-[var(--border)] text-[8px]";
+                }
+
                 document.getElementById('d-hierarchy-box').classList.remove('hidden');
             } else {
                 document.getElementById('d-hierarchy-box').classList.add('hidden');
