@@ -187,15 +187,15 @@
             </div>
 
             <div class="search-controls" id="singleSearchBox">
-                <input type="text" id="searchInput" placeholder="Search by Account Name or Number..." onkeydown="if(event.key === 'Enter') executeSearch()">
+                <input type="text" id="searchInput" placeholder="Search by Account Name, Number, Phone, City, or Order #..." onkeydown="if(event.key === 'Enter') executeSearch()">
             </div>
 
             <div class="search-controls" id="bulkSearchBox" style="display: none; width: 100%;">
-                <textarea id="bulkSearchInput" placeholder="Paste a list of Account Numbers here (separated by commas or new lines).&#10;Example:&#10;12345&#10;67890&#10;99999"></textarea>
+                <textarea id="bulkSearchInput" placeholder="Paste a list of Account Numbers or Sales Order Numbers here (separated by commas or new lines).&#10;Example:&#10;12345&#10;ORD-09876&#10;99999"></textarea>
             </div>
 
             <div style="width: 100%; text-align: center;">
-                <button onclick="executeSearch()" style="margin-right: 10px;"><i class="fa-solid fa-magnifying-glass"></i> Search Accounts</button>
+                <button onclick="executeSearch()" style="margin-right: 10px;"><i class="fa-solid fa-magnifying-glass"></i> Search Dataverse</button>
                 <button class="logout-btn" onclick="signOut()"><i class="fa-solid fa-power-off"></i></button>
             </div>
         </div>
@@ -498,51 +498,93 @@
             document.getElementById('bulkSearchBox').style.display = mode === 'bulk' ? 'flex' : 'none';
         }
 
-        // --- PHASE 1: DYNAMIC SEARCH (SINGLE OR BULK) ---
+        // --- PHASE 1: DYNAMIC SEARCH (CROSS-ENTITY PARALLEL EXECUTION) ---
         async function executeSearch() {
             dashboardContainer.style.display = "none"; resultsContainer.style.display = "none";
             document.getElementById('resultsList').innerHTML = "";
-
-            let queryUrls = [];
-
-            if (searchMode === 'single') {
-                const term = document.getElementById('searchInput').value.trim();
-                if (!term) return;
-                queryUrls.push(`${d365ApiUrl}/accounts?$filter=contains(name,'${encodeURIComponent(term)}') or contains(accountnumber,'${encodeURIComponent(term)}')&$select=name,accountnumber,accountid&$top=20`);
-            } else {
-                const rawText = document.getElementById('bulkSearchInput').value;
-                // Parse textarea into an array of account numbers
-                const acctArray = rawText.split(/[\s,]+/).map(a => a.trim()).filter(a => a.length > 0);
-                if (acctArray.length === 0) return;
-
-                // Chunk into arrays of 25 to prevent URL length limits on the API
-                const chunkSize = 25;
-                for (let i = 0; i < acctArray.length; i += chunkSize) {
-                    const chunk = acctArray.slice(i, i + chunkSize);
-                    const filterString = chunk.map(num => `accountnumber eq '${encodeURIComponent(num)}'`).join(' or ');
-                    queryUrls.push(`${d365ApiUrl}/accounts?$filter=${filterString}&$select=name,accountnumber,accountid`);
-                }
-            }
-
+            let allAccounts = [];
             statusMessage.innerHTML = "<div class='loading-spinner' style='width: 14px; height: 14px;'></div> Querying Dataverse...";
 
             try {
                 const token = await getToken();
                 const headers = { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' };
-                
-                // Execute all queries in parallel
-                const fetchPromises = queryUrls.map(url => fetch(url, { headers }).then(r => r.json()));
-                const resultsArray = await Promise.all(fetchPromises);
-                
-                // Merge results
-                let allRecords = [];
-                resultsArray.forEach(res => { if(res.value) allRecords = allRecords.concat(res.value); });
-                
-                // Deduplicate by accountid just in case
-                const uniqueRecords = Array.from(new Map(allRecords.map(item => [item.accountid, item])).values());
 
+                if (searchMode === 'single') {
+                    const term = document.getElementById('searchInput').value.trim();
+                    if (!term) return;
+                    const encodedTerm = encodeURIComponent(term);
+
+                    // Cross-Entity Parallel Fetch
+                    const accountFilter = `contains(accountnumber,'${encodedTerm}') or contains(name,'${encodedTerm}') or contains(telephone1,'${encodedTerm}') or contains(address1_city,'${encodedTerm}')`;
+                    const q1 = fetch(`${d365ApiUrl}/accounts?$filter=${accountFilter}&$select=name,accountnumber,accountid&$top=20`, { headers }).then(r => r.json());
+                    const q2 = fetch(`${d365ApiUrl}/salesorders?$filter=contains(ordernumber,'${encodedTerm}')&$select=_customerid_value&$top=20`, { headers }).then(r => r.json());
+
+                    const [accRes, soRes] = await Promise.all([q1, q2]);
+                    allAccounts = accRes.value || [];
+
+                    let existingIds = new Set(allAccounts.map(a => a.accountid));
+                    let newIds = new Set();
+                    if (soRes.value) {
+                        soRes.value.forEach(so => {
+                            if (so._customerid_value && !existingIds.has(so._customerid_value)) {
+                                newIds.add(so._customerid_value);
+                            }
+                        });
+                    }
+
+                    if (newIds.size > 0) {
+                        const idFilter = Array.from(newIds).map(id => `accountid eq '${id}'`).join(' or ');
+                        const q3 = await fetch(`${d365ApiUrl}/accounts?$filter=${idFilter}&$select=name,accountnumber,accountid`, { headers }).then(r => r.json());
+                        if (q3.value) allAccounts = allAccounts.concat(q3.value);
+                    }
+
+                } else {
+                    const rawText = document.getElementById('bulkSearchInput').value;
+                    const acctArray = rawText.split(/[\s,]+/).map(a => a.trim()).filter(a => a.length > 0);
+                    if (acctArray.length === 0) return;
+
+                    const chunkSize = 20; // Chunking protects against URL length limits
+                    let missingAccountIds = new Set();
+
+                    for (let i = 0; i < acctArray.length; i += chunkSize) {
+                        const chunk = acctArray.slice(i, i + chunkSize);
+                        
+                        const accFilter = chunk.map(num => `accountnumber eq '${encodeURIComponent(num)}'`).join(' or ');
+                        const soFilter = chunk.map(num => `ordernumber eq '${encodeURIComponent(num)}'`).join(' or ');
+
+                        const p1 = fetch(`${d365ApiUrl}/accounts?$filter=${accFilter}&$select=name,accountnumber,accountid`, { headers }).then(r => r.json());
+                        const p2 = fetch(`${d365ApiUrl}/salesorders?$filter=${soFilter}&$select=_customerid_value`, { headers }).then(r => r.json());
+
+                        const [chunkAccRes, chunkSoRes] = await Promise.all([p1, p2]);
+                        
+                        if (chunkAccRes.value) allAccounts = allAccounts.concat(chunkAccRes.value);
+                        
+                        if (chunkSoRes.value) {
+                            let currentIds = new Set(allAccounts.map(a => a.accountid));
+                            chunkSoRes.value.forEach(so => {
+                                if (so._customerid_value && !currentIds.has(so._customerid_value)) {
+                                    missingAccountIds.add(so._customerid_value);
+                                }
+                            });
+                        }
+                    }
+
+                    if (missingAccountIds.size > 0) {
+                        const missingArray = Array.from(missingAccountIds);
+                        for (let i = 0; i < missingArray.length; i += chunkSize) {
+                            const chunk = missingArray.slice(i, i + chunkSize);
+                            const idFilter = chunk.map(id => `accountid eq '${id}'`).join(' or ');
+                            const missingRes = await fetch(`${d365ApiUrl}/accounts?$filter=${idFilter}&$select=name,accountnumber,accountid`, { headers }).then(r => r.json());
+                            if (missingRes.value) allAccounts = allAccounts.concat(missingRes.value);
+                        }
+                    }
+                }
+
+                // Deduplicate resulting data
+                const uniqueRecords = Array.from(new Map(allAccounts.map(item => [item.accountid, item])).values());
                 renderResults(uniqueRecords);
                 statusMessage.innerHTML = `Found <span style="color: var(--neon-cyan);">${uniqueRecords.length}</span> record(s).`;
+
             } catch (error) { 
                 console.error(error);
                 statusMessage.innerHTML = "<div class='error-text'>Error fetching data. Check console.</div>"; 
@@ -552,7 +594,7 @@
         function renderResults(records) {
             const list = document.getElementById('resultsList');
             resultsContainer.style.display = "block";
-            if (records.length === 0) { list.innerHTML = "<p class='empty-state'>No accounts found.</p>"; return; }
+            if (records.length === 0) { list.innerHTML = "<p class='empty-state'>No accounts found matching search term.</p>"; return; }
 
             records.forEach(record => {
                 const card = document.createElement('div'); card.className = 'account-card';
@@ -589,7 +631,7 @@
                         document.getElementById('dashPhone').innerText = acc.telephone1 || 'N/A';
                         document.getElementById('dashRevenue').innerText = acc.revenue != null ? formatter.format(acc.revenue) : 'N/A';
                         document.getElementById('dashEmployees').innerText = acc.numberofemployees || 'N/A';
-                        document.getElementById('dashIndustry').innerText = acc['industrycode@OData.Community.Display.V1.FormattedValue'] || acc.industrycode || 'N/A'; // Attempt formatted value if annotation preferred is on
+                        document.getElementById('dashIndustry').innerText = acc['industrycode@OData.Community.Display.V1.FormattedValue'] || acc.industrycode || 'N/A';
                         document.getElementById('dashCreditLimit').innerText = acc.creditlimit != null ? formatter.format(acc.creditlimit) : 'N/A';
                         document.getElementById('dashAddress').innerText = [acc.address1_line1, acc.address1_city, acc.address1_stateorprovince].filter(Boolean).join(', ') || 'No Address Listed';
                         document.getElementById('dashCreditHold').innerHTML = acc.creditonhold ? `<span class="status-badge status-hold">Credit Hold Active</span>` : `<span class="status-badge status-ok">Good Standing</span>`;
