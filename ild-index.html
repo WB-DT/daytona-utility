@@ -897,9 +897,17 @@ opacity-40">CC:</span>
             el.innerHTML = `<i class="fa fa-spinner fa-spin mr-1"></i> Checking Delivery Info...`;
             try {
                 const url = `https://wbreporting.wbmason.corp/ReportServer?%2Fwbreports%2FCRMReports%2FCustomerSalesOrderRpt_CRM&Acct=${accountNumber}&SalesID=${orderNumber}&rs%3ACommand=Render&rs%3AFormat=HTML5&rc%3ALinkTarget=_top&rc%3AJavascript=false&rc%3AToolbar=false`;
-                const response = await fetch(url);
-                if (!response.ok) throw new Error("Report fetch failed");
+                
+                // Using mode: 'no-cors' to suppress console error as requested.
+                // This produces an opaque response, which we can't parse, so it naturally hits our new local D365 table fallback!
+                const response = await fetch(url, { mode: 'no-cors' });
                 const htmlText = await response.text();
+                
+                if (!htmlText) {
+                    await fetchOrderDetailsD365(orderNumber, accountNumber);
+                    return;
+                }
+                
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(htmlText, 'text/html');
                 
@@ -986,7 +994,8 @@ opacity-40">CC:</span>
         async function fetchOrderDetailsD365(orderNumber, accountNumber) {
             const el = document.getElementById('d-order-date');
             try {
-                const token = await getToken(ENV_D365);
+                // Switching this to query your accessible table (ENTITY_SET) rather than the locked-down salesorders table.
+                const token = await getToken(ENV_DATA);
                 let safeAccountNum = String(accountNumber || '').trim().replace(/'/g, "''");
                 let safeOrderNum = String(orderNumber || '').trim();
                 
@@ -994,32 +1003,31 @@ opacity-40">CC:</span>
                     throw new Error("Invalid Account Number");
                 }
                 
-                // Step 1: Resolve Account ID using accountNumber
-                const accQuery = `${D365_API}/accounts?$filter=accountnumber eq '${safeAccountNum}'&$select=accountid`;
-                const accRes = await fetch(accQuery, { headers: { 'Authorization': `Bearer ${token}` } });
-                const accData = await accRes.json();
+                // We request all logs for the account number
+                const orderQuery = `${DATA_API}/${ENTITY_SET}?$filter=cr714_accountnumber eq '${safeAccountNum}'&$select=cr714_salesordernumber,createdon`;
                 
-                if (accData.value && accData.value.length > 0) {
-                    const accountId = accData.value[0].accountid;
+                const res = await fetch(orderQuery, { 
+                    headers: { 
+                        'Authorization': `Bearer ${token}`,
+                        'Accept': 'application/json', 
+                        'OData-MaxVersion': '4.0', 
+                        'OData-Version': '4.0'
+                    } 
+                });
+                const data = await res.json();
+                
+                if (data.value && data.value.length > 0) {
+                    // Search locally in the results for the exact sales order number
+                    const foundOrder = data.value.find(o => String(o.cr714_salesordernumber).trim() === safeOrderNum);
                     
-                    // Step 2: Fetch all sales orders for this account
-                    const orderQuery = `${D365_API}/salesorders?$filter=_customerid_value eq '${accountId}'&$select=ordernumber,createdon`;
-                    const res = await fetch(orderQuery, { headers: { 'Authorization': `Bearer ${token}` } });
-                    const data = await res.json();
-                    
-                    if (data.value && data.value.length > 0) {
-                        // Step 3: Search locally for the specific order number
-                        const foundOrder = data.value.find(o => String(o.ordernumber).trim() === safeOrderNum);
-                        
-                        if (foundOrder && foundOrder.createdon) {
-                            const dt = new Date(foundOrder.createdon);
-                            el.innerHTML = `<div class="flex items-center justify-end font-bold text-[11px]"><i class="fas fa-calendar-check text-[var(--brand)] mr-1.5"></i> ${dt.toLocaleDateString('en-CA')} @ ${dt.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>`;
-                            return;
-                        }
+                    if (foundOrder && foundOrder.createdon) {
+                        const dt = new Date(foundOrder.createdon);
+                        el.innerHTML = `<div class="flex items-center justify-end font-bold text-[11px]"><i class="fas fa-calendar-check text-[var(--brand)] mr-1.5"></i> ${dt.toLocaleDateString('en-CA')} @ ${dt.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>`;
+                        return;
                     }
                 }
                 
-                el.innerHTML = `<div class="flex items-center justify-end font-bold text-[11px]"><i class="fas fa-exclamation-circle text-[var(--text-accent)] mr-1.5"></i> Order not found in D365</div>`;
+                el.innerHTML = `<div class="flex items-center justify-end font-bold text-[11px]"><i class="fas fa-exclamation-circle text-[var(--text-accent)] mr-1.5"></i> Order not found in History</div>`;
             } catch(e) {
                 console.warn("fetchOrderDetailsD365 Error:", e);
                 el.innerText = "";
