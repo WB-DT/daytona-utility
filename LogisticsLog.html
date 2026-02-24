@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLog v105.99 | Logistics Dashboard</title>
+    <title>LogiLog v106.04 | Logistics Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -95,7 +95,7 @@
         <div class="flex items-center gap-6">
             <div class="flex items-center gap-3">
                 <i class="fa-solid fa-frog text-2xl text-[var(--brand)]"></i>
-                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v105.99</span></div>
+                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v106.04</span></div>
             </div>
             <input type="text" id="global-search" oninput="render()" placeholder="Search (Order, Warehouse, Company...)" class="w-80 bg-black/5 border border-[var(--border)] p-2 text-xs rounded text-[var(--text-main)] outline-none focus:border-[var(--brand)]">
         </div>
@@ -150,6 +150,7 @@
                         <option value="Escalated - Wayne">Escalated - Wayne</option>
                         <option value="Escalated - Working On">Escalated - Working On</option>
                         <option value="Sent Back">Sent Back</option>
+                        <option value="Working on">Working on</option>
                         <option value="Completed">Completed</option>
                         <option value="Completed Escalated">Completed Escalated</option>
                         <option value="Escalation Sent">Escalation Sent</option>
@@ -347,7 +348,6 @@
             const authorizedAdmins = ["Wayne Rendt", "Holly Evans", "Kari Westervelt", "Taylor Whitaker"];
             if (authorizedAdmins.includes(account.name)) { document.getElementById('admin-toggle-container').style.display = 'flex'; }
             
-            // v105.99: Non-blocking immediate load [cite: 1, 147-153]
             await fetchData();
             const repFilter = document.getElementById('rep-view-filter');
             if (repFilter && Array.from(repFilter.options).some(o => o.value === account.name)) {
@@ -374,7 +374,7 @@
                 const token = await getToken(ENV_DATA); 
                 const r = await fetch(`${DATA_API}/${ENTITY_SET}?$orderby=createdon desc`, { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' } }); 
                 const data = await r.json(); 
-                if (data && data.error && data.error.code === '0x80040220') { showToast("Dataverse Read Permission Denied.", "error"); return; }
+                if (data && data.error && data.error.code === '0x80040220') { showToast("Dataverse Permission Denied.", "error"); return; }
                 if (data && data.value) ingest(data.value); 
             } catch (e) {} 
             setTimeout(() => { if(icon) icon.className = "fa fa-circle text-[8px] text-[var(--brand)]"; }, 1500); 
@@ -423,7 +423,6 @@
         function render() { 
             const list = document.getElementById('ticket-list'); const search = document.getElementById('global-search').value.toLowerCase(); const repVal = document.getElementById('rep-view-filter').value; const dispoVal = document.getElementById('dispo-gallery-filter').value; 
             const filtered = db.filter(t => { 
-                // v105.99: warehouse searchable [cite: 1, 178-180]
                 const matchSearch = (t.order + t.company + t.account + t.issue + t.warehouse).toLowerCase().includes(search); 
                 const isActive = ['Pending', 'Working on', 'Follow-up', 'Escalated', 'Escalated - Holly', 'Escalated - Wayne', 'Escalated - Working On', 'Escalation Sent'].includes(t.status); 
                 const modeFilter = currentMode === 'active' ? isActive : !isActive; 
@@ -456,7 +455,6 @@
             document.getElementById('d-company').innerText = t.company; document.getElementById('d-order').innerText = t.order; 
             document.getElementById('d-full-time').innerText = t.fullStamp; document.getElementById('d-account').innerText = "#" + t.account; 
             document.getElementById('d-shipping-address').innerText = t.shippingAddress; 
-            // RESTORED UI Logic for Contact row, Route badge, and Driver info
             document.getElementById('d-contact-info').innerText = t.contactInfo;
             document.getElementById('d-wh-badge').innerText = t.warehouse; 
             document.getElementById('d-route-badge').innerText = `RT: ${t.route}`;
@@ -482,23 +480,71 @@
             btn.innerText = "SENDING..."; btn.disabled = true; 
             try { 
                 const parse = (s) => s.split(/[,;]/).map(e => e.trim()).filter(e => e).map(e => ({ emailAddress: { address: e } })); 
-                // engine 1: Outlook Send immediate
                 const graphToken = await msalInstance.acquireTokenSilent({ scopes: ["Mail.Send"], account: msalAccount }); 
                 await fetch("https://graph.microsoft.com/v1.0/me/sendMail", { method: "POST", headers: { "Authorization": `Bearer ${graphToken.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ message: { subject, body: { contentType: "HTML", content: body }, toRecipients: parse(toField), ccRecipients: parse(ccField) }, saveToSentItems: "true" }) }); 
                 showToast("Email Sent!"); 
                 closeDraftModal();
-                // engine 2: Background D365 Log [cite: 1, 221-225]
                 try {
                     const dToken = await getToken(ENV_D365); const parties = []; if(currentUser.id) parties.push({ "participationtypemask": 1, "partyid_systemuser@odata.bind": `/systemusers(${currentUser.id})` }); parse(toField).forEach(p => parties.push({ "participationtypemask": 2, "addressused": p.emailAddress.address })); parse(ccField).forEach(p => parties.push({ "participationtypemask": 3, "addressused": p.emailAddress.address })); 
                     const logPayload = { subject, description: body, directioncode: true, email_activity_parties: parties }; 
                     const soRes = await fetch(`${D365_API}/salesorders?$filter=ordernumber eq '${t.order.trim()}'&$select=salesorderid`, { headers: { 'Authorization': `Bearer ${dToken}` } }); const soData = await soRes.json(); if(soData.value?.length > 0) logPayload[`regardingobjectid_salesorder@odata.bind`] = `/salesorders(${soData.value[0].salesorderid})`; await fetch(`${D365_API}/emails`, { method: 'POST', headers: { 'Authorization': `Bearer ${dToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(logPayload) }); 
                     showToast("Activity Tracked!");
-                } catch(e) { showToast("Track failed (Permission issue)", "error"); }
+                } catch(e) { showToast("Track failed (Permission error)", "error"); }
             } catch (err) { showToast("Send Error", "error"); } finally { btn.innerText = "Send & Log to Account"; btn.disabled = false; } 
         }
 
-        function openDraftModal() { const t = db.find(x => x.id === currentTicketId); if(!t) return; let repPhone = "(508) 436 - XXXX"; if (currentUserProfileData?.businessPhones?.length > 0) { const raw = currentUserProfileData.businessPhones[0]; repPhone = raw.length === 4 ? `(508) 436 - ${raw}` : raw; } const whNotes = document.getElementById('d-warehouse-input').value.trim(); const drNotes = document.getElementById('d-driver-input').value.trim(); let combined = ""; if (whNotes) combined += `<strong>Warehouse Update:</strong><br>${whNotes.replace(/\n/g, '<br>')}<br><br>`; if (drNotes) combined += `<strong>Driver Feedback:</strong><br>${drNotes.replace(/\n/g, '<br>')}<br><br>`; document.getElementById('m-to-address').value = `${t.submitRep.toLowerCase().replace(/\s+/g, '.')}@wbmason.com`; document.getElementById('m-subject').value = `${t.order} / ${t.company} / Logistics Update`; document.getElementById('m-body').innerHTML = `Hello,<br><br><strong>Status:</strong> ${t.status}<br><strong>Account Name:</strong> #${t.order}<br><strong>Company:</strong> ${t.company}<br><strong>Issue:</strong> ${t.issue}<br><br>${combined}Sincerely,<br><strong>${currentUser.name}</strong><br>W.B. MASON CO, INC.<br>${repPhone}`; document.getElementById('email-modal-overlay').style.display = 'flex'; }
-        function openWarehouseEmail() { const t = db.find(x => x.id === currentTicketId); if(!t) return; let repPhone = "(508) 436 - XXXX"; if (currentUserProfileData?.businessPhones?.length > 0) { const raw = currentUserProfileData.businessPhones[0]; repPhone = raw.length === 4 ? `(508) 436 - ${raw}` : raw; } const signature = `<br><br>Thank you,<br><strong>${currentUser.name}</strong><br>Logistics Department<br>${repPhone}`; document.getElementById('m-to-address').value = ""; document.getElementById('m-cc-address').value = ""; document.getElementById('m-subject').value = `${t.company} / ${t.order} / ${t.warehouse} / ${t.issue} / ${t.route}`; document.getElementById('m-body').innerHTML = `Hello,<br><br>${t.issue}<br><br>${t.description}<br><br>${t.order}<br>${t.account} - ${t.company}<br>${t.shippingAddress}<br><br>${t.route} - ${t.warehouse}<br><br>${signature}`; document.getElementById('email-modal-overlay').style.display = 'flex'; }
+        // Updated Template Overhaul per turn 32 request
+        function openDraftModal() { 
+            const t = db.find(x => x.id === currentTicketId); 
+            if(!t) return; 
+            let repPhone = "(508) 436 - XXXX"; 
+            if (currentUserProfileData?.businessPhones?.length > 0) { 
+                const raw = currentUserProfileData.businessPhones[0]; 
+                repPhone = raw.length === 4 ? `(508) 436 - ${raw}` : raw; 
+            } 
+            const whNotes = document.getElementById('d-warehouse-input').value.trim(); 
+            const drNotes = document.getElementById('d-driver-input').value.trim(); 
+            let combined = ""; 
+            if (whNotes) combined += `<strong>Warehouse Update:</strong><br>${whNotes.replace(/\n/g, '<br>')}<br><br>`; 
+            if (drNotes) combined += `<strong>Driver Feedback:</strong><br>${drNotes.replace(/\n/g, '<br>')}<br><br>`; 
+            
+            // Dynamic Title Logic
+            let userTitle = "Logistics Department";
+            if (currentUser.name === "Holly Evans") userTitle = "Logistics Supervisor";
+            if (currentUser.name === "Wayne Rendt") userTitle = "Logistics Manager";
+
+            document.getElementById('m-to-address').value = `${t.submitRep.toLowerCase().replace(/\s+/g, '.')}@wbmason.com`; 
+            document.getElementById('m-subject').value = `${t.order} / ${t.company} / Logistics Update`; 
+            
+            // Layout strictly per turn 32 requirements
+            document.getElementById('m-body').innerHTML = `Hello,<br><br><strong>Order Number:</strong> #${t.order}<br><strong>Account Number:</strong> ${t.account}<br><strong>Account Name:</strong> ${t.company}<br><strong>Contact Info:</strong> ${t.contactInfo}<br><strong>Delivery Address:</strong> ${t.shippingAddress}<br>${t.warehouse} / ${t.route}<br><br><strong>Issue:</strong> ${t.issue}<br><strong>Description:</strong> ${t.description}<br><br>${combined}Sincerely,<br><strong>${currentUser.name}</strong><br>W.B. MASON CO, INC.<br>${userTitle}<br>${repPhone}`; 
+            document.getElementById('email-modal-overlay').style.display = 'flex'; 
+        }
+
+        function openWarehouseEmail() { 
+            const t = db.find(x => x.id === currentTicketId); 
+            if(!t) return; 
+            let repPhone = "(508) 436 - XXXX"; 
+            if (currentUserProfileData?.businessPhones?.length > 0) { 
+                const raw = currentUserProfileData.businessPhones[0]; 
+                repPhone = raw.length === 4 ? `(508) 436 - ${raw}` : raw; 
+            } 
+            
+            // Dynamic Title Logic
+            let userTitle = "Logistics Department";
+            if (currentUser.name === "Holly Evans") userTitle = "Logistics Supervisor";
+            if (currentUser.name === "Wayne Rendt") userTitle = "Logistics Manager";
+
+            const signature = `<br><br>Thank you,<br><strong>${currentUser.name}</strong><br>${userTitle}<br>${repPhone}`; 
+            document.getElementById('m-to-address').value = ""; 
+            document.getElementById('m-cc-address').value = ""; 
+            document.getElementById('m-subject').value = `${t.company} / ${t.order} / ${t.warehouse} / ${t.issue} / ${t.route}`; 
+            
+            // Layout strictly per turn 32 requirements
+            document.getElementById('m-body').innerHTML = `Hello,<br><br><strong>Order Number:</strong> #${t.order}<br><strong>Account Number:</strong> ${t.account}<br><strong>Account Name:</strong> ${t.company}<br><strong>Contact Info:</strong> ${t.contactInfo}<br><strong>Delivery Address:</strong> ${t.shippingAddress}<br>${t.warehouse} / ${t.route}<br><br><strong>Issue:</strong> ${t.issue}<br><strong>Description:</strong> ${t.description}<br><br>${signature}`; 
+            document.getElementById('email-modal-overlay').style.display = 'flex'; 
+        }
+
         async function saveRecord() { 
             const btn = document.getElementById('save-btn'); const t = db.find(x => x.id === currentTicketId); const dispoInput = document.getElementById('d-disposition'); const dispoVal = dispoInput.value; const isAdmin = document.getElementById('admin-bypass-toggle')?.checked || false; if (!isAdmin && t.logisticsOwner !== 'Unassigned' && !dispoVal) { showToast("Select Disposition.", "error"); dispoInput.classList.add('input-error-highlight'); return; }
             dispoInput.classList.remove('input-error-highlight'); btn.innerText = "SAVING..."; btn.disabled = true; try { const token = await getToken(ENV_DATA); await fetch(`${DATA_API}/${ENTITY_SET}(${t.guid})`, { method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ "cr714_disposition": dispoVal, "cr714_receivedemailfromwarehousenotes": document.getElementById('d-warehouse-input').value, "cr714_receivedtextfromdrivernotes": document.getElementById('d-driver-input').value }) }); showToast("Saved successfully"); } catch (e) { showToast("Save Error", "error"); } finally { btn.innerText = "Save Logistics Update"; btn.disabled = false; fetchData(); } 
