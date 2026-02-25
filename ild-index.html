@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLeap v106.00 | Master Command</title>
+    <title>LogiLeap v106.01 | Master Command</title>
     
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -160,7 +160,7 @@
             <div class="flex justify-end gap-3 mt-4 pt-4 border-t border-[var(--border)]">
                 <button onclick="closeEmailModal()" class="px-6 py-2 rounded border border-[var(--border)] text-[var(--text-dim)] hover:text-white text-xs font-bold uppercase transition">Discard</button>
                 <button onclick="confirmEmailLog()" id="btn-send-email" class="px-8 py-2 bg-[var(--brand)] text-black text-xs font-black uppercase shadow-lg hover:brightness-110 transition flex items-center gap-2">
-                    <i class="fas fa-paper-plane"></i> Send via Outlook & Log to D365
+                    <i class="fas fa-paper-plane"></i> Send via Outlook & Log to Account
                 </button>
             </div>
         </div>
@@ -169,7 +169,7 @@
     <header class="bg-[var(--bg-surface)] border-b border-[var(--border)] px-6 py-2 flex justify-between items-center shadow-sm relative z-30">
         <div class="flex items-center gap-4">
             <i class="fa-solid fa-frog text-2xl text-[var(--brand)]"></i>
-            <h1 class="font-black uppercase tracking-tighter text-xl text-[var(--brand)]">LOGILEAP <span class="text-[10px] opacity-40">v106.00</span></h1>
+            <h1 class="font-black uppercase tracking-tighter text-xl text-[var(--brand)]">LOGILEAP <span class="text-[10px] opacity-40">v106.01</span></h1>
         </div>
 
         <div class="flex-1 max-w-2xl mx-12">
@@ -673,6 +673,23 @@
 
         Chart.register(ChartDataLabels);
 
+        // Define Hoisted Global Functions
+        function setTheme(t) { 
+            document.body.setAttribute('data-theme', t); 
+            localStorage.setItem('theme', t); 
+        }
+
+        function applyFilters() { 
+            worker.postMessage({ type: 'FILTER', payload: { search: document.getElementById('global-search').value.toLowerCase(), wh: document.getElementById('filter-wh').value, status: document.getElementById('filter-status').value, ownerFilter: document.getElementById('filter-owner').value, sortFilter: document.getElementById('filter-sort').value, fullData, mine: showMine, user: userProfile.name, timeFrame: activeTimeFrame, dateRange: document.getElementById('filter-date').value, hideFurniture } }); 
+        }
+
+        function switchView(v) { 
+            document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.id === `nav-${v}`)); 
+            document.querySelectorAll('.view-section').forEach(s => s.classList.toggle('hidden', s.id !== `container-${v}`)); 
+            if(v === 'map') setTimeout(initMap, 300); 
+            renderView(false); 
+        }
+
         async function getToken(envUrl) {
             const request = { scopes: [`${envUrl}/user_impersonation`] };
             const accounts = msalInstance.getAllAccounts();
@@ -807,23 +824,6 @@
             } catch(e) { console.warn("Background fetch error", e); } finally { isFetchingBackground = false; }
         }
 
-        async function processAutoResolves(autoResolvable) {
-            try {
-                const token = await getToken(ENV_DATA);
-                for (let group of autoResolvable) {
-                    for (let r of group.records) {
-                        await fetch(`${DATA_API}/${ENTITY_SET}(${r.guid})`, {
-                            method: 'PATCH',
-                            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ "cr714_logisticsowner": group.owner })
-                        });
-                        const idx = fullData.findIndex(x => x.guid === r.guid);
-                        if (idx > -1) fullData[idx].owner = group.owner;
-                    }
-                }
-            } catch(e) { console.warn("Auto-resolve failed", e); }
-        }
-
         worker.onmessage = (e) => {
             const { type, data, stats, whsList, statusList, ownerList, mapPoints, fullData: workerFull, conflicts, autoResolvable } = e.data;
             if(type === 'RENDER') { 
@@ -838,21 +838,12 @@
                 globalReps.forEach(r => fOwner.add(new Option(r, r)));
                 
                 wSel.value = currWh; sSel.value = currStat; if(currOwn) mOwner.value = currOwn; if(currFOwn) fOwner.value = currFOwn;
-                
-                if (autoResolvable && autoResolvable.length > 0) {
-                    processAutoResolves(autoResolvable);
-                }
 
                 if (conflicts && conflicts.length > 0) {
                     activeConflicts = conflicts;
                     const btn = document.getElementById('btn-conflict-header');
                     btn.classList.remove('hidden');
                     btn.innerHTML = `<i class="fa fa-triangle-exclamation text-[var(--text-accent)]"></i> Resolve Duplicates (${conflicts.length})`;
-                    
-                    if (!hasPromptedConflicts) {
-                        hasPromptedConflicts = true;
-                        openConflictModal();
-                    }
                 } else {
                     document.getElementById('btn-conflict-header').classList.add('hidden');
                 }
@@ -1587,65 +1578,6 @@
 
         function closeDrilldownModal() { document.getElementById('drilldown-modal').classList.remove('active'); }
 
-        function renderCoaching() {
-            if(document.getElementById('container-coaching').classList.contains('hidden')) return;
-
-            const coachingData = filteredData.filter(t => t.isCoaching).sort((a,b) => (b.timestamp || 0) - (a.timestamp || 0));
-            document.getElementById('coaching-count').innerText = coachingData.length;
-            
-            const mgrCounts = {}; const repCounts = {};
-            coachingData.forEach(t => {
-                const rep = t.submitRep || 'Unknown';
-                let reqName = rep.toLowerCase().trim();
-                let h = empHierarchyMap[reqName];
-                if(!h) { const key = Object.keys(empHierarchyMap).find(k => k.includes(reqName) || reqName.includes(k)); if(key) h = empHierarchyMap[key]; }
-                
-                const mgr = h ? h.manager : 'Unknown Manager';
-                repCounts[rep] = (repCounts[rep] || 0) + 1;
-                mgrCounts[mgr] = (mgrCounts[mgr] || 0) + 1;
-            });
-
-            const barOps = { maintainAspectRatio: false, plugins: { legend: { display: false }, datalabels: { display: true, color: '#fff', font: { weight: 'bold' } } } };
-            
-            if(chartInstances['coach-mgr']) chartInstances['coach-mgr'].destroy();
-            chartInstances['coach-mgr'] = new Chart(document.getElementById('coaching-mgr-chart'), { type: 'bar', data: { labels: Object.keys(mgrCounts), datasets: [{ data: Object.values(mgrCounts), backgroundColor: '#fbbf24' }] }, options: barOps });
-            
-            if(chartInstances['coach-rep']) chartInstances['coach-rep'].destroy();
-            chartInstances['coach-rep'] = new Chart(document.getElementById('coaching-rep-chart'), { type: 'bar', data: { labels: Object.keys(repCounts), datasets: [{ data: Object.values(repCounts), backgroundColor: '#a855f7' }] }, options: barOps });
-
-            const grid = document.getElementById('coaching-grid');
-            let html = '';
-            coachingData.forEach(t => {
-                let reqName = (t.submitRep || '').toLowerCase().trim();
-                let h = empHierarchyMap[reqName];
-                if(!h) { const key = Object.keys(empHierarchyMap).find(k => k.includes(reqName) || reqName.includes(k)); if(key) h = empHierarchyMap[key]; }
-                const manager = h ? h.manager : 'Unassigned / Unknown';
-                const supervisor = h ? h.supervisor : 'N/A';
-
-                html += `
-                <div class="bg-[var(--bg-surface)] border border-[var(--border)] rounded-xl p-4 flex flex-col hover:border-[var(--text-accent)] transition-colors cursor-pointer" onclick="openDetail('${t.id}')">
-                    <div class="flex justify-between items-start mb-2">
-                        <div class="font-black text-xs uppercase text-[var(--text-accent)] tracking-widest truncate">${t.submitRep}</div>
-                        <div class="text-[9px] font-mono bg-black/20 px-2 py-0.5 rounded border border-[var(--border)]">${t.date}</div>
-                    </div>
-                    <div class="text-[9px] uppercase tracking-widest opacity-50 mb-3 space-y-1">
-                        <div><i class="fa fa-sitemap mr-1"></i> Mgr: <span class="font-bold text-white">${manager}</span></div>
-                        <div><i class="fa fa-user-tie mr-1"></i> Sup: <span class="font-bold text-white">${supervisor}</span></div>
-                    </div>
-                    
-                    <div class="flex-1 bg-black/10 rounded border border-[var(--border)] p-3 mb-3 text-[10px] leading-relaxed italic opacity-80 overflow-y-auto max-h-[80px]">
-                        "${t.coachingNotes || 'No notes provided.'}"
-                    </div>
-
-                    <div class="mt-auto border-t border-[var(--border)] pt-2 grid grid-cols-2 gap-2 text-[9px] uppercase">
-                        <div><span class="opacity-40 block">Account</span><span class="font-bold truncate text-[var(--brand)] block">${t.company}</span></div>
-                        <div><span class="opacity-40 block">Logistics</span><span class="font-bold truncate block">${t.owner}</span></div>
-                    </div>
-                </div>`;
-            });
-            grid.innerHTML = html || `<div class="col-span-full text-center p-10 opacity-30 font-black uppercase text-xl">No Coaching Opportunities</div>`;
-        }
-
         function renderMapTable() {
             const grouped = {};
             filteredData.forEach(t => {
@@ -1699,8 +1631,6 @@
                     console.log("PBI Dataset Linked:", cachedDatasetId);
                 }
 
-                // NOTE TO DEVELOPER: Update 'SalesOrders' and column names based on your PBI model.
-                // If it fails, open F12 Console and type: await explorePBI()
                 const daxQuery = `
                     EVALUATE 
                     TOPN(1, 
@@ -1728,8 +1658,8 @@
                 if (data.results && data.results[0].tables[0].rows.length > 0) {
                     const row = data.results[0].tables[0].rows[0];
                     
-                    // Update this key based on your PBI column name!
-                    const orderDate = row['SalesOrders[OrderDate]']; 
+                    const dateKey = Object.keys(row).find(k => k.toLowerCase().includes('date'));
+                    const orderDate = dateKey ? row[dateKey] : null; 
                     
                     if (orderDate) {
                         const dt = new Date(orderDate);
@@ -1747,7 +1677,6 @@
             }
         }
 
-        // Diagnostic Tool for the User
         window.explorePBI = async function() {
             console.log("Analyzing Power BI Dataset...");
             const token = await getPBIToken();
@@ -1864,6 +1793,141 @@
             } catch(e) { el.innerText = ""; }
         }
 
+        async function confirmEmailLog() { 
+            const to = document.getElementById('em-to').value;
+            const cc = document.getElementById('em-cc').value;
+            const subject = document.getElementById('em-subject').value;
+            const body = document.getElementById('em-body').value;
+            const t = fullData.find(x => x.id === currentId);
+            
+            if (!to) { Toastify({text:"Recipient Required", style:{background:"#ef4444"}}).showToast(); return; }
+
+            const btn = document.getElementById('btn-send-email');
+            btn.innerHTML = `<i class="fa fa-spinner fa-spin"></i> SENDING...`;
+            btn.disabled = true;
+
+            const parseEmails = (str) => str.split(/[,;]/).map(e => e.trim()).filter(e => e).map(e => ({ emailAddress: { address: e } }));
+            const toRecipients = parseEmails(to);
+            const ccRecipients = parseEmails(cc);
+
+            Toastify({text:"Sending Email & Logging to Account Timeline...", style:{background:"#fbbf24"}}).showToast(); 
+            try {
+                const tokenResponse = await msalInstance.acquireTokenSilent({ scopes: ["Mail.Send"], account: msalAccount })
+                    .catch(async () => await msalInstance.acquireTokenPopup({ scopes: ["Mail.Send"] }));
+
+                const emailPayload = { 
+                    message: { 
+                        subject: subject, 
+                        body: { contentType: "HTML", content: body }, 
+                        toRecipients: toRecipients,
+                        ccRecipients: ccRecipients 
+                    }, 
+                    saveToSentItems: "true" 
+                };
+
+                const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", { 
+                    method: "POST", 
+                    headers: { "Authorization": `Bearer ${tokenResponse.accessToken}`, "Content-Type": "application/json" }, 
+                    body: JSON.stringify(emailPayload) 
+                });
+
+                if (!res.ok) throw new Error("Graph API error");
+
+                const dToken = await getToken(ENV_D365);
+                const parties = [];
+                if(currentUser.id) parties.push({ "participationtypemask": 1, "partyid_systemuser@odata.bind": `/systemusers(${currentUser.id})` });
+                toRecipients.forEach(p => parties.push({ "participationtypemask": 2, "addressused": p.emailAddress.address }));
+                ccRecipients.forEach(p => parties.push({ "participationtypemask": 3, "addressused": p.emailAddress.address }));
+
+                const logPayload = { subject: subject, description: body, directioncode: true, email_activity_parties: parties };
+
+                if(t.accountNum && t.accountNum !== 'N/A') {
+                    try {
+                        const cleanAcc = t.accountNum.replace(/'/g, "''");
+                        const accRes = await fetch(`${D365_API}/accounts?$filter=accountnumber eq '${cleanAcc}'&$select=accountid`, { headers: { 'Authorization': `Bearer ${dToken}` } });
+                        if(accRes.ok) {
+                            const accData = await accRes.json();
+                            if(accData.value && accData.value.length > 0) { 
+                                logPayload[`regardingobjectid_account@odata.bind`] = `/accounts(${accData.value[0].accountid})`; 
+                            }
+                        }
+                    } catch(e) { console.warn("Account bind failed."); }
+                }
+
+                await fetch(`${D365_API}/emails`, { method: 'POST', headers: { 'Authorization': `Bearer ${dToken}`, 'Content-Type': 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' }, body: JSON.stringify(logPayload) });
+                
+                Toastify({text:"Email Sent & Logged to Account Timeline!", style:{background:"#10b981"}}).showToast(); 
+                closeEmailModal(); 
+            } catch (err) { Toastify({text:`Error: ${err.message}`, style:{background:"#ef4444"}}).showToast(); 
+            } finally {
+                btn.innerHTML = `<i class="fas fa-paper-plane"></i> Send via Outlook & Log to Account`;
+                btn.disabled = false;
+            }
+        }
+        
+        function exportExcel() { const ws = XLSX.utils.json_to_sheet(filteredData); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Logistics"); XLSX.writeFile(wb, "LogiLeap_Export.xlsx"); }
+        function renderSnippets() { const s = ["Left VM", "Called Driver", "Completed"]; document.getElementById('snippet-bar').innerHTML = s.map(x => `<button onclick="insertSnippet('${x}')" class="px-2 py-1 bg-black/20 border border-[var(--border)] rounded text-[8px] hover:bg-[var(--brand)] hover:text-black uppercase font-black transition">${x}</button>`).join(''); }
+        function insertSnippet(s) { document.getElementById('m-notes').value += `\n[${new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} - ${userProfile.name.split(' ')[0]}] ${s}`; }
+        
+        function initMap() { 
+            if(!mapInstance) { 
+                mapInstance=L.map('map-container').setView([39.8,-98.6],4); 
+                L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png').addTo(mapInstance); 
+                mapLayerGroup = L.layerGroup().addTo(mapInstance); 
+            } 
+            mapInstance.invalidateSize(); 
+            if(currentMapPoints && currentMapPoints.length > 0) updateMap(currentMapPoints);
+        }
+        
+        function updateMap(points) { 
+            if(!mapInstance || !mapLayerGroup) return; 
+            mapLayerGroup.clearLayers(); 
+            
+            const colors = { 'Escalated': '#ef4444', 'Escalation Sent': '#ef4444', 'Sent Back': '#ef4444', 'Completed': '#10b981', 'Working on': '#3b82f6', 'Pending': '#fbbf24' };
+
+            points.forEach(p => { 
+                let col = '#2dd4bf'; // Default
+                for(let key in colors) { if(p.status.includes(key)) { col = colors[key]; break; } }
+                L.circleMarker([p.lat, p.lng], { color: col, fillColor: col, fillOpacity: 0.6, radius: 6 }).bindPopup(`<b>Ticket #${p.id}</b><br>${p.status}`).addTo(mapLayerGroup); 
+            }); 
+        }
+        
+        async function createNew() {
+            const so = prompt("Enter Sales Order #:"); if(!so) return;
+            
+            let assignedOwner = "Unassigned";
+            const existing = fullData.find(x => x.order === so && x.owner !== 'Unassigned');
+            if (existing) {
+                if (confirm(`Sales Order ${so} is already historically assigned to ${existing.owner}. Do you want to automatically sync this new ticket to them?`)) {
+                    assignedOwner = existing.owner;
+                }
+            }
+
+            const token = await getToken(ENV_DATA);
+            try {
+                const res = await fetch(`${DATA_API}/${ENTITY_SET}`, { 
+                    method: 'POST', 
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ 
+                        "cr714_salesordernumber": so, 
+                        "cr714_companyordeliveryname": "New Entry", 
+                        "cr714_disposition": "Pending",
+                        "cr714_logisticsowner": assignedOwner
+                    }) 
+                });
+                if(res.ok) { Toastify({text:"Ticket Created", style:{background:"#10b981"}}).showToast(); refreshData(true); }
+            } catch(e){}
+        }
+
+        async function deleteRecord() {
+            if(!confirm("Delete permanently?")) return;
+            const guid = document.getElementById('sys-guid').innerText;
+            const token = await getToken(ENV_DATA);
+            try {
+                const res = await fetch(`${DATA_API}/${ENTITY_SET}(${guid})`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } });
+                if(res.ok) { Toastify({text:"Record Deleted", style:{background:"#ef4444"}}).showToast(); closeDetail(); refreshData(true); }
+            } catch(e){}
+        }
     </script>
 </body>
 </html>
