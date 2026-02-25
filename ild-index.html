@@ -787,20 +787,26 @@
             }
         }
 
-        function loadTicket(id) {
+function loadTicket(id) {
             const dispoInput = document.getElementById('d-disposition');
             if (currentTicketId) {
                 const currentT = db.find(x => x.id === currentTicketId);
                 const isAdmin = document.getElementById('admin-bypass-toggle')?.checked || false; 
                 const isAssigned = currentT && currentT.logisticsOwner !== 'Unassigned';
-                if (!isAdmin && isAssigned && !dispoInput.value) { showToast("Disposition required.", "error"); dispoInput.classList.add('input-error-highlight'); return;
+                if (!isAdmin && isAssigned && !dispoInput.value) { 
+                    showToast("Disposition required.", "error"); 
+                    dispoInput.classList.add('input-error-highlight'); 
+                    return;
                 }
             }
             dispoInput.classList.remove('input-error-highlight');
             currentTicketId = id;
-            const t = db.find(x => x.id === id); if(!t) return; render(false);
+            const t = db.find(x => x.id === id); 
+            if(!t) return; 
+            render(false);
             
-            document.getElementById('empty-state').classList.add('hidden'); document.getElementById('detail-content').classList.remove('hidden');
+            document.getElementById('empty-state').classList.add('hidden'); 
+            document.getElementById('detail-content').classList.remove('hidden');
             document.getElementById('d-company').innerText = t.company;
             document.getElementById('d-order').innerText = t.order; 
             document.getElementById('d-full-time').innerText = t.fullStamp; 
@@ -822,7 +828,180 @@
             document.getElementById('d-contact-info').innerText = t.contactInfo; 
 
             updateSidebar(t.order);
+            // This calls the function below, passing the two variables
             fetchAccountDataAndReport(t.order, t.account);
+        }
+
+        async function fetchAccountDataAndReport(orderNumber, accountNumber) {
+            const dateEl = document.getElementById('d-order-date');
+            const msgEl = document.getElementById('d-account-message');
+            if(msgEl) msgEl.innerHTML = '';
+            if(!dateEl) return;
+            if(!orderNumber || orderNumber === 'N/A') { dateEl.innerHTML = ''; return; }
+            
+            dateEl.innerHTML = `<i class="fa fa-spinner fa-spin mr-1"></i> Calling Secure Bridge...`;
+            
+            let accountData = null;
+            let accountMessage = "";
+            
+            // 1. Fetch D365 Account Data natively
+            try {
+                const dToken = await getToken(ENV_D365);
+                let safeAccountNum = String(accountNumber || '').trim().replace(/'/g, "''");
+                
+                if (safeAccountNum && safeAccountNum !== 'N/A') {
+                    const accQuery = `${D365_API}/accounts?$filter=accountnumber eq '${safeAccountNum}'`;
+                    const accRes = await fetch(accQuery, {
+                        headers: { 
+                            'Authorization': `Bearer ${dToken}`, 
+                            'Accept': 'application/json', 
+                            'OData-MaxVersion': '4.0', 
+                            'OData-Version': '4.0' 
+                        },
+                        mode: 'cors'
+                    });
+                    
+                    if (accRes.ok) {
+                        const accJson = await accRes.json();
+                        if (accJson.value && accJson.value.length > 0) {
+                            accountData = accJson.value[0];
+                            console.log("Successfully retrieved Account payload:", accountData);
+                            
+                            accountMessage = accountData.description || 
+                                             accountData.cr714_accountmessage || 
+                                             accountData.cr714_message || 
+                                             accountData.wbm_accountmessage || 
+                                             accountData.wbm_message || 
+                                             "";
+                                             
+                            if (accountMessage && msgEl) {
+                                msgEl.innerHTML = `<i class="fas fa-info-circle mr-1 text-[var(--brand)]"></i> ${accountMessage.substring(0, 100)}${accountMessage.length > 100 ? '...' : ''}`;
+                            }
+                        }
+                    }
+                }
+            } catch(e) {
+                console.warn("D365 Account Fetch Error:", e);
+            }
+
+            // 2. Query Power Automate Webhook returning CSV Data
+            try {
+                if (!PA_WEBHOOK_URL || PA_WEBHOOK_URL.includes("PASTE_YOUR_POWER_AUTOMATE_URL_HERE")) {
+                    console.warn("Webhook URL not set, falling back to basic Dataverse query.");
+                    await fetchOrderDetailsD365(orderNumber, accountNumber);
+                    return;
+                }
+
+                const webhookUrl = new URL(PA_WEBHOOK_URL);
+                webhookUrl.searchParams.append("accountNumber", accountNumber);
+                webhookUrl.searchParams.append("orderNumber", orderNumber);
+
+                const response = await fetch(webhookUrl.toString(), {
+                    method: 'GET'
+                });
+
+                const csvText = await response.text();
+                
+                if (!csvText || csvText.trim() === "" || csvText.includes("<!DOCTYPE html>")) {
+                    throw new Error("Invalid CSV or Webhook configuration");
+                }
+
+                const rows = csvText.split('\n').map(row => {
+                    const regex = /(?:\"([^\"]*(?:\"\"[^\"]*)*)\")|([^\",]+)/g;
+                    let matches = [];
+                    let match;
+                    while (match = regex.exec(row)) {
+                        matches.push(match[1] ? match[1].replace(/\"\"/g, '\"') : match[2]);
+                    }
+                    return matches;
+                }).filter(row => row.length > 0);
+
+                let orderDateFound = "";
+                let rmaFound = "";
+                let messageFound = "";
+
+                for (const row of rows) {
+                    if (!row) continue;
+                    
+                    const rowString = row.join(" ").replace(/\s+/g, ' ');
+                    
+                    if (rowString.includes(orderNumber)) {
+                        const matchDate = rowString.match(/Order Date:\s*([0-9/]+\s+[0-9:]+\s+[AMPM]+)/i) 
+                                       || rowString.match(/([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{4}\s+[0-9]{1,2}:[0-9]{2}\s+[AMPM]{2})/i);
+                        if (matchDate && matchDate[1]) {
+                            orderDateFound = matchDate[1].trim();
+                        }
+
+                        const matchRma = rowString.match(/\b(R[0-9]{8,})\b/);
+                        if (matchRma && matchRma[1]) {
+                            rmaFound = matchRma[1].trim();
+                        }
+                        
+                        if (row.length > 0 && row[0] && row[0].toLowerCase() !== "tip text") {
+                            messageFound = row[0].trim();
+                        }
+                        
+                        break;
+                    }
+                }
+
+                if (orderDateFound) {
+                    let displayHtml = `<div class="flex items-center justify-end font-bold text-[11px]"><i class="fas fa-calendar-check text-[var(--brand)] mr-1.5"></i> ${orderDateFound}`;
+                    if (rmaFound) {
+                        displayHtml += ` <span class="text-[var(--text-dim)] mx-1.5 opacity-50">/</span> <i class="fas fa-retweet text-[var(--text-accent)] mr-1"></i> <span class="text-[var(--text-accent)]">${rmaFound}</span>`;
+                    }
+                    displayHtml += `</div>`;
+                    dateEl.innerHTML = displayHtml;
+                    
+                    if (messageFound && messageFound.length > 5 && msgEl) {
+                        msgEl.innerHTML = `<i class="fas fa-exclamation-triangle mr-1"></i> ${messageFound}`;
+                    }
+
+                } else {
+                    await fetchOrderDetailsD365(orderNumber, accountNumber);
+                }
+
+            } catch(e) {
+                console.warn("Delivery Report Parse fallback to D365", e);
+                await fetchOrderDetailsD365(orderNumber, accountNumber);
+            }
+        }
+
+        async function fetchOrderDetailsD365(orderNumber, accountNumber) {
+            const el = document.getElementById('d-order-date');
+            try {
+                const token = await getToken(ENV_DATA);
+                let safeAccountNum = String(accountNumber || '').trim().replace(/'/g, "''");
+                let safeOrderNum = String(orderNumber || '').trim();
+                if (!safeAccountNum || safeAccountNum === 'N/A') {
+                    throw new Error("Invalid Account Number");
+                }
+                
+                const orderQuery = `${DATA_API}/${ENTITY_SET}?$filter=cr714_accountnumber eq '${safeAccountNum}'&$select=cr714_salesordernumber,createdon`;
+                const res = await fetch(orderQuery, { 
+                    headers: { 
+                        'Authorization': `Bearer ${token}`,
+                        'Accept': 'application/json', 
+                        'OData-MaxVersion': '4.0', 
+                        'OData-Version': '4.0'
+                    } 
+                });
+                const data = await res.json();
+                
+                if (data.value && data.value.length > 0) {
+                    const foundOrder = data.value.find(o => String(o.cr714_salesordernumber).trim() === safeOrderNum);
+                    if (foundOrder && foundOrder.createdon) {
+                        const dt = new Date(foundOrder.createdon);
+                        el.innerHTML = `<div class="flex items-center justify-end font-bold text-[11px]"><i class="fas fa-calendar-check text-[var(--brand)] mr-1.5"></i> ${dt.toLocaleDateString('en-CA')} @ ${dt.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>`;
+                        return;
+                    }
+                }
+                
+                el.innerHTML = `<div class="flex items-center justify-end font-bold text-[11px]"><i class="fas fa-exclamation-circle text-[var(--text-accent)] mr-1.5"></i> Order not found in History</div>`;
+            } catch(e) {
+                console.warn("fetchOrderDetailsD365 Error:", e);
+                el.innerText = "";
+            }
         }
 
         async function fetchAccountDataAndReport(accountNumber) {
@@ -1413,3 +1592,4 @@
     </script>
 </body>
 </html>
+
