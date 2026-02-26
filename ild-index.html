@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLog v106.17 | Logistics Dashboard</title>
+    <title>LogiLog v106.18 | Logistics Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -202,6 +202,7 @@
         .gallery-dropdown:focus { border-color: var(--brand);
         }
         
+        /* Custom scrollbar for the data matrix */
         .custom-scrollbar::-webkit-scrollbar { width: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: var(--brand); border-radius: 4px; }
     </style>
@@ -232,7 +233,7 @@
         <div class="flex items-center gap-6">
             <div class="flex items-center gap-3">
                 <i class="fa-solid fa-frog frog-mascot"></i>
-                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v106.17</span></div>
+                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v106.18</span></div>
             </div>
  
             <div class="flex items-center gap-3">
@@ -426,7 +427,7 @@
 
                         <div>
                             <h4 class="text-[10px] font-black uppercase text-[var(--text-accent)] tracking-widest mb-3"><i class="fa fa-chart-line mr-2"></i>3-Month Categorical Analysis (Power BI)</h4>
-                            <div id="d-sales-data" class="overflow-x-auto"></div>
+                            <div id="d-sales-data" class="overflow-x-auto min-h-[100px]"></div>
                         </div>
                     </div>
 
@@ -590,6 +591,38 @@
                 const loginResponse = await msalInstance.acquireTokenPopup(request);
                 return loginResponse.accessToken;
             }
+        }
+
+        // --- NEW AUTO-DISCOVERY FUNCTION FOR PBI DATASETS ---
+        async function getDatasetId(token, reportId) {
+            if (cachedDatasetId) return cachedDatasetId;
+
+            // 1. Check Personal Workspace First
+            try {
+                const res = await fetch(`https://api.powerbi.com/v1.0/myorg/reports/${reportId}`, { headers: { 'Authorization': `Bearer ${token}` } });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.datasetId) { cachedDatasetId = data.datasetId; return cachedDatasetId; }
+                }
+            } catch(e) {}
+
+            // 2. Fallback: Loop through accessible Groups/Workspaces to find it
+            try {
+                const groupsRes = await fetch(`https://api.powerbi.com/v1.0/myorg/groups`, { headers: { 'Authorization': `Bearer ${token}` } });
+                if (groupsRes.ok) {
+                    const groupsData = await groupsRes.json();
+                    for (const group of groupsData.value) {
+                        const rRes = await fetch(`https://api.powerbi.com/v1.0/myorg/groups/${group.id}/reports`, { headers: { 'Authorization': `Bearer ${token}` } });
+                        if (rRes.ok) {
+                            const rData = await rRes.json();
+                            const target = rData.value.find(r => r.id === reportId);
+                            if (target && target.datasetId) { cachedDatasetId = target.datasetId; return cachedDatasetId; }
+                        }
+                    }
+                }
+            } catch(e) {}
+            
+            throw new Error("Dataset ID not found in accessible workspaces");
         }
 
         function login() { msalInstance.loginPopup({ scopes: ["User.Read", "Mail.Send"] }).then(resp => { if(resp && resp.account) applyIdentity(resp.account); });
@@ -864,7 +897,7 @@
 
             updateSidebar(t.order);
             fetchAccountData(t.account);
-            fetchOrderDetailsLocalHistory(t.order); // Keeps order date working
+            fetchOrderDetailsD365(t.order);
             
             if(t.account && t.account !== 'N/A') {
                 fetchPBISalesData(t.account);
@@ -900,7 +933,7 @@
                         if (accJson.value && accJson.value.length > 0) {
                             const accountData = accJson.value[0];
                             
-                            // 1. Process Warning Banner (Prioritizing mss_messagecenter)
+                            // 1. Process Warning Banner
                             const accountMessage = accountData.mss_messagecenter || accountData.description || accountData.cr714_accountmessage || accountData.cr714_message || accountData.wbm_accountmessage || accountData.wbm_message || accountData.wbm_deliveryinstructions || accountData.wbm_warningnotification || accountData.wbm_alert || "";
                             if (accountMessage && msgEl) {
                                 msgEl.innerHTML = `<div class="font-black uppercase tracking-widest mb-1 text-amber-500"><i class="fas fa-exclamation-triangle mr-1"></i> Account Note</div>${accountMessage}`;
@@ -950,17 +983,9 @@
 
             try {
                 const token = await getPBIToken();
+                const dId = await getDatasetId(token, PBI_REPORT_ID);
 
-                if (!cachedDatasetId) {
-                    const repRes = await fetch(`https://api.powerbi.com/v1.0/myorg/reports/${PBI_REPORT_ID}`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
-                    });
-                    if (!repRes.ok) throw new Error("Dataset lookup failed");
-                    const repData = await repRes.json();
-                    cachedDatasetId = repData.datasetId;
-                }
-
-                // EXACT DAX QUERY FROM YOUR FLOW
+                // EXACT DAX QUERY FROM YOUR POWER AUTOMATE FLOW
                 const daxQuery = `
                 EVALUATE SUMMARIZECOLUMNS(
                   'DimItemIDItemTypeGroup'[ItemTypeGroupDescription],
@@ -979,7 +1004,7 @@
                 ) ORDER BY 'DimItemIDItemTypeGroup'[ItemTypeGroupDescription] ASC
                 `;
 
-                const res = await fetch(`https://api.powerbi.com/v1.0/myorg/datasets/${cachedDatasetId}/executeQueries`, {
+                const res = await fetch(`https://api.powerbi.com/v1.0/myorg/datasets/${dId}/executeQueries`, {
                     method: 'POST',
                     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({ queries: [{ query: daxQuery }], serializerSettings: { includeNulls: true } })
@@ -1015,12 +1040,13 @@
             }
         }
 
-        async function fetchOrderDetailsLocalHistory(orderNumber) {
+        async function fetchOrderDetailsD365(orderNumber) {
             const el = document.getElementById('d-order-date');
             try {
                 const token = await getToken(ENV_DATA);
                 const safeOrderNum = String(orderNumber || '').trim();
                 
+                // Pure local dataverse search against our own logistics records
                 const orderQuery = `${DATA_API}/${ENTITY_SET}?$filter=cr714_salesordernumber eq '${safeOrderNum}'&$select=createdon`;
                 const res = await fetch(orderQuery, { 
                     headers: { 
@@ -1041,57 +1067,6 @@
                 el.innerHTML = `<i class="fas fa-exclamation-circle text-[var(--text-accent)] mr-1.5"></i> Order not in History`;
             } catch(e) { el.innerText = ""; }
         }
-
-        // Run this in F12 console: await huntAccountMessage("123456", "Hermitage")
-        window.huntAccountMessage = async function(accountNum, searchPhrase = "") {
-            console.log(`Hunting in Account ${accountNum}...`);
-            const token = await getToken(ENV_D365);
-            const res = await fetch(`${D365_API}/accounts?$filter=accountnumber eq '${accountNum}'`, { 
-                headers: { 
-                    'Authorization': `Bearer ${token}`,
-                    'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
-                } 
-            });
-            const data = await res.json();
-            if(data.value && data.value.length > 0) {
-                const acc = data.value[0];
-                let found = false;
-                
-                console.log("%c--- FULL ACCOUNT PAYLOAD ---", "color: #2dd4bf; font-weight: bold; font-size: 14px;");
-                console.dir(acc);
-
-                if (searchPhrase) {
-                    for (let key in acc) {
-                        if (acc[key] && typeof acc[key] === 'string' && acc[key].toLowerCase().includes(searchPhrase.toLowerCase())) {
-                            console.log(`%cFOUND TARGET IN FIELD: ${key}`, "color: #10b981; font-weight: bold; font-size: 14px;");
-                            console.log(`Value: ${acc[key]}`);
-                            found = true;
-                        }
-                    }
-                    if(!found) console.warn("Phrase not found in the raw Account table.");
-                }
-            } else {
-                console.error("Account not found.");
-            }
-        };
-
-        window.explorePBI = async function() {
-            console.log("Analyzing Power BI Dataset...");
-            const token = await getPBIToken();
-            if (!cachedDatasetId) {
-                console.error("No Dataset ID. Please click an order in the UI first to initialize.");
-                return;
-            }
-            try {
-                const res = await fetch(`https://api.powerbi.com/v1.0/myorg/datasets/${cachedDatasetId}/executeQueries`, {
-                    method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ queries: [{ query: "EVALUATE INFO.TABLES()" }] })
-                });
-                const data = await res.json();
-                console.log("%c--- POWER BI TABLES ---", "color: #2dd4bf; font-weight: bold; font-size: 14px;");
-                console.table(data.results[0].tables[0].rows.map(r => ({ TableName: r['[Name]'] })));
-            } catch(e) { console.error(e); }
-        };
 
         function updateSidebar(orderNumber) { const rail = document.getElementById('account-rail');
             const content = document.getElementById('rail-content'); const matches = db.filter(x => x.order === orderNumber && orderNumber !== 'N/A').sort((a,b) => a.timestamp - b.timestamp);
