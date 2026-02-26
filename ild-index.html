@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLog v106.14 | Logistics Dashboard</title>
+    <title>LogiLog v106.15 | Logistics Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -233,7 +233,7 @@
         <div class="flex items-center gap-6">
             <div class="flex items-center gap-3">
                 <i class="fa-solid fa-frog frog-mascot"></i>
-                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v106.14</span></div>
+                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v106.15</span></div>
             </div>
  
             <div class="flex items-center gap-3">
@@ -417,7 +417,7 @@
 
                     <div class="mt-8 bg-black/20 border border-[var(--border)] rounded-xl p-5 shadow-inner">
                         <div class="flex justify-between items-center border-b border-[var(--border)] pb-3 mb-4">
-                            <h3 class="text-xs font-black uppercase text-[var(--brand)] tracking-widest"><i class="fa fa-database mr-2"></i>Full Account Data Matrix</h3>
+                            <h3 class="text-xs font-black uppercase text-[var(--brand)] tracking-widest"><i class="fa fa-database mr-2"></i>Full Record Data Matrix</h3>
                             <button onclick="document.getElementById('d-full-account-data').classList.toggle('hidden')" class="text-[9px] uppercase hover:text-white text-[var(--text-dim)] font-bold bg-[var(--bg-surface)] px-3 py-1 rounded border border-[var(--border)] transition">Toggle View</button>
                         </div>
                         <div id="d-full-account-data" class="hidden grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-3 text-[10px] h-64 overflow-y-auto pr-2 custom-scrollbar">
@@ -517,7 +517,7 @@
     </div>
 
     <script>
-        // GLOBALS & CONFIG
+        // GLOBALS & HOISTED UTILITIES
         const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: "https://wb-dt.github.io/daytona-utility/LogisticsLog.html" }, cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false } };
         const msalInstance = new msal.PublicClientApplication(msalConfig);
         let msalAccount = null;
@@ -528,6 +528,10 @@
 
         const ENV_D365 = "https://wbmasonco.crm.dynamics.com";
         const D365_API = `${ENV_D365}/api/data/v9.2`;
+
+        // POWER BI GLOBALS
+        const PBI_REPORT_ID = "d6465ef8-02cc-4aad-944d-2c5527c81d2c";
+        let cachedDatasetId = null;
 
         let db = []; let orderCounts = {};
         let currentMode = 'active'; let currentTicketId = null;
@@ -563,6 +567,22 @@
             } catch (e) { 
                 const res = await msalInstance.acquireTokenPopup({ scopes: [`${envUrl}/user_impersonation`] });
                 return res.accessToken;
+            }
+        }
+
+        async function getPBIToken() {
+            const request = { 
+                scopes: [
+                    "https://analysis.windows.net/powerbi/api/Report.Read.All", 
+                    "https://analysis.windows.net/powerbi/api/Dataset.Read.All"
+                ],
+                account: msalAccount 
+            };
+            try {
+                return (await msalInstance.acquireTokenSilent(request)).accessToken;
+            } catch (e) {
+                const loginResponse = await msalInstance.acquireTokenPopup(request);
+                return loginResponse.accessToken;
             }
         }
 
@@ -837,16 +857,16 @@
             document.getElementById('d-contact-info').innerText = t.contactInfo; 
 
             updateSidebar(t.order);
-            fetchAccountData(t.account);
+            fetchMatrixData(t.account, t.order);
             
-            if(t.order && t.order !== 'N/A' && t.account && t.account !== 'N/A') {
-                fetchOrderDetailsD365(t.order, t.account);
+            if(t.order && t.order !== 'N/A') {
+                fetchPBIReport(t.order);
             } else {
                 document.getElementById('d-order-date').innerHTML = '';
             }
         }
 
-        async function fetchAccountData(accountNum) {
+        async function fetchMatrixData(accountNum, orderNum) {
             const msgEl = document.getElementById('d-account-message');
             const dataEl = document.getElementById('d-full-account-data');
             
@@ -856,7 +876,10 @@
             try {
                 const dToken = await getToken(ENV_D365);
                 let safeAccountNum = String(accountNum || '').trim().replace(/'/g, "''");
+                let safeOrderNum = String(orderNum || '').trim();
+                let html = '';
                 
+                // 1. Fetch Account Data
                 if (safeAccountNum && safeAccountNum !== 'N/A') {
                     const accQuery = `${D365_API}/accounts?$filter=accountnumber eq '${safeAccountNum}'`;
                     const accRes = await fetch(accQuery, { 
@@ -872,54 +895,86 @@
                         if (accJson.value && accJson.value.length > 0) {
                             const accountData = accJson.value[0];
                             
-                            // 1. Process Warning Banner
-                            const accountMessage = accountData.description || accountData.cr714_accountmessage || accountData.cr714_message || accountData.wbm_accountmessage || accountData.wbm_message || accountData.wbm_deliveryinstructions || accountData.wbm_warningnotification || accountData.wbm_alert || "";
+                            // Process Warning Banner
+                            const accountMessage = accountData.mss_messagecenter || accountData.description || accountData.cr714_accountmessage || accountData.cr714_message || accountData.wbm_accountmessage || accountData.wbm_message || accountData.wbm_deliveryinstructions || accountData.wbm_warningnotification || accountData.wbm_alert || "";
                             if (accountMessage && msgEl) {
                                 msgEl.innerHTML = `<div class="font-black uppercase tracking-widest mb-1 text-amber-500"><i class="fas fa-exclamation-triangle mr-1"></i> Account Note</div>${accountMessage}`;
                                 msgEl.classList.remove('hidden');
                             }
 
-                            // 2. Process Full Data Matrix (Using Formatted Values)
-                            if (dataEl) {
-                                let html = '';
-                                Object.keys(accountData).sort().forEach(key => {
-                                    if (key.startsWith('@odata') || key.startsWith('_')) return;
-                                    
-                                    let rawVal = accountData[key];
-                                    let formattedVal = accountData[`${key}@OData.Community.Display.V1.FormattedValue`] || accountData[`_${key}_value@OData.Community.Display.V1.FormattedValue`];
-                                    let finalVal = formattedVal !== undefined ? formattedVal : rawVal;
+                            // Process Matrix
+                            html += `<div class="col-span-full border-b border-[var(--brand)] text-[var(--brand)] font-black uppercase tracking-widest pb-1 mt-2 mb-1">Account Data</div>`;
+                            Object.keys(accountData).sort().forEach(key => {
+                                if (key.includes('@OData') || key.startsWith('_')) return;
+                                
+                                let rawVal = accountData[key];
+                                let formattedVal = accountData[`${key}@OData.Community.Display.V1.FormattedValue`] || accountData[`_${key}_value@OData.Community.Display.V1.FormattedValue`];
+                                let finalVal = formattedVal !== undefined ? formattedVal : rawVal;
 
-                                    if (finalVal !== null && finalVal !== "") {
-                                        let displayKey = key.replace('cr714_', '').replace('wbm_', '');
-                                        html += `
-                                        <div class="flex flex-col border-b border-[var(--border)] pb-1">
-                                            <span class="opacity-40 uppercase tracking-widest text-[8px] truncate" title="${key}">${displayKey}</span>
-                                            <span class="font-bold text-white truncate" title="${String(finalVal).replace(/"/g, '&quot;')}">${finalVal}</span>
-                                        </div>`;
-                                    }
-                                });
-                                dataEl.innerHTML = html || '<div class="col-span-full opacity-50">No additional data found.</div>';
-                            }
-                        } else {
-                            if(dataEl) dataEl.innerHTML = '<div class="col-span-full text-red-400 opacity-80">Account not found in D365 Database.</div>';
+                                if (finalVal !== null && finalVal !== "") {
+                                    let displayKey = key.replace(/^(cr714_|wbm_|mss_|super_)/i, '');
+                                    html += `
+                                    <div class="flex flex-col border-b border-[var(--border)] pb-1">
+                                        <span class="opacity-40 uppercase tracking-widest text-[8px] truncate" title="${key}">${displayKey}</span>
+                                        <span class="font-bold text-white truncate" title="${String(finalVal).replace(/"/g, '&quot;')}">${finalVal}</span>
+                                    </div>`;
+                                }
+                            });
                         }
                     }
                 }
+
+                // 2. Fetch Sales Order Data
+                if (safeOrderNum && safeOrderNum !== 'N/A') {
+                    const soQuery = `${D365_API}/salesorders?$filter=ordernumber eq '${safeOrderNum}'`;
+                    const soRes = await fetch(soQuery, { 
+                        headers: { 
+                            'Authorization': `Bearer ${dToken}`,
+                            'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
+                        }, 
+                        mode: 'cors' 
+                    });
+                    
+                    if (soRes.ok) {
+                        const soJson = await soRes.json();
+                        if (soJson.value && soJson.value.length > 0) {
+                            const soData = soJson.value[0];
+                            html += `<div class="col-span-full border-b border-[var(--text-accent)] text-[var(--text-accent)] font-black uppercase tracking-widest pb-1 mt-4 mb-1">Sales Order Data</div>`;
+                            Object.keys(soData).sort().forEach(key => {
+                                if (key.includes('@OData') || key.startsWith('_')) return;
+                                
+                                let rawVal = soData[key];
+                                let formattedVal = soData[`${key}@OData.Community.Display.V1.FormattedValue`] || soData[`_${key}_value@OData.Community.Display.V1.FormattedValue`];
+                                let finalVal = formattedVal !== undefined ? formattedVal : rawVal;
+
+                                if (finalVal !== null && finalVal !== "") {
+                                    let displayKey = key.replace(/^(cr714_|wbm_|mss_|super_)/i, '');
+                                    html += `
+                                    <div class="flex flex-col border-b border-[var(--border)] pb-1">
+                                        <span class="opacity-40 uppercase tracking-widest text-[8px] truncate" title="${key}">${displayKey}</span>
+                                        <span class="font-bold text-white truncate" title="${String(finalVal).replace(/"/g, '&quot;')}">${finalVal}</span>
+                                    </div>`;
+                                }
+                            });
+                        }
+                    }
+                }
+
+                if (dataEl) {
+                    dataEl.innerHTML = html || '<div class="col-span-full opacity-50">No additional data found.</div>';
+                }
             } catch(e) { 
-                console.warn("Account Fetch Error", e); 
+                console.warn("Matrix Fetch Error", e); 
                 if(dataEl) dataEl.innerHTML = '<div class="col-span-full text-red-400 opacity-80">API Fetch Error.</div>';
             }
         }
 
-        async function fetchOrderDetailsD365(orderNumber, accountNum) {
+        async function fetchOrderDetailsD365(orderNumber) {
             const el = document.getElementById('d-order-date');
             try {
                 const token = await getToken(ENV_DATA);
                 const safeOrderNum = String(orderNumber || '').trim();
-                const safeAccountNum = String(accountNum || '').trim().replace(/'/g, "''");
-                
-                // Pure local dataverse search against our own records
-                const orderQuery = `${DATA_API}/${ENTITY_SET}?$filter=cr714_accountnumber eq '${safeAccountNum}'&$select=cr714_salesordernumber,createdon`;
+                const orderQuery = `${DATA_API}/${ENTITY_SET}?$filter=cr714_salesordernumber eq '${safeOrderNum}'&$select=createdon`;
                 const res = await fetch(orderQuery, { 
                     headers: { 
                         'Authorization': `Bearer ${token}`,
@@ -930,13 +985,10 @@
                 });
                 const data = await res.json();
                 
-                if (data.value && data.value.length > 0) {
-                    const foundOrder = data.value.find(o => String(o.cr714_salesordernumber).trim() === safeOrderNum);
-                    if (foundOrder && foundOrder.createdon) {
-                        const dt = new Date(foundOrder.createdon);
-                        el.innerHTML = `<i class="fas fa-calendar-check text-[var(--text-dim)] mr-1.5"></i> ${dt.toLocaleDateString('en-CA')} @ ${dt.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} (Local)`;
-                        return;
-                    }
+                if (data.value && data.value.length > 0 && data.value[0].createdon) {
+                    const dt = new Date(data.value[0].createdon);
+                    el.innerHTML = `<i class="fas fa-calendar-check text-[var(--text-dim)] mr-1.5"></i> ${dt.toLocaleDateString('en-CA')} @ ${dt.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} (Local)`;
+                    return;
                 }
                 
                 el.innerHTML = `<i class="fas fa-exclamation-circle text-[var(--text-accent)] mr-1.5"></i> Order not in History`;
@@ -1370,6 +1422,10 @@
             }, 3000);
         }
 
+        function closeDraftModal() { document.getElementById('email-modal-overlay').style.display = 'none';
+        }
+        function setTheme(t) { document.body.setAttribute('data-theme', t); localStorage.setItem('theme', t);
+        }
     </script>
 </body>
 </html>
