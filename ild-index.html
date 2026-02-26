@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLog v106.12 | Logistics Dashboard</title>
+    <title>LogiLog v106.13 | Logistics Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -229,13 +229,14 @@
         <div class="flex items-center gap-6">
             <div class="flex items-center gap-3">
                 <i class="fa-solid fa-frog frog-mascot"></i>
-                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v106.12</span></div>
+                <div class="text-xl font-black uppercase tracking-tighter text-[var(--brand)]">LOGILOG <span class="text-[10px] opacity-40 ml-1">v106.13</span></div>
             </div>
  
             <div class="flex items-center gap-3">
                 <input type="text" id="global-search" oninput="render(true)" placeholder="Deep Omni-Search (Order, Item, Address, Description...)" class="w-96 bg-black/5 border border-[var(--border)] p-2 text-xs rounded text-[var(--text-main)] outline-none focus:border-[var(--brand)] transition-colors">
                 <div class="text-[9px] font-mono text-[var(--text-dim)] uppercase tracking-widest bg-[var(--bg-deep)] px-3 py-1.5 rounded border border-[var(--border)] whitespace-nowrap shadow-inner">
-                    Showing <span id="count-display" class="text-[var(--brand)] font-black text-xs">0</span> Records
+                    Showing 
+<span id="count-display" class="text-[var(--brand)] font-black text-xs">0</span> Records
                 </div>
             </div>
         </div>
@@ -502,6 +503,7 @@
     </div>
 
     <script>
+        // GLOBALS & HOISTED UTILITIES
         const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: "https://wb-dt.github.io/daytona-utility/LogisticsLog.html" }, cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false } };
         const msalInstance = new msal.PublicClientApplication(msalConfig);
         let msalAccount = null;
@@ -513,6 +515,10 @@
         const ENV_D365 = "https://wbmasonco.crm.dynamics.com";
         const D365_API = `${ENV_D365}/api/data/v9.2`;
 
+        // POWER BI GLOBALS
+        const PBI_REPORT_ID = "d6465ef8-02cc-4aad-944d-2c5527c81d2c";
+        let cachedDatasetId = null;
+
         let db = []; let orderCounts = {};
         let currentMode = 'active'; let currentTicketId = null;
         let currentUser = { name: "User", email: "", id: null };
@@ -521,6 +527,9 @@
         let isFetchingBackground = false;
         let isSilentUpdate = false;
         const NAME_MAP = { "Kari": "Kari Westervelt", "Holly": "Holly Evans", "Courtney": "Courtney Youngblood", "Jewel": "Jewel Jenkins", "Noah": "Noah Comans", "Wayne": "Wayne Rendt", "Rachel": "Rachel Kaiser", "Tobbitha": "Tobbitha Bishoff", "Paula": "Paula Bowen", "Jessica": "Jessica Pauley" };
+        
+        function setTheme(t) { document.body.setAttribute('data-theme', t); localStorage.setItem('theme', t); }
+        function closeDraftModal() { document.getElementById('email-modal-overlay').style.display = 'none'; }
         
         window.onload = () => { 
             if(localStorage.getItem('theme')) setTheme(localStorage.getItem('theme'));
@@ -544,6 +553,22 @@
             } catch (e) { 
                 const res = await msalInstance.acquireTokenPopup({ scopes: [`${envUrl}/user_impersonation`] });
                 return res.accessToken;
+            }
+        }
+
+        async function getPBIToken() {
+            const request = { 
+                scopes: [
+                    "https://analysis.windows.net/powerbi/api/Report.Read.All", 
+                    "https://analysis.windows.net/powerbi/api/Dataset.Read.All"
+                ],
+                account: msalAccount 
+            };
+            try {
+                return (await msalInstance.acquireTokenSilent(request)).accessToken;
+            } catch (e) {
+                const loginResponse = await msalInstance.acquireTokenPopup(request);
+                return loginResponse.accessToken;
             }
         }
 
@@ -819,7 +844,12 @@
 
             updateSidebar(t.order);
             fetchAccountMessage(t.account);
-            fetchOrderDetails(t.order, t.account);
+            
+            if(t.order && t.order !== 'N/A') {
+                fetchPBIReport(t.order);
+            } else {
+                document.getElementById('d-order-date').innerHTML = '';
+            }
         }
 
         async function fetchAccountMessage(accountNum) {
@@ -831,7 +861,7 @@
                 let safeAccountNum = String(accountNum || '').trim().replace(/'/g, "''");
                 
                 if (safeAccountNum && safeAccountNum !== 'N/A') {
-                    const accQuery = `${D365_API}/accounts?$filter=accountnumber eq '${safeAccountNum}'`;
+                    const accQuery = `${D365_API}/accounts?$filter=accountnumber eq '${safeAccountNum}'&$select=description,cr714_accountmessage,cr714_message,wbm_accountmessage,wbm_message`;
                     const accRes = await fetch(accQuery, { headers: { 'Authorization': `Bearer ${dToken}` }, mode: 'cors' });
                     if (accRes.ok) {
                         const accJson = await accRes.json();
@@ -847,71 +877,116 @@
             } catch(e) { console.warn("Account Fetch Error", e); }
         }
 
-        async function fetchOrderDetails(orderNumber, accountNum) {
+        async function fetchPBIReport(orderNumber) {
             const dateEl = document.getElementById('d-order-date');
             if(!dateEl) return;
-            if(!orderNumber || orderNumber === 'N/A' || !accountNum || accountNum === 'N/A') { dateEl.innerHTML = ''; return; }
-            
-            dateEl.innerHTML = `<i class="fa fa-spinner fa-spin mr-1"></i> Checking History...`;
+            if(!orderNumber || orderNumber === 'N/A') { dateEl.innerHTML = ''; return; }
+
+            dateEl.innerHTML = `<i class="fa fa-spinner fa-spin mr-1"></i> Querying Power BI...`;
 
             try {
-                const ssrsUrl = `https://wbreporting.wbmason.corp/ReportServer?%2Fwbreports%2FCRMReports%2FCustomerSalesOrderRpt_CRM&Acct=${accountNum}&SalesID=&rs%3ACommand=Render&rs%3AFormat=HTML5`;
-                const res = await fetch(ssrsUrl, { method: 'GET' });
-                
-                if (!res.ok) throw new Error("SSRS Request Failed");
-                
-                const htmlText = await res.text();
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(htmlText, 'text/html');
-                
-                const rows = doc.querySelectorAll('tr[valign="top"]');
-                let orderDateFound = "";
-                let rmaFound = "";
-                
-                for (const row of rows) {
-                    const rowText = row.innerText.replace(/\s+/g, ' ').trim();
-                    if (rowText.includes(orderNumber)) {
-                        const matchDate = rowText.match(/Order Date:\s*([0-9/]+\s+[0-9:]+\s+[AMPM]+)/i) || rowText.match(/([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{4}\s+[0-9]{1,2}:[0-9]{2}\s+[AMPM]{2})/i);
-                        if (matchDate && matchDate[1]) orderDateFound = matchDate[1].trim();
-                        
-                        const rmaMatch = rowText.match(/\b(R[0-9]{8,})\b/);
-                        if (rmaMatch && rmaMatch[1]) rmaFound = rmaMatch[1].trim();
-                        break;
-                    }
+                const token = await getPBIToken();
+
+                if (!cachedDatasetId) {
+                    const repRes = await fetch(`https://api.powerbi.com/v1.0/myorg/reports/${PBI_REPORT_ID}`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    const repData = await repRes.json();
+                    cachedDatasetId = repData.datasetId;
+                    if (!cachedDatasetId) throw new Error("Dataset not found");
                 }
-                
-                if (orderDateFound) {
-                    let displayHtml = `<div class="flex items-center justify-end font-bold text-[11px]"><i class="fas fa-calendar-check text-[var(--brand)] mr-1.5"></i> ${orderDateFound}`;
-                    if (rmaFound) displayHtml += ` <span class="text-[var(--text-dim)] mx-1.5 opacity-50">/</span> <i class="fas fa-retweet text-[var(--text-accent)] mr-1"></i> <span class="text-[var(--text-accent)]">${rmaFound}</span>`;
-                    displayHtml += `</div>`;
-                    dateEl.innerHTML = displayHtml;
+
+                // DAX QUERY
+                // Change 'SalesOrders' and 'SalesOrders'[SalesID] if your table is named differently!
+                const daxQuery = `
+                    EVALUATE 
+                    TOPN(1, 
+                        FILTER(
+                            'SalesOrders', 
+                            'SalesOrders'[SalesID] = "${orderNumber}"
+                        )
+                    )
+                `;
+
+                const res = await fetch(`https://api.powerbi.com/v1.0/myorg/datasets/${cachedDatasetId}/executeQueries`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ queries: [{ query: daxQuery }], serializerSettings: { includeNulls: true } })
+                });
+
+                if (!res.ok) {
+                    dateEl.innerHTML = `<i class="fas fa-exclamation-circle text-[var(--text-accent)] mr-1"></i> Schema Mismatch (See Console)`;
+                    console.warn("Power BI DAX Query failed. The table or column names in the DAX string need to be updated. Run window.explorePBI() in the console.");
                     return;
                 }
-                throw new Error("Not found in SSRS");
-            } catch(e) {
-                console.warn("SSRS Fallback to Dataverse:", e);
-                try {
-                    const token = await getToken(ENV_DATA);
-                    let safeAccountNum = String(accountNum || '').trim().replace(/'/g, "''");
-                    let safeOrderNum = String(orderNumber || '').trim();
-                    const orderQuery = `${DATA_API}/${ENTITY_SET}?$filter=cr714_accountnumber eq '${safeAccountNum}'&$select=cr714_salesordernumber,createdon`;
-                    const res = await fetch(orderQuery, { headers: { 'Authorization': `Bearer ${token}` } });
-                    const data = await res.json();
+
+                const data = await res.json();
+                if (data.results && data.results[0].tables[0].rows.length > 0) {
+                    const row = data.results[0].tables[0].rows[0];
+                    const dateKey = Object.keys(row).find(k => k.toLowerCase().includes('date'));
+                    const orderDate = dateKey ? row[dateKey] : null; 
                     
-                    if (data.value && data.value.length > 0) {
-                        const foundOrder = data.value.find(o => String(o.cr714_salesordernumber).trim() === safeOrderNum);
-                        if (foundOrder && foundOrder.createdon) {
-                            const dt = new Date(foundOrder.createdon);
-                            dateEl.innerHTML = `<div class="flex items-center justify-end font-bold text-[11px]"><i class="fas fa-calendar-check text-[var(--brand)] mr-1.5"></i> ${dt.toLocaleDateString('en-CA')} @ ${dt.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>`;
-                            return;
-                        }
+                    if (orderDate) {
+                        const dt = new Date(orderDate);
+                        dateEl.innerHTML = `<i class="fas fa-calendar-check text-[var(--brand)] mr-1.5"></i> ${dt.toLocaleDateString('en-CA')} @ ${dt.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`;
+                    } else {
+                        dateEl.innerHTML = `<i class="fas fa-check text-[var(--brand)] mr-1"></i> Order Found (No Date Column)`;
                     }
-                    dateEl.innerHTML = `<div class="flex items-center justify-end font-bold text-[11px]"><i class="fas fa-exclamation-circle text-[var(--text-accent)] mr-1.5"></i> Order not in History</div>`;
-                } catch(e2) {
-                    dateEl.innerText = "";
+                } else {
+                    // Fallback to Dataverse history search
+                    fetchOrderDetailsD365(orderNumber);
                 }
+            } catch(e) {
+                console.warn("PBI Query failed, falling back to local history.");
+                fetchOrderDetailsD365(orderNumber);
             }
         }
+
+        async function fetchOrderDetailsD365(orderNumber) {
+            const el = document.getElementById('d-order-date');
+            try {
+                const token = await getToken(ENV_DATA);
+                const safeOrderNum = String(orderNumber || '').trim();
+                const orderQuery = `${DATA_API}/${ENTITY_SET}?$filter=cr714_salesordernumber eq '${safeOrderNum}'&$select=createdon`;
+                const res = await fetch(orderQuery, { 
+                    headers: { 
+                        'Authorization': `Bearer ${token}`,
+                        'Accept': 'application/json', 
+                        'OData-MaxVersion': '4.0', 
+                        'OData-Version': '4.0'
+                    } 
+                });
+                const data = await res.json();
+                
+                if (data.value && data.value.length > 0 && data.value[0].createdon) {
+                    const dt = new Date(data.value[0].createdon);
+                    el.innerHTML = `<i class="fas fa-calendar-check text-[var(--text-dim)] mr-1.5"></i> ${dt.toLocaleDateString('en-CA')} @ ${dt.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})} (Local)`;
+                    return;
+                }
+                
+                el.innerHTML = `<i class="fas fa-exclamation-circle text-[var(--text-accent)] mr-1.5"></i> Order not in History`;
+            } catch(e) { el.innerText = ""; }
+        }
+
+        // Run this in the F12 console if the PBI query fails to find the exact table names
+        window.explorePBI = async function() {
+            console.log("Analyzing Power BI Dataset...");
+            const token = await getPBIToken();
+            if (!cachedDatasetId) {
+                console.error("No Dataset ID. Please click an order in the UI first to initialize.");
+                return;
+            }
+            try {
+                const res = await fetch(`https://api.powerbi.com/v1.0/myorg/datasets/${cachedDatasetId}/executeQueries`, {
+                    method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ queries: [{ query: "EVALUATE INFO.TABLES()" }] })
+                });
+                const data = await res.json();
+                console.log("%c--- POWER BI TABLES ---", "color: #2dd4bf; font-weight: bold; font-size: 14px;");
+                console.table(data.results[0].tables[0].rows.map(r => ({ TableName: r['[Name]'] })));
+                console.log("To view columns for a table, update the DAX query in fetchPBIReport to: EVALUATE INFO.COLUMNS()");
+            } catch(e) { console.error(e); }
+        };
 
         function updateSidebar(orderNumber) { const rail = document.getElementById('account-rail');
             const content = document.getElementById('rail-content'); const matches = db.filter(x => x.order === orderNumber && orderNumber !== 'N/A').sort((a,b) => a.timestamp - b.timestamp);
@@ -1226,7 +1301,7 @@
                             mode: 'cors'
                         });
                         if (d365Res.ok) {
-                            showToast("Logged to D365 Timeline!");
+                            showToast("Logged to Account Timeline!");
                         } else {
                             console.warn("D365 Email Log Failed");
                         }
