@@ -117,7 +117,6 @@
         
         /* New Source Badge */
         .source-badge { font-size: 9px; padding: 1px 4px; border-radius: 3px; margin-left: 5px; opacity: 0.7; }
-        .source-dv { background-color: #744da9; color: white; } /* Dataverse Purple */
         .source-pl { background-color: #0078d4; color: white; } /* Planner Blue */
 
         /* --- Main Content --- */
@@ -370,7 +369,6 @@
                             <option value="Not started">Not started</option>
                             <option value="In progress">In progress</option>
                             <option value="Completed">Completed</option>
-                            <option value="Deferred">Deferred</option>
                         </select>
                     </div>
 
@@ -423,7 +421,7 @@
     </div>
 
     <script>
-        // --- CONFIGURATION OBJECT (Edit IDs here) ---
+        // --- CONFIGURATION OBJECT ---
         const CONFIG = {
             planId: "1OcMKeRdYkya_CVm8zy2U2UADc-E",
             buckets: {
@@ -432,31 +430,46 @@
                 "Anslee": "gtJqth6KWEy9WgPQ-gEATWUAG9WI",
                 "Lori": "M7zGXOQcuUW5-4F90qmbXGUAGVuZ",
                 "Unassigned": "cJn6qz4MukyZj3d2DbGUR2UAO8k-"
-            },
-            flows: {
-                create: "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/3aa4d4b11ac346d2b129df08e89ced84/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=A7K99hFNiPZdmnhNcZtdX-ddFle7H_TLHsV7Ck-Xx6M",
-                poll:   "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/8e66353b8e2b45618281c3301da22865/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=ma3tglDIraiozHcUL46tMT-qljPHrSyweRkIm2yfU2A",
-                update: "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/305ddbb25dca43049427e3435723b6f1/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=emJDSrupKmGVFgiVuIQXYQSktIhuRuUSDecu69Wc59U"
             }
         };
 
-        const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: window.location.href }, cache: { cacheLocation: "localStorage" } };
+        const msalConfig = { 
+            auth: { 
+                clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
+                authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", 
+                redirectUri: window.location.href 
+            }, 
+            cache: { cacheLocation: "localStorage" } 
+        };
         const myMSALObj = new msal.PublicClientApplication(msalConfig);
+        
+        // Scope required for Planner Graph API
+        const tokenRequest = { scopes: ["Tasks.ReadWrite", "Group.Read.All", "User.Read"] };
         
         // --- MAPPINGS ---
         const bucketIdToName = Object.fromEntries(Object.entries(CONFIG.buckets).map(a => a.reverse()));
-        const dvPriorityMap = { "Low": 473930000, "Medium": 473930001, "High": 473930002, "Critical": 473930003 };
-        const dvStatusMap = { "Not started": 473930000, "In progress": 473930001, "Completed": 473930002, "Deferred": 473930003 };
+        
+        // Planner Graph Priority (1=Urgent/Critical, 3=High, 5=Medium, 9=Low)
+        const plannerPriorityMap = { "Critical": 1, "High": 3, "Medium": 5, "Low": 9 };
+        // Planner Graph Status (0=Not Started, 50=In Progress, 100=Completed)
+        const plannerStatusMap = { "Not started": 0, "In progress": 50, "Completed": 100 };
 
         let username = "";
         let tickets = []; 
         let currentTicketId = null;
-        let pendingAttachment = null; // Stores file data before save
+        let pendingAttachment = null; 
 
         // --- AUTH ---
         async function signIn() {
-            try { const response = await myMSALObj.loginPopup({ scopes: ["User.Read"] }); handleLogin(response.account); } 
-            catch (error) { console.error(error); showToast("Login failed: " + error.message, "error"); }
+            try { 
+                const response = await myMSALObj.loginPopup(tokenRequest); 
+                myMSALObj.setActiveAccount(response.account);
+                handleLogin(response.account); 
+            } 
+            catch (error) { 
+                console.error(error); 
+                showToast("Login failed: " + error.message, "error"); 
+            }
         }
 
         function handleLogin(account) {
@@ -469,26 +482,19 @@
             setInterval(refreshTickets, 60000); 
         }
 
-        // --- NORMALIZATION HELPERS ---
-        function normalizeDataverse(item) {
-            const bucketId = item['cr714_bucket'] || "";
-            const bucketName = bucketIdToName[bucketId] || "Triage";
-            return {
-                id: item['cr714_cr_bugtrackerid'],
-                source: 'dataverse',
-                linkedPlannerId: item['cr714_plannertaskid'],
-                title: item['cr714_topic'] || "No Title",
-                description: item['cr714_description'] || "",
-                bucket: bucketName, bucketName: bucketName, bucketId: bucketId,
-                priority: item['cr714_priority@OData.Community.Display.V1.FormattedValue'] || "Medium",
-                status: item['cr714_status@OData.Community.Display.V1.FormattedValue'] || "Not started",
-                assignedTo: item['_ownerid_value@OData.Community.Display.V1.FormattedValue'] || item['_owninguser_value@OData.Community.Display.V1.FormattedValue'] || "",
-                requester: item['_createdby_value@OData.Community.Display.V1.FormattedValue'] || "",
-                startDate: item['createdon'] || "", 
-                dueDate: item['cr714_duedate'] || ""
-            };
+        async function getToken() {
+            const account = myMSALObj.getActiveAccount();
+            if(!account) throw new Error("No active account. Please refresh and sign in.");
+            try {
+                const response = await myMSALObj.acquireTokenSilent({ ...tokenRequest, account });
+                return response.accessToken;
+            } catch (e) {
+                const response = await myMSALObj.acquireTokenPopup(tokenRequest);
+                return response.accessToken;
+            }
         }
 
+        // --- NORMALIZATION HELPERS ---
         function normalizePlanner(item) {
             let prio = "Medium";
             const p = item.priority || 5;
@@ -505,13 +511,13 @@
             return {
                 id: item.id,
                 source: 'planner',
-                linkedPlannerId: null,
+                _raw: item, // Storing raw object to keep @odata.etag for PATCH requests
                 title: item.title || "No Title",
-                description: item.hasDescription ? "(See Planner for details)" : "",
+                description: item.hasDescription ? "Loading description..." : "",
                 bucket: bucketName, bucketName: bucketName, bucketId: item.bucketId,
                 priority: prio,
                 status: stat,
-                assignedTo: "Planner User",
+                assignedTo: "Planner User", // Microsoft Graph requires user Object IDs for assignment, simplified for UI
                 requester: "Planner",
                 startDate: item.startDateTime || item.createdDateTime || "",
                 dueDate: item.dueDateTime || ""
@@ -526,32 +532,25 @@
             if(btn) btn.classList.add('fa-spin');
 
             try {
-                const payload = { }; 
-                const res = await fetch(CONFIG.flows.poll, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+                const token = await getToken();
+                // DIRECT API POLL TO MICROSOFT GRAPH PLANNER ENDPOINT
+                const res = await fetch(`https://graph.microsoft.com/v1.0/planner/plans/${CONFIG.planId}/tasks`, { 
+                    method: 'GET', 
+                    headers: { 'Authorization': `Bearer ${token}` } 
+                });
                 
                 if (res.ok) {
                     const data = await res.json();
-                    
-                    let dvRaw = [];
-                    let plRaw = [];
-
-                    if (data.dataverse && Array.isArray(data.dataverse)) dvRaw = data.dataverse;
-                    else if (data.value && Array.isArray(data.value)) dvRaw = data.value;
-
-                    if (data.planner && Array.isArray(data.planner)) plRaw = data.planner;
-
-                    const dvNormalized = dvRaw.map(normalizeDataverse);
-                    const plNormalized = plRaw.map(normalizePlanner);
-
-                    const linkedIds = new Set(dvNormalized.map(t => t.linkedPlannerId).filter(Boolean));
-                    const plFiltered = plNormalized.filter(t => !linkedIds.has(t.id));
-
-                    tickets = [...dvNormalized, ...plFiltered];
-                    
-                    showToast(`Fetched ${tickets.length} items`, "success");
+                    tickets = data.value.map(normalizePlanner);
+                    showToast(`Fetched ${tickets.length} items from Planner`, "success");
+                } else {
+                    throw new Error(await res.text());
                 }
                 renderList();
-            } catch (e) { console.error("Poll error", e); } 
+            } catch (e) { 
+                console.error("Poll error", e); 
+                showToast("Failed to fetch tasks.", "error");
+            } 
             finally { if(btn) btn.classList.remove('fa-spin'); }
         }
 
@@ -596,9 +595,7 @@
                 div.className = `ticket-card priority-${t.priority} ${currentTicketId === t.id ? 'active' : ''}`;
                 div.onclick = () => loadTicket(t.id);
                 
-                const sourceBadge = t.source === 'dataverse' 
-                    ? '<span class="source-badge source-dv">DB</span>' 
-                    : '<span class="source-badge source-pl">PL</span>';
+                const sourceBadge = '<span class="source-badge source-pl">PL</span>';
 
                 div.innerHTML = `
                     <div class="card-header">
@@ -622,7 +619,6 @@
                 const file = input.files[0];
                 const reader = new FileReader();
                 reader.onload = function(e) {
-                    // Store base64 data to send to Flow
                     const base64Raw = e.target.result.split(',')[1];
                     pendingAttachment = {
                         name: file.name,
@@ -646,7 +642,7 @@
                     </div>
                 `;
             } else {
-                container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary); font-style:italic">No attachments selected.</div>`;
+                container.innerHTML = `<div style="font-size:12px; color:var(--text-secondary); font-style:italic">No attachments selected. (Note: Direct Planner API requires SharePoint URL links for attachments)</div>`;
             }
         }
 
@@ -661,11 +657,10 @@
             pendingAttachment = null;
             document.getElementById('inp-title').value = "";
             document.getElementById('inp-notes').value = "";
-            document.getElementById('inp-bucket').value = "Triage";
+            document.getElementById('inp-bucket').value = "Unassigned";
             document.getElementById('inp-priority').value = "Medium";
             document.getElementById('inp-progress').value = "Not started";
             document.getElementById('inp-assigned').value = "";
-            // Use LOCAL timezone for default date
             document.getElementById('inp-start').value = new Date().toLocaleDateString('en-CA'); 
             document.getElementById('inp-due').value = "";
             document.getElementById('comments-list').innerHTML = "";
@@ -676,22 +671,21 @@
             renderAttachmentPreview();
         }
 
-        function loadTicket(id) {
+        async function loadTicket(id) {
             currentTicketId = id;
-            pendingAttachment = null; // Clear new attachments when loading existing ticket
+            pendingAttachment = null; 
             renderAttachmentPreview();
 
             const t = tickets.find(x => x.id === id);
             if(!t) return;
 
             document.getElementById('inp-title').value = t.title || "";
-            document.getElementById('inp-notes').value = t.description || "";
+            document.getElementById('inp-notes').value = "Loading description from Planner...";
             document.getElementById('inp-bucket').value = t.bucketName || t.bucket || "Triage";
             document.getElementById('inp-priority').value = t.priority || "Medium";
             document.getElementById('inp-progress').value = t.status || "Not started";
             document.getElementById('inp-assigned').value = t.assignedTo || "";
             
-            // Safe date handling
             const safeDate = (d) => d ? d.split('T')[0] : "";
             document.getElementById('inp-start').value = safeDate(t.startDate);
             document.getElementById('inp-due').value = safeDate(t.dueDate);
@@ -702,11 +696,24 @@
             commentsList.innerHTML = "";
             document.getElementById('inp-title').classList.remove('input-error');
             
-            if(t.source === 'planner') {
-               showToast("Editing raw Planner tasks may not sync back fully.", "info");
-            }
-
             renderList(); 
+
+            // Fetch Task Details to get the actual Description
+            try {
+                const token = await getToken();
+                const res = await fetch(`https://graph.microsoft.com/v1.0/planner/tasks/${id}/details`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if(res.ok) {
+                    const details = await res.json();
+                    document.getElementById('inp-notes').value = details.description || "";
+                    t._details = details; // cache details containing the details etag
+                } else {
+                    document.getElementById('inp-notes').value = "Could not load description.";
+                }
+            } catch (e) {
+                console.error("Failed to fetch details", e);
+            }
         }
 
         async function saveTicket() {
@@ -730,70 +737,90 @@
             const selectedStatus = document.getElementById('inp-progress').value;
             const rawStart = document.getElementById('inp-start').value;
             const rawDue = document.getElementById('inp-due').value;
-
-            // DETERMINE THE CORRECT PLANNER ID TO SEND
-            let plannerIdToSend = null;
-            if (currentTicketId) {
-                const t = tickets.find(x => x.id === currentTicketId);
-                if (t) {
-                     // If it's a Dataverse item, use the linked Planner ID.
-                     // If it's a raw Planner item, use its main ID.
-                     plannerIdToSend = t.source === 'dataverse' ? t.linkedPlannerId : t.id;
-                }
-            }
-
-            const payload = {
-                id: currentTicketId, 
-                plannerTaskId: plannerIdToSend, // <--- EXPLICITLY sending the correct planner ID
-                title: titleInput.value,
-                bucket: realBucketId, 
-                bucketName: selectedBucketName,
-                priority: selectedPriority,
-                priorityCode: dvPriorityMap[selectedPriority] || 473930001,
-                status: selectedStatus,
-                statusCode: dvStatusMap[selectedStatus] || 473930000,
-                assignedTo: document.getElementById('inp-assigned').value,
-                description: document.getElementById('inp-notes').value,
-                startDate: rawStart ? rawStart : null,
-                dueDate: rawDue ? rawDue : null,
-                requester: username,
-                planId: CONFIG.planId,
-                // Add attachment if present
-                attachment: pendingAttachment ? pendingAttachment : null
-            };
-
-            const url = currentTicketId ? CONFIG.flows.update : CONFIG.flows.create;
+            const notesValue = document.getElementById('inp-notes').value;
 
             try {
-                const res = await fetch(url, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-                if (!res.ok) throw new Error("Server returned " + res.status);
+                const token = await getToken();
+                let savedTaskId = currentTicketId;
                 
-                const responseData = await res.json(); 
-                if (!Array.isArray(tickets)) tickets = []; 
+                // MAIN TASK PAYLOAD
+                const taskPayload = {
+                    title: titleInput.value,
+                    bucketId: realBucketId,
+                    priority: plannerPriorityMap[selectedPriority] || 5,
+                    percentComplete: plannerStatusMap[selectedStatus] || 0
+                };
+
+                if (rawStart) taskPayload.startDateTime = new Date(rawStart).toISOString();
+                if (rawDue) taskPayload.dueDateTime = new Date(rawDue).toISOString();
+                
+                // Add Assignment info to notes if typed (Graph needs Azure GUIDs for real assignments)
+                const assignedInput = document.getElementById('inp-assigned').value;
+                let finalNotes = notesValue;
+                if(assignedInput && !currentTicketId) finalNotes = `Assigned To: ${assignedInput}\n\n${finalNotes}`;
 
                 if (!currentTicketId) {
-                    payload.id = responseData.dataverseId || ("TEMP-" + Date.now()); 
-                    payload.bucket = selectedBucketName;
-                    payload.source = "dataverse"; 
-                    tickets.unshift(payload);
-                    currentTicketId = payload.id;
+                    // CREATE NEW TASK
+                    taskPayload.planId = CONFIG.planId;
+                    const res = await fetch(`https://graph.microsoft.com/v1.0/planner/tasks`, { 
+                        method: 'POST', 
+                        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, 
+                        body: JSON.stringify(taskPayload) 
+                    });
+                    if (!res.ok) throw new Error(await res.text());
+                    const newTaskData = await res.json();
+                    savedTaskId = newTaskData.id;
+                    
+                    // Immediately fetch details to get the ETag so we can set the description
+                    const detRes = await fetch(`https://graph.microsoft.com/v1.0/planner/tasks/${savedTaskId}/details`, { headers: { 'Authorization': `Bearer ${token}` } });
+                    const newDetails = await detRes.json();
+                    
+                    // Update Description
+                    if(finalNotes) {
+                        await fetch(`https://graph.microsoft.com/v1.0/planner/tasks/${savedTaskId}/details`, {
+                            method: 'PATCH',
+                            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'If-Match': newDetails['@odata.etag'] },
+                            body: JSON.stringify({ description: finalNotes })
+                        });
+                    }
+                    
+                    currentTicketId = savedTaskId;
                     triggerConfetti(); 
+
                 } else {
-                    const idx = tickets.findIndex(x => x.id === currentTicketId);
-                    if (idx > -1) {
-                        tickets[idx] = { ...tickets[idx], ...payload };
-                        tickets[idx].bucket = selectedBucketName;
+                    // UPDATE EXISTING TASK
+                    const existingTask = tickets.find(t => t.id === currentTicketId);
+                    if(!existingTask || !existingTask._raw) throw new Error("Missing Task ETag for update.");
+
+                    const res = await fetch(`https://graph.microsoft.com/v1.0/planner/tasks/${currentTicketId}`, { 
+                        method: 'PATCH', 
+                        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'If-Match': existingTask._raw['@odata.etag'] }, 
+                        body: JSON.stringify(taskPayload) 
+                    });
+                    if (!res.ok) throw new Error("Update Task Error: " + await res.text());
+
+                    // UPDATE DESCRIPTION
+                    if(existingTask._details) {
+                        const patchRes = await fetch(`https://graph.microsoft.com/v1.0/planner/tasks/${currentTicketId}/details`, {
+                            method: 'PATCH',
+                            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'If-Match': existingTask._details['@odata.etag'] },
+                            body: JSON.stringify({ description: finalNotes })
+                        });
+                        if (!patchRes.ok) console.warn("Could not patch description. Etag might be out of sync.");
                     }
                 }
                 
-                // Clear pending attachment after success
                 if(pendingAttachment) {
+                    showToast("Task saved, but direct Graph attachments require SharePoint integration.", "info");
                     clearAttachment();
-                    showToast("Ticket Saved (File Upload sent to backend)", "success");
                 } else {
                     showToast("Ticket Saved Successfully", "success");
                 }
-                renderList();
+                
+                // Refresh list to pull newest etags and states
+                await refreshTickets();
+                loadTicket(currentTicketId);
+
             } catch (e) {
                 console.error(e);
                 showToast("Save Failed: " + e.message, "error");
