@@ -688,13 +688,14 @@
             <div class="card p-6 w-full max-w-sm shadow-xl">
                  <h3 class="text-lg font-bold mb-4 border-b pb-2"><i class="fas fa-user-lock mr-2"></i>Admin Override</h3>
                  
-                 <div id="admin-step-1">
-                      <p class="text-xs text-muted mb-2">Enter Administrator Password:</p>
-                     <input type="password" id="admin-password" name="adminPassword" class="mb-3 p-3 text-lg" placeholder="Password">
-                     <div class="flex justify-end gap-2 mt-2">
-                        <button onclick="window.checkAdminPassword()" class="btn-primary text-xs w-full">Authenticate</button>
-                     </div>
-                 </div>
+<div id="admin-step-2" class="hidden">
+    <p class="text-xs text-green-600 font-bold mb-2"><i class="fas fa-check-circle"></i> Access Granted</p>
+    <label class="text-xs font-bold uppercase text-muted block mb-1">Target Rep Name</label>
+    <input type="text" id="override-rep-name" name="overrideRepName" class="p-2 mb-3 border border-blue-300 bg-blue-50" placeholder="e.g. John Doe">
+    <div class="flex justify-end gap-2 mt-4">
+        <button onclick="window.confirmAdminOverride()" class="btn-primary text-xs w-full bg-blue-600">Load Rep Data</button>
+    </div>
+</div>
 
                  <div id="admin-step-2" class="hidden">
                      <p class="text-xs text-green-600 font-bold mb-2"><i class="fas fa-check-circle"></i> Access Granted</p>
@@ -1420,8 +1421,7 @@
             if(elContact) elContact.textContent = uniqueContacts.size;
         }
 
-        // --- DIRECT DATAVERSE LOAD (API REPLACES GET_MY_RECORDS_FLOW_URL) ---
-        window.loadRecords = async function() {
+window.loadRecords = async function() {
             const list = document.getElementById('record-gallery-list');
             list.innerHTML = '<div class="text-center p-4">Loading Data via Dataverse API...</div>';
             document.getElementById('global-loader').style.display = 'flex'; document.getElementById('global-loader').style.opacity = '1';
@@ -1437,54 +1437,37 @@
                     'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
                 };
                 
-                // Fetch from Cadence Datasets
+                // 1. Fetch from Cadence Datasets
                 let cadenceData = { value: [] };
                 try {
                     const cadenceRes = await fetch(`${DATAVERSE_URL}/cr714_cadencedatasets?$filter=cr714_retentionrep eq '${currentUserRepName}'`, { headers });
                     if (cadenceRes.ok) cadenceData = await cadenceRes.json();
                 } catch(e) { console.warn("Cadence API error", e); }
                 
-                // Fetch from Prospecting Datasets
+                // 2. Fetch from Prospecting Datasets
                 let prospectData = { value: [] };
                 try {
                     const prospectRes = await fetch(`${DATAVERSE_URL}/cr714_prospectingdatasets?$filter=cr714_repassigned eq '${currentUserRepName}' and cr714_prospectingnotes ne null`, { headers });
                     if (prospectRes.ok) prospectData = await prospectRes.json();
                 } catch(e) { console.warn("Prospect API error", e); }
 
-                // Fetch from Account Management
+                // 3. Fetch from Account Management (Gracefully handles 404)
                 let accountMgmtData = { value: [] };
                 try {
-                    // Try with datasets postfix
-                    let amRes = await fetch(`${DATAVERSE_URL}/cr714_accountmanagementdatasets?$filter=cr714_rep eq '${currentUserRepName}'`, { headers });
-                    if(amRes.status === 404) {
-                        // Fallback to manangements plural
-                        amRes = await fetch(`${DATAVERSE_URL}/cr714_accountmanagements?$filter=cr714_rep eq '${currentUserRepName}'`, { headers });
-                    }
+                    const amRes = await fetch(`${DATAVERSE_URL}/cr714_accountmanagements?$filter=cr714_rep eq '${currentUserRepName}'`, { headers });
                     if (amRes.ok) accountMgmtData = await amRes.json();
                 } catch(e) { console.warn("Account Mgmt API error", e); }
 
                 // Merge Data
                 let rawList = [];
                 if (cadenceData.value) {
-                    cadenceData.value.forEach(item => {
-                        item._sourceTable = 'cr714_cadencedatasets';
-                        item._sourceId = item.cr714_cadencedatasetid;
-                        rawList.push(item);
-                    });
+                    cadenceData.value.forEach(item => { item._sourceTable = 'cr714_cadencedatasets'; item._sourceId = item.cr714_cadencedatasetid; rawList.push(item); });
                 }
                 if (prospectData.value) {
-                    prospectData.value.forEach(item => {
-                        item._sourceTable = 'cr714_prospectingdatasets';
-                        item._sourceId = item.cr714_prospectingdatasetid;
-                        rawList.push(item);
-                    });
+                    prospectData.value.forEach(item => { item._sourceTable = 'cr714_prospectingdatasets'; item._sourceId = item.cr714_prospectingdatasetid; rawList.push(item); });
                 }
                 if (accountMgmtData.value) {
-                    accountMgmtData.value.forEach(item => {
-                        item._sourceTable = item.cr714_accountmanagementdatasetid ? 'cr714_accountmanagementdatasets' : 'cr714_accountmanagements';
-                        item._sourceId = item.cr714_accountmanagementdatasetid || item.cr714_accountmanagementid;
-                        rawList.push(item);
-                    });
+                    accountMgmtData.value.forEach(item => { item._sourceTable = 'cr714_accountmanagements'; item._sourceId = item.cr714_accountmanagementid; rawList.push(item); });
                 }
 
                 // Deduping & Normalizing Account Numbers to ALWAYS have the 'C'
@@ -1493,10 +1476,8 @@
                     let acct = item.cr714_accountnum || item.cr714_accountnumber || item.cr714_id || '';
                     acct = String(acct).trim().toUpperCase();
                     
-                    if (/^\d+$/.test(acct)) {
-                        acct = 'C' + acct;
-                    }
-
+                    if (/^\d+$/.test(acct)) { acct = 'C' + acct; } // Force C Prefix
+                    
                     item._accountNum = acct || Math.random().toString(36).substr(2, 9);
 
                     if (seen.has(item._accountNum)) { 
@@ -1509,19 +1490,17 @@
                 
                 const statTotal = document.getElementById('stat-total');
                 if(statTotal) statTotal.textContent = allRecords.length; 
-                
                 if (currentUserRepName) {
                     const welMsg = document.getElementById('welcome-message');
                     if(welMsg) welMsg.innerHTML = `<i class="fas fa-user-circle text-xl"></i> <span class="hidden md:inline">${currentUserRepName}</span>`;
                 }
-                
                 currentUserProfile = { name: currentUserRepName, jobTitle: msalAccount?.username };
 
-                window.updateStats();
-                window.populateActionFilter();
+                window.updateStats(); window.populateActionFilter();
                 if(typeof window.loadGalleryPrefs === 'function') window.loadGalleryPrefs(); 
-                window.filterAndSortGallery();
-                window.setLayout('form');
+                
+                if(typeof window.filterAndSortGallery === 'function') window.filterAndSortGallery();
+                if(typeof window.setLayout === 'function') window.setLayout('form');
                 
                 document.getElementById('global-loader').style.opacity = '0'; 
                 setTimeout(()=>document.getElementById('global-loader').style.display='none', 300);
@@ -2400,7 +2379,174 @@
                         resizer.classList.remove('bg-blue-500/20');
                         localStorage.setItem('daytona_history_width', getComputedStyle(grid).getPropertyValue('--history-width'));
                     }
-                };
+                };window.filterAndSortGallery = function() {
+    const search = window.getElementValue('search-bar')?.toLowerCase() || '';
+    const sort = window.getElementValue('sort-dropdown') || 'company-asc';
+    const filterAction = window.getElementValue('filter-action-dropdown') || '';
+    
+    let sentRecs = [];
+    try { 
+        sentRecs = JSON.parse(localStorage.getItem('daytona_sent_records') || '[]'); 
+    } catch(e) {}
+    
+    const isToday = (d) => { 
+        if(!d) return false; 
+        return new Date(d).toLocaleDateString('en-CA') === new Date().toLocaleDateString('en-CA'); 
+    };
+    
+    const pref = JSON.parse(localStorage.getItem('daytona_gallery_prefs') || '{"showId":true,"showRep":true,"showDate":true}');
+    
+    let filtered = window.allRecords.filter(r => {
+        if(!r.cr714_id) return false;
+        const isSent = sentRecs.includes(String(r.cr714_id));
+        
+        if(document.getElementById('filter-sent-only')?.checked && !isSent) return false;
+        if(document.getElementById('filter-hidesent')?.checked && isSent) return false;
+        if(filterAction && r.cr714_action !== filterAction) return false;
+        if(document.getElementById('filter-requests')?.checked && !r.cr714_action) return false;
+        if(document.getElementById('filter-followup')?.checked && !r.cr714_followup) return false;
+        if(document.getElementById('filter-nonotes')?.checked && (r.cr714_qbnotes || '').trim() !== '') return false;
+        
+        if(document.getElementById('filter-norecent')?.checked) {
+            const notes = window.parseNotes(r.cr714_qbnotes || '');
+            if (notes.length > 0) { 
+                const lastDate = new Date(notes[0].date);
+                if (!isNaN(lastDate) && Math.ceil(Math.abs(new Date() - lastDate)/(1000*60*60*24)) < 14) return false;
+            }
+        }
+        
+        if(search) { 
+            const values = Object.values(r).join(' ').toLowerCase();
+            if(!values.includes(search)) return false; 
+        }
+        
+        return true;
+    });
+    
+    // Sort Logic
+    filtered.sort((a,b) => {
+        const get = (item, key) => (item[key] || '').toString().toLowerCase();
+        
+        if(sort.includes('company')) {
+            return sort === 'company-asc' ? 
+                get(a,'cr714_company').localeCompare(get(b,'cr714_company')) : 
+                get(b,'cr714_company').localeCompare(get(a,'cr714_company'));
+        }
+        if(sort.includes('followup')) {
+            const da = a.cr714_followup ? new Date(a.cr714_followup) : new Date(sort === 'followup-asc' ? 8640000000000000 : -8640000000000000);
+            const db = b.cr714_followup ? new Date(b.cr714_followup) : new Date(sort === 'followup-asc' ? 8640000000000000 : -8640000000000000);
+            if(isNaN(da)) return sort === 'followup-asc' ? 1 : -1;
+            if(isNaN(db)) return sort === 'followup-asc' ? -1 : 1;
+            return sort === 'followup-asc' ? da - db : db - da;
+        }
+        if(sort.includes('rep')) {
+            return sort === 'rep-asc' ? 
+                get(a,'cr714_rep').localeCompare(get(b,'cr714_rep')) : 
+                get(b,'cr714_rep').localeCompare(get(a,'cr714_rep'));
+        }
+        return 0;
+    });
+
+    // Store global filtered list for mini-nav
+    window.currentFilteredList = filtered;
+    
+    // Update Mini Nav Counters
+    const miniTotalEl = document.getElementById('mini-total-count');
+    if(miniTotalEl) miniTotalEl.innerText = filtered.length;
+    if(typeof window.updateMiniCounter === 'function') window.updateMiniCounter();
+
+    const list = document.getElementById('record-gallery-list'); 
+    if(list) list.innerHTML = '';
+    
+    const countEl = document.getElementById('record-count');
+    if(countEl) countEl.textContent = filtered.length;
+    
+    const statTotal = document.getElementById('stat-total'); 
+    if(statTotal) statTotal.textContent = window.allRecords.length;
+    
+    const viewStat = document.getElementById('stat-filtered'); 
+    if(viewStat) viewStat.textContent = filtered.length;
+    
+    if(filtered.length === 0) { 
+        if(list) list.innerHTML = '<div class="text-center p-4 text-xs italic">No records found.</div>'; 
+        return; 
+    }
+    
+    filtered.forEach(r => {
+        const div = document.createElement('div');
+        const isSent = sentRecs.includes(String(r.cr714_id));
+        const isDuplicate = window.duplicateRecordIds ? window.duplicateRecordIds.has(r.cr714_id) : false;
+        
+        // PULSE LOGIC: Has Message AND Modified Today
+        const hasMsg = (r.cr714_actionmessage && r.cr714_actionmessage.trim().length > 0);
+        const updatedToday = isToday(r.modifiedon); 
+        const shouldPulse = hasMsg && updatedToday;
+        const pulseClass = shouldPulse ? 'response-pulse' : '';
+        const duplicateClass = isDuplicate ? 'duplicate-flash' : '';
+
+        div.className = `gallery-item ${window.currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${isSent ? 'has-sent-email' : ''} ${pulseClass} ${duplicateClass}`;
+        
+        if(isDuplicate) div.title = "Duplicate Account";
+        
+        div.onclick = () => { if(typeof window.selectRecord === 'function') window.selectRecord(r.cr714_id); };
+        
+        const idHtml = pref.showId ? `<span class="text-[10px] text-gray-500">ID: ${r.cr714_id}</span>` : '';
+        const dateHtml = pref.showDate ? `<span class="text-xs text-muted">${r.cr714_followup ? new Date(r.cr714_followup).toLocaleDateString() : 'None'}</span>` : '';
+        const repHtml = pref.showRep ? `<div class="text-xs text-muted">Rep: ${r.cr714_rep || 'N/A'}</div>` : '';
+
+        div.innerHTML = `
+            <div class="flex justify-between w-full items-center">
+                ${idHtml}
+                <i class="fas fa-envelope-circle-check sent-indicator" style="display: ${isSent ? 'inline-block' : 'none'};"></i>
+                ${dateHtml}
+            </div>
+            <div class="gallery-item-company truncate" title="${r.cr714_company || 'Unknown Company'}">${window.escapeHTML ? window.escapeHTML(r.cr714_company) : r.cr714_company || 'Unknown'}</div>
+            ${repHtml}
+        `;
+        
+        if(list) list.appendChild(div);
+    });
+};window.checkAdminPassword = function() {
+    const pwd = document.getElementById('admin-password').value;
+    
+    // Checks for the authorized passwords
+    if(pwd === 'admin' || pwd === 'daytona') { 
+        // Hides the password input (Step 1) and shows the rep name input (Step 2)
+        document.getElementById('admin-step-1').classList.add('hidden');
+        document.getElementById('admin-step-2').classList.remove('hidden');
+    } else {
+        window.showToast("Incorrect Password", "error");
+        document.getElementById('admin-password').value = '';
+    }
+}
+
+window.confirmAdminOverride = function() {
+    const newRep = document.getElementById('override-rep-name').value;
+    
+    // Ensure a name was actually entered
+    if(!newRep) { 
+        window.showToast("Please enter a Rep Name", "error"); 
+        return; 
+    }
+    
+    // Override the current rep and notify the user
+    currentUserRepName = newRep;
+    window.showToast(`Switched to user: ${newRep}`, "success");
+    
+    // Close the modal
+    window.closeSidebarModal('admin-modal');
+    
+    // Reset the modal UI back to Step 1 for the next time it's opened
+    document.getElementById('admin-step-1').classList.remove('hidden');
+    document.getElementById('admin-step-2').classList.add('hidden');
+    
+    // Clear the input fields
+    document.getElementById('admin-password').value = '';
+    document.getElementById('override-rep-name').value = '';
+    
+    // Reload the gallery records as the newly selected rep
+    window.loadRecords();
+}
 
                 resizer.addEventListener('mousedown', (e) => onDown(e.clientX));
                 document.addEventListener('mousemove', (e) => onMove(e.clientX));
@@ -2411,6 +2557,7 @@
                 document.addEventListener('touchend', onUp);
             }
         });
+        
     </script>
 </body>
 </html>
