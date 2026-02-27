@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLog v106.18 | Logistics Dashboard</title>
+    <title>LogiLog v106.19| Logistics Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -793,7 +793,7 @@
                     message: { 
                         subject: `Record Sent Back: Order #${t.order} / ${t.company}`, 
                         body: { contentType: "HTML", content: emailBody }, 
-                        toRecipients: [{ emailAddress: { address: "wayne.rendt@wbmason.com" } }] 
+                        toRecipients: [{ emailAddress: { address: "Anslee.erickson@wbmason.com" } }] 
                     }, 
                     saveToSentItems: "false" 
                 };
@@ -922,23 +922,76 @@
 
         async function sendViaGraph() {
             const btn = document.getElementById('confirm-send-btn');
-            const toField = document.getElementById('m-to-address').value; const t = db.find(x => x.id === currentTicketId);
-            if(!toField) { showToast("Recipient required", "error"); return;
-            }
+            const toField = document.getElementById('m-to-address').value; 
+            const t = db.find(x => x.id === currentTicketId);
+            
+            if(!toField) { showToast("Recipient required", "error"); return; }
+            
             btn.innerHTML = `<i class="fa fa-spinner fa-spin"></i> SENDING...`;
             btn.disabled = true;
+            
             try {
                 const tokenResponse = await msalInstance.acquireTokenSilent({ scopes: ["Mail.Send"], account: msalAccount }).catch(async () => await msalInstance.acquireTokenPopup({ scopes: ["Mail.Send"] }));
                 const parse = (s) => s.split(/[,;]/).map(e => e.trim()).filter(e => e).map(e => ({ emailAddress: { address: e } }));
-                const response = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", { method: "POST", headers: { "Authorization": `Bearer ${tokenResponse.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify({ message: { subject: document.getElementById('m-subject').value, body: { contentType: "HTML", content: document.getElementById('m-body').innerHTML }, toRecipients: parse(toField), ccRecipients: parse(document.getElementById('m-cc-address').value) }, saveToSentItems: "true" }) });
+                const response = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", { 
+                    method: "POST", 
+                    headers: { "Authorization": `Bearer ${tokenResponse.accessToken}`, "Content-Type": "application/json" }, 
+                    body: JSON.stringify({ 
+                        message: { 
+                            subject: document.getElementById('m-subject').value, 
+                            body: { contentType: "HTML", content: document.getElementById('m-body').innerHTML }, 
+                            toRecipients: parse(toField), 
+                            ccRecipients: parse(document.getElementById('m-cc-address').value) 
+                        }, 
+                        saveToSentItems: "true" 
+                    }) 
+                });
+                
                 if (response.ok) { 
                     showToast("Email Sent!");
-                    // Write timestamp to Dataverse
+                    
+                    // --- NEW NOTES STAMPING LOGIC ---
+                    const stampTime = new Date().toLocaleString('en-US', { month: 'numeric', day: 'numeric', year: '2-digit', hour: 'numeric', minute: '2-digit', hour12: true });
+                    const stampText = `\n\n[${stampTime} - ${activeEmailType === 'warehouse' ? 'Warehouse Email Sent' : 'Rep Update Sent'}]`;
+                    
+                    let wBox = document.getElementById('d-warehouse-input');
+                    let dBox = document.getElementById('d-driver-input');
+                    let wNotes = wBox.value.trim();
+                    let dNotes = dBox.value.trim();
+                    
+                    if (activeEmailType === 'warehouse') {
+                        wNotes += stampText;
+                    } else if (activeEmailType === 'rep') {
+                        if (wNotes) wNotes += stampText;
+                        if (dNotes) dNotes += stampText;
+                        if (!wNotes && !dNotes) wNotes += stampText; // Fallback to warehouse box if both are empty
+                    }
+                    
+                    // Update the UI
+                    wBox.value = wNotes.trim();
+                    dBox.value = dNotes.trim();
+                    t.warehouseNotes = wNotes.trim();
+                    t.driverNotes = dNotes.trim();
+                    // ---------------------------------
+
+                    // Write timestamp and updated notes to Dataverse
                     try {
                         const stampToken = await getToken(ENV_DATA);
                         const field = activeEmailType === 'warehouse' ? 'cr714_warehouseemaildatestamp' : 'cr714_repemaildatestamp';
-                        await fetch(`${DATA_API}/${ENTITY_SET}(${t.guid})`, { method: 'PATCH', headers: { 'Authorization': `Bearer ${stampToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ [field]: new Date().toISOString() }) });
-                    } catch(e) {}
+                        
+                        const patchBody = { 
+                            [field]: new Date().toISOString(),
+                            "cr714_receivedemailfromwarehousenotes": wNotes.trim(),
+                            "cr714_receivedtextfromdrivernotes": dNotes.trim()
+                        };
+
+                        await fetch(`${DATA_API}/${ENTITY_SET}(${t.guid})`, { 
+                            method: 'PATCH', 
+                            headers: { 'Authorization': `Bearer ${stampToken}`, 'Content-Type': 'application/json' }, 
+                            body: JSON.stringify(patchBody) 
+                        });
+                    } catch(e) { console.warn("Dataverse Stamp Failed", e); }
+                    
                     // CRM Tracking
                     try {
                         const dToken = await getToken(ENV_D365);
@@ -953,8 +1006,11 @@
                     } catch(e) {}
                     setTimeout(() => { closeDraftModal(); btn.innerHTML = `<i class="fas fa-paper-plane"></i> Send Email & Log to D365`; btn.disabled = false; fetchData(true); }, 1000);
                 }
-            } catch (e) { btn.innerText = "RETRY";
-            btn.disabled = false; showToast("Graph error", "error"); }
+            } catch (e) { 
+                btn.innerText = "RETRY";
+                btn.disabled = false; 
+                showToast("Graph error", "error"); 
+            }
         }
 
         function toggleLinkSidebar() { const sidebar = document.getElementById('link-sidebar');
