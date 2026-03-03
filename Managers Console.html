@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Daytona Enterprise v42.2 (Direct API Stable)</title>
+    <title>Daytona Enterprise v42.3 (Direct API & Async Load)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -27,7 +27,8 @@
                     },
                     animation: {
                         'flash-red': 'flashRed 1.5s ease-in-out 3',
-                        'blob': 'blob 2s infinite'
+                        'blob': 'blob 2s infinite',
+                        'pulse-fast': 'pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite'
                     },
                     keyframes: {
                         flashRed: {
@@ -266,6 +267,15 @@
             animation: blob 1.5s ease-in-out infinite;
         }
 
+        /* Loading Progress Track */
+        .progress-track {
+            width: 100%; max-width: 300px; height: 6px;
+            background: rgba(255,255,255,0.1); border-radius: 10px; overflow: hidden; margin-top: 10px;
+        }
+        .progress-bar {
+            height: 100%; background: var(--primary); width: 0%; transition: width 0.3s ease;
+        }
+
         /* --- MODALS --- */
         .modal-overlay { position: fixed;
             inset: 0; background: rgba(0,0,0,0.85); z-index: 50; display: none; align-items: center; justify-content: center; backdrop-filter: blur(4px);
@@ -333,7 +343,7 @@
             <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center text-white font-bold text-lg shadow-glow">D</div>
             <div>
                 <div class="font-bold text-lg leading-tight text-textMain tracking-tight">Daytona <span class="text-primary font-light">Enterprise</span></div>
-                <div class="text-[10px] text-textMuted font-mono tracking-widest">V42.2 PLATINUM (Direct API)</div>
+                <div class="text-[10px] text-textMuted font-mono tracking-widest">V42.3 PLATINUM (Async Connect)</div>
             </div>
         </div>
         
@@ -404,10 +414,15 @@
     </div>
 
     <div id="global-loader" class="fixed inset-0 z-[10000] bg-bgBase flex flex-col items-center justify-center">
-        <div class="jelly-loader mb-4"></div>
-        <h2 class="text-xl font-bold text-textMain">Connecting</h2>
-        <p class="text-sm text-textMuted mt-2" id="loading-status-text">Authenticating securely...</p>
-        <button onclick="window.fetchMasterData(true)" class="mt-6 text-xs text-primary underline hidden" id="retry-load-btn">Retry in Safe Mode</button>
+        <div class="jelly-loader mb-6"></div>
+        <h2 class="text-2xl font-bold text-textMain mb-2">A.C.T. System</h2>
+        <p class="text-sm text-textMuted mb-4" id="loading-status-text">Initializing connection...</p>
+        
+        <div class="progress-track">
+            <div id="load-progress-bar" class="progress-bar"></div>
+        </div>
+        
+        <button onclick="window.fetchMasterData(true)" class="mt-8 text-xs text-primary border border-primary/50 px-4 py-2 rounded hover:bg-primary/10 transition hidden" id="retry-load-btn">Retry in Safe Mode</button>
     </div>
 
     <div id="login-container" class="fixed inset-0 z-[9998] hidden flex items-center justify-center bg-black/80 backdrop-blur-sm">
@@ -723,7 +738,7 @@
         const CONFIG = {
             DATAVERSE_URL: "https://org23279050.crm.dynamics.com", 
             LISTS: [
-                { table: "cr714_accountmanagementdatasets", name: "Account Management", pk: "cr714_accountmanagementid" },
+                { table: "cr714_accountmanagements", name: "Account Management", pk: "cr714_accountmanagementid" },
                 { table: "cr714_cadencedatasets", name: "Cadence", pk: "cr714_cadencedatasetid" },
                 { table: "cr714_prospectingdatasets", name: "Prospecting", pk: "cr714_prospectingdatasetid" }
             ],
@@ -888,32 +903,79 @@
         }
 
         async function fetchMasterData(safeMode = false) {
-            const progressBar = document.getElementById('loading-status-text');
-            document.getElementById('retry-load-btn').classList.add('hidden');
-            try {
-                progressBar.innerText = "Querying Dataverse Lists...";
-                
-                let allRawRecords = [];
+            const statusText = document.getElementById('loading-status-text');
+            const progressBar = document.getElementById('load-progress-bar');
+            const retryBtn = document.getElementById('retry-load-btn');
+            
+            retryBtn.classList.add('hidden');
+            statusText.innerText = "Authenticating & Preparing Queries...";
+            if(progressBar) progressBar.style.width = '5%';
 
-                for (const list of CONFIG.LISTS) {
-                    // ACT App logic: fetch entire dataset matching the rep, no restrictive $select to avoid 400 Bad Requests on missing columns.
+            // Render skeleton list loaders to indicate data is fetching
+            const listEl = document.getElementById('gallery-list');
+            if(listEl) {
+                listEl.innerHTML = `
+                    <div class="animate-pulse flex flex-col gap-2 p-1">
+                        <div class="h-16 bg-white/5 rounded border border-white/10 w-full"></div>
+                        <div class="h-16 bg-white/5 rounded border border-white/10 w-full"></div>
+                        <div class="h-16 bg-white/5 rounded border border-white/10 w-full"></div>
+                        <div class="h-16 bg-white/5 rounded border border-white/10 w-full"></div>
+                        <div class="h-16 bg-white/5 rounded border border-white/10 w-full"></div>
+                    </div>
+                `;
+            }
+
+            try {
+                let allRawRecords = [];
+                let completedLists = 0;
+                let totalRecordsFetched = 0;
+
+                // Fire all lists concurrently using Promise.all
+                const fetchPromises = CONFIG.LISTS.map(async (list) => {
                     let query = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${list.table}`;
                     
                     if (!safeMode && !appState.isManager) {
                         if (list.table === 'cr714_cadencedatasets') query += `?$filter=cr714_retentionrep eq '${appState.user}'`;
                         else if (list.table === 'cr714_prospectingdatasets') query += `?$filter=cr714_repassigned eq '${appState.user}'`;
-                        else if (list.table === 'cr714_accountmanagementdatasets') query += `?$filter=cr714_rep eq '${appState.user}'`;
+                        else if (list.table === 'cr714_accountmanagements') query += `?$filter=cr714_rep eq '${appState.user}'`;
                     }
-                    
-                    const data = await dataverseApiCall("GET", query);
-                    const raw = data.value || [];
-                    raw.forEach(r => {
-                        r._sourceTable = list.table;
-                        r._sourceName = list.name;
-                        r._guid = r[list.pk];
-                    });
-                    allRawRecords = allRawRecords.concat(raw);
-                }
+
+                    try {
+                        const data = await dataverseApiCall("GET", query);
+                        const raw = data.value || [];
+                        raw.forEach(r => {
+                            r._sourceTable = list.table;
+                            r._sourceName = list.name;
+                            r._guid = r[list.pk];
+                        });
+                        
+                        completedLists++;
+                        totalRecordsFetched += raw.length;
+                        
+                        // Update Progress Bar
+                        const pct = 5 + ((completedLists / CONFIG.LISTS.length) * 90);
+                        if(progressBar) progressBar.style.width = `${pct}%`;
+                        statusText.innerText = `Loaded ${list.name} (${completedLists}/${CONFIG.LISTS.length}) ... [${totalRecordsFetched} total records found]`;
+
+                        return raw;
+                    } catch (err) {
+                        console.error(`Failed to load list: ${list.table}`, err);
+                        completedLists++;
+                        const pct = 5 + ((completedLists / CONFIG.LISTS.length) * 90);
+                        if(progressBar) progressBar.style.width = `${pct}%`;
+                        statusText.innerText = `Error loading ${list.name}. Moving to next...`;
+                        return [];
+                    }
+                });
+
+                // Wait for all list promises to resolve in parallel
+                const results = await Promise.all(fetchPromises);
+                
+                statusText.innerText = "Processing and normalizing records...";
+                if(progressBar) progressBar.style.width = '98%';
+
+                // Flatten the results array
+                allRawRecords = results.flat();
                 
                 // Normalization uses the exact fallback coalescing defined in your ACT app code
                 appState.rawData = allRawRecords.filter(r => r._guid).map(r => normalizeRecord(r));
@@ -930,13 +992,16 @@
 
                 setupUI(); populateActionFilter(); window.initListRender(); 
                 
-                // Start direct polling interval instead of Flow URL
+                // Start direct polling interval
                 startDirectDataPolling();
                 
-                setTimeout(() => { document.getElementById('global-loader').style.opacity = '0'; setTimeout(() => { document.getElementById('global-loader').style.display = 'none'; showGateway(); }, 500); }, 800);
+                if(progressBar) progressBar.style.width = '100%';
+                statusText.innerText = "Ready!";
+
+                setTimeout(() => { document.getElementById('global-loader').style.opacity = '0'; setTimeout(() => { document.getElementById('global-loader').style.display = 'none'; showGateway(); }, 500); }, 500);
             } catch (e) { 
-                document.getElementById('loading-status-text').innerText = "ERROR: " + e.message;
-                document.getElementById('retry-load-btn').classList.remove('hidden');
+                statusText.innerText = "ERROR: " + e.message;
+                retryBtn.classList.remove('hidden');
             }
         }
 
