@@ -154,11 +154,11 @@
 
         /* GALLERY & NOTES */
         .gallery-list { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding: 2px; }
-        .gallery-item { padding: 0.5rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.5rem; cursor: pointer; transition: border-color 0.1s; position: relative; }
+        .gallery-item { padding: 0.5rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.5rem; cursor: pointer; transition: border-color 0.1s; position: relative; height: auto; }
         .gallery-item:hover { border-color: var(--primary); }
         .gallery-item.is-selected { border-color: var(--primary); background: var(--primary); color: var(--primary-fg); }
         .gallery-item.is-selected * { color: var(--primary-fg) !important; }
-        .gallery-item-company { color: var(--text-main); font-weight: 600; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .gallery-item-company { color: var(--text-main); font-weight: 600; font-size: 0.85rem; white-space: normal; word-break: break-word; }
         
         .duplicate-flash { animation: redFlash 2s infinite; border-color: var(--accent-danger) !important; border-width: 2px; }
         @keyframes redFlash { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
@@ -1048,7 +1048,7 @@
         window.parseNotes = function(rawNotes) { 
             if (!rawNotes) return [];
             let cleanRaw = rawNotes.replace(/\r\n/g, '\n');
-            const rawEntries = cleanRaw.split(/(?=Modified By:)/i).filter(e => e.trim().length > 0);
+            const rawEntries = cleanRaw.split(/(?=Modified By:|--- Notes from)/i).filter(e => e.trim().length > 0);
             
             const parsed = [];
             rawEntries.forEach(entry => {
@@ -1061,6 +1061,10 @@
                 for(let i=0; i<lines.length; i++) {
                     const line = lines[i].trim();
                     if (line.match(/^-{3,}$/)) continue; // Clean up extra dash lines
+                    if (line.match(/^--- Notes from/i)) {
+                        author = line.replace(/-/g, '').trim();
+                        continue;
+                    }
                     
                     if (line.toLowerCase().includes('modified on:')) {
                         date = line.split(/modified on:/i)[1]?.trim() || "Unknown Date";
@@ -1092,6 +1096,29 @@
             });
             return parsed;
         }
+
+        window.calculateDaysSinceEmail = function(r) {
+            let latestTime = 0;
+            // check local audit log first
+            let log = [];
+            try { log = JSON.parse(localStorage.getItem('daytona_audit_log') || '[]'); } catch(e){}
+            let emails = log.filter(x => x.recordId === r._accountNum && x.type.toLowerCase().includes('email'));
+            if(emails.length > 0) {
+                let latestLog = new Date(Math.max(...emails.map(e => new Date(e.timestamp).getTime())));
+                latestTime = latestLog.getTime();
+            }
+            
+            // fall back to D365 data if available in cache or object directly
+            let cache = window.accountCache[r._accountNum];
+            let apiDate = r.cr714_lastactivitydate || r.lastactivitydate || (cache ? cache.lastactivitydate : null);
+            if(apiDate) {
+                let d365Time = new Date(apiDate).getTime();
+                if(d365Time > latestTime) latestTime = d365Time;
+            }
+            
+            if(latestTime === 0) return null;
+            return Math.floor((Date.now() - latestTime) / (1000 * 3600 * 24));
+        };
 
         window.showToast = function(message, type = 'info') {
             let existingContainer = document.querySelector('.toast-container');
@@ -1452,7 +1479,9 @@
             select.disabled = false;
             
             const actions = new Set();
-            allRecords.forEach(r => { if(r.cr714_action) actions.add(r.cr714_action); });
+            allRecords.forEach(r => {
+                if(r._allActions) { r._allActions.forEach(a => actions.add(a)); }
+            });
             Array.from(actions).sort().forEach(act => {
                 const opt = document.createElement('option'); opt.value = act; opt.textContent = act; 
                 select.appendChild(opt);
@@ -1620,15 +1649,36 @@
                     accountMgmtData.value.forEach(item => { item._sourceTable = 'cr714_accountmanagements'; item._sourceId = item.cr714_accountmanagementid; rawList.push(window.standardizeRecord(item)); });
                 }
 
-                const seen = new Set();
-                allRecords = rawList.filter(item => {
+                // Merging and Aggregating Data
+                const seen = new Map();
+                let finalRecords = [];
+                
+                rawList.forEach(item => {
                     if (seen.has(item._accountNum)) { 
+                        let existing = seen.get(item._accountNum);
+                        
+                        if(item.cr714_action && !existing._allActions.includes(item.cr714_action)) existing._allActions.push(item.cr714_action);
+                        if(item._sourceTable && !existing._allSources.includes(item._sourceTable)) existing._allSources.push(item._sourceTable);
+                        
+                        let sourceLabel = item._sourceTable === 'cr714_cadencedatasets' ? 'Cadence' : (item._sourceTable === 'cr714_prospectingdatasets' ? 'Prospect' : 'Acct Mgmt');
+                        if(item.cr714_qbnotes && item.cr714_qbnotes.trim() !== '') {
+                            existing.cr714_qbnotes += `\n--- Notes from ${sourceLabel} ---\n` + item.cr714_qbnotes;
+                        }
+                        
                         duplicateRecordIds.add(item._accountNum); 
-                        return false;  
+                    } else {
+                        item._allActions = item.cr714_action ? [item.cr714_action] : [];
+                        item._allSources = item._sourceTable ? [item._sourceTable] : [];
+                        if(item.cr714_qbnotes && item.cr714_qbnotes.trim() !== '') {
+                            let sourceLabel = item._sourceTable === 'cr714_cadencedatasets' ? 'Cadence' : (item._sourceTable === 'cr714_prospectingdatasets' ? 'Prospect' : 'Acct Mgmt');
+                            item.cr714_qbnotes = `--- Notes from ${sourceLabel} ---\n` + item.cr714_qbnotes;
+                        }
+                        seen.set(item._accountNum, item);
+                        finalRecords.push(item);
                     }
-                    seen.add(item._accountNum);
-                    return true;
                 });
+                
+                allRecords = finalRecords;
                 
                 const statTotal = document.getElementById('stat-total');
                 if(statTotal) statTotal.textContent = allRecords.length; 
@@ -1683,7 +1733,10 @@
 
             setText('acct-company', r.cr714_company);
             setText('acct-number-header', r._accountNum);
-            setText('acct-action', r.cr714_action);
+            
+            // Show all combined actions
+            let actionStr = (r._allActions && r._allActions.length > 0) ? r._allActions.join(' | ') : (r.cr714_action || '--');
+            setText('acct-action', actionStr);
             setText('acct-action-message', r.cr714_actionmessage);
             setText('acct-address-display', r.cr714_billingaddress || 'No Address Available');
             
@@ -1760,7 +1813,7 @@
                         safeAccountNum = 'C' + safeAccountNum;
                     }
 
-                    // Removed $select here to prevent 400 Bad Requests if a custom field is missing
+                    // Fetch D365 info
                     const accRes = await fetch(`${D365_API}/accounts?$filter=accountnumber eq '${safeAccountNum}'&$expand=primarycontactid($select=fullname,emailaddress1,telephone1)`, { 
                         headers: { 'Authorization': `Bearer ${dToken}`, 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' }
                     });
@@ -1787,20 +1840,21 @@
                         const d365LastOrder = accountData['lastinvoicedate@OData.Community.Display.V1.FormattedValue'] || accountData.lastinvoicedate;
                         const d365Address = accountData.address1_composite || accountData.address1_line1 ? `${accountData.address1_line1 || ''} ${accountData.address1_city || ''}, ${accountData.address1_stateorprovince || ''} ${accountData.address1_postalcode || ''}`.trim() : null;
 
-                        if(d365Phone) rec.cr714_primaryphone = d365Phone;
-                        if(d365Email) rec.cr714_emailmost = d365Email;
-                        if(d365Name) rec.cr714_namemost = d365Name;
-                        if(d365Company) rec.cr714_company = d365Company;
-                        if(d365LastOrder) rec.cr714_lastorderdate = d365LastOrder;
-                        if(d365Address) rec.cr714_billingaddress = d365Address;
+                        // Only overwrite dataset values if D365 has a non-blank value
+                        if(d365Phone && d365Phone.trim() !== '') rec.cr714_primaryphone = d365Phone;
+                        if(d365Email && d365Email.trim() !== '') rec.cr714_emailmost = d365Email;
+                        if(d365Name && d365Name.trim() !== '') rec.cr714_namemost = d365Name;
+                        if(d365Company && d365Company.trim() !== '') rec.cr714_company = d365Company;
+                        if(d365LastOrder && d365LastOrder.trim() !== '') rec.cr714_lastorderdate = d365LastOrder;
+                        if(d365Address && d365Address.trim() !== '') rec.cr714_billingaddress = d365Address;
                         
                         if(currentSelectedRecord && currentSelectedRecord._accountNum === id) {
-                            if(d365Name) document.getElementById('contact-name-most').value = d365Name;
-                            if(d365Phone) document.getElementById('contact-phone-primary').value = d365Phone;
-                            if(d365Email) document.getElementById('contact-email-most').value = d365Email;
-                            if(d365Company) document.getElementById('acct-company').innerText = d365Company;
-                            if(d365LastOrder) document.getElementById('last-order-date').value = d365LastOrder;
-                            if(d365Address) document.getElementById('acct-address-display').innerText = d365Address;
+                            if(d365Name && d365Name.trim() !== '') document.getElementById('contact-name-most').value = d365Name;
+                            if(d365Phone && d365Phone.trim() !== '') document.getElementById('contact-phone-primary').value = d365Phone;
+                            if(d365Email && d365Email.trim() !== '') document.getElementById('contact-email-most').value = d365Email;
+                            if(d365Company && d365Company.trim() !== '') document.getElementById('acct-company').innerText = d365Company;
+                            if(d365LastOrder && d365LastOrder.trim() !== '') document.getElementById('last-order-date').value = d365LastOrder;
+                            if(d365Address && d365Address.trim() !== '') document.getElementById('acct-address-display').innerText = d365Address;
                             
                             const axMsg = accountData.mss_messagecenter || accountData.description || accountData.wbm_accountmessage || accountData.wbm_warningnotification || accountData.wbm_alert || "";
                             const axContainer = document.getElementById('ax-account-message');
@@ -2336,7 +2390,7 @@
             
             let filtered = allRecords.filter(r => {
                 if(search && !Object.values(r).join(' ').toLowerCase().includes(search)) return false;
-                if(document.getElementById('filter-requests').checked && !r.cr714_action) return false;
+                if(document.getElementById('filter-requests').checked && (!r._allActions || r._allActions.length === 0)) return false;
                 if(document.getElementById('filter-followup').checked && !r.cr714_followup) return false;
                 if(document.getElementById('filter-florida')?.checked) {
                     const addr = (r.cr714_billingaddress || r.address1_stateorprovince || r.address1_city || '').toLowerCase();
@@ -2355,21 +2409,33 @@
                 div.className = `gallery-item ${window.currentRecordId === String(r._accountNum) ? 'is-selected' : ''}`;
                 div.onclick = () => window.selectRecord(r._accountNum);
                 
-                // Add Source / Action queues visually
-                let qLabel = '';
-                if (r._sourceTable === 'cr714_cadencedatasets') qLabel = 'Cadence';
-                else if (r._sourceTable === 'cr714_prospectingdatasets') qLabel = 'Prospect';
-                else if (r._sourceTable === 'cr714_accountmanagements') qLabel = 'Acct Mgmt';
-                
-                let b = `<span class="bg-gray-100 text-gray-600 px-1 rounded border border-gray-200">${qLabel}</span>`;
-                if (r.cr714_action) b += `<span class="bg-blue-50 text-blue-600 px-1 rounded border border-blue-200 ml-1">${r.cr714_action}</span>`;
-                if (r.cr714_followup) b += `<span class="bg-yellow-50 text-yellow-600 px-1 rounded border border-yellow-200 ml-1"><i class="fas fa-clock text-[7px]"></i> F/U</span>`;
+                let fupLabel = r.cr714_followup ? `<span class="bg-yellow-50 text-yellow-600 px-1 rounded border border-yellow-200 ml-1 whitespace-nowrap"><i class="fas fa-clock text-[7px]"></i> ${new Date(r.cr714_followup).toLocaleDateString('en-US', {month:'numeric', day:'numeric'})}</span>` : '';
+
+                let b = (r._allSources || []).map(s => {
+                    let sl = s === 'cr714_cadencedatasets' ? 'Cadence' : (s === 'cr714_prospectingdatasets' ? 'Prospect' : 'Acct Mgmt');
+                    return `<span class="bg-gray-100 text-gray-600 px-1 rounded border border-gray-200 whitespace-nowrap">${sl}</span>`;
+                }).join(' ');
+
+                if (r._allActions && r._allActions.length > 0) {
+                    b += ' ' + r._allActions.map(a => `<span class="bg-blue-50 text-blue-600 px-1 rounded border border-blue-200 whitespace-nowrap">${a}</span>`).join(' ');
+                }
+                b += ' ' + fupLabel;
+
+                let emailIcon = '';
+                let daysSince = window.calculateDaysSinceEmail(r);
+                if(daysSince !== null) {
+                    if(daysSince <= 30) {
+                        emailIcon = `<span class="text-green-500 ml-1 flex-shrink-0" title="Emailed ${daysSince} days ago"><i class="fas fa-envelope"></i></span>`;
+                    } else {
+                        emailIcon = `<span class="text-red-500 ml-1 relative flex-shrink-0" title="Emailed ${daysSince} days ago"><i class="fas fa-envelope"></i><span class="absolute -top-1.5 -right-2 text-[7px] font-black bg-white rounded-sm px-0.5 border border-red-500 leading-none">30+</span></span>`;
+                    }
+                }
 
                 div.innerHTML = `
                     <div class="gallery-item-company">${r.cr714_company}</div>
-                    <div class="flex justify-between items-center mt-1">
-                        <div class="text-[9px] opacity-60 font-mono font-bold">${r._accountNum}</div>
-                        <div class="flex items-center text-[8px] font-semibold">${b}</div>
+                    <div class="flex justify-between items-start mt-1 gap-2">
+                        <div class="text-[9px] opacity-60 font-mono font-bold flex-shrink-0 pt-0.5">${r._accountNum}</div>
+                        <div class="flex flex-wrap items-center justify-end text-[8px] font-semibold gap-y-1 gap-x-0.5">${b} ${emailIcon}</div>
                     </div>`;
                 list.appendChild(div);
             });
