@@ -721,9 +721,12 @@
     <script>
         // --- CONFIG & STATE ---
         const CONFIG = {
-            // ** IMPORTANT: REPLACE THESE WITH YOUR EXACT DATAVERSE ENDPOINTS **
-            DATAVERSE_URL: "https://wbmasonco.crm.dynamics.com", 
-            ENTITY_PLURAL: "cr714_accounts", 
+            DATAVERSE_URL: "https://org23279050.crm.dynamics.com", 
+            LISTS: [
+                { table: "cr714_accountmanagementdatasets", name: "Account Management" },
+                { table: "cr714_cadencedatasets", name: "Cadence" },
+                { table: "cr714_prospectingdatasets", name: "Prospecting" }
+            ],
             
             ADMINS: ["Manager", "Admin", "Matt Bleakley", "Vanessa Parette"],
             MSAL: { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: "https://WB-DT.github.io/daytona-utility/" } },
@@ -742,7 +745,7 @@
             { id: 'action', label: 'Action', field: 'action', width: '120px', editable: true, dbField: 'cr714_action' },
             { id: 'status', label: 'Status', field: 'status', width: '120px', editable: true, dbField: 'cr714_recordstatus' },
             { id: 'daysSinceOrder', label: 'Days', field: 'daysSinceOrder', width: '80px', editable: false },
-            { id: 'dept', label: 'List/Dept', field: 'dept', width: '120px', editable: true, dbField: 'cr714_department' }
+            { id: 'dept', label: 'List/Dept', field: 'dept', width: '120px', editable: false } // Source table determines this, not editable
         ];
 
         let appState = { 
@@ -869,7 +872,6 @@
                 "Authorization": `Bearer ${token}`
             };
             
-            // Prefer Return=representation on PATCH to get updated data back
             if (method === "PATCH") headers["Prefer"] = "return=representation";
 
             const options = { method, headers };
@@ -889,25 +891,31 @@
             const progressBar = document.getElementById('loading-status-text');
             document.getElementById('retry-load-btn').classList.add('hidden');
             try {
-                progressBar.innerText = "Querying Dataverse...";
+                progressBar.innerText = "Querying Dataverse Lists...";
                 
-                // Construct Dataverse Query. If safeMode, pull everything (or limited subset). If not, maybe filter by rep.
-                // Note: For large datasets, Dataverse limits to 5000 per page. We will implement simple fetching here, 
-                // assuming you might want a top count or pagination loop if dataset is huge.
-                const selectFields = "cr714_id,cr714_accountid,cr714_company,cr714_rep,cr714_contact,cr714_namemost,cr714_primaryphone,cr714_emailmost,cr714_action,cr714_actionmessage,cr714_recordstatus,cr714_followup,cr714_qbnotes,cr714_managernotes,cr714_manager,cr714_dayssincelastorder,cr714_department";
+                const selectFields = "cr714_id,cr714_accountid,cr714_company,cr714_rep,cr714_contact,cr714_namemost,cr714_namelatest,cr714_primaryphone,cr714_emailmost,cr714_emaillatest,cr714_action,cr714_actionmessage,cr714_recordstatus,cr714_followup,cr714_qbnotes,cr714_managernotes,cr714_manager,cr714_dayssincelastorder,cr714_accountmanagementdatasetid,cr714_cadencedatasetid,cr714_prospectingdatasetid";
                 
-                // For demonstration, getting all active accounts. Modify filter per exact requirements.
-                let query = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${CONFIG.ENTITY_PLURAL}?$select=${selectFields}`;
-                if (!safeMode && !appState.isManager) {
-                     // If standard user, only get their records
-                     query += `&$filter=cr714_rep eq '${appState.user}'`;
-                }
+                let allRawRecords = [];
 
-                const data = await dataverseApiCall("GET", query);
-                const rawRecords = data.value || [];
+                for (const list of CONFIG.LISTS) {
+                    let query = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${list.table}?$select=${selectFields}`;
+                    if (!safeMode && !appState.isManager) {
+                         query += `&$filter=cr714_rep eq '${appState.user}'`;
+                    }
+                    const data = await dataverseApiCall("GET", query);
+                    const raw = data.value || [];
+                    raw.forEach(r => {
+                        r._sourceTable = list.table;
+                        r._sourceName = list.name;
+                        
+                        const pkField = list.table.endsWith('s') ? list.table.slice(0, -1) + 'id' : list.table + 'id';
+                        r._guid = r[pkField] || r.cr714_accountid || r.cr714_dataverseid;
+                    });
+                    allRawRecords = allRawRecords.concat(raw);
+                }
                 
                 // Strict Null ID Removal & Normalization
-                appState.rawData = rawRecords.filter(r => r.cr714_id && r.cr714_id !== 'null').map(r => normalizeRecord(r));
+                appState.rawData = allRawRecords.filter(r => r.cr714_id && r.cr714_id !== 'null').map(r => normalizeRecord(r));
                 
                 const uniqueReps = [...new Set(appState.rawData.map(i => i.rep).filter(Boolean))];
                 appState.roster = uniqueReps.map(repName => { 
@@ -931,61 +939,66 @@
             }
         }
 
-        // --- NEW DIRECT POLLING FOR TOASTS ---
+        // --- DIRECT POLLING FOR TOASTS ---
         function startDirectDataPolling() {
             if(pollingInterval) clearInterval(pollingInterval);
             // Poll for recently modified records (last 5 mins) to catch manager updates/help requests
             pollingInterval = setInterval(async () => {
                 try {
                     const fiveMinsAgo = new Date(Date.now() - 5 * 60000).toISOString();
-                    const query = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${CONFIG.ENTITY_PLURAL}?$select=cr714_id,cr714_accountid,cr714_managernotes,cr714_recordstatus&$filter=modifiedon ge ${fiveMinsAgo}`;
-                    
-                    const data = await dataverseApiCall("GET", query);
-                    const modifiedRecords = data.value || [];
-                    
                     let needsRefresh = false;
 
-                    modifiedRecords.forEach(inRec => {
-                        const existing = appState.rawData.find(r => r.uuid === inRec.cr714_accountid || r.id === inRec.cr714_id);
-                        if (existing) {
-                            let recordChanged = false;
+                    for(const list of CONFIG.LISTS) {
+                        const pkField = list.table.endsWith('s') ? list.table.slice(0, -1) + 'id' : list.table + 'id';
+                        const query = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${list.table}?$select=cr714_id,${pkField},cr714_accountid,cr714_managernotes,cr714_recordstatus&$filter=modifiedon ge ${fiveMinsAgo}`;
+                        
+                        const data = await dataverseApiCall("GET", query);
+                        const modifiedRecords = data.value || [];
+                        
+                        modifiedRecords.forEach(inRec => {
+                            const pkValue = inRec[pkField] || inRec.cr714_accountid;
+                            const existing = appState.rawData.find(r => r.uuid === pkValue || r.id === inRec.cr714_id);
                             
-                            // Monitor Manager Notes back and forth
-                            const newNotes = inRec.cr714_managernotes || "";
-                            const oldNotes = existing.mgrNotes || "";
-                            if (newNotes !== oldNotes && newNotes !== "") {
-                                existing.mgrNotes = newNotes;
-                                recordChanged = true;
-                                if (existing.rep === appState.user || appState.isManager) {
-                                    window.showToast("New manager note for " + existing.company, "info");
+                            if (existing) {
+                                let recordChanged = false;
+                                
+                                // Monitor Manager Notes back and forth
+                                const newNotes = inRec.cr714_managernotes || "";
+                                const oldNotes = existing.mgrNotes || "";
+                                if (newNotes !== oldNotes && newNotes !== "") {
+                                    existing.mgrNotes = newNotes;
+                                    recordChanged = true;
+                                    if (existing.rep === appState.user || appState.isManager) {
+                                        window.showToast("New manager note for " + existing.company, "info");
+                                    }
                                 }
-                            }
-                            
-                            // Monitor Status Changes (Help Requests/Resolutions)
-                            const newStatus = inRec.cr714_recordstatus || "Normal";
-                            const oldStatus = existing.status || "Normal";
-                            if (newStatus !== oldStatus) {
-                                existing.status = newStatus;
-                                recordChanged = true;
-                                if (existing.rep === appState.user || appState.isManager) {
-                                    window.showToast("Status changed to " + newStatus + " for " + existing.company, "info");
+                                
+                                // Monitor Status Changes (Help Requests/Resolutions)
+                                const newStatus = inRec.cr714_recordstatus || "Normal";
+                                const oldStatus = existing.status || "Normal";
+                                if (newStatus !== oldStatus) {
+                                    existing.status = newStatus;
+                                    recordChanged = true;
+                                    if (existing.rep === appState.user || appState.isManager) {
+                                        window.showToast("Status changed to " + newStatus + " for " + existing.company, "info");
+                                    }
                                 }
-                            }
-                            
-                            if (recordChanged) {
-                                needsRefresh = true;
-                                if (appState.selectedRecord && appState.selectedRecord.id === existing.id) {
-                                    document.getElementById('mgr-notes-input').value = existing.mgrNotes;
-                                    document.getElementById('mgr-status-select').value = existing.status;
-                                    const activeCard = document.querySelector('.gallery-card.active');
-                                    if(activeCard) {
-                                        if(existing.status.includes("Help")) activeCard.classList.add('help');
-                                        else activeCard.classList.remove('help');
+                                
+                                if (recordChanged) {
+                                    needsRefresh = true;
+                                    if (appState.selectedRecord && appState.selectedRecord.id === existing.id) {
+                                        document.getElementById('mgr-notes-input').value = existing.mgrNotes;
+                                        document.getElementById('mgr-status-select').value = existing.status;
+                                        const activeCard = document.querySelector('.gallery-card.active');
+                                        if(activeCard) {
+                                            if(existing.status.includes("Help")) activeCard.classList.add('help');
+                                            else activeCard.classList.remove('help');
+                                        }
                                     }
                                 }
                             }
-                        }
-                    });
+                        });
+                    }
                     
                     const dot = document.getElementById('connection-dot');
                     if(dot) dot.classList.add('connected');
@@ -1002,7 +1015,8 @@
         function normalizeRecord(r) {
             return {
                 id: r.cr714_id, 
-                uuid: r.cr714_dataverseid || r.cr714_accountid, 
+                uuid: r._guid, 
+                _sourceTable: r._sourceTable,
                 company: r.cr714_company || r.cr714_account, 
                 rep: r.cr714_rep || r.cr714_accountrep, 
                 contact: r.cr714_contact || r.cr714_namemost || r.cr714_namelatest || "No Contact",
@@ -1027,7 +1041,7 @@
                 birthday: r.cr714_birthday,
                 shirtSize: r.cr714_shirtsize,
                 location: r.cr714_location,
-                dept: r.cr714_department || "Default"
+                dept: r._sourceName
             };
         }
 
@@ -1354,7 +1368,7 @@
             };
 
             try {
-                const endpoint = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${CONFIG.ENTITY_PLURAL}(${appState.selectedRecord.uuid})`;
+                const endpoint = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${appState.selectedRecord._sourceTable}(${appState.selectedRecord.uuid})`;
                 const updatedRec = await dataverseApiCall("PATCH", endpoint, payload);
                 
                 appState.selectedRecord.contact = newContact;
@@ -1385,7 +1399,7 @@
             };
 
             try {
-                const endpoint = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${CONFIG.ENTITY_PLURAL}(${appState.selectedRecord.uuid})`;
+                const endpoint = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${appState.selectedRecord._sourceTable}(${appState.selectedRecord.uuid})`;
                 await dataverseApiCall("PATCH", endpoint, payload);
                 
                 appState.selectedRecord.mgrNotes = mgrNotes; appState.selectedRecord.status = status;
@@ -1414,7 +1428,7 @@
             };
             
             try {
-                const endpoint = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${CONFIG.ENTITY_PLURAL}(${appState.selectedRecord.uuid})`;
+                const endpoint = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${appState.selectedRecord._sourceTable}(${appState.selectedRecord.uuid})`;
                 await dataverseApiCall("PATCH", endpoint, payload);
                 
                 appState.selectedRecord.action = type;
@@ -1676,6 +1690,7 @@
                         if(colDef.editable) {
                             td.contentEditable = "true";
                             td.setAttribute("data-id", r.uuid); // Using uuid for Dataverse PATCH
+                            td.setAttribute("data-table", r._sourceTable); // Bind source table mapping
                             td.setAttribute("data-field", colDef.field);
                             td.setAttribute("data-dbfield", colDef.dbField);
                             td.setAttribute("data-original", td.innerText);
@@ -1697,6 +1712,7 @@
             if(newVal === originalVal) return; // No change
 
             const uuid = cell.getAttribute("data-id");
+            const sourceTable = cell.getAttribute("data-table");
             const appField = cell.getAttribute("data-field");
             const dbField = cell.getAttribute("data-dbfield");
             
@@ -1707,7 +1723,7 @@
             payload[dbField] = newVal;
 
             try {
-                const endpoint = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${CONFIG.ENTITY_PLURAL}(${uuid})`;
+                const endpoint = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${sourceTable}(${uuid})`;
                 await dataverseApiCall("PATCH", endpoint, payload);
                 
                 // Update local model
