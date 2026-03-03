@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Daytona Enterprise v42.1 (Direct API Stable)</title>
+    <title>Daytona Enterprise v42.2 (Direct API Stable)</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -333,7 +333,7 @@
             <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center text-white font-bold text-lg shadow-glow">D</div>
             <div>
                 <div class="font-bold text-lg leading-tight text-textMain tracking-tight">Daytona <span class="text-primary font-light">Enterprise</span></div>
-                <div class="text-[10px] text-textMuted font-mono tracking-widest">V42.1 PLATINUM (Direct API)</div>
+                <div class="text-[10px] text-textMuted font-mono tracking-widest">V42.2 PLATINUM (Direct API)</div>
             </div>
         </div>
         
@@ -723,9 +723,9 @@
         const CONFIG = {
             DATAVERSE_URL: "https://org23279050.crm.dynamics.com", 
             LISTS: [
-                { table: "cr714_accountmanagementdatasets", name: "Account Management" },
-                { table: "cr714_cadencedatasets", name: "Cadence" },
-                { table: "cr714_prospectingdatasets", name: "Prospecting" }
+                { table: "cr714_accountmanagements", name: "Account Management", pk: "cr714_accountmanagementid" },
+                { table: "cr714_cadencedatasets", name: "Cadence", pk: "cr714_cadencedatasetid" },
+                { table: "cr714_prospectingdatasets", name: "Prospecting", pk: "cr714_prospectingdatasetid" }
             ],
             
             ADMINS: ["Manager", "Admin", "Matt Bleakley", "Vanessa Parette"],
@@ -896,27 +896,26 @@
                 let allRawRecords = [];
 
                 for (const list of CONFIG.LISTS) {
-                    const pkField = list.table.endsWith('s') ? list.table.slice(0, -1) + 'id' : list.table + 'id';
+                    // ACT App logic: fetch entire dataset matching the rep, no restrictive $select to avoid 400 Bad Requests on missing columns.
+                    let query = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${list.table}`;
                     
-                    // We dynamically append the primary key field for each table, and omit cr714_id completely.
-                    const selectFields = `${pkField},cr714_accountnum,cr714_accountid,cr714_company,cr714_rep,cr714_contact,cr714_namemost,cr714_namelatest,cr714_primaryphone,cr714_emailmost,cr714_emaillatest,cr714_action,cr714_actionmessage,cr714_recordstatus,cr714_followup,cr714_qbnotes,cr714_managernotes,cr714_manager,cr714_dayssincelastorder,cr714_department`;
-                    
-                    let query = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${list.table}?$select=${selectFields}`;
                     if (!safeMode && !appState.isManager) {
-                         query += `&$filter=cr714_rep eq '${appState.user}'`;
+                        if (list.table === 'cr714_cadencedatasets') query += `?$filter=cr714_retentionrep eq '${appState.user}'`;
+                        else if (list.table === 'cr714_prospectingdatasets') query += `?$filter=cr714_repassigned eq '${appState.user}'`;
+                        else if (list.table === 'cr714_accountmanagements') query += `?$filter=cr714_rep eq '${appState.user}'`;
                     }
+                    
                     const data = await dataverseApiCall("GET", query);
                     const raw = data.value || [];
                     raw.forEach(r => {
                         r._sourceTable = list.table;
                         r._sourceName = list.name;
-                        
-                        r._guid = r[pkField] || r.cr714_accountid || r.cr714_dataverseid;
+                        r._guid = r[list.pk];
                     });
                     allRawRecords = allRawRecords.concat(raw);
                 }
                 
-                // Normalization uses cr714_accountnum as ID instead of cr714_id
+                // Normalization uses the exact fallback coalescing defined in your ACT app code
                 appState.rawData = allRawRecords.filter(r => r._guid).map(r => normalizeRecord(r));
                 
                 const uniqueReps = [...new Set(appState.rawData.map(i => i.rep).filter(Boolean))];
@@ -951,17 +950,20 @@
                     let needsRefresh = false;
 
                     for(const list of CONFIG.LISTS) {
-                        const pkField = list.table.endsWith('s') ? list.table.slice(0, -1) + 'id' : list.table + 'id';
-                        const query = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${list.table}?$select=${pkField},cr714_accountnum,cr714_accountid,cr714_managernotes,cr714_recordstatus&$filter=modifiedon ge ${fiveMinsAgo}`;
+                        const query = `${CONFIG.DATAVERSE_URL}/api/data/v9.2/${list.table}?$filter=modifiedon ge ${fiveMinsAgo}`;
                         
                         const data = await dataverseApiCall("GET", query);
                         const modifiedRecords = data.value || [];
                         
                         modifiedRecords.forEach(inRec => {
-                            const pkValue = inRec[pkField] || inRec.cr714_accountid;
-                            const internalAccountNum = inRec.cr714_accountnum;
+                            const pkValue = inRec[list.pk];
                             
-                            const existing = appState.rawData.find(r => r.uuid === pkValue || r.id === internalAccountNum);
+                            // Emulate standard fallback to find matching local record ID
+                            let acct = inRec.cr714_accountnum || inRec.cr714_account || inRec.cr714_id || inRec.accountnumber || '';
+                            acct = String(acct).trim().toUpperCase();
+                            if (/^[0-9]/.test(acct)) { acct = 'C' + acct; } 
+
+                            const existing = appState.rawData.find(r => r.uuid === pkValue || r.id === acct);
                             
                             if (existing) {
                                 let recordChanged = false;
@@ -1015,37 +1017,41 @@
             }, 30000); // 30s
         }
 
-        // Normalization Mapper
-        function normalizeRecord(r) {
+        // Normalization Mapper using ACT App fallbacks perfectly
+        function normalizeRecord(item) {
+            let acct = item.cr714_accountnum || item.cr714_account || item.cr714_id || item.accountnumber || '';
+            acct = String(acct).trim().toUpperCase();
+            if (/^[0-9]/.test(acct)) { acct = 'C' + acct; } 
+
             return {
-                id: r.cr714_accountnum || r.cr714_accountid || "UNKNOWN", 
-                uuid: r._guid, 
-                _sourceTable: r._sourceTable,
-                company: r.cr714_company || r.cr714_account, 
-                rep: r.cr714_rep || r.cr714_accountrep, 
-                contact: r.cr714_contact || r.cr714_namemost || r.cr714_namelatest || "No Contact",
-                phone: r.cr714_primaryphone, 
-                email: r.cr714_emailmost || r.cr714_emaillatest,
-                action: r.cr714_action, 
-                actionMsg: r.cr714_actionmessage, 
-                status: r.cr714_recordstatus || "Normal", 
-                followUp: r.cr714_followup,
-                notes: r.cr714_qbnotes || r.cr714_importantaccountinformation, 
-                mgrNotes: r.cr714_managernotes, 
-                csr: r.cr714_csr,
-                info: r.cr714_importantaccountinformation,
-                mgr: r.cr714_managerassigned || r.cr714_manager,
-                srManager: r.cr714_srmanager,
-                secondaryManager: r.cr714_secondarymanager,
-                daysSinceOrder: r.cr714_dayssincelastorder ? parseInt(r.cr714_dayssincelastorder) : 0,
-                name: r.cr714_employeename || r.cr714_name, 
-                title: r.cr714_title, 
-                billingAddress: r.cr714_billingaddress,
-                personalPhone: r.cr714_personalphone,
-                birthday: r.cr714_birthday,
-                shirtSize: r.cr714_shirtsize,
-                location: r.cr714_location,
-                dept: r._sourceName || r.cr714_department || "Default"
+                id: acct || "UNKNOWN", 
+                uuid: item._guid, 
+                _sourceTable: item._sourceTable,
+                company: item.cr714_company || item.cr714_acctname || item.cr714_accountname || item.cr714_name || item.name || 'Unknown Company', 
+                rep: item.cr714_retentionrep || item.cr714_repassigned || item.cr714_accountrep || item.cr714_rep || '', 
+                contact: item.cr714_namemost || item.cr714_namelatest || item.cr714_contactname || item.cr714_primarycontact || "No Contact",
+                phone: item.cr714_primaryphone || item.cr714_phone || item.telephone1 || '', 
+                email: item.cr714_emailmost || item.cr714_emaillatest || item.cr714_email_latest || item.emailaddress1 || '',
+                action: item.cr714_action, 
+                actionMsg: item.cr714_actionmessage, 
+                status: item.cr714_recordstatus || "Normal", 
+                followUp: item.cr714_followup || item.cr714_date || item.cr714_duedate,
+                notes: item.cr714_qbnotes || item.cr714_prospectingnotes || item.cr714_notes || item.description || '', 
+                mgrNotes: item.cr714_managernotes, 
+                csr: item.cr714_csr,
+                info: item.cr714_importantaccountinformation,
+                mgr: item.cr714_managerassigned || item.cr714_manager,
+                srManager: item.cr714_srmanager,
+                secondaryManager: item.cr714_secondarymanager,
+                daysSinceOrder: item.cr714_dayssincelastorder ? parseInt(item.cr714_dayssincelastorder) : 0,
+                name: item.cr714_employeename || item.cr714_name, 
+                title: item.cr714_title, 
+                billingAddress: item.cr714_billingaddress || item.cr714_address || item.address1_composite || '',
+                personalPhone: item.cr714_personalphone,
+                birthday: item.cr714_birthday,
+                shirtSize: item.cr714_shirtsize,
+                location: item.cr714_location,
+                dept: item._sourceName || item.cr714_department || "Default"
             };
         }
 
