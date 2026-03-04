@@ -319,6 +319,20 @@
         return [];
     }
 
+    // Direct fetch to D365 standard 'accounts' table for fast contact data updates
+    window.fetchD365Account = async function(accountId) {
+        try {
+            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
+            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+            const res = await fetch(`${DATAVERSE_URL}/accounts?$filter=accountnumber eq '${accountId}'&$select=name,telephone1,emailaddress1&$expand=primarycontactid($select=fullname,emailaddress1,telephone1)`, { headers });
+            if(res.ok) {
+                const data = await res.json();
+                if(data.value && data.value.length > 0) return data.value[0];
+            }
+        } catch(e) { console.warn("D365 fast fetch error", e); }
+        return null;
+    }
+
     window.loadRecords = async function() {
         const list = document.getElementById('record-gallery-list');
         list.innerHTML = '<div class="text-center p-4">Loading Data from Dataverse...</div>';
@@ -371,6 +385,7 @@
         }
     }
 
+    // Silent flow primarily used to gather Sales data now (like LastOrderDate)
     window.silentUpdateAccount = async function(id) {
         if(!id) return;
         document.getElementById('truck-loader-notification').classList.add('show');
@@ -386,22 +401,24 @@
                     const cust = custData[0];
                     const rec = allRecords.find(r => String(r.cr714_id) === String(id));
                     if(rec) {
+                        // Fallback fields just in case D365 fetch missed them
                         rec.cr714_namemost = cust['[FullName_most]'] || cust['[FullName_latest]'] || rec.cr714_namemost;
                         rec.cr714_primaryphone = cust['[Phone]'] || rec.cr714_primaryphone;
                         rec.cr714_emailmost = cust['[Email_most]'] || cust['[Email_latest]'] || rec.cr714_emailmost;
                         rec.cr714_lastorderdate = cust['[LastOrderDate]'] || '--';
+                        
                         document.getElementById('truck-loader-notification').classList.remove('show'); if(overlay) overlay.classList.add('hidden');
                         if(currentSelectedRecord && String(currentSelectedRecord.cr714_id) === String(id)) {
-                            const nf = document.getElementById('contact-name-most'); if(nf && (!nf.value || nf.value === 'Unknown Name')) nf.value = rec.cr714_namemost;
-                            const pf = document.getElementById('contact-phone-primary'); if(pf && !pf.value) pf.value = rec.cr714_primaryphone;
-                            const ef = document.getElementById('contact-email-most'); if(ef && !ef.value) ef.value = rec.cr714_emailmost;
+                            const nf = document.getElementById('contact-name-most'); if(nf && (!nf.value || nf.value === 'Unknown Name' || nf.value === '--')) nf.value = rec.cr714_namemost;
+                            const pf = document.getElementById('contact-phone-primary'); if(pf && (!pf.value || pf.value === '--')) pf.value = rec.cr714_primaryphone;
+                            const ef = document.getElementById('contact-email-most'); if(ef && (!ef.value || ef.value === '--')) ef.value = rec.cr714_emailmost;
                             const lo = document.getElementById('last-order-date'); if(lo) lo.value = rec.cr714_lastorderdate;
                             window.takeSnapshot(currentSelectedRecord);
                         }
                     }
                 } else { throw new Error("No data returned"); }
             } else { throw new Error("No data returned"); }
-        } catch(e) { console.warn("Silent update failed for " + id, e); document.getElementById('truck-loader-notification').classList.remove('show'); if(overlay) overlay.classList.add('hidden'); }
+        } catch(e) { console.warn("Silent sales update failed for " + id, e); document.getElementById('truck-loader-notification').classList.remove('show'); if(overlay) overlay.classList.add('hidden'); }
     }
         
     window.prefetchNextRecords = function() { if(!currentRecordId) return; const idx = allRecords.findIndex(r => String(r.cr714_id) === currentRecordId); if(idx === -1) return; for(let i = 1; i <= 3; i++) { if(allRecords[idx+i]) window.silentUpdateAccount(allRecords[idx+i].cr714_id); } }
@@ -414,10 +431,24 @@
         if(!quiet) { if(!oppType) { window.showToast("Opp Type is Required", "error"); document.getElementById('opp-type-select').focus(); document.getElementById('opp-type-select').classList.add('empty-field-warning'); return; } if(!loc || !dm || !comp) { window.showToast("Note: Some Account Info fields are empty.", "info"); } }
         if(!quiet) window.showToast("Saving...", "processing");
         const metaString = `{{METADATA: Loc=${loc}|DM=${dm}|Comp=${comp}|Opp=${oppType}}}`;
+        
         let note = autoNote ? autoNote : (document.getElementById('qb-notes-input').value || "").replace(QB_NOTES_TEMPLATE, '').trim();
         const timeStamp = new Date().toLocaleString(); const userStamp = currentUserRepName || "Unknown User";
         const newNoteEntry = note ? `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n${metaString}\n${note}\n\n------------------------------\n` : `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n${metaString}\n(Metadata Update)\n\n------------------------------\n`;
-        const fullNote = newNoteEntry + (currentSelectedRecord.cr714_qbnotes || "");
+        
+        // Parse and clean out "Unknown User" from the historic note chain
+        let rawEntries = (currentSelectedRecord.cr714_qbnotes || "").split(/-{20,}/);
+        let validEntries = rawEntries.filter(e => {
+            if (!e.trim()) return false;
+            let match = e.match(/(?:Modified By:|by:)\s*(.*)/i);
+            let author = match ? match[1].trim() : "";
+            return author !== "Unknown User" && author !== "Unknown";
+        });
+        
+        let rebuiltNotes = validEntries.map(e => e.trim()).join('\n\n------------------------------\n');
+        if (rebuiltNotes) rebuiltNotes += '\n\n------------------------------\n';
+        
+        const fullNote = newNoteEntry + rebuiltNotes;
         let d=document.getElementById('follow-up-date').value, t=document.getElementById('follow-up-time').value, iso=d ? (t?`${d}T${t}:00Z`:`${d}T00:00:00Z`):null;
 
         try {
@@ -591,9 +622,39 @@
 
     window.selectRecord = function(id) { if(window.isDirty()) { window.targetSelectId = id; document.getElementById('unsaved-changes-modal').classList.remove('hidden'); document.getElementById('unsaved-changes-modal').style.display='flex'; } else { window.performSelect(id); } }
 
-    window.performSelect = function(id) {
-        window.closeAllSidebarTabs(); window.isPopulating = true; currentRecordId = String(id); currentSelectedRecord = allRecords.find(r => String(r.cr714_id) === currentRecordId); window.filterAndSortGallery(); window.updateMiniCounter();
-        if(currentSelectedRecord) { window.populateForm(currentSelectedRecord); window.takeSnapshot(currentSelectedRecord); window.toggleEditMode(true); window.silentUpdateAccount(id); window.prefetchNextRecords(); document.querySelectorAll('iframe').forEach(i => i.src = 'about:blank'); }
+    window.performSelect = async function(id) {
+        window.closeAllSidebarTabs(); window.isPopulating = true; currentRecordId = String(id); 
+        currentSelectedRecord = allRecords.find(r => String(r.cr714_id) === currentRecordId); 
+        window.filterAndSortGallery(); window.updateMiniCounter();
+        
+        if(currentSelectedRecord) { 
+            // Fallback population
+            window.populateForm(currentSelectedRecord); 
+            window.takeSnapshot(currentSelectedRecord); 
+            window.toggleEditMode(true); 
+            
+            // Instantly fetch D365 Contact data if available (faster than flow)
+            const d365Acct = await window.fetchD365Account(id);
+            if (d365Acct) {
+                const pc = d365Acct.primarycontactid || {};
+                const newName = pc.fullname || currentSelectedRecord.cr714_namemost;
+                const newPhone = pc.telephone1 || d365Acct.telephone1 || currentSelectedRecord.cr714_primaryphone;
+                const newEmail = pc.emailaddress1 || d365Acct.emailaddress1 || currentSelectedRecord.cr714_emailmost;
+                
+                const setVal = (elId, val) => { const el=document.getElementById(elId); if(el && val) el.value = val; };
+                setVal('contact-name-most', newName);
+                setVal('contact-phone-primary', newPhone);
+                setVal('contact-email-most', newEmail);
+                
+                // Update active snapshot memory
+                window.takeSnapshot(currentSelectedRecord);
+            }
+            
+            // Background update (Sales Flow data like last order date)
+            window.silentUpdateAccount(id); 
+            window.prefetchNextRecords(); 
+            document.querySelectorAll('iframe').forEach(i => i.src = 'about:blank'); 
+        }
         window.hasUnsavedChanges = false; setTimeout(() => { window.isPopulating = false; }, 200);
     }
 
@@ -1079,7 +1140,7 @@
                             <div class="flex gap-1 w-1/2 justify-end items-end pb-0.5">
                                 <button onclick="window.toggleInternalNote()" id="help-button" class="btn-secondary text-[10px] px-2 h-7 btn-action-help flex-1 truncate" disabled>Help</button>
                                 <button onclick="window.openMVGOModal()" id="mvgo-button" class="btn-secondary text-[10px] px-2 h-7 btn-action-mvgo flex-1 truncate" disabled>MVGO Catalog</button>
-                                <button onclick="window.openCloseAccountModal()" id="close-button" class="btn-secondary text-[10px] px-2 h-7 btn-action-close flex-1 truncate" disabled>Close</button>
+                                <button onclick="window.moveAccountToMaster()" id="move-master-button" class="btn-secondary text-[10px] px-2 h-7 btn-action-close flex-1 truncate" disabled>Move to Master</button>
                             </div>
                         </div>
                     </div>
