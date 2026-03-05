@@ -209,36 +209,60 @@
         return res;
     };
 
-    window.parseNotes = function(rawNotes) {
-        if (!rawNotes) return []; let cleanRaw = rawNotes.replace(/\r\n/g, '\n'); const rawEntries = cleanRaw.split(/-{20,}/).filter(e => e.trim().length > 0); const parsed = [];
-        rawEntries.forEach(entry => {
-            const lines = entry.trim().split('\n'); let date = "Unknown Date"; let author = "Unknown User"; let textLines = [];
-            let metaLoc='', metaDm='', metaComp='', metaOpp='';
-            
-            const metaMatch = entry.match(/{{METADATA:(.*?)}}/);
-            if (metaMatch && metaMatch[1]) {
-                metaMatch[1].split('|').forEach(p => {
-                    const kv = p.split('=');
-                    if (kv[0]==='Loc') metaLoc = kv[1]||'';
-                    if (kv[0]==='DM') metaDm = kv[1]||'';
-                    if (kv[0]==='Comp') metaComp = kv[1]||'';
-                    if (kv[0]==='Opp') metaOpp = kv[1]||'';
-                });
-            }
+window.parseNotes = function(rawNotes) {
+    if (!rawNotes) return [];
+    let cleanRaw = rawNotes.replace(/\r\n/g, '\n');
+    // Split by the horizontal line separator
+    const rawEntries = cleanRaw.split(/-{20,}/).filter(e => e.trim().length > 0);
+    const parsed = [];
 
-            for(let i=0; i<lines.length; i++) {
-                const line = lines[i].trim();
-                if (line.toLowerCase().includes('modified on:')) { date = line.split(/modified on:/i)[1]?.trim() || "Unknown Date"; continue; }
-                if (line.toLowerCase().includes('modified by:') || line.toLowerCase().startsWith('by:')) { author = line.split(/(?:modified by:|by:)/i)[1]?.trim() || "Unknown User"; continue; }
-                if (line !== "") { textLines.push(lines[i]); }
+    rawEntries.forEach(entry => {
+        const lines = entry.trim().split('\n');
+        let date = "Unknown Date";
+        let author = "Unknown User";
+        let textLines = [];
+        let metaLoc='', metaDm='', metaComp='', metaOpp='';
+        
+        // Extract Metadata specifically for THIS entry
+        const metaMatch = entry.match(/{{METADATA:(.*?)}}/);
+        if (metaMatch && metaMatch[1]) {
+            metaMatch[1].split('|').forEach(p => {
+                const kv = p.split('=');
+                if (kv[0].trim()==='Loc') metaLoc = kv[1]||'';
+                if (kv[0].trim()==='DM') metaDm = kv[1]||'';
+                if (kv[0].trim()==='Comp') metaComp = kv[1]||'';
+                if (kv[0].trim()==='Opp') metaOpp = kv[1]||'';
+            });
+        }
+
+        for(let i=0; i<lines.length; i++) {
+            const line = lines[i].trim();
+            if (line.toLowerCase().includes('modified on:')) { 
+                date = line.split(/modified on:/i)[1]?.trim() || "Unknown Date"; 
+                continue; 
             }
-            textLines = textLines.filter(l => !l.startsWith("{{METADATA:") && !l.startsWith("[List:"));
-            if (author !== "Unknown User" && author !== "Unknown" && (textLines.length > 0)) { 
-                parsed.push({ date: date, author: author, text: textLines.join('\n').trim(), metaLoc, metaDm, metaComp, metaOpp }); 
+            if (line.toLowerCase().includes('modified by:') || line.toLowerCase().startsWith('by:')) { 
+                author = line.split(/(?:modified by:|by:)/i)[1]?.trim() || "Unknown User"; 
+                continue; 
             }
-        });
-        return parsed;
-    }
+            // Filter out system tags from the display text
+            if (line !== "" && !line.startsWith("{{METADATA:") && !line.startsWith("[List:")) { 
+                textLines.push(lines[i]); 
+            }
+        }
+        
+        if (textLines.length > 0) {
+            parsed.push({ 
+                date: date, 
+                author: author, 
+                text: textLines.join('\n').trim(), 
+                metaLoc, metaDm, metaComp, metaOpp,
+                rawDate: new Date(date).getTime() || 0 
+            });
+        }
+    });
+    return parsed;
+};
 
     // --- RESTORED MISSING FUNCTIONS ---
 
@@ -481,12 +505,15 @@
         return [];
     }
 
-    window.fetchD365Account = async function(accountId) {
+window.fetchD365Account = async function(accountId) {
         try {
-            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
+            const token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation");
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
             const cleanId = String(accountId).trim();
-            const res = await fetch(`${DATAVERSE_URL}/accounts?$filter=accountnumber eq '${cleanId}'`, { headers });
+            
+            // Strictly fetch the account without $expand to prevent relationship errors
+            const res = await fetch(`https://wbmasonco.crm.dynamics.com/api/data/v9.2/accounts?$filter=accountnumber eq '${cleanId}'`, { headers });
+            
             if(res.ok) {
                 const data = await res.json();
                 if(data.value && data.value.length > 0) return data.value[0];
@@ -584,15 +611,22 @@
         const newNoteEntry = note ? `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId}]\n${metaString}\n${note}\n\n------------------------------\n` : `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId}]\n${metaString}\n(Metadata Update)\n\n------------------------------\n`;
         
         let rawEntries = (currentSelectedRecord.cr714_qbnotes || "").split(/-{20,}/);
-        let validEntries = rawEntries.filter(e => {
-            if (!e.trim()) return false;
-            let match = e.match(/(?:Modified By:|by:)\s*(.*)/i);
-            let author = match ? match[1].trim() : "";
-            if (author === "Unknown User" || author === "Unknown") return false;
-            let textOnly = e.replace(/Modified By:.*\n/i, '').replace(/Modified On:.*\n/i, '').replace(/{{METADATA:.*?}}/i, '').replace(/\[List:.*?\]/i, '').trim();
-            if(!textOnly) return false;
-            return true;
-        });
+// Inside window.handleCustomSave:
+// Replace the validEntries filter with this to prevent history duplication
+let validEntries = rawEntries.filter(e => {
+    const trimmed = e.trim();
+    if (!trimmed) return false;
+    
+    // Don't keep entries that are just headers with no content
+    const textOnly = trimmed
+        .replace(/Modified By:.*\n/i, '')
+        .replace(/Modified On:.*\n/i, '')
+        .replace(/{{METADATA:.*?}}/i, '')
+        .replace(/\[List:.*?\]/i, '')
+        .trim();
+        
+    return textOnly.length > 0;
+});
         
         let rebuiltNotes = validEntries.map(e => e.trim()).join('\n\n------------------------------\n');
         if (rebuiltNotes) rebuiltNotes = '\n\n' + rebuiltNotes + '\n\n------------------------------\n';
@@ -1055,22 +1089,25 @@
         window.currentRecordSnapshot = { loc: metaLoc, dm: metaDm, comp: metaComp, oppType: metaOpp, fuDate: document.getElementById('follow-up-date')?.value || '', fuTime: document.getElementById('follow-up-time')?.value || '' };
     }
 
-    window.toggleGallery = function() { 
-        const col = document.getElementById('gallery-column');
-        col.classList.toggle('collapsed'); 
-        document.querySelector('.app-grid').classList.toggle('sidebar-collapsed'); 
-        
-        const searchBar = document.getElementById('search-bar');
-        const filterContainer = document.getElementById('filter-bar-container');
-        const normalContainer = document.getElementById('gallery-normal-content');
-        if (col.classList.contains('collapsed')) {
-            filterContainer.insertBefore(searchBar, filterContainer.firstChild);
-            searchBar.classList.add('w-48'); searchBar.classList.remove('w-full');
-        } else {
-            normalContainer.appendChild(searchBar);
-            searchBar.classList.remove('w-48'); searchBar.classList.add('w-full');
-        }
+window.toggleGallery = function() { 
+    const col = document.getElementById('gallery-column');
+    col.classList.toggle('collapsed'); 
+    document.querySelector('.app-grid').classList.toggle('sidebar-collapsed'); 
+    
+    const searchBar = document.getElementById('search-bar');
+    const filterContainer = document.getElementById('filter-bar-container');
+    const normalContainer = document.getElementById('gallery-normal-content');
+    
+    if (col.classList.contains('collapsed')) {
+        filterContainer.insertBefore(searchBar, filterContainer.firstChild);
+        searchBar.classList.add('w-48'); searchBar.classList.remove('w-full');
+    } else {
+        normalContainer.appendChild(searchBar);
+        searchBar.classList.remove('w-48'); searchBar.classList.add('w-full');
     }
+    // Re-focus to ensure usability
+    searchBar.focus();
+}
     
     window.expandLeftWorkspace = function() {
         const p = document.getElementById('left-workspace-panel');
@@ -1143,10 +1180,11 @@
             }
             history.sort((a,b) => { const da = a.rawDate || new Date(a.date).getTime() || 0; const db = b.rawDate || new Date(b.date).getTime() || 0; return db - da; });
 
-            if(history.length > 0) {
+if(history.length > 0) {
                 p.innerHTML = history.map(h => {
-                    const border = h.isLogistics ? 'border-left-color: #f59e0b; background-color: #fffbeb;' : '';
-                    const headerColor = h.isLogistics ? 'background-color: #fef3c7;' : '';
+                    // FIX: Use CSS Theme Variables instead of hardcoded hex colors
+                    const border = h.isLogistics ? 'border-left-color: var(--accent-warning); background-color: var(--bg-input);' : '';
+                    const headerColor = h.isLogistics ? 'background-color: var(--bg-app); color: var(--accent-warning);' : '';
                     let metaHtml = '';
                     if (h.metaLoc || h.metaDm || h.metaComp || h.metaOpp) {
                         metaHtml = `<div class="flex flex-wrap gap-3 mb-2 text-[10px] text-muted p-1.5 rounded border bg-black/5" style="border-color: var(--border-color);">
@@ -1158,9 +1196,9 @@
                     }
                     return `<div class="note-card" style="${border}"><div class="note-card-header" style="${headerColor}"><span>${h.date}</span><span>${h.author}</span></div><div class="note-card-body">${metaHtml}${window.escapeHTML(h.text)}</div></div>`;
                 }).join('');
-            } else { p.innerHTML = '<div class="text-center italic mt-10 text-muted">No history found</div>'; }
+            else { p.innerHTML = '<div class="text-center italic mt-10 text-muted">No history found</div>'; }
         } else { p.innerHTML = '<div class="text-center italic mt-10 text-muted">History hidden</div>'; }
-    }
+    
 
     // Modal Operations
     window.toggleModalFullscreen = function(id) {
@@ -1253,11 +1291,14 @@
 
     // INTERNAL NOTES / HELP REQUESTS & ADMIN EXTRAS
     window.toggleInternalNote = function() { document.getElementById('internal-note-wrapper').classList.toggle('hidden'); }
-    window.sendHelpNote = async function() { 
+window.sendHelpNote = async function() { 
         const v = document.getElementById('internal-note-input').value; 
         if(!v) return; 
+        
+        // 1. Always save the note to the Dataverse record first
         window.handleCustomSave(`[Help Request]: ${v}`, true); 
         
+        // 2. Safely attempt to email manager
         const mgrName = currentUserProfile?.cr714_managerassigned;
         if (mgrName && msalAccount) {
             const mgrEmail = mgrName.trim().replace(/\s+/g, '.').toLowerCase() + '@wbmason.com';
@@ -1266,7 +1307,7 @@
                 const mailBody = { 
                     message: { 
                         subject: `Help Request from ${currentUserRepName} for Account ${currentRecordId}`, 
-                        body: { contentType: "Text", content: `Account: ${currentRecordId}\nCompany: ${currentSelectedRecord.cr714_company}\n\nMessage:\n${v}` }, 
+                        body: { contentType: "Text", content: `Account: ${currentRecordId}\nCompany: ${currentSelectedRecord?.cr714_company}\n\nMessage:\n${v}` }, 
                         toRecipients: [{ emailAddress: { address: mgrEmail } }] 
                     }, 
                     saveToSentItems: "false" 
@@ -1294,9 +1335,9 @@
         document.getElementById('secret-modal').style.display = 'flex';
     }
 
-    window.reportIssue = async function() {
+window.reportIssue = async function() {
         const issue = prompt("Please briefly describe the issue:");
-        if(issue) {
+        if (issue) {
             window.showToast("Reporting...", "processing");
             try {
                 const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
@@ -1307,11 +1348,104 @@
                     cr714_bucket: "Unknown",
                     statuscode: 1
                 };
-                const res = await fetch(`${DATAVERSE_URL}/cr714_cr_bugtrackers`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                if(res.ok) { window.showToast("Issue Reported", "success"); window.saveToAuditLog('Issue Report', issue); } 
-            } catch(e) { window.showToast("Failed to report issue", "error"); }
+                const res = await fetch(`${DATAVERSE_URL}/cr714_cr_bugtrackers`, { 
+                    method: 'POST', 
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(payload) 
+                });
+                if (res.ok) { 
+                    window.showToast("Issue Reported", "success"); 
+                    window.saveToAuditLog('Issue Report', issue); 
+                } 
+            } catch (e) { 
+                window.showToast("Failed to report issue", "error"); 
+            }
         }
-    }
+    };
+
+    // Global listener for resizing images inside contenteditable editors
+    document.addEventListener('click', function(e) {
+        if (e.target.tagName === 'IMG' && e.target.closest('[contenteditable="true"]')) {
+            const currentWidth = e.target.style.width || e.target.width;
+            const newWidth = prompt("Enter new image width (e.g., 200px or 50%):", currentWidth);
+            if (newWidth) { 
+                e.target.style.width = newWidth.includes('%') || newWidth.includes('px') ? newWidth : newWidth + 'px'; 
+                e.target.style.height = 'auto'; 
+            }
+        }
+    });
+
+    document.addEventListener('DOMContentLoaded', () => {
+        window.loadSavedTheme();
+        document.addEventListener('click', function(event) { 
+            if (!event.target.matches('#theme-toggle-btn') && !event.target.closest('#theme-toggle-btn')) { 
+                const menu = document.getElementById('theme-menu'); 
+                if (menu && menu.classList.contains('show')) { menu.classList.remove('show'); } 
+            } 
+            if (!event.target.closest('.theme-dropdown')) { 
+                const settings = document.getElementById('gallery-settings-menu'); 
+                if (settings && settings.style.display === 'block') settings.style.display = 'none'; 
+            } 
+        });
+
+        msalInstance.handleRedirectPromise().then(resp => { 
+            if (resp && resp.account) { 
+                msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp(); 
+            } else { 
+                const accounts = msalInstance.getAllAccounts(); 
+                if (accounts.length > 0) { 
+                    msalAccount = accounts[0]; currentUserRepName = msalAccount.name; window.initializeApp(); 
+                } else { 
+                    document.getElementById('global-loader').style.display='none'; 
+                    document.getElementById('login-container').classList.remove('hidden'); 
+                    document.getElementById('login-container').style.display='flex'; 
+                } 
+            } 
+        }).catch(e => { 
+            console.error(e); 
+            document.getElementById('global-loader').style.display='none'; 
+            document.getElementById('login-container').style.display='flex'; 
+        });
+
+        const resizer = document.getElementById('history-resizer'); 
+        const grid = document.querySelector('.app-grid'); 
+        const historyCol = document.getElementById('history-column');
+        if (resizer && grid && historyCol) {
+            let isResizing = false; 
+            let startX, startWidth; 
+            const savedWidth = localStorage.getItem('daytona_history_width'); 
+            if (savedWidth) grid.style.setProperty('--history-width', savedWidth);
+            
+            const onDown = (clientX) => { 
+                isResizing = true; 
+                startX = clientX; 
+                startWidth = historyCol.offsetWidth; 
+                document.body.style.cursor = 'col-resize'; 
+                document.body.style.userSelect = 'none'; 
+                resizer.classList.add('bg-blue-500/20'); 
+            };
+            const onMove = (clientX) => { 
+                if (!isResizing) return; 
+                const deltaX = startX - clientX; 
+                let newWidth = startWidth + deltaX; 
+                if (newWidth < 200) newWidth = 200; 
+                if (newWidth > 600) newWidth = 600; 
+                grid.style.setProperty('--history-width', `${newWidth}px`); 
+            };
+            const onUp = () => { 
+                if (isResizing) { 
+                    isResizing = false; 
+                    document.body.style.cursor = ''; 
+                    document.body.style.userSelect = ''; 
+                    resizer.classList.remove('bg-blue-500/20'); 
+                    localStorage.setItem('daytona_history_width', getComputedStyle(grid).getPropertyValue('--history-width')); 
+                } 
+            };
+            resizer.addEventListener('mousedown', (e) => onDown(e.clientX)); 
+            document.addEventListener('mousemove', (e) => onMove(e.clientX)); 
+            document.addEventListener('mouseup', onUp);
+        }
+    });
 
     document.addEventListener('DOMContentLoaded', () => {
         window.loadSavedTheme();
@@ -1572,7 +1706,21 @@
                     </div>
                 </div>
                 
- 
+                <div class="card mt-2 flex-shrink-0 overflow-hidden" style="background-color: var(--bg-card); border-color: var(--border-color);">
+                    <div class="card-header cursor-pointer text-[10px] p-2 bg-gray-50 flex justify-between items-center" onclick="document.getElementById('d365-matrix-content').classList.toggle('hidden')" style="background-color: var(--bg-header);">
+                        <span class="font-bold text-muted uppercase"><i class="fas fa-database mr-1"></i> D365 Account Matrix & Sales Analysis</span>
+                        <i class="fas fa-chevron-down text-muted"></i>
+                    </div>
+                    <div id="d365-matrix-content" class="hidden p-3 overflow-y-auto custom-scrollbar" style="border-color: var(--border-color); background-color: var(--bg-input);">
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-[9px] font-mono mb-4 border-b pb-4" style="border-color: var(--border-color);" id="d365-raw-grid">
+                            <div class="col-span-full text-muted italic text-center">Select an account to load matrix.</div>
+                        </div>
+                        <div>
+                            <h4 class="text-[10px] font-black uppercase text-blue-600 tracking-widest mb-2"><i class="fa fa-chart-line mr-2"></i>3-Month Categorical Analysis (Power BI)</h4>
+                            <div id="d-sales-data" class="overflow-x-auto min-h-[100px]"></div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="col-history min-h-0" id="history-column">
