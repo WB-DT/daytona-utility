@@ -209,60 +209,36 @@
         return res;
     };
 
-window.parseNotes = function(rawNotes) {
-    if (!rawNotes) return [];
-    let cleanRaw = rawNotes.replace(/\r\n/g, '\n');
-    // Split by the horizontal line separator
-    const rawEntries = cleanRaw.split(/-{20,}/).filter(e => e.trim().length > 0);
-    const parsed = [];
+    window.parseNotes = function(rawNotes) {
+        if (!rawNotes) return []; let cleanRaw = rawNotes.replace(/\r\n/g, '\n'); const rawEntries = cleanRaw.split(/-{20,}/).filter(e => e.trim().length > 0); const parsed = [];
+        rawEntries.forEach(entry => {
+            const lines = entry.trim().split('\n'); let date = "Unknown Date"; let author = "Unknown User"; let textLines = [];
+            let metaLoc='', metaDm='', metaComp='', metaOpp='';
+            
+            const metaMatch = entry.match(/{{METADATA:(.*?)}}/);
+            if (metaMatch && metaMatch[1]) {
+                metaMatch[1].split('|').forEach(p => {
+                    const kv = p.split('=');
+                    if (kv[0]==='Loc') metaLoc = kv[1]||'';
+                    if (kv[0]==='DM') metaDm = kv[1]||'';
+                    if (kv[0]==='Comp') metaComp = kv[1]||'';
+                    if (kv[0]==='Opp') metaOpp = kv[1]||'';
+                });
+            }
 
-    rawEntries.forEach(entry => {
-        const lines = entry.trim().split('\n');
-        let date = "Unknown Date";
-        let author = "Unknown User";
-        let textLines = [];
-        let metaLoc='', metaDm='', metaComp='', metaOpp='';
-        
-        // Extract Metadata specifically for THIS entry
-        const metaMatch = entry.match(/{{METADATA:(.*?)}}/);
-        if (metaMatch && metaMatch[1]) {
-            metaMatch[1].split('|').forEach(p => {
-                const kv = p.split('=');
-                if (kv[0].trim()==='Loc') metaLoc = kv[1]||'';
-                if (kv[0].trim()==='DM') metaDm = kv[1]||'';
-                if (kv[0].trim()==='Comp') metaComp = kv[1]||'';
-                if (kv[0].trim()==='Opp') metaOpp = kv[1]||'';
-            });
-        }
-
-        for(let i=0; i<lines.length; i++) {
-            const line = lines[i].trim();
-            if (line.toLowerCase().includes('modified on:')) { 
-                date = line.split(/modified on:/i)[1]?.trim() || "Unknown Date"; 
-                continue; 
+            for(let i=0; i<lines.length; i++) {
+                const line = lines[i].trim();
+                if (line.toLowerCase().includes('modified on:')) { date = line.split(/modified on:/i)[1]?.trim() || "Unknown Date"; continue; }
+                if (line.toLowerCase().includes('modified by:') || line.toLowerCase().startsWith('by:')) { author = line.split(/(?:modified by:|by:)/i)[1]?.trim() || "Unknown User"; continue; }
+                if (line !== "") { textLines.push(lines[i]); }
             }
-            if (line.toLowerCase().includes('modified by:') || line.toLowerCase().startsWith('by:')) { 
-                author = line.split(/(?:modified by:|by:)/i)[1]?.trim() || "Unknown User"; 
-                continue; 
+            textLines = textLines.filter(l => !l.startsWith("{{METADATA:") && !l.startsWith("[List:"));
+            if (author !== "Unknown User" && author !== "Unknown" && (textLines.length > 0)) { 
+                parsed.push({ date: date, author: author, text: textLines.join('\n').trim(), metaLoc, metaDm, metaComp, metaOpp }); 
             }
-            // Filter out system tags from the display text
-            if (line !== "" && !line.startsWith("{{METADATA:") && !line.startsWith("[List:")) { 
-                textLines.push(lines[i]); 
-            }
-        }
-        
-        if (textLines.length > 0) {
-            parsed.push({ 
-                date: date, 
-                author: author, 
-                text: textLines.join('\n').trim(), 
-                metaLoc, metaDm, metaComp, metaOpp,
-                rawDate: new Date(date).getTime() || 0 
-            });
-        }
-    });
-    return parsed;
-};
+        });
+        return parsed;
+    }
 
     // --- RESTORED MISSING FUNCTIONS ---
 
@@ -611,22 +587,15 @@ window.fetchD365Account = async function(accountId) {
         const newNoteEntry = note ? `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId}]\n${metaString}\n${note}\n\n------------------------------\n` : `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId}]\n${metaString}\n(Metadata Update)\n\n------------------------------\n`;
         
         let rawEntries = (currentSelectedRecord.cr714_qbnotes || "").split(/-{20,}/);
-// Inside window.handleCustomSave:
-// Replace the validEntries filter with this to prevent history duplication
-let validEntries = rawEntries.filter(e => {
-    const trimmed = e.trim();
-    if (!trimmed) return false;
-    
-    // Don't keep entries that are just headers with no content
-    const textOnly = trimmed
-        .replace(/Modified By:.*\n/i, '')
-        .replace(/Modified On:.*\n/i, '')
-        .replace(/{{METADATA:.*?}}/i, '')
-        .replace(/\[List:.*?\]/i, '')
-        .trim();
-        
-    return textOnly.length > 0;
-});
+        let validEntries = rawEntries.filter(e => {
+            if (!e.trim()) return false;
+            let match = e.match(/(?:Modified By:|by:)\s*(.*)/i);
+            let author = match ? match[1].trim() : "";
+            if (author === "Unknown User" || author === "Unknown") return false;
+            let textOnly = e.replace(/Modified By:.*\n/i, '').replace(/Modified On:.*\n/i, '').replace(/{{METADATA:.*?}}/i, '').replace(/\[List:.*?\]/i, '').trim();
+            if(!textOnly) return false;
+            return true;
+        });
         
         let rebuiltNotes = validEntries.map(e => e.trim()).join('\n\n------------------------------\n');
         if (rebuiltNotes) rebuiltNotes = '\n\n' + rebuiltNotes + '\n\n------------------------------\n';
@@ -1089,25 +1058,22 @@ let validEntries = rawEntries.filter(e => {
         window.currentRecordSnapshot = { loc: metaLoc, dm: metaDm, comp: metaComp, oppType: metaOpp, fuDate: document.getElementById('follow-up-date')?.value || '', fuTime: document.getElementById('follow-up-time')?.value || '' };
     }
 
-window.toggleGallery = function() { 
-    const col = document.getElementById('gallery-column');
-    col.classList.toggle('collapsed'); 
-    document.querySelector('.app-grid').classList.toggle('sidebar-collapsed'); 
-    
-    const searchBar = document.getElementById('search-bar');
-    const filterContainer = document.getElementById('filter-bar-container');
-    const normalContainer = document.getElementById('gallery-normal-content');
-    
-    if (col.classList.contains('collapsed')) {
-        filterContainer.insertBefore(searchBar, filterContainer.firstChild);
-        searchBar.classList.add('w-48'); searchBar.classList.remove('w-full');
-    } else {
-        normalContainer.appendChild(searchBar);
-        searchBar.classList.remove('w-48'); searchBar.classList.add('w-full');
+    window.toggleGallery = function() { 
+        const col = document.getElementById('gallery-column');
+        col.classList.toggle('collapsed'); 
+        document.querySelector('.app-grid').classList.toggle('sidebar-collapsed'); 
+        
+        const searchBar = document.getElementById('search-bar');
+        const filterContainer = document.getElementById('filter-bar-container');
+        const normalContainer = document.getElementById('gallery-normal-content');
+        if (col.classList.contains('collapsed')) {
+            filterContainer.insertBefore(searchBar, filterContainer.firstChild);
+            searchBar.classList.add('w-48'); searchBar.classList.remove('w-full');
+        } else {
+            normalContainer.appendChild(searchBar);
+            searchBar.classList.remove('w-48'); searchBar.classList.add('w-full');
+        }
     }
-    // Re-focus to ensure usability
-    searchBar.focus();
-}
     
     window.expandLeftWorkspace = function() {
         const p = document.getElementById('left-workspace-panel');
@@ -1335,9 +1301,9 @@ window.sendHelpNote = async function() {
         document.getElementById('secret-modal').style.display = 'flex';
     }
 
-window.reportIssue = async function() {
+    window.reportIssue = async function() {
         const issue = prompt("Please briefly describe the issue:");
-        if (issue) {
+        if(issue) {
             window.showToast("Reporting...", "processing");
             try {
                 const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
@@ -1348,104 +1314,23 @@ window.reportIssue = async function() {
                     cr714_bucket: "Unknown",
                     statuscode: 1
                 };
-                const res = await fetch(`${DATAVERSE_URL}/cr714_cr_bugtrackers`, { 
-                    method: 'POST', 
-                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, 
-                    body: JSON.stringify(payload) 
-                });
-                if (res.ok) { 
-                    window.showToast("Issue Reported", "success"); 
-                    window.saveToAuditLog('Issue Report', issue); 
-                } 
-            } catch (e) { 
-                window.showToast("Failed to report issue", "error"); 
+                // FIX: Add click listener to resize images inside the Email & Signature Modals
+// Allow image resizing in the Email & Signature editors
+        document.addEventListener('click', function(e) {
+            if (e.target.tagName === 'IMG' && e.target.closest('[contenteditable="true"]')) {
+                const currentWidth = e.target.style.width || e.target.width;
+                const newWidth = prompt("Enter new image width (e.g., 200px or 50%):", currentWidth);
+                if(newWidth) { 
+                    e.target.style.width = newWidth.includes('%') || newWidth.includes('px') ? newWidth : newWidth + 'px'; 
+                    e.target.style.height = 'auto'; 
+                }
             }
-        }
-    };
-
-    // Global listener for resizing images inside contenteditable editors
-    document.addEventListener('click', function(e) {
-        if (e.target.tagName === 'IMG' && e.target.closest('[contenteditable="true"]')) {
-            const currentWidth = e.target.style.width || e.target.width;
-            const newWidth = prompt("Enter new image width (e.g., 200px or 50%):", currentWidth);
-            if (newWidth) { 
-                e.target.style.width = newWidth.includes('%') || newWidth.includes('px') ? newWidth : newWidth + 'px'; 
-                e.target.style.height = 'auto'; 
-            }
-        }
-    });
-
-    document.addEventListener('DOMContentLoaded', () => {
-        window.loadSavedTheme();
-        document.addEventListener('click', function(event) { 
-            if (!event.target.matches('#theme-toggle-btn') && !event.target.closest('#theme-toggle-btn')) { 
-                const menu = document.getElementById('theme-menu'); 
-                if (menu && menu.classList.contains('show')) { menu.classList.remove('show'); } 
-            } 
-            if (!event.target.closest('.theme-dropdown')) { 
-                const settings = document.getElementById('gallery-settings-menu'); 
-                if (settings && settings.style.display === 'block') settings.style.display = 'none'; 
-            } 
         });
-
-        msalInstance.handleRedirectPromise().then(resp => { 
-            if (resp && resp.account) { 
-                msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp(); 
-            } else { 
-                const accounts = msalInstance.getAllAccounts(); 
-                if (accounts.length > 0) { 
-                    msalAccount = accounts[0]; currentUserRepName = msalAccount.name; window.initializeApp(); 
-                } else { 
-                    document.getElementById('global-loader').style.display='none'; 
-                    document.getElementById('login-container').classList.remove('hidden'); 
-                    document.getElementById('login-container').style.display='flex'; 
-                } 
-            } 
-        }).catch(e => { 
-            console.error(e); 
-            document.getElementById('global-loader').style.display='none'; 
-            document.getElementById('login-container').style.display='flex'; 
-        });
-
-        const resizer = document.getElementById('history-resizer'); 
-        const grid = document.querySelector('.app-grid'); 
-        const historyCol = document.getElementById('history-column');
-        if (resizer && grid && historyCol) {
-            let isResizing = false; 
-            let startX, startWidth; 
-            const savedWidth = localStorage.getItem('daytona_history_width'); 
-            if (savedWidth) grid.style.setProperty('--history-width', savedWidth);
-            
-            const onDown = (clientX) => { 
-                isResizing = true; 
-                startX = clientX; 
-                startWidth = historyCol.offsetWidth; 
-                document.body.style.cursor = 'col-resize'; 
-                document.body.style.userSelect = 'none'; 
-                resizer.classList.add('bg-blue-500/20'); 
-            };
-            const onMove = (clientX) => { 
-                if (!isResizing) return; 
-                const deltaX = startX - clientX; 
-                let newWidth = startWidth + deltaX; 
-                if (newWidth < 200) newWidth = 200; 
-                if (newWidth > 600) newWidth = 600; 
-                grid.style.setProperty('--history-width', `${newWidth}px`); 
-            };
-            const onUp = () => { 
-                if (isResizing) { 
-                    isResizing = false; 
-                    document.body.style.cursor = ''; 
-                    document.body.style.userSelect = ''; 
-                    resizer.classList.remove('bg-blue-500/20'); 
-                    localStorage.setItem('daytona_history_width', getComputedStyle(grid).getPropertyValue('--history-width')); 
-                } 
-            };
-            resizer.addEventListener('mousedown', (e) => onDown(e.clientX)); 
-            document.addEventListener('mousemove', (e) => onMove(e.clientX)); 
-            document.addEventListener('mouseup', onUp);
+                const res = await fetch(`${DATAVERSE_URL}/cr714_cr_bugtrackers`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                if(res.ok) { window.showToast("Issue Reported", "success"); window.saveToAuditLog('Issue Report', issue); } 
+            } catch(e) { window.showToast("Failed to report issue", "error"); }
         }
-    });
+    }
 
     document.addEventListener('DOMContentLoaded', () => {
         window.loadSavedTheme();
