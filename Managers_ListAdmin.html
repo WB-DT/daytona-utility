@@ -251,6 +251,38 @@
 
     // --- RESTORED MISSING FUNCTIONS ---
 
+    window.insertTemplate = function() {
+        const input = document.getElementById('qb-notes-input');
+        if(input && !input.disabled) {
+            input.value += (input.value ? '\n\n' : '') + QB_NOTES_TEMPLATE;
+            window.markDirty();
+            input.focus();
+        }
+    };
+
+    window.showUserProfileCard = function() {
+        if(!currentUserProfile && !msalAccount) return;
+        const name = currentUserProfile?.cr714_employeename || msalAccount?.name || 'Unknown User';
+        const email = msalAccount?.username || 'No Email';
+        const phone = window.currentUserGraphPhone || currentUserProfile?.cr714_extension || '--';
+        const mgr = currentUserProfile?.cr714_managerassigned || '--';
+        
+        let html = `
+            <div class="text-center w-full">
+                <i class="fas fa-user-circle text-6xl text-blue-500 mb-4 block"></i>
+                <h3 class="text-xl font-bold">${name}</h3>
+                <p class="text-sm text-muted mb-4">${email}</p>
+                <div class="grid grid-cols-2 gap-2 text-left bg-gray-50 p-3 rounded border w-full" style="background-color: var(--bg-input); border-color: var(--border-color);">
+                    <div><span class="text-[10px] font-bold uppercase text-muted block">Phone/Ext</span><span class="text-sm font-semibold">${phone}</span></div>
+                    <div><span class="text-[10px] font-bold uppercase text-muted block">Manager</span><span class="text-sm font-semibold">${mgr}</span></div>
+                </div>
+            </div>
+        `;
+        document.getElementById('profile-content').innerHTML = html;
+        document.getElementById('profile-modal').style.display = 'flex';
+        document.getElementById('profile-modal').classList.remove('hidden');
+    };
+
     window.resolveUnsaved = function(save) {
         document.getElementById('unsaved-changes-modal').style.display = 'none';
         if (save) { window.handleCustomSave(null, true); }
@@ -532,6 +564,7 @@
                     cr714_namemost: r.cr714_namemost, cr714_namelatest: r.cr714_namelatest, cr714_primaryphone: window.formatPhone(r.cr714_phone || r.cr714_primaryphone), cr714_emailmost: r.cr714_emailmost, cr714_emaillatest: r.cr714_emaillatest || r.cr714_email_latest, cr714_lastorderdate: r.cr714_lastorderdate || '--',
                     cr714_qbnotes: qbNotes || '', cr714_managernotes: r.cr714_managernotes, cr714_importantaccountinformation: r.cr714_importantaccountinformation || r.cr714_importantaccountinfo, cr714_actionmessage: r.cr714_actionmessage, cr714_billingaddress: r.cr714_address || r.cr714_billingaddress,
                     cr714_actionemailsent: r.cr714_actionemailsent || r.cr714_emailsenttimestamp || null,
+                    cr714_intro: r.cr714_intro || '',
                     source_table: type === 'AM' ? 'cr714_accountmanagementdatasets' : (type === 'Cadence' ? 'cr714_cadencedatasets' : 'cr714_prospectingdatasets'), source_dataset_type: type, source_id: r.cr714_accountmanagementdatasetid || r.cr714_cadencedatasetid || r.cr714_prospectingdatasetid
                 };
             };
@@ -547,10 +580,43 @@
             if (currentUserRepName && document.getElementById('welcome-message')) { document.getElementById('welcome-message').innerHTML = `<i class="fas fa-user-circle text-xl"></i> <span class="hidden md:inline">${currentUserRepName}</span>`; }
             
             window.updateStats(); window.populateActionFilter(); if(typeof window.loadGalleryPrefs === 'function') window.loadGalleryPrefs(); window.filterAndSortGallery(); document.getElementById('global-loader').style.opacity = '0'; setTimeout(()=>document.getElementById('global-loader').style.display='none', 300);
+            
+            // Check for new intros and send email
+            window.checkAndSendIntroEmail();
         } catch (e) { 
             list.innerHTML = `<div class="p-4 text-red-600 text-center">Error: ${e.message}<br><button onclick="window.loadRecords()" class="mt-2 underline font-bold">Retry</button></div>`; document.getElementById('global-loader').style.display='none';
         }
     }
+
+    // Alerts rep of any newly added INTROS
+    window.checkAndSendIntroEmail = async function() {
+        let knownIntros = [];
+        try { knownIntros = JSON.parse(localStorage.getItem('daytona_known_intros') || '[]'); } catch(e) {}
+        
+        const newIntroAccounts = allRecords.filter(r => {
+            const hasIntro = r.cr714_intro || window.parseNotes(r.cr714_qbnotes || '')[0]?.metaIntro;
+            return hasIntro && !knownIntros.includes(r.cr714_id);
+        });
+
+        if (newIntroAccounts.length > 0 && msalAccount) {
+            const emailLines = newIntroAccounts.map(r => `<li><b>${r.cr714_company} (${r.cr714_id}):</b> ${r.cr714_intro || window.parseNotes(r.cr714_qbnotes || '')[0]?.metaIntro}</li>`).join('');
+            try {
+                const token = await window.getToken("Mail.Send");
+                const mailBody = {
+                    message: {
+                        subject: `New Intros Detected - ACT System`,
+                        body: { contentType: "HTML", content: `<div style="font-family: Arial, sans-serif;"><h3>New Accounts with Intros:</h3><ul>${emailLines}</ul><p style="color: #666; font-size: 12px;">This is an automated alert from the ACT App.</p></div>` },
+                        toRecipients: [{ emailAddress: { address: msalAccount.username } }]
+                    },
+                    saveToSentItems: "false"
+                };
+                await fetch(`${GRAPH_URL}/me/sendMail`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(mailBody) });
+                
+                newIntroAccounts.forEach(r => knownIntros.push(r.cr714_id));
+                localStorage.setItem('daytona_known_intros', JSON.stringify(knownIntros));
+            } catch (e) { console.warn("Failed to send intro alert email", e); }
+        }
+    };
 
     window.silentUpdateAccount = async function(id) {
         if(!id) return;
@@ -614,6 +680,7 @@
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
             let payload = {};
             if (iso) payload.cr714_followup = iso;
+            if (intro) payload.cr714_intro = intro;
             
             if (currentSelectedRecord.source_table === 'cr714_accountmanagementdatasets') {
                 payload.cr714_namemost = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most'); payload.cr714_accountmanagementnotes = fullNote;
@@ -630,6 +697,7 @@
             window.saveToAuditLog('Save', `Note: ${note}`); 
             currentSelectedRecord.cr714_qbnotes = fullNote; 
             currentSelectedRecord.cr714_followup = iso; 
+            currentSelectedRecord.cr714_intro = intro;
             document.querySelectorAll('.empty-field-warning').forEach(el => el.classList.remove('empty-field-warning')); 
             window.updateNotesPreview(); 
             window.filterAndSortGallery(); 
@@ -791,6 +859,7 @@
             if(document.getElementById('filter-hidesent').checked && isSent) return false; 
             if(document.getElementById('filter-florida').checked) { const fAddr = r.cr714_billingaddress || ''; if(!/\b(fl|florida)\b/i.test(fAddr)) return false; }
             if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) { if (!r.cr714_managernotes || r.cr714_managernotes.trim() === '') return false; }
+            if(document.getElementById('filter-has-intro').checked) { const hasIntro = r.cr714_intro || window.parseNotes(r.cr714_qbnotes || '')[0]?.metaIntro; if (!hasIntro) return false; }
             if(filter && r.cr714_action !== filter) return false; 
             if(document.getElementById('filter-followup').checked && !r.cr714_followup) return false; 
             if(document.getElementById('filter-nonotes').checked && (r.cr714_qbnotes || '').trim() !== '') return false;
@@ -1055,6 +1124,7 @@
     window.renderAccountMatrix = function(data) {
         const container = document.getElementById('d365-matrix-content');
         const grid = document.getElementById('d365-raw-grid');
+        if(!grid) return; // Fallback in case element isn't in DOM
         if(!data) { grid.innerHTML = '<div class="col-span-full text-muted italic text-center">No data found in D365.</div>'; return; }
         let html = '';
         for(const key in data) {
@@ -1133,7 +1203,7 @@
         setVal('input-location', metaLoc); 
         setVal('input-dm', metaDm); 
         setVal('input-competitor', metaComp); 
-        setVal('input-intro', metaIntro);
+        setVal('input-intro', metaIntro || rec.cr714_intro);
         setVal('opp-type-select', ''); // Opp Type deliberately not restored per user requirement
         
         // Setup custom competitor dropdown state
@@ -1366,7 +1436,7 @@
         document.getElementById('mvgo-modal').style.display = 'flex';
     }
 
-    window.generateMVGOUrl = function() {
+    window.generateMVGOUrl = async function() {
         const check = (id, text) => document.getElementById(id).checked ? (text + ", ") : "";
         let reqAction = check('mvgo-check-save', "Save/Trouble") + check('mvgo-check-loss', "Loss/Winback") + check('mvgo-check-new', "New Buyer") + check('mvgo-check-buying', "Buying");
         let catOpp = check('mvgo-cat-water', "Water") + check('mvgo-cat-jan', "Janitorial") + check('mvgo-cat-hosp', "Hospitality") + check('mvgo-cat-food', "Food") + check('mvgo-cat-break', "Breakroom") + check('mvgo-cat-ship', "Shipping") + check('mvgo-cat-furn', "Furniture") + check('mvgo-cat-office', "Office") + check('mvgo-cat-auto', "Auto") + check('mvgo-cat-print', "Print");
@@ -1376,13 +1446,17 @@
         const details = `Action: ${reqAction.trim().replace(/,$/, '')}\nOpp: ${catOpp.trim().replace(/,$/, '')}\nConcern: ${concern.trim().replace(/,$/, '')}`;
         
         const url = `https://go.masonville.com/#/activityleadcall?accountNumber=${encodeURIComponent(currentRecordId)}&salesCallTriggerDetails=${encodeURIComponent(details)}`;
-        window.openSidebarTab('mvgo', 'MVGO Launch', url);
+        
+        // Launch in new tab instead of iframe modal
+        window.open(url, '_blank');
         
         const historyStamp = `[MVGO LINK SENT]\n${details}`;
         
-        // Push the MVGO note back into the main note box along with the MVGO tag and immediately save it
+        // Push the MVGO note back into the main note box along with the MVGO tag and await save
         document.getElementById('qb-notes-input').value = historyStamp + (userNotes ? `\n\nInstructions/Notes: ${userNotes}` : '');
-        window.handleCustomSave(null, true); 
+        
+        // AWAIT the save so it fully processes the note before wiping it
+        await window.handleCustomSave(null, true); 
         
         // Clear immediately after saving to reset UI correctly
         document.getElementById('qb-notes-input').value = "";
@@ -1586,16 +1660,16 @@
         <div id="filter-bar-container" class="w-full flex flex-wrap gap-2 text-xs border-t pt-2 mt-1 filter-pills items-center justify-start" style="border-color: var(--border-color)">
              <span class="font-bold mr-2 uppercase text-muted" style="font-size: 0.65rem;">View:</span>
              <select id="sort-dropdown" name="sort" onchange="window.filterAndSortGallery()" class="text-xs w-32 border-none bg-transparent">
-    <option value="company-asc">Sort: Company (A-Z)</option>
-    <option value="company-desc">Sort: Company (Z-A)</option>
-    <option value="followup-asc">Sort: Follow Up (Oldest)</option>
-    <option value="followup-desc">Sort: Follow Up (Newest)</option>
-    <option value="rep-asc">Sort: Rep (A-Z)</option>
-</select>
+                <option value="company-asc">Sort: Company (A-Z)</option>
+                <option value="company-desc">Sort: Company (Z-A)</option>
+                <option value="followup-asc">Sort: Follow Up (Oldest)</option>
+                <option value="followup-desc">Sort: Follow Up (Newest)</option>
+                <option value="rep-asc">Sort: Rep (A-Z)</option>
+            </select>
 
-<select id="filter-action-dropdown" onchange="window.filterAndSortGallery()" class="text-xs w-32 border-none bg-transparent ml-2">
-    <option value="">Action: All</option>
-</select>
+            <select id="filter-action-dropdown" onchange="window.filterAndSortGallery()" class="text-xs w-32 border-none bg-transparent ml-2">
+                <option value="">Action: All</option>
+            </select>
              
              <label class="cursor-pointer select-none hidden"><input type="checkbox" id="filter-mgrnotes" class="filter-pill-input" onchange="window.filterAndSortGallery()"></label>
              <label class="cursor-pointer select-none"><input type="checkbox" id="filter-followup" name="filterFollowup" class="filter-pill-input" onchange="window.filterAndSortGallery()"><span class="filter-pill-label"><i class="fas fa-clock"></i> Follow Ups</span></label>
@@ -1604,6 +1678,7 @@
              <label class="cursor-pointer select-none"><input type="checkbox" id="filter-hidesent" name="filterHideSent" class="filter-pill-input" onchange="window.filterAndSortGallery()"><span class="filter-pill-label"><i class="fas fa-eye-slash"></i> Hide Sent Emails</span></label>
              <label class="cursor-pointer select-none"><input type="checkbox" id="filter-sent-only" name="filterSentOnly" class="filter-pill-input" onchange="window.filterAndSortGallery()"><span class="filter-pill-label sent-today"><i class="fas fa-check-double"></i> Emails Sent Today</span></label>
              <label class="cursor-pointer select-none"><input type="checkbox" id="filter-florida" name="filterFlorida" class="filter-pill-input" onchange="window.filterAndSortGallery()"><span class="filter-pill-label"><i class="fas fa-sun"></i> Florida Accounts</span></label>
+             <label class="cursor-pointer select-none"><input type="checkbox" id="filter-has-intro" name="filterHasIntro" class="filter-pill-input" onchange="window.filterAndSortGallery()"><span class="filter-pill-label"><i class="fas fa-handshake"></i> Has Intro</span></label>
              
              <div class="ml-auto flex items-center gap-2">
                  <div id="email-counter-segment" class="flex justify-between items-center text-[10px] text-muted p-1 bg-gray-50 border rounded-full px-3 mr-2" style="border-color: var(--border-color); background-color: var(--bg-input);">
@@ -1679,154 +1754,143 @@
                     <div class="flex flex-row flex-grow min-h-0 overflow-hidden relative">
                         <div id="left-workspace-panel" class="w-1/2 flex flex-col border-r p-2 gap-2 min-h-0" style="background-color: var(--bg-card); border-color: var(--border-color);">
                            <div class="flex justify-between items-center h-7 mb-1">
-    <label class="text-xs font-bold text-muted uppercase tracking-wider">Note Box</label>
-    <div class="flex items-center gap-2">
-        <div id="save-controls" class="hidden items-center gap-1">
-            <button onclick="window.confirmClearChanges()" class="bg-red-100 text-red-700 border border-red-200 px-2 py-0.5 rounded text-[9px] font-bold hover:bg-red-200 transition-colors">
-                <i class="fas fa-times mr-1"></i>CLR
-            </button>
-            <button onclick="window.handleCustomSave()" class="bg-green-600 text-white px-2 py-0.5 rounded text-[9px] font-bold hover:bg-green-700 shadow-sm transition-colors">
-                <i class="fas fa-save mr-1"></i>SAVE
-            </button>
-        </div>
-        <button onclick="window.expandLeftWorkspace()" class="text-gray-400 hover:text-blue-500 bg-transparent border-none cursor-pointer ml-1" title="Toggle Full Width">
-            <i id="expand-workspace-icon" class="fas fa-expand text-xs"></i>
-        </button>
-    </div>
-</div>
+                                <label class="text-xs font-bold text-muted uppercase tracking-wider">Note Box</label>
+                                <div class="flex items-center gap-2">
+                                    <div id="save-controls" class="hidden items-center gap-1">
+                                        <button onclick="window.confirmClearChanges()" class="bg-red-100 text-red-700 border border-red-200 px-2 py-0.5 rounded text-[9px] font-bold hover:bg-red-200 transition-colors">
+                                            <i class="fas fa-times mr-1"></i>CLR
+                                        </button>
+                                        <button onclick="window.handleCustomSave()" class="bg-green-600 text-white px-2 py-0.5 rounded text-[9px] font-bold hover:bg-green-700 shadow-sm transition-colors">
+                                            <i class="fas fa-save mr-1"></i>SAVE
+                                        </button>
+                                    </div>
+                                    <button onclick="window.expandLeftWorkspace()" class="text-gray-400 hover:text-blue-500 bg-transparent border-none cursor-pointer ml-1" title="Toggle Full Width">
+                                        <i id="expand-workspace-icon" class="fas fa-expand text-xs"></i>
+                                    </button>
+                                </div>
+                            </div>
 
-<div class="relative flex flex-col min-h-0 mb-2">
-    <button onclick="window.insertTemplate()" class="absolute top-2 right-2 z-10 text-[9px] font-bold text-blue-600 bg-white/90 border border-blue-200 px-2 py-1 rounded hover:bg-blue-50 transition-all shadow-sm">
-        <i class="fas fa-paste mr-1"></i>Template
-    </button>
-    
-    <textarea id="qb-notes-input" name="generalNote" oninput="window.markDirty()" class="note-textarea w-full p-2 pr-20 text-sm font-mono rounded border h-60 resize-none min-h-0" disabled placeholder="Enter note box here..."></textarea>
-</div>
+                            <div class="relative flex flex-col min-h-0 mb-2">
+                                <button onclick="window.insertTemplate()" class="absolute top-2 right-2 z-10 text-[9px] font-bold text-blue-600 bg-white/90 border border-blue-200 px-2 py-1 rounded hover:bg-blue-50 transition-all shadow-sm">
+                                    <i class="fas fa-paste mr-1"></i>Template
+                                </button>
+                                
+                                <textarea id="qb-notes-input" name="generalNote" oninput="window.markDirty()" class="note-textarea w-full p-2 pr-20 text-sm font-mono rounded border h-60 resize-none min-h-0" disabled placeholder="Enter note box here..."></textarea>
+                            </div>
 
-<div class="grid grid-cols-5 gap-2 flex-shrink-0 p-2 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
-    <div class="flex flex-col items-center">
-        <input type="text" id="input-location" oninput="window.markDirty()" placeholder="Locations" class="text-[10px] border rounded p-1 h-6 w-full text-center">
-        <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Locations</label>
-    </div>
-    <div class="flex flex-col items-center">
-        <input type="text" id="input-dm" oninput="window.markDirty()" placeholder="Decision Maker" class="text-[10px] border rounded p-1 h-6 w-full text-center">
-        <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Decision Maker</label>
-    </div>
-    
-    <div class="flex flex-col items-center relative w-full" id="competitor-container">
-        <div id="competitor-display" onclick="window.toggleCompetitorDropdown()" class="text-[10px] border rounded p-1 h-6 w-full text-center overflow-hidden whitespace-nowrap cursor-pointer select-none editable-field" style="background-color: var(--bg-input); border-color: var(--border-color); color: var(--text-main); text-overflow: ellipsis;" disabled>Select...</div>
-        <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Competitor</label>
-        <input type="hidden" id="input-competitor">
-        
-        <div id="competitor-dropdown" class="absolute bottom-8 left-0 w-48 border shadow-2xl rounded z-[9999] hidden flex-col gap-1 p-2 text-xs" style="background-color: var(--bg-card); border-color: var(--border-color); color: var(--text-main);">
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Amazon" class="comp-chk" onchange="window.updateCompetitorValue()"> Amazon</label>
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Staples" class="comp-chk" onchange="window.updateCompetitorValue()"> Staples</label>
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Office Depot" class="comp-chk" onchange="window.updateCompetitorValue()"> Office Depot</label>
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Quill" class="comp-chk" onchange="window.updateCompetitorValue()"> Quill</label>
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Uline" class="comp-chk" onchange="window.updateCompetitorValue()"> Uline</label>
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="CDW" class="comp-chk" onchange="window.updateCompetitorValue()"> CDW</label>
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Grainger" class="comp-chk" onchange="window.updateCompetitorValue()"> Grainger</label>
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Imperial Dade" class="comp-chk" onchange="window.updateCompetitorValue()"> Imperial Dade</label>
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Fastenal" class="comp-chk" onchange="window.updateCompetitorValue()"> Fastenal</label>
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Local/Independent" class="comp-chk" onchange="window.updateCompetitorValue()"> Local/Independent</label>
-            <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" id="comp-chk-other" value="Other" onchange="window.toggleOtherCompetitor(this)"> Other</label>
-            <input type="text" id="comp-other-text" class="hidden text-[10px] border rounded p-1 mt-1 w-full" placeholder="Type here..." style="background-color: var(--bg-input); border-color: var(--border-color); color: var(--text-main);" oninput="window.updateCompetitorValue()" onblur="window.updateCompetitorValue()">
-            <button type="button" onclick="window.closeCompetitorDropdown()" class="btn-primary text-[10px] py-1 mt-1 w-full">Done</button>
-        </div>
-    </div>
+                            <div class="grid grid-cols-5 gap-2 flex-shrink-0 p-2 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
+                                <div class="flex flex-col items-center">
+                                    <input type="text" id="input-location" oninput="window.markDirty()" placeholder="Locations" class="text-[10px] border rounded p-1 h-6 w-full text-center">
+                                    <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Locations</label>
+                                </div>
+                                <div class="flex flex-col items-center">
+                                    <input type="text" id="input-dm" oninput="window.markDirty()" placeholder="Decision Maker" class="text-[10px] border rounded p-1 h-6 w-full text-center">
+                                    <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Decision Maker</label>
+                                </div>
+                                
+                                <div class="flex flex-col items-center relative w-full" id="competitor-container">
+                                    <div id="competitor-display" onclick="window.toggleCompetitorDropdown()" class="text-[10px] border rounded p-1 h-6 w-full text-center overflow-hidden whitespace-nowrap cursor-pointer select-none editable-field" style="background-color: var(--bg-input); border-color: var(--border-color); color: var(--text-main); text-overflow: ellipsis;" disabled>Select...</div>
+                                    <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Competitor</label>
+                                    <input type="hidden" id="input-competitor">
+                                    
+                                    <div id="competitor-dropdown" class="absolute bottom-8 left-0 w-48 border shadow-2xl rounded z-[9999] hidden flex-col gap-1 p-2 text-xs" style="background-color: var(--bg-card); border-color: var(--border-color); color: var(--text-main);">
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Amazon" class="comp-chk" onchange="window.updateCompetitorValue()"> Amazon</label>
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Staples" class="comp-chk" onchange="window.updateCompetitorValue()"> Staples</label>
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Office Depot" class="comp-chk" onchange="window.updateCompetitorValue()"> Office Depot</label>
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Quill" class="comp-chk" onchange="window.updateCompetitorValue()"> Quill</label>
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Uline" class="comp-chk" onchange="window.updateCompetitorValue()"> Uline</label>
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="CDW" class="comp-chk" onchange="window.updateCompetitorValue()"> CDW</label>
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Grainger" class="comp-chk" onchange="window.updateCompetitorValue()"> Grainger</label>
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Imperial Dade" class="comp-chk" onchange="window.updateCompetitorValue()"> Imperial Dade</label>
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Fastenal" class="comp-chk" onchange="window.updateCompetitorValue()"> Fastenal</label>
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" value="Local/Independent" class="comp-chk" onchange="window.updateCompetitorValue()"> Local/Independent</label>
+                                        <label class="flex items-center gap-1 cursor-pointer"><input type="checkbox" id="comp-chk-other" value="Other" onchange="window.toggleOtherCompetitor(this)"> Other</label>
+                                        <input type="text" id="comp-other-text" class="hidden text-[10px] border rounded p-1 mt-1 w-full" placeholder="Type here..." style="background-color: var(--bg-input); border-color: var(--border-color); color: var(--text-main);" oninput="window.updateCompetitorValue()" onblur="window.updateCompetitorValue()">
+                                        <button type="button" onclick="window.closeCompetitorDropdown()" class="btn-primary text-[10px] py-1 mt-1 w-full">Done</button>
+                                    </div>
+                                </div>
 
-    <div class="flex flex-col items-center">
-        <input type="text" id="input-intro" oninput="window.markDirty()" placeholder="Intro" class="text-[10px] border rounded p-1 h-6 w-full text-center">
-        <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Intro</label>
-    </div>
-    
-    <div class="flex flex-col items-center">
-        <select id="opp-type-select" onchange="window.markDirty()" class="text-[10px] p-0 border rounded h-6 w-full font-bold text-center">
-        <option value="">-- Select --</option>
-        <option value="Call">Phone Call</option>
-        <option value="Email">Email</option>
-        <option value="General Note">General Note</option>
-</select>
-        <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Opp Type</label>
-    </div>
-</div>
+                                <div class="flex flex-col items-center">
+                                    <input type="text" id="input-intro" oninput="window.markDirty()" placeholder="Intro" class="text-[10px] border rounded p-1 h-6 w-full text-center">
+                                    <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Intro</label>
+                                </div>
+                                
+                                <div class="flex flex-col items-center">
+                                    <select id="opp-type-select" onchange="window.markDirty()" class="text-[10px] p-0 border rounded h-6 w-full font-bold text-center">
+                                        <option value="">-- Select --</option>
+                                        <option value="Call">Phone Call</option>
+                                        <option value="Email">Email</option>
+                                        <option value="General Note">General Note</option>
+                                    </select>
+                                    <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Opp Type</label>
+                                </div>
+                            </div>
 
-<div class="flex flex-col gap-1 p-2 border rounded flex-shrink-0 mt-2" style="background-color: var(--bg-input); border-color: var(--border-color);">
-    <label class="text-[10px] font-bold text-muted uppercase flex items-center gap-2"><i class="fas fa-envelope text-blue-500"></i> Email Templates</label>
-    <div class="flex gap-1 w-full">
-        <select id="email-template-dropdown" class="text-xs flex-grow h-8 border rounded px-2 shadow-sm font-semibold" disabled></select>
-        <button onclick="window.launchEmailLogic()" id="launch-email-button" class="btn-primary text-[10px] px-3 h-8 whitespace-nowrap shadow-sm" disabled><i class="fas fa-paper-plane mr-1"></i> Draft</button>
-    </div>
-</div>
+                            <div class="flex flex-col gap-1 p-2 border rounded flex-shrink-0 mt-2" style="background-color: var(--bg-input); border-color: var(--border-color);">
+                                <label class="text-[10px] font-bold text-muted uppercase flex items-center gap-2"><i class="fas fa-envelope text-blue-500"></i> Email Templates</label>
+                                <div class="flex gap-1 w-full">
+                                    <select id="email-template-dropdown" class="text-xs flex-grow h-8 border rounded px-2 shadow-sm font-semibold" disabled></select>
+                                    <button onclick="window.launchEmailLogic()" id="launch-email-button" class="btn-primary text-[10px] px-3 h-8 whitespace-nowrap shadow-sm" disabled><i class="fas fa-paper-plane mr-1"></i> Draft</button>
+                                </div>
+                            </div>
                         </div>
 
-                        <div id="right-workspace-panel" class="w-1/2 flex flex-col p-2 gap-2 overflow-y-auto min-h-0" style="background-color: var(--bg-card);">
-                            <div class="flex items-center gap-2 mb-2 pb-2 border-b" style="border-color: var(--border-color);">
+                        <div id="right-workspace-panel" class="w-1/2 flex flex-col p-2 gap-2 overflow-y-auto min-h-0 custom-scrollbar" style="background-color: var(--bg-card);">
+                            <div class="flex items-center gap-2 mb-2 pb-2 border-b flex-shrink-0" style="border-color: var(--border-color);">
                                 <div class="flex gap-2 form-wide-container flex-grow w-1/2 overflow-hidden rounded-md border-l-4 shadow-md p-2 border-orange-500" style="background-color: var(--bg-input);">
                                     <div class="flex flex-col min-w-0 w-full">
                                         <div class="flex items-center gap-1 mb-1 pb-1 border-b border-orange-500/20 font-black" style="color: var(--text-main);">
                                             <span class="text-[8px] uppercase tracking-wider opacity-70">Current Action Strategy:</span>
                                             <span id="form-action-value" class="text-[11px] tracking-tight text-blue-600">--</span>
                                         </div>
-                                        
                                         <div class="form-wide-value whitespace-normal leading-tight" style="max-height: 5em; overflow-y: auto;">
                                             <span id="form-msg-value" class="text-[10px] font-bold italic" style="color: var(--text-main);">--</span>
                                         </div>
                                     </div>
                                 </div>
-                                
                                 <button onclick="window.toggleEditMode()" id="editModeButton" class="hidden btn-secondary text-[10px] py-2 h-8 px-6 ml-auto" disabled><i class="fas fa-edit mr-2"></i> Edit</button>
                             </div>
                             
-                            <div class="grid grid-cols-2 gap-2">
-    <button onclick="window.open('https://go.masonville.com/#/customer/' + currentRecordId, '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate">
-        <i class="fas fa-clipboard-list text-blue-500"></i> Summary
-    </button>
-    
-    <button onclick="window.open('https://go.masonville.com/#/report/' + currentRecordId + '/Four%20Month%20Sales', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate">
-        <i class="fas fa-file-invoice-dollar text-green-500"></i> Sales
-    </button>
-    
-    <button onclick="window.open('https://wbmasonco.crm.dynamics.com/main.aspx?appid=9e06e7d4-8616-eb11-a817-000d3a8b6b20&pagetype=search&searchText=' + currentRecordId, '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate">
-        <i class="fas fa-headset text-purple-500"></i> CSW
-    </button>
-    
-    <button onclick="window.open('https://www.wbmason.com/', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate">
-        <i class="fas fa-shopping-cart text-red-600"></i> WB Site
-    </button>
-
-    <button onclick="window.open('https://www.spradvantage.com/Login/Index?ReturnUrl=%2F', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate">
-        <i class="fas fa-truck text-orange-600"></i> SPR
-    </button>
-    
-    <button onclick="window.open('https://www.iteminfo.com', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate">
-        <i class="fas fa-info-circle text-teal-600"></i> ItemInfo
-    </button>
-    
-    <button onclick="window.open('https://wbmasonco.sharepoint.com/sites/WBMasonDaytonaQA/Knowledge%20Base/Forms/AllItems.aspx', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate">
-    <i class="fas fa-book text-cyan-600"></i> KB
-</button>
-    
-    <button onclick="window.open('https://e42.ultipro.com/Login.aspx?ReturnUrl=%2f', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate">
-        <i class="fas fa-id-card text-indigo-600"></i> UltiPro
-    </button>
+                            <div class="grid grid-cols-2 gap-2 flex-shrink-0">
+                                <button onclick="window.open('https://go.masonville.com/#/customer/' + currentRecordId, '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-clipboard-list text-blue-500"></i> Summary</button>
+                                <button onclick="window.open('https://go.masonville.com/#/report/' + currentRecordId + '/Four%20Month%20Sales', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-file-invoice-dollar text-green-500"></i> Sales</button>
+                                <button onclick="window.open('https://wbmasonco.crm.dynamics.com/main.aspx?appid=9e06e7d4-8616-eb11-a817-000d3a8b6b20&pagetype=search&searchText=' + currentRecordId, '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-headset text-purple-500"></i> CSW</button>
+                                <button onclick="window.open('https://www.wbmason.com/', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-shopping-cart text-red-600"></i> WB Site</button>
+                                <button onclick="window.open('https://www.spradvantage.com/Login/Index?ReturnUrl=%2F', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-truck text-orange-600"></i> SPR</button>
+                                <button onclick="window.open('https://www.iteminfo.com', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-info-circle text-teal-600"></i> ItemInfo</button>
+                                <button onclick="window.open('https://wbmasonco.sharepoint.com/sites/WBMasonDaytonaQA/Knowledge%20Base/Forms/AllItems.aspx', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-book text-cyan-600"></i> KB</button>
+                                <button onclick="window.open('https://e42.ultipro.com/Login.aspx?ReturnUrl=%2f', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-id-card text-indigo-600"></i> UltiPro</button>
                                 <div class="col-span-2 flex flex-col mt-2">
                                     <button onclick="window.openCallScript()" id="btn-script" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate flex justify-center items-center gap-2 rounded-b-none border-b-0"><i class="fas fa-comment-dots text-pink-500"></i> Call Script</button>
                                 </div>
                             </div>
                             
-                            <div class="flex flex-col gap-1 p-2 border rounded flex-shrink-0 mt-4" style="background-color: var(--bg-input); border-color: var(--border-color);">
-                                    <label class="text-[10px] font-bold text-muted uppercase">Follow Up Scheduler</label>
-                                    <div class="flex gap-1 w-full">
-                                        <input type="date" id="follow-up-date" onchange="window.markDirty()" class="text-xs flex-1 editable-field h-7" disabled>
-                                        <input type="time" id="follow-up-time" onchange="window.markDirty()" class="text-xs flex-1 editable-field h-7" disabled>
-                                    </div>
-                                    <button onclick="window.createCalendarEvent()" class="btn-primary text-xs w-full h-6 py-0 flex items-center justify-center mt-1">Create Event</button>
+                            <div class="flex flex-col gap-1 p-2 border rounded flex-shrink-0 mt-2" style="background-color: var(--bg-input); border-color: var(--border-color);">
+                                <label class="text-[10px] font-bold text-muted uppercase">Follow Up Scheduler</label>
+                                <div class="flex gap-1 w-full">
+                                    <input type="date" id="follow-up-date" onchange="window.markDirty()" class="text-xs flex-1 editable-field h-7" disabled>
+                                    <input type="time" id="follow-up-time" onchange="window.markDirty()" class="text-xs flex-1 editable-field h-7" disabled>
                                 </div>
+                                <button onclick="window.createCalendarEvent()" class="btn-primary text-xs w-full h-6 py-0 flex items-center justify-center mt-1">Create Event</button>
+                            </div>
+
+                            <div class="flex flex-col border rounded mt-2 p-2 flex-shrink-0" style="background-color: var(--bg-input); border-color: var(--border-color);">
+                                <label class="text-[10px] font-bold text-muted uppercase flex items-center justify-between cursor-pointer" onclick="document.getElementById('d365-matrix-content').classList.toggle('hidden')">
+                                    <span><i class="fas fa-database text-teal-600 mr-1"></i> D365 Raw Data</span>
+                                    <i class="fas fa-chevron-down"></i>
+                                </label>
+                                <div id="d365-matrix-content" class="hidden mt-2 border-t pt-2 max-h-32 overflow-y-auto custom-scrollbar" style="border-color: var(--border-color);">
+                                    <div id="d365-raw-grid" class="grid grid-cols-2 gap-2"></div>
+                                </div>
+                            </div>
+                            
+                            <div class="flex flex-col border rounded mt-2 p-2 flex-shrink-0" style="background-color: var(--bg-input); border-color: var(--border-color);">
+                                <label class="text-[10px] font-bold text-muted uppercase mb-1"><i class="fas fa-chart-line text-blue-600 mr-1"></i> Power BI Sales Analytics</label>
+                                <div id="d-sales-data" class="w-full overflow-x-auto min-h-[40px] flex items-center justify-center custom-scrollbar"></div>
                             </div>
                         </div>
 
-                        <div id="workspace-controls-footer" class="flex-shrink-0 border-t p-2 z-10" style="border-color: var(--border-color); background-color: var(--bg-header);">
+                        <div id="workspace-controls-footer" class="absolute bottom-0 left-0 w-full flex-shrink-0 border-t p-2 z-10" style="border-color: var(--border-color); background-color: var(--bg-header);">
                             <div class="flex flex-row w-full justify-between gap-3 items-center">
                                 <div class="flex flex-col flex-1 relative">
                                     <button onclick="window.toggleInternalNote()" id="help-button" class="btn-secondary text-[10px] px-2 h-8 w-full truncate shadow-sm flex items-center justify-center gap-2" style="color: #2563eb; border-color: #93c5fd;" disabled><i class="fas fa-hands-helping"></i> Help/Losing Account</button>
@@ -1842,9 +1906,8 @@
                                 <button onclick="window.openCloseAccountModal()" id="close-button" class="btn-secondary flex-1 text-[10px] px-2 h-8 truncate shadow-sm flex items-center justify-center gap-2" style="color: #dc2626; border-color: #fca5a5;" disabled><i class="fas fa-ban"></i> Close</button>
                             </div>
                         </div>
+                    </div>
                 </div>
-                
- 
             </div>
 
             <div class="col-history min-h-0" id="history-column">
@@ -1866,7 +1929,7 @@
         </div>
     </div>
 
-    <div id="utility-panel-content" class="hidden h-full flex-col gap-4"><div id="utility-action-slot"></div></div>
+    <!-- OVERLAYS AND MODALS -->
 
     <div id="unified-sidebar" class="sidebar-modal">
         <div class="p-3 border-b flex justify-between items-center modal-header-custom" style="height:50px;">
@@ -1959,7 +2022,7 @@
                 </div>
             </div>
             <div class="p-4 border-t flex justify-between items-center bg-gray-50 flex-shrink-0" style="background-color: var(--bg-header) !important;">
-                <p class="text-xs text-muted"><i class="fas fa-info-circle mr-1"></i> Clicking 'Launch' will generate the URL and open MVGO in the right panel.</p>
+                <p class="text-xs text-muted"><i class="fas fa-info-circle mr-1"></i> Clicking 'Launch' will generate the URL and open MVGO in a new tab.</p>
                 <div class="flex gap-2">
                     <button onclick="document.getElementById('mvgo-modal').style.display = 'none';" class="btn-secondary px-6">Cancel</button>
                     <button onclick="window.generateMVGOUrl()" class="btn-primary bg-blue-600 px-8 text-sm"><i class="fas fa-external-link-alt mr-2"></i>Launch & Save</button>
@@ -1985,4 +2048,121 @@
             </div>
             <div class="flex justify-center gap-3">
                 <button onclick="document.getElementById('close-account-modal').style.display='none';" class="btn-secondary px-6">Cancel</button>
-                <button onclick="window
+                <button onclick="window.confirmCloseAccount()" class="btn-primary bg-red-600 px-6">Close Account</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="email-modal" class="modal-overlay hidden" style="display:none; z-index: 9100;">
+        <div class="outlook-modal w-[90%] max-w-4xl h-[85vh]">
+            <div class="outlook-header">
+                <div class="flex items-center gap-2"><i class="fas fa-envelope"></i> Message</div>
+                <div class="flex items-center gap-4">
+                    <button onclick="document.getElementById('email-modal').style.display='none';" class="text-white hover:text-red-200 bg-transparent border-none">&times;</button>
+                </div>
+            </div>
+            <div class="outlook-ribbon">
+                <button class="outlook-send-btn shadow-sm" onclick="window.handleModalSend()"><i class="fas fa-paper-plane mr-1"></i> Send</button>
+                <div class="outlook-ribbon-separator"></div>
+                <button class="outlook-ribbon-btn" onclick="document.getElementById('email-modal').style.display='none';"><i class="fas fa-trash text-red-500"></i> Discard</button>
+                <button class="outlook-ribbon-btn" onclick="window.openSignatureModal()"><i class="fas fa-pen-nib"></i> Signature</button>
+            </div>
+            <div class="flex flex-col flex-grow overflow-hidden" style="background-color: var(--bg-card);">
+                <div class="outlook-field-row"><label class="outlook-label">To</label><input type="text" id="email-modal-to" class="outlook-input" placeholder="Recipient Email"></div>
+                <div class="outlook-field-row"><label class="outlook-label">Cc</label><input type="text" id="email-modal-cc" class="outlook-input" placeholder="CC Email"></div>
+                <div class="outlook-field-row"><label class="outlook-label">Subject</label><input type="text" id="email-modal-subject" class="outlook-input font-semibold" placeholder="Subject"></div>
+                <div class="outlook-toolbar">
+                    <button class="outlook-tool-btn font-bold">B</button>
+                    <button class="outlook-tool-btn italic">I</button>
+                    <button class="outlook-tool-btn underline">U</button>
+                    <div class="outlook-ribbon-separator"></div>
+                    <button class="outlook-tool-btn"><i class="fas fa-link"></i></button>
+                    <button class="outlook-tool-btn"><i class="fas fa-image"></i></button>
+                </div>
+                <div id="email-modal-body" class="outlook-editor" contenteditable="true"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="script-modal" class="modal-overlay hidden" style="display:none; z-index: 9100;">
+        <div class="modal-content w-96 text-center shadow-2xl rounded-xl">
+            <h3 class="text-xl font-bold mb-4 text-pink-500"><i class="fas fa-comment-dots mr-2"></i>Call Script</h3>
+            <div id="script-content" class="text-sm text-left p-4 bg-gray-50 border rounded mb-4" style="background-color: var(--bg-input); border-color: var(--border-color);"></div>
+            <button onclick="document.getElementById('script-modal').style.display='none';" class="btn-primary px-8">Close</button>
+        </div>
+    </div>
+
+    <div id="failed-saves-modal" class="modal-overlay hidden" style="display:none; z-index: 9100;">
+        <div class="modal-content w-96 text-center">
+            <h3 class="text-lg font-bold mb-4 text-red-600"><i class="fas fa-exclamation-circle mr-2"></i>Failed Operations</h3>
+            <div id="failed-items-list" class="max-h-48 overflow-y-auto mb-4 bg-gray-50 border rounded text-left text-sm" style="background-color: var(--bg-input);"></div>
+            <div class="flex justify-center gap-3">
+                <button onclick="document.getElementById('failed-saves-modal').style.display='none';" class="btn-secondary">Close</button>
+                <button onclick="window.retryFailedSaves()" class="btn-primary bg-red-600">Retry All</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="activity-modal" class="modal-overlay hidden" style="display:none; z-index: 9100;">
+        <div class="modal-content w-[90%] max-w-2xl h-[70vh] flex flex-col p-0 overflow-hidden shadow-2xl rounded-xl">
+            <div class="p-4 border-b flex justify-between items-center bg-gray-50" style="background-color: var(--bg-header) !important;">
+                <h3 class="font-bold text-lg text-blue-600"><i class="fas fa-history mr-2"></i>Today's Activity Log</h3>
+                <button onclick="document.getElementById('activity-modal').style.display='none';" class="text-gray-400 hover:text-red-500 text-xl bg-transparent border-none">&times;</button>
+            </div>
+            <div id="activity-log-list" class="flex-grow overflow-y-auto p-2 bg-white custom-scrollbar" style="background-color: var(--bg-card);"></div>
+            <div class="p-4 border-t bg-gray-50 flex justify-between" style="background-color: var(--bg-header) !important;">
+                <button onclick="window.exportActivityLog()" class="btn-secondary text-xs"><i class="fas fa-file-csv mr-2"></i>Export CSV</button>
+                <button onclick="window.downloadAuditLog()" class="btn-secondary text-xs"><i class="fas fa-download mr-2"></i>Download JSON</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="profile-modal" class="modal-overlay hidden" style="display:none; z-index: 9100;">
+        <div class="modal-content w-80 shadow-2xl rounded-xl relative">
+            <button onclick="document.getElementById('profile-modal').style.display='none';" class="absolute top-2 right-2 text-gray-400 hover:text-red-500 bg-transparent border-none text-xl">&times;</button>
+            <div id="profile-content" class="mt-4 flex flex-col items-center"></div>
+            <div class="mt-6 flex justify-center w-full">
+                <button onclick="window.logout()" class="btn-danger-outline text-xs w-full"><i class="fas fa-sign-out-alt mr-2"></i>Logout</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="signature-modal" class="modal-overlay hidden" style="display:none; z-index: 9200;">
+        <div class="modal-content w-[600px] shadow-2xl rounded-xl">
+            <h3 class="text-lg font-bold mb-4 text-primary"><i class="fas fa-pen-nib mr-2"></i>Edit Email Signature</h3>
+            <p class="text-xs text-muted mb-2">You can type custom HTML or plain text here.</p>
+            <div id="signature-editor-visual" class="w-full h-48 border rounded p-3 mb-4 overflow-y-auto bg-gray-50 text-sm font-mono" contenteditable="true" style="background-color: var(--bg-input); border-color: var(--border-color);"></div>
+            <div class="flex justify-end gap-2">
+                <button onclick="document.getElementById('signature-modal').style.display='none';" class="btn-secondary text-sm px-4">Cancel</button>
+                <button onclick="window.saveSignature()" class="btn-primary text-sm px-6">Save Signature</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="admin-modal" class="modal-overlay hidden" style="display:none; z-index: 9200;">
+        <div class="modal-content w-80 text-left shadow-2xl rounded-xl relative">
+            <button onclick="document.getElementById('admin-modal').style.display='none';" class="absolute top-2 right-2 text-gray-400 hover:text-red-500 bg-transparent border-none text-xl">&times;</button>
+            <h3 class="text-lg font-bold mb-4 text-brand"><i class="fas fa-user-shield mr-2"></i>Admin Access</h3>
+            <div id="admin-step-1">
+                <input type="password" id="admin-password" class="p-2 w-full border rounded mb-4" placeholder="Enter password...">
+                <button onclick="window.checkAdminPassword()" class="btn-primary w-full">Unlock</button>
+            </div>
+            <div id="admin-step-2" class="hidden">
+                <p class="text-xs text-green-600 font-bold mb-2"><i class="fas fa-check-circle"></i> Access Granted</p>
+                <label class="text-xs font-bold uppercase text-muted block mb-1">Target Rep Name</label>
+                <input type="text" id="override-rep-name" name="overrideRepName" class="p-2 mb-3 border border-blue-300 w-full" placeholder="e.g. John Doe">
+                <div class="flex justify-end gap-2 mt-4"><button onclick="window.confirmAdminOverride()" class="btn-primary text-xs w-full bg-blue-600">Load Rep Data</button></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="secret-modal" class="modal-overlay hidden" style="display:none; z-index: 9999;">
+        <div class="modal-content text-center bg-black border border-gray-800 p-4 rounded-xl shadow-2xl">
+            <button onclick="document.getElementById('secret-modal').style.display='none';" class="absolute top-2 right-2 text-white hover:text-red-500 font-bold bg-transparent border-none text-xl">&times;</button>
+            <img src="https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/ACT%20Logo%20GIF.gif" class="w-64 h-auto rounded-lg mx-auto mb-4 border border-gray-700" alt="ACT Secret Logo">
+            <p class="font-mono text-xs text-green-500 mt-2">A.C.T System Connected.</p>
+        </div>
+    </div>
+
+</body>
+</html>
