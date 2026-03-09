@@ -163,6 +163,16 @@
         .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 8px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: var(--primary); border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: var(--bg-input); }
+
+        /* Enable object resizing for images in contenteditable areas */
+        [contenteditable="true"] img {
+            max-width: 100%;
+            height: auto;
+            cursor: pointer;
+        }
+        [contenteditable="true"] img:focus {
+            outline: 2px solid var(--primary);
+        }
     </style>
 
 <script>
@@ -183,7 +193,16 @@
 
     // --- UTILITY FUNCTIONS ---
     window.escapeHTML = function(str) { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'})[m]); }
-    window.stripHTML = function(html) { if (!html) return ''; let tmp = document.createElement("DIV"); tmp.innerHTML = html; return tmp.textContent || tmp.innerText || ""; }
+    
+    // New function to strip HTML out of notes cleanly
+    window.stripHTML = function(html) { 
+        if (!html) return ''; 
+        let tmp = document.createElement("DIV"); 
+        let withLineBreaks = String(html).replace(/<br\s*[\/]?>/gi, '\n').replace(/<\/p>/gi, '\n');
+        tmp.innerHTML = withLineBreaks; 
+        return (tmp.textContent || tmp.innerText || "").replace(/\n\s*\n+/g, '\n').trim(); 
+    }
+    
     window.getElementValue = function(id) { const el=document.getElementById(id); return el ? (el.value?.trim() ?? el.textContent?.trim() ?? null) : null; }
     window.safeJSONParse = function(str) { try { if (typeof str === 'object' && str !== null) return str; const parsed = JSON.parse(str); return typeof parsed === 'string' ? JSON.parse(parsed) : parsed; } catch (e) { return null; } };
     window.formatPhone = function(phone) {
@@ -365,7 +384,7 @@
         
         window.showToast("Closing Account...", "processing");
         try {
-            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
+            const token = await window.getToken("https://org23279050.crm.dynamics.com/user_impersonation");
             const payload = { statecode: 1, statuscode: 2, cr714_actionmessage: `[CLOSED]: ${reason}` };
             
             const res = await fetch(`${DATAVERSE_URL}/${currentSelectedRecord.source_table}(${currentSelectedRecord.source_id})`, { 
@@ -406,9 +425,15 @@
     const msalInstance = new msal.PublicClientApplication(msalConfig);
     let msalAccount = null;
 
-    window.getToken = async function(scope) {
+    // Graceful getToken function: Will not pop up for explicitly marked background calls to prevent blocks
+    window.getToken = async function(scope, silentFallback = false) {
         const account = msalInstance.getAllAccounts()[0]; const request = { scopes: [scope], account: account };
-        try { return (await msalInstance.acquireTokenSilent(request)).accessToken; } catch (e) { return (await msalInstance.acquireTokenPopup(request)).accessToken; }
+        try { 
+            return (await msalInstance.acquireTokenSilent(request)).accessToken; 
+        } catch (e) { 
+            if(silentFallback) throw e; // Fail gracefully instead of forcing a popup loop
+            return (await msalInstance.acquireTokenPopup(request)).accessToken; 
+        }
     }
 
     // --- INITIALIZATION ---
@@ -436,14 +461,15 @@
 
     window.login = function() {
         // Mail.Read scope strictly removed to prevent cross-tenant Admin Consent blockers
-        msalInstance.loginPopup({ scopes: ["User.Read", "Calendars.ReadWrite", "Mail.Send"] }).then(resp => {
+        // Only basic User.Read is requested at login to ensure a perfectly smooth launch.
+        msalInstance.loginPopup({ scopes: ["User.Read"] }).then(resp => {
             msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
         }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
     }
 
     window.fetchGraphProfile = async function() {
         try {
-            const token = await window.getToken("User.Read");
+            const token = await window.getToken("User.Read", true);
             const res = await fetch("https://graph.microsoft.com/v1.0/me?$select=displayName,userPrincipalName,businessPhones", { headers: { 'Authorization': `Bearer ${token}` } });
             if(res.ok) {
                 const data = await res.json();
@@ -518,7 +544,7 @@
     // --- FETCH DATA ---
     window.fetchLogisticsForAccount = async function(accountId) {
         try {
-            const token = await window.getToken("https://org23279050.crm.dynamics.com/user_impersonation");
+            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation", true);
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="*"' };
             let res = await fetch(`${DATAVERSE_URL}/cr714_logisticslog_2s?$filter=cr714_accountnumber eq '${accountId}'`, { headers });
             if(res.ok) { const data = await res.json(); return data.value || []; }
@@ -528,8 +554,15 @@
 
     window.fetchD365Account = async function(accountId) {
         try {
-            // Reverted strictly to the wbmasonco query logic that worked 2 versions ago
-            const token = await window.getToken(`${PRIMARY_CRM_URL.split('/api')[0]}/user_impersonation`);
+            let token;
+            try {
+                // Reverted to exactly what worked 2 versions ago with double slash to fix AAD token issues
+                token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+            } catch(tokenErr) {
+                console.warn("D365 wbmasonco token blocked by admin consent, skipping D365 overlay.", tokenErr);
+                return null;
+            }
+            if(!token) return null;
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
             const cleanId = String(accountId).trim();
             const res = await fetch(`${PRIMARY_CRM_URL}/accounts?$filter=accountnumber eq '${cleanId}'&$expand=primarycontactid($select=fullname,telephone1,emailaddress1)`, { headers });
@@ -547,8 +580,8 @@
         document.getElementById('global-loader').style.display = 'flex'; document.getElementById('global-loader').style.opacity = '1';
         allRecords = []; duplicateRecordIds = new Set();
         try {
-            const token = await window.getToken("https://org23279050.crm.dynamics.com/user_impersonation");
-            // Cache-busting added to ensure new records and cr714_intro columns are forcefully fetched from the server.
+            // Using exact matching scope format with double slash to prevent admin prompts
+            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation", true);
             const reqOptions = { method: 'GET', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="*"' }, cache: 'no-store' };
             let targetRep = currentUserRepName;
 
@@ -605,7 +638,7 @@
         if (newIntroAccounts.length > 0 && msalAccount) {
             const emailLines = newIntroAccounts.map(r => `<li><b>${window.escapeHTML(r.cr714_company)} (${r.cr714_id}):</b> ${window.escapeHTML(r.cr714_intro)}</li>`).join('');
             try {
-                const token = await window.getToken("Mail.Send");
+                const token = await window.getToken("Mail.Send", true);
                 const mailBody = {
                     message: {
                         subject: `New Intros Detected - ACT System`,
@@ -657,7 +690,7 @@
         let d=document.getElementById('follow-up-date').value, t=document.getElementById('follow-up-time').value, iso=d ? (t?`${d}T${t}:00Z`:`${d}T00:00:00Z`):null;
 
         try {
-            const token = await window.getToken("https://org23279050.crm.dynamics.com/user_impersonation");
+            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
             let payload = {};
             if (iso) payload.cr714_followup = iso;
@@ -702,7 +735,7 @@
         if(actionType === 'FULL_MOVE') window.showToast("Moving to Master Table...", "processing");
         
         try {
-            const token = await window.getToken("https://org23279050.crm.dynamics.com/user_impersonation");
+            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
             const get = (id) => document.getElementById(id)?.value || ''; 
             const dsMap = { 'AM': 1, 'Cadence': 2, 'Prospecting': 3 };
@@ -968,13 +1001,6 @@
         });
     }
 
-    window.stripHTML = function(html) {
-        if (!html) return '';
-        let tmp = document.createElement("DIV");
-        tmp.innerHTML = html;
-        return tmp.textContent || tmp.innerText || "";
-    };
-
     window.selectRecord = function(id) { if(window.isDirty()) { window.targetSelectId = id; document.getElementById('unsaved-changes-modal').classList.remove('hidden'); document.getElementById('unsaved-changes-modal').style.display='flex'; } else { window.performSelect(id); } }
 
     window.performSelect = async function(id) {
@@ -1100,8 +1126,13 @@
         alertContainer.innerHTML = ''; 
         const hasMgr = (rec.cr714_managernotes && rec.cr714_managernotes.trim().length > 0); 
         const hasImp = (rec.cr714_importantaccountinformation && rec.cr714_importantaccountinformation.trim().length > 0);
-        if (hasMgr) { alertContainer.innerHTML += `<div class="alert-box mgr flex-1 h-full max-h-24 overflow-y-auto custom-scrollbar"><span class="alert-label">Manager Note</span>${window.escapeHTML(rec.cr714_managernotes)}</div>`; } 
-        if (hasImp) { alertContainer.innerHTML += `<div class="alert-box imp flex-1 h-full max-h-24 overflow-y-auto custom-scrollbar"><span class="alert-label">Important Info</span>${window.escapeHTML(rec.cr714_importantaccountinformation)}</div>`; } 
+        
+        // Strip HTML from Manager/Important notes before displaying
+        const mgrNoteClean = window.stripHTML(String(rec.cr714_managernotes || ''));
+        const impNoteClean = window.stripHTML(String(rec.cr714_importantaccountinformation || ''));
+
+        if (hasMgr) { alertContainer.innerHTML += `<div class="alert-box mgr flex-1 h-full max-h-24 overflow-y-auto custom-scrollbar"><span class="alert-label">Manager Note</span>${window.escapeHTML(mgrNoteClean)}</div>`; } 
+        if (hasImp) { alertContainer.innerHTML += `<div class="alert-box imp flex-1 h-full max-h-24 overflow-y-auto custom-scrollbar"><span class="alert-label">Important Info</span>${window.escapeHTML(impNoteClean)}</div>`; } 
 
         const rawNotes = rec.cr714_qbnotes || ''; let metaLoc = '', metaDm = '', metaComp = '', metaOpp = '', metaIntro = ''; const metaMatch = rawNotes.match(/{{METADATA:(.*?)}}/);
         if(metaMatch && metaMatch[1]) { const parts = metaMatch[1].split('|'); parts.forEach(p => { const kv = p.split('='); if(kv[0].trim() === 'Loc') metaLoc = kv[1] || ''; if(kv[0].trim() === 'DM') metaDm = kv[1] || ''; if(kv[0].trim() === 'Comp') metaComp = kv[1] || ''; if(kv[0].trim() === 'Opp') metaOpp = kv[1] || ''; if(kv[0].trim() === 'Intro') metaIntro = kv[1] || ''; }); }
@@ -1351,7 +1382,7 @@
     }
 
     window.generateMVGOUrl = async function() {
-        const check = (id, text) => document.getElementById(id).checked ? (text + "\n") : "";
+        const check = (id, text) => document.getElementById(id).checked ? (text + ", ") : "";
         let reqAction = check('mvgo-check-save', "Save/Trouble") + check('mvgo-check-loss', "Loss/Winback") + check('mvgo-check-new', "New Buyer") + check('mvgo-check-buying', "Buying");
         let catOpp = check('mvgo-cat-water', "Water") + check('mvgo-cat-jan', "Janitorial") + check('mvgo-cat-hosp', "Hospitality") + check('mvgo-cat-food', "Food") + check('mvgo-cat-break', "Breakroom") + check('mvgo-cat-ship', "Shipping") + check('mvgo-cat-furn', "Furniture") + check('mvgo-cat-office', "Office") + check('mvgo-cat-auto', "Auto") + check('mvgo-cat-print', "Print");
         let concern = check('mvgo-con-pricing', "Pricing") + check('mvgo-con-service', "Service") + check('mvgo-con-dm', "DM");
@@ -1362,8 +1393,13 @@
         const phoneStr = document.getElementById('mvgo-phone')?.value || '';
         const addrStr = document.getElementById('mvgo-address')?.value || '';
 
+        // Clean trailing commas
+        reqAction = reqAction.replace(/, $/, '');
+        catOpp = catOpp.replace(/, $/, '');
+        concern = concern.replace(/, $/, '');
+
         // Build the multiline string and correctly encode the entire thing to ensure it passes into MVGO
-        const details = `Action Plan --- Created On: ${today}\n\nRequested Action(s):\n${reqAction}\n\nCategory Opportunities:\n${catOpp}\n\nConcern(s):\n${concern}Other: \n\nContact Info:\nName: ${contactName}\nPhone Number: ${phoneStr}\nAddress:\n${addrStr}\n\nInside Sales Note: \n${userNotes}`;
+        const details = `Action Plan --- Created On: ${today}\n\nRequested Action(s):\n${reqAction}\n\nCategory Opportunities:\n${catOpp}\n\nConcern(s):\n${concern}\nOther: \n\nContact Info:\nName: ${contactName}\nPhone Number: ${phoneStr}\nAddress:\n${addrStr}\n\nInside Sales Note: \n${userNotes}`;
         const encodedDetails = encodeURIComponent(details);
         
         const url = `https://go.masonville.com/#/activityleadcall?repCreditCode=&emptyOwner=TRUE&accountNumber=${encodeURIComponent(currentRecordId)}&salesCallTriggerID=&schedFutureDays=1&salesCallTrigger=ISReq&salesCallTriggerDetails=${encodedDetails}`;
@@ -1371,11 +1407,12 @@
         // Launch in new tab
         window.open(url, '_blank');
         
-        const historyStamp = `[MVGO LINK SENT]\n${details}`;
+        // Compact note for history
+        const historyStamp = `[MVGO LINK SENT] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
         const qbInput = document.getElementById('qb-notes-input');
         
         // Push the MVGO note back into the main note box along with the MVGO tag and await save
-        qbInput.value = historyStamp + (qbInput.value ? '\n\n' + qbInput.value : '');
+        qbInput.value = historyStamp + (userNotes ? ` | Note: ${userNotes}` : '') + (qbInput.value ? '\n\n' + qbInput.value : '');
         
         // AWAIT the save so it fully processes the note before wiping it
         await window.handleCustomSave(null, true); 
@@ -1471,7 +1508,7 @@
         if(issue) {
             window.showToast("Reporting...", "processing");
             try {
-                const dvToken = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
+                const dvToken = await window.getToken("https://org23279050.crm.dynamics.com/user_impersonation");
                 const mailToken = await window.getToken("Mail.Send");
 
                 const payload = {
@@ -1797,7 +1834,7 @@
                         </div>
                     </div>
                     
-                    <div id="workspace-controls-footer" class="absolute bottom-0 left-0 w-full flex-shrink-0 border-t p-2" style="border-color: var(--border-color); background-color: var(--bg-header);">
+                    <div id="workspace-controls-footer" class="absolute bottom-0 left-0 w-full flex-shrink-0 border-t p-2 z-10" style="border-color: var(--border-color); background-color: var(--bg-header);">
                         <div class="flex flex-row w-full justify-between gap-3 items-center">
                             <div class="flex flex-col flex-1 relative">
                                 <button onclick="window.toggleInternalNote()" id="help-button" class="btn-secondary text-[10px] px-2 h-8 w-full truncate shadow-sm flex items-center justify-center gap-2" style="color: #2563eb; border-color: #93c5fd;" disabled><i class="fas fa-hands-helping"></i> Help/Losing Account</button>
