@@ -311,11 +311,19 @@
         if (window.targetSelectId) { window.performSelect(window.targetSelectId); window.targetSelectId = null; }
     };
 
-    window.createCalendarEvent = function() {
+    window.createCalendarEvent = async function() {
         if(!currentSelectedRecord) return;
         const d = document.getElementById('follow-up-date').value;
         const t = document.getElementById('follow-up-time').value;
         if(!d) { window.showToast("Select a date first", "error"); return; }
+        
+        try {
+            // Check for Graph token to ensure we actually have calendar rights before firing off
+            await window.getToken("Calendars.ReadWrite");
+        } catch(e) {
+            window.showToast("Calendar permissions required.", "error");
+            return;
+        }
         
         let startStr = d + (t ? `T${t}:00` : 'T09:00:00');
         let dt = new Date(startStr);
@@ -384,7 +392,7 @@
         
         window.showToast("Closing Account...", "processing");
         try {
-            const token = await window.getToken("https://org23279050.crm.dynamics.com/user_impersonation");
+            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
             const payload = { statecode: 1, statuscode: 2, cr714_actionmessage: `[CLOSED]: ${reason}` };
             
             const res = await fetch(`${DATAVERSE_URL}/${currentSelectedRecord.source_table}(${currentSelectedRecord.source_id})`, { 
@@ -425,13 +433,18 @@
     const msalInstance = new msal.PublicClientApplication(msalConfig);
     let msalAccount = null;
 
-    // Graceful getToken function: Will not pop up for explicitly marked background calls to prevent blocks
+    // Graceful getToken function: Handles silent failovers and explicit interaction requests cleanly
     window.getToken = async function(scope, silentFallback = false) {
-        const account = msalInstance.getAllAccounts()[0]; const request = { scopes: [scope], account: account };
+        const account = msalInstance.getAllAccounts()[0]; 
+        const request = { scopes: [scope], account: account };
         try { 
             return (await msalInstance.acquireTokenSilent(request)).accessToken; 
         } catch (e) { 
-            if(silentFallback) throw e; // Fail gracefully instead of forcing a popup loop
+            if(silentFallback) {
+                console.warn(`Silent token fetch failed for ${scope}. Ignoring to prevent popup loop.`);
+                throw e; 
+            }
+            console.log(`Interactive token request needed for ${scope}`);
             return (await msalInstance.acquireTokenPopup(request)).accessToken; 
         }
     }
@@ -448,7 +461,7 @@
         if (lastRunDate !== todayStr) { localStorage.setItem('daytona_sent_records', '[]'); localStorage.setItem('daytona_last_run_date', todayStr); }
 
         window.fetchGraphProfile();
-        window.loadOrFetchSignature(); // Preemptively load/fetch signature cache
+        window.loadOrFetchSignature(); 
         window.initSidebarTabs(); 
         window.loadRecords();
         window.loadFontSize();
@@ -461,8 +474,8 @@
 
     window.login = function() {
         // Mail.Read scope strictly removed to prevent cross-tenant Admin Consent blockers
-        // Only basic User.Read is requested at login to ensure a perfectly smooth launch.
-        msalInstance.loginPopup({ scopes: ["User.Read"] }).then(resp => {
+        // Added Mail.Send and Calendars.ReadWrite back here to request at login as they are standard scopes and shouldn't trigger admin blocks.
+        msalInstance.loginPopup({ scopes: ["User.Read", "Mail.Send", "Calendars.ReadWrite"] }).then(resp => {
             msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
         }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
     }
@@ -1001,6 +1014,14 @@
         });
     }
 
+    window.stripHTML = function(html) {
+        if (!html) return '';
+        let tmp = document.createElement("DIV");
+        let withLineBreaks = String(html).replace(/<br\s*[\/]?>/gi, '\n').replace(/<\/p>/gi, '\n');
+        tmp.innerHTML = withLineBreaks;
+        return (tmp.textContent || tmp.innerText || "").replace(/\n\s*\n+/g, '\n').trim();
+    };
+
     window.selectRecord = function(id) { if(window.isDirty()) { window.targetSelectId = id; document.getElementById('unsaved-changes-modal').classList.remove('hidden'); document.getElementById('unsaved-changes-modal').style.display='flex'; } else { window.performSelect(id); } }
 
     window.performSelect = async function(id) {
@@ -1508,7 +1529,7 @@
         if(issue) {
             window.showToast("Reporting...", "processing");
             try {
-                const dvToken = await window.getToken("https://org23279050.crm.dynamics.com/user_impersonation");
+                const dvToken = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
                 const mailToken = await window.getToken("Mail.Send");
 
                 const payload = {
