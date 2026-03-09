@@ -339,56 +339,6 @@
         }
     };
 
-    // Auto Signature Logic
-    window.loadOrFetchSignature = async function() {
-        let sig = localStorage.getItem('daytona_signature');
-        if (sig && sig.trim() !== '') return sig;
-        
-        try {
-            const token = await window.getToken("Mail.Read");
-            const res = await fetch("https://graph.microsoft.com/v1.0/me/mailFolders/sentitems/messages?$top=20&$select=body", { headers: { 'Authorization': `Bearer ${token}` } });
-            if (res.ok) {
-                const data = await res.json();
-                let signatures = [];
-                for(let msg of data.value) {
-                    if (msg.body && msg.body.content) {
-                        let html = msg.body.content;
-                        let sigMatch = html.match(/<div[^>]*id="Signature"[^>]*>([\s\S]*?)<\/div>/i);
-                        if (sigMatch) { 
-                            signatures.push(sigMatch[0]); 
-                        } 
-                        else if (html.includes('Sincerely,')) {
-                            let parts = html.split('Sincerely,');
-                            if(parts.length > 1) { signatures.push('Sincerely,' + parts[parts.length - 1]); }
-                        }
-                    }
-                }
-                
-                if(signatures.length > 0) {
-                    // Find the most common signature (looking for at least 2 iterations)
-                    const counts = {};
-                    let maxCount = 0;
-                    let chosenSig = signatures[0];
-                    for (let s of signatures) {
-                        counts[s] = (counts[s] || 0) + 1;
-                        if (counts[s] > maxCount) {
-                            maxCount = counts[s];
-                            chosenSig = s;
-                        }
-                    }
-                    if (maxCount >= 2) {
-                        localStorage.setItem('daytona_signature', chosenSig);
-                        return chosenSig;
-                    } else if (signatures.length > 0) {
-                        localStorage.setItem('daytona_signature', signatures[0]);
-                        return signatures[0];
-                    }
-                }
-            }
-        } catch (e) { console.warn("Could not fetch sent items for signature fallback", e); }
-        return null;
-    }
-
     window.saveSignature = function() {
         const html = document.getElementById('signature-editor-visual').innerHTML;
         localStorage.setItem('daytona_signature', html);
@@ -466,7 +416,6 @@
         if (lastRunDate !== todayStr) { localStorage.setItem('daytona_sent_records', '[]'); localStorage.setItem('daytona_last_run_date', todayStr); }
 
         window.fetchGraphProfile();
-        window.loadOrFetchSignature(); // Preemptively load/fetch signature cache
         window.initSidebarTabs(); 
         window.loadRecords();
         window.loadFontSize();
@@ -478,7 +427,7 @@
     }
 
     window.login = function() {
-        msalInstance.loginPopup({ scopes: ["User.Read", "Calendars.ReadWrite", "Mail.Send", "Mail.Read"] }).then(resp => {
+        msalInstance.loginPopup({ scopes: ["User.Read", "Calendars.ReadWrite", "Mail.Send"] }).then(resp => {
             msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
         }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
     }
@@ -558,6 +507,16 @@
     }
 
     // --- FETCH DATA ---
+    window.fetchLogisticsForAccount = async function(accountId) {
+        try {
+            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
+            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="*"' };
+            let res = await fetch(`${DATAVERSE_URL}/cr714_logisticslog_2s?$filter=cr714_accountnumber eq '${accountId}'`, { headers });
+            if(res.ok) { const data = await res.json(); return data.value || []; }
+        } catch(e) { console.error("Logistics error", e); }
+        return [];
+    }
+
     window.fetchD365Account = async function(accountId) {
         try {
             const token = await window.getToken(`${PRIMARY_CRM_URL.split('/api')[0]}//user_impersonation`);
@@ -759,6 +718,16 @@
         } catch(e) { window.showToast(`Error moving record: ${e.message}`, "error"); }
     }
 
+    window.resolveInactivePrompt = function(move) {
+        document.getElementById('inactive-prompt-modal').classList.add('hidden');
+        if(move) { window.moveAccountToMaster('DEACTIVATE_ONLY'); window.showToast("Moved to Archive"); }
+        else {
+            localStorage.setItem('daytona_keep_inactive_' + window.pendingInactiveId, 'true');
+            window.handleCustomSave("[System]: Rep elected to keep inactive account in working list.", true);
+            window.showToast("Account kept in working list");
+        }
+    }
+
     window.launchEmailLogic = async function() {
         if(!currentSelectedRecord) return;
         if(!window.checkEmailRateLimit()) { window.showToast("Limit Reached", "error"); return; }
@@ -783,7 +752,7 @@
         
         const catalogRequestUrl = "https://www.wbmason.com/LandingPage.aspx?LandingPageID=Catalog-Request&icid=JUL0124_HPBNR_CCTG_CATALOGREQUEST_CGAW_WDAC_AWR_BNR_CTA01_DM_NA_CR";
         
-        let signature = await window.loadOrFetchSignature();
+        let signature = localStorage.getItem('daytona_signature');
         if (!signature || signature.trim() === '') {
             signature = `<br><br><div style="font-family: 'Aptos', sans-serif;">Sincerely,<br>${repName} | W.B. MASON<br>${repPhone} | ${repEmail}<br><br><a href="${catalogRequestUrl}" target="_blank"><img src="${IMG_CATALOG}" alt="Request a Catalog" style="max-width:100px;"></a></div>`;
         }
@@ -1264,6 +1233,15 @@
             p.innerHTML = '<div class="text-center italic mt-10 text-muted">Loading history...</div>';
             let history = window.parseNotes(currentSelectedRecord.cr714_qbnotes || '');
             
+            if (!currentSelectedRecord.logisticsFetched) {
+                currentSelectedRecord.logisticsData = await window.fetchLogisticsForAccount(currentSelectedRecord.cr714_id);
+                currentSelectedRecord.logisticsFetched = true;
+            }
+            if (currentSelectedRecord.logisticsData && currentSelectedRecord.logisticsData.length > 0) {
+                currentSelectedRecord.logisticsData.forEach(log => {
+                    history.push({ date: log.createdon ? new Date(log.createdon).toLocaleString() : 'Unknown Date', author: log.cr714_logisticsowner || log.createdbyname || 'Logistics Team', text: `[LOGISTICS REQUEST]\nIssue: ${log.cr714_issue || '--'}\nSummary: ${log.cr714_briefsummaryissue || '--'}\nNotes: ${log.cr714_logisticsnotes || '--'}\nStatus: ${log.cr714_disposition || log.statuscodename || '--'}`, isLogistics: true, rawDate: log.createdon ? new Date(log.createdon).getTime() : 0 });
+                });
+            }
             history.sort((a,b) => { const da = a.rawDate || new Date(a.date).getTime() || 0; const db = b.rawDate || new Date(b.date).getTime() || 0; return db - da; });
 
             if(history.length > 0) {
@@ -1442,12 +1420,11 @@
     window.checkAdminPassword = function() { const pwd = document.getElementById('admin-password').value; if(pwd === 'admin' || pwd === 'daytona') { document.getElementById('admin-step-1').classList.add('hidden'); document.getElementById('admin-step-2').classList.remove('hidden'); } else { window.showToast("Incorrect Password", "error"); document.getElementById('admin-password').value = ''; } }
     window.confirmAdminOverride = function() { const newRep = document.getElementById('override-rep-name').value; if(!newRep) { window.showToast("Please enter a Rep Name", "error"); return; } currentUserRepName = newRep; window.showToast("Override active", "success"); window.loadRecords(); document.getElementById('admin-modal').style.display='none'; }
     
-    window.openSignatureModal = async function() { 
+    window.openSignatureModal = function() { 
         document.getElementById('signature-modal').classList.remove('hidden'); 
         document.getElementById('signature-modal').style.display='flex'; 
         const visual = document.getElementById('signature-editor-visual'); 
-        visual.innerHTML = "<div class='text-center p-4 italic text-muted'>Loading signature context from Outlook...</div>";
-        let sig = await window.loadOrFetchSignature();
+        let sig = localStorage.getItem('daytona_signature');
         visual.innerHTML = sig || "No signature found. Type or paste your HTML here.";
     }
     
@@ -1700,17 +1677,17 @@
                                     <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider w-full text-center">Competitor</label>
                                     <input type="hidden" id="input-competitor">
                                     
-                                    <div id="competitor-dropdown" class="absolute bottom-8 left-0 w-48 border shadow-2xl rounded z-[9999] hidden flex-col items-start gap-1 p-2 text-xs" style="background-color: var(--bg-card); border-color: var(--border-color); color: var(--text-main);">
-                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Amazon" class="comp-chk" onchange="window.updateCompetitorValue()"> <span>Amazon</span></label>
-                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Staples" class="comp-chk" onchange="window.updateCompetitorValue()"> <span>Staples</span></label>
-                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Office Depot" class="comp-chk" onchange="window.updateCompetitorValue()"> <span>Office Depot</span></label>
-                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Quill" class="comp-chk" onchange="window.updateCompetitorValue()"> <span>Quill</span></label>
-                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Uline" class="comp-chk" onchange="window.updateCompetitorValue()"> <span>Uline</span></label>
-                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="CDW" class="comp-chk" onchange="window.updateCompetitorValue()"> <span>CDW</span></label>
-                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Grainger" class="comp-chk" onchange="window.updateCompetitorValue()"> <span>Grainger</span></label>
-                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Imperial Dade" class="comp-chk" onchange="window.updateCompetitorValue()"> <span>Imperial Dade</span></label>
-                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Fastenal" class="comp-chk" onchange="window.updateCompetitorValue()"> <span>Fastenal</span></label>
-                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Local/Independent" class="comp-chk" onchange="window.updateCompetitorValue()"> <span>Local/Independent</span></label>
+                                    <div id="competitor-dropdown" class="absolute top-full mt-1 left-0 w-48 border shadow-2xl rounded z-[9999] hidden flex-col items-start gap-1 p-2 text-xs" style="background-color: var(--bg-card); border-color: var(--border-color); color: var(--text-main);">
+                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Amazon" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Amazon</span></label>
+                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Staples" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Staples</span></label>
+                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Office Depot" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Office Depot</span></label>
+                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Quill" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Quill</span></label>
+                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Uline" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Uline</span></label>
+                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="CDW" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>CDW</span></label>
+                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Grainger" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Grainger</span></label>
+                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Imperial Dade" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Imperial Dade</span></label>
+                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Fastenal" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Fastenal</span></label>
+                                        <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" value="Local/Independent" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Local/Independent</span></label>
                                         <label class="flex flex-row items-center justify-start gap-2 cursor-pointer w-full text-left p-1 hover:bg-black/5 rounded"><input type="checkbox" id="comp-chk-other" value="Other" onchange="window.toggleOtherCompetitor(this)"> <span>Other</span></label>
                                         <input type="text" id="comp-other-text" class="hidden text-[10px] border rounded p-1 mt-1 w-full" placeholder="Type here..." style="background-color: var(--bg-input); border-color: var(--border-color); color: var(--text-main);" oninput="window.updateCompetitorValue()" onblur="window.updateCompetitorValue()">
                                         <button type="button" onclick="window.closeCompetitorDropdown()" class="btn-primary text-[10px] py-1 mt-1 w-full">Done</button>
