@@ -167,7 +167,7 @@
 
     let currentThemeIdx=0, isEditMode=true, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentUserRepName=null, currentUserProfile=null;
     let failedSaves = []; let duplicateRecordIds = new Set();
-    window.hasUnsavedChanges = false; window.targetSelectId = null; window.currentRecordSnapshot = null; window.currentUserGraphPhone = null;
+    window.hasUnsavedChanges = false; window.targetSelectId = null; window.currentRecordSnapshot = null; window.currentUserGraphPhone = null; window.isPopulating = false;
 
     // --- UTILITY FUNCTIONS ---
     window.escapeHTML = function(str) { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'})[m]); }
@@ -176,7 +176,8 @@
     window.stripHTML = function(html) { 
         if (!html) return ''; 
         let tmp = document.createElement("DIV"); 
-        tmp.innerHTML = String(html); 
+        let withLineBreaks = String(html).replace(/<br\s*[\/]?>/gi, '\n').replace(/<\/p>/gi, '\n');
+        tmp.innerHTML = withLineBreaks; 
         return (tmp.textContent || tmp.innerText || "").replace(/[\r\n\t]+/g, ' ').replace(/\s\s+/g, ' ').trim(); 
     }
     
@@ -298,40 +299,14 @@
         
         let startStr = d + (t ? `T${t}:00` : 'T09:00:00');
         let dtStart = new Date(startStr);
-        let dtEnd = new Date(dtStart.getTime() + 30 * 60000); 
+        let endDt = new Date(dtStart.getTime() + 30 * 60000); 
         
-        const subject = `Follow Up: ${currentSelectedRecord.cr714_company} (${currentRecordId})`;
-        const description = `Account: ${currentRecordId}\\nCompany: ${currentSelectedRecord.cr714_company}\\nContact: ${document.getElementById('contact-name-most').value}\\nPhone: ${document.getElementById('contact-phone-primary').value}`;
+        const subject = encodeURIComponent(`Follow Up: ${currentSelectedRecord.cr714_company} (${currentRecordId})`);
+        const body = encodeURIComponent(`Account: ${currentRecordId}\nCompany: ${currentSelectedRecord.cr714_company}\nContact: ${document.getElementById('contact-name-most').value}\nPhone: ${document.getElementById('contact-phone-primary').value}`);
         
-        // Format dates to ICS requirements (YYYYMMDDTHHMMSS)
-        const formatICSDate = (date) => {
-            return date.toISOString().replace(/-|:/g, '').split('.')[0] + 'Z';
-        };
-
-        const icsContent = [
-            "BEGIN:VCALENDAR",
-            "VERSION:2.0",
-            "PRODID:-//WBMason ACT//EN",
-            "BEGIN:VEVENT",
-            `UID:${currentRecordId}-${Date.now()}@wbmason.com`,
-            `DTSTAMP:${formatICSDate(new Date())}`,
-            `DTSTART:${formatICSDate(dtStart)}`,
-            `DTEND:${formatICSDate(dtEnd)}`,
-            `SUMMARY:${subject}`,
-            `DESCRIPTION:${description}`,
-            "END:VEVENT",
-            "END:VCALENDAR"
-        ].join('\n');
-
-        const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `FollowUp_${currentRecordId}.ics`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        window.showToast("Calendar Event File Downloaded", "success");
+        // Deep link correctly requests Outlook Online event creation without background Graph scopes
+        const url = `https://outlook.office.com/calendar/0/deeplink/compose?subject=${subject}&startdt=${dtStart.toISOString()}&enddt=${endDt.toISOString()}&body=${body}`;
+        window.open(url, '_blank');
     };
 
     window.addToFailedQueue = function(operationName, retryFunc) {
@@ -431,6 +406,7 @@
     const msalInstance = new msal.PublicClientApplication(msalConfig);
     let msalAccount = null;
 
+    // Graceful getToken function: Handles silent failovers and explicit interaction requests cleanly
     window.getToken = async function(scope, silentFallback = false) {
         const account = msalInstance.getAllAccounts()[0]; 
         const request = { scopes: [scope], account: account };
@@ -470,9 +446,9 @@
     }
 
     window.login = function() {
-        // Explicitly ONLY request basic User profile read on login to prevent immediate Admin blocks.
-        // Other scopes will be requested conditionally only if the user explicitly triggers an action requiring them.
-        msalInstance.loginPopup({ scopes: ["User.Read"] }).then(resp => {
+        // Explicitly request basic User profile AND Mail.Send on login to ensure token can be fetched silently later. 
+        // Note: Calendars and Mail.Read are strictly excluded to avoid admin blocks.
+        msalInstance.loginPopup({ scopes: ["User.Read", "Mail.Send"] }).then(resp => {
             msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
         }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
     }
@@ -780,31 +756,85 @@
         
         const catalogRequestUrl = "https://www.wbmason.com/LandingPage.aspx?LandingPageID=Catalog-Request&icid=JUL0124_HPBNR_CCTG_CATALOGREQUEST_CGAW_WDAC_AWR_BNR_CTA01_DM_NA_CR";
         
-        const plainSignature = `\n\nSincerely,\n${repName} | W.B. MASON\n${repPhone} | ${repEmail}\nRequest a Catalog: ${catalogRequestUrl}`;
-        const benefitsList = `Here are some things that you can always expect from us at WB Mason:\n- Customized pricing on the products your business actually uses\n- Free delivery, with no order minimums\n- Personalized support including a personal driver, customer service representative, and inside sales representative\n- One-stop shopping for all your workplace products\n\n`;
+        let signature = await window.loadOrFetchSignature();
+        if (!signature || signature.trim() === '') {
+            signature = `<br><br><div style="font-family: 'Aptos', sans-serif;">Sincerely,<br>${repName} | W.B. MASON<br>${repPhone} | ${repEmail}<br><br><a href="${catalogRequestUrl}" target="_blank"><img src="${IMG_CATALOG}" alt="Request a Catalog" style="max-width:100px;"></a></div>`;
+        }
+        signature = signature.replace(/\[Rep Name\]/g, repName).replace(/\[Phone\]/g, repPhone).replace(/\[Email\]/g, repEmail);
+
+        const wrapperStart = `<div style="font-family: 'Aptos', 'Segoe UI', Arial, sans-serif; font-size: 11pt; color: #1f2937; line-height: 1.4; max-width: 600px;">`;
+        const wrapperEnd = `</div>`; const pStyle = `margin: 0 0 16px 0; padding: 0;`;
+        const benefitsList = `<div style="${pStyle}"><strong>Here are some things that you can always expect from us at WB Mason:</strong></div><ul style="margin: 0 0 16px 20px; padding: 0;"><li><strong>Customized pricing</strong> on the products your business actually uses</li><li><strong>Free delivery</strong>, with no order minimums</li><li><strong>Personalized support</strong> including a personal driver, customer service representative, and inside sales representative</li><li><strong>One-stop shopping</strong> for all your workplace products</li></ul>`;
+        const customNotesPlaceholder = `<div style="${pStyle} color:dodgerblue; font-size: 14px; font-weight: bold;">[Custom Email Notes will be placed here - Type over this]</div>`;
 
         if (template === "Prospecting") {
-            subject = "Intro / W.B. Mason"; body = `Hi ${contactName},\n\nMy name is ${repName} and I'm your dedicated account representative at W.B. Mason. I wanted to briefly introduce myself and see if there are any immediate needs I can help you with today.\n\nWe offer a wide range of products beyond just office supplies, including breakroom essentials, janitorial supplies, and furniture.\n\n${benefitsList}${plainSignature}`;
+            subject = "Intro / W.B. Mason"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">My name is ${repName} and I'm your dedicated account representative at W.B. Mason. I wanted to briefly introduce myself and see if there are any immediate needs I can help you with today.</div><div style="${pStyle}">We offer a wide range of products beyond just office supplies, including breakroom essentials, janitorial supplies, and furniture.</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
         } else if (template === "No Jan") { 
-            subject = "Checking in - W.B. Mason"; body = `Hi ${contactName},\n\nI’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed and we all know how time can slip by and then you realize you’re out of something you meant to order.\n\nI just received a coupon you can use through the end of the month when you checkout online. Let me know if I can help find any items for you or get an order placed. We even match/beat competitor prices if you’re finding a lower price elsewhere!\n\nWhere else are you having to shop, aside from WB Mason, that I can beat pricing on for you?\n\n${benefitsList}${plainSignature}`;
+            subject = "Checking in - W.B. Mason"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">I’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed and we all know how time can slip by and then you realize you’re out of something you meant to order.</div><div style="${pStyle}">I just received a coupon you can use through the end of the month when you checkout online. Let me know if I can help find any items for you or get an order placed. We even match/beat competitor prices if you’re finding a lower price elsewhere!</div><div style="${pStyle}">Where else are you having to shop, aside from WB Mason, that I can beat pricing on for you?</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
         } else if (template === "No DEC/JAN") { 
-            subject = "Checking in - W.B. Mason"; body = `Hi ${contactName},\n\nI’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed in December and I know with the holidays, time can slip by and then you realize you’re out of something you meant to order. Are you finding lower prices elsewhere?\n\nI just received a coupon you can use through the end of the month when you checkout online. Let me know if I can help find any items for you or get an order placed.\n\n${benefitsList}${plainSignature}`;
+            subject = "Checking in - W.B. Mason"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">I’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed in December and I know with the holidays, time can slip by and then you realize you’re out of something you meant to order. <span style="background-color:yellow; color:black;">Are you finding lower prices elsewhere?</span></div><div style="${pStyle}">I just received a coupon you can use through the end of the month when you checkout online. Let me know if I can help find any items for you or get an order placed.</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
         } else if (template === "Chair Mat Contest") { 
-            subject = "A Promo That Matters"; body = `Hi ${currentSelectedRecord.cr714_company},\n\nI wanted to reach out as it looks like you’ve purchased a chair with us recently. Are you in need of a chair mat for your office? Chair mats protect your floors from wear and tear, and gives your chair a smoother rolling surface, reducing joint and muscle pain, making them a great ergonomic choice for your office!\n\nPlease see attached link for both carpeted and hardwood options: https://www.wbmason.com/shop?q=everlife\n\nI’m happy to help narrow down selections and help search for what will best fit your business needs. Let me know how I can assist!\n\n${plainSignature}`;
+            subject = "A Promo That Matters"; body = `${wrapperStart}<div style="${pStyle}">Hi <span style="color:green;"><b>${currentSelectedRecord.cr714_company}</b></span>,</div><div style="${pStyle}">I wanted to reach out as it looks like you’ve purchased a chair with us recently. Are you in need of a chair mat for your office? Chair mats protect your floors from wear and tear, and gives your chair a smoother rolling surface, reducing joint and muscle pain, making them a great ergonomic choice for your office!</div><div style="${pStyle}">Please see attached link for both carpeted and hardwood options: <b><a href="https://www.wbmason.com/shop?q=everlife" target="_blank" style="color:#0b66c3;text-decoration:none;">Shop Chair Mats | W.B. Mason</a>.</b></div><div style="${pStyle}">I’m happy to help narrow down selections and help search for what will best fit your business needs. Let me know how I can assist!</div>${customNotesPlaceholder}<div style="${pStyle}; text-align:center;"><a href="https://www.wbmason.com/shop?q=everlife" target="_blank"><img src="${IMG_CHAIR}" style="max-width:100%;"></a></div>${signature}${wrapperEnd}`;
         } else {
-            body = `Hi ${contactName},\n\nChecking in on your account.\n\n${plainSignature}`;
+            body = `<div style="font-family:'Aptos',sans-serif;">Hi ${contactName},<br><br>Checking in on your account.<br><br></div>${signature}`;
         }
 
-        // Bypassing MS Graph API and launching standard default mail client to avoid Token blocking
-        const mailtoUrl = `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-        window.open(mailtoUrl, '_self');
+        const toInput = document.getElementById('email-modal-to');
+        if (toInput) toInput.value = email; 
         
-        await window.handleCustomSave(`[Email Draft Opened via App]: ${subject}`, true);
+        const ccInput = document.getElementById('email-modal-cc');
+        if (ccInput) ccInput.value = ""; 
+        
+        const subjInput = document.getElementById('email-modal-subject');
+        if (subjInput) subjInput.value = subject; 
+        
+        const bodyInput = document.getElementById('email-modal-body');
+        if (bodyInput) bodyInput.innerHTML = body; 
+        
+        document.getElementById('email-modal').classList.remove('hidden'); 
+        document.getElementById('email-modal').style.display = 'flex';
     }
 
-    // Unused, but kept to prevent console errors if directly called
-    window.handleModalSend = async function() {}
-    window.checkEmailRateLimit = function() { return true; }
+    window.handleModalSend = async function() {
+        if(!window.checkEmailRateLimit()) return;
+        window.showToast("Sending...", "processing");
+        try {
+            // Explicitly request Mail.Send ONLY when the user clicks the Send button inside the modal
+            const token = await window.getToken("Mail.Send");
+            const ccValue = document.getElementById('email-modal-cc').value.trim();
+            const ccRecipients = ccValue ? [{ emailAddress: { address: ccValue } }] : [];
+            const mailBody = { message: { subject: document.getElementById('email-modal-subject').value, body: { contentType: "HTML", content: document.getElementById('email-modal-body').innerHTML }, toRecipients: [{ emailAddress: { address: document.getElementById('email-modal-to').value } }], ccRecipients: ccRecipients }, saveToSentItems: "true" };
+            const res = await fetch(`${GRAPH_URL}/me/sendMail`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(mailBody) });
+            if(!res.ok) throw new Error("Graph API Error");
+            
+            await window.handleCustomSave(`[Email Sent]: ${mailBody.message.subject}`, true);
+            let timestamps = []; try { timestamps = JSON.parse(localStorage.getItem('daytona_email_timestamps') || '[]'); } catch(e) {}
+            timestamps.push(Date.now()); try { localStorage.setItem('daytona_email_timestamps', JSON.stringify(timestamps)); } catch(e) {} window.checkEmailRateLimit();
+            let sentRecs = []; try { sentRecs = JSON.parse(localStorage.getItem('daytona_sent_records') || '[]'); } catch(e) {}
+            if(!sentRecs.includes(currentRecordId)) { sentRecs.push(currentRecordId); try { localStorage.setItem('daytona_sent_records', JSON.stringify(sentRecs)); } catch(e) {} }
+            document.getElementById('profile-sent-badge').classList.remove('hidden'); document.getElementById('email-modal').classList.add('hidden'); document.getElementById('email-modal').style.display = 'none'; window.showToast("Email Sent!", "success");
+        } catch(e) { 
+            window.showToast("Mail send failed or cancelled.", "error");
+        }
+    }
+
+    window.checkEmailRateLimit = function() {
+         const now = Date.now(); let timestamps = []; try { timestamps = JSON.parse(localStorage.getItem('daytona_email_timestamps') || '[]'); } catch(e) {}
+         timestamps = timestamps.filter(ts => (now - ts) < 3600000); try { localStorage.setItem('daytona_email_timestamps', JSON.stringify(timestamps)); } catch(e) {}
+         const display = document.getElementById('email-hourly-count'); const btn = document.getElementById('launch-email-button');
+         
+         let sentTodayCount = 0; const localTodayStr = new Date().toLocaleDateString('en-CA');
+         try {
+             let logs = JSON.parse(localStorage.getItem('daytona_audit_log') || '[]');
+             sentTodayCount = logs.filter(l => l.type.toLowerCase().includes('email') && l.timestamp.startsWith(localTodayStr)).length;
+         } catch(e) {}
+         const badgeToday = document.getElementById('stat-emails-today');
+         if(badgeToday) badgeToday.innerText = sentTodayCount;
+
+         if(display) display.innerText = `${timestamps.length}/100`;
+         if(timestamps.length >= EMAIL_LIMIT_PER_HOUR) { if(display) display.classList.add('text-red-500'); if(btn) btn.disabled = true; } else { if(display) display.classList.remove('text-red-500'); if(btn && currentSelectedRecord) btn.disabled = false; }
+         window.updateStats(); return timestamps.length < EMAIL_LIMIT_PER_HOUR;
+    }
     
     // --- UI/UX INTERACTIONS ---
     window.toggleThemeMode = function() { const current = document.body.getAttribute('data-theme'); const newTheme = (current === 'midnight') ? 'modern' : 'midnight'; document.body.setAttribute('data-theme', newTheme); localStorage.setItem('daytona_user_theme', newTheme); }
@@ -934,10 +964,20 @@
         });
     }
 
-    window.selectRecord = function(id) { if(window.isDirty()) { window.targetSelectId = id; document.getElementById('unsaved-changes-modal').classList.remove('hidden'); document.getElementById('unsaved-changes-modal').style.display='flex'; } else { window.performSelect(id); } }
+    window.selectRecord = function(id) { 
+        if(window.isDirty()) { 
+            window.targetSelectId = id; 
+            document.getElementById('unsaved-changes-modal').classList.remove('hidden'); 
+            document.getElementById('unsaved-changes-modal').style.display='flex'; 
+        } else { 
+            window.performSelect(id); 
+        } 
+    }
 
     window.performSelect = async function(id) {
-        window.closeAllSidebarTabs(); window.isPopulating = true; currentRecordId = String(id); 
+        window.closeAllSidebarTabs(); 
+        window.isPopulating = true; 
+        currentRecordId = String(id); 
         currentSelectedRecord = allRecords.find(r => String(r.cr714_id) === currentRecordId); 
         window.filterAndSortGallery(); window.updateMiniCounter();
         
@@ -1000,12 +1040,14 @@
         
         // Fully reset tracking flags so the prompt loop doesn't happen
         window.hasUnsavedChanges = false; 
-        setTimeout(() => { window.isPopulating = false; }, 200);
+        setTimeout(() => { window.isPopulating = false; }, 50);
     }
 
-    // Stricter dirty check to ensure we aren't accidentally tripping it
+    // Stricter dirty check to ensure we aren't accidentally tripping it on empty notes
     window.isDirty = function() {
         if(!window.currentRecordSnapshot || window.isPopulating) return false;
+        if(window.hasUnsavedChanges) return true; // manual dirty flag
+        
         const snap = window.currentRecordSnapshot; 
         const getCurrent = (id) => (document.getElementById(id)?.value || '').trim(); 
         const getSnap = (val) => (val || '').trim();
@@ -1016,12 +1058,12 @@
         if(getCurrent('opp-type-select') !== getSnap(snap.oppType)) return true;
         
         let currentNote = getCurrent('qb-notes-input'); 
-        if (currentNote.startsWith(QB_NOTES_TEMPLATE.trim())) { currentNote = currentNote.replace(QB_NOTES_TEMPLATE.trim(), '').trim(); } 
-        else { currentNote = currentNote.replace(QB_NOTES_TEMPLATE, '').trim(); }
-        if(currentNote !== '') return true; 
+        let templateTrimmed = QB_NOTES_TEMPLATE.trim();
+        if(currentNote !== '' && currentNote !== templateTrimmed) return true;
         
         if(getCurrent('follow-up-date') !== getSnap(snap.fuDate)) return true; 
         if(getCurrent('follow-up-time') !== getSnap(snap.fuTime)) return true; 
+        
         return false;
     }
 
@@ -1160,7 +1202,7 @@
 
     window.toggleEditMode = function(forceEnable = false) { 
         isEditMode = forceEnable === true ? true : !isEditMode; 
-        const formInputs = document.querySelectorAll('#profile-column input:not([type="hidden"]), #profile-column textarea, #profile-column select'); 
+        const formInputs = document.querySelectorAll('#profile-column input:not([type="hidden"]), #profile-column textarea, #profile-column select, #follow-up-date, #follow-up-time'); 
         const compDisplay = document.getElementById('competitor-display');
         
         if (!isEditMode) { 
@@ -1426,14 +1468,21 @@
         window.handleCustomSave(`[Help Request]: ${v}`, true); 
         
         const mgrName = currentUserProfile?.cr714_managerassigned;
-        if (mgrName) {
+        if (mgrName && msalAccount) {
             const mgrEmail = mgrName.trim().replace(/\s+/g, '.').toLowerCase() + '@wbmason.com';
-            const subject = `Help Request from ${currentUserRepName} for Account ${currentRecordId}`;
-            const body = `Account: ${currentRecordId}\nCompany: ${currentSelectedRecord.cr714_company}\n\nMessage:\n${v}`;
-            
-            // Standard mailto link fallback to avoid graph API requirement
-            const mailtoUrl = `mailto:${encodeURIComponent(mgrEmail)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-            window.open(mailtoUrl, '_self');
+            try {
+                // Ensure Mail.Send token is acquired ONLY when this specific action is triggered
+                const token = await window.getToken("Mail.Send");
+                const mailBody = { 
+                    message: { 
+                        subject: `Help Request from ${currentUserRepName} for Account ${currentRecordId}`, 
+                        body: { contentType: "Text", content: `Account: ${currentRecordId}\nCompany: ${currentSelectedRecord.cr714_company}\n\nMessage:\n${v}` }, 
+                        toRecipients: [{ emailAddress: { address: mgrEmail } }] 
+                    }, 
+                    saveToSentItems: "false" 
+                };
+                fetch(`${GRAPH_URL}/me/sendMail`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(mailBody) });
+            } catch(e) { console.warn("Failed to send manager email", e); }
         }
         
         document.getElementById('internal-note-input').value=''; 
@@ -1460,6 +1509,53 @@
     window.openSecretModal = function() {
         document.getElementById('secret-modal').classList.remove('hidden');
         document.getElementById('secret-modal').style.display = 'flex';
+    }
+
+    window.reportIssue = async function() {
+        const issue = prompt("Please briefly describe the issue:");
+        if(issue) {
+            window.showToast("Reporting...", "processing");
+            try {
+                const dvToken = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
+                
+                // Ensure Mail.Send token is acquired ONLY when this specific action is triggered
+                const mailToken = await window.getToken("Mail.Send");
+
+                const payload = {
+                    cr714_topic: `ACT Bug: ${issue.substring(0, 30)}`,
+                    cr714_description: `User: ${currentUserRepName}\nIssue: ${issue}\nTime: ${new Date().toISOString()}\nBrowser: ${navigator.userAgent}`,
+                    cr714_requesteremail: msalAccount ? msalAccount.username : currentUserRepName,
+                    cr714_bucket: "App Bug",
+                    statuscode: 1
+                };
+                
+                const res = await fetch(`${DATAVERSE_URL}/cr714_cr_bugtrackers`, { 
+                    method: 'POST', headers: { 'Authorization': `Bearer ${dvToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) 
+                });
+
+                if(res.ok) {
+                    const mailBody = {
+                        message: {
+                            subject: `🚨 ACT BUG REPORT: ${currentUserRepName}`,
+                            body: { contentType: "HTML", content: `<div style="font-family: Arial, sans-serif; color: #333;"><h2 style="color: #ef4444;">New Bug Reported</h2><p><strong>Reported By:</strong> ${currentUserRepName}</p><p><strong>Description:</strong> ${issue}</p><hr style="border: 0; border-top: 1px solid #eee;"><p style="font-size: 11px; color: #666;">Time: ${new Date().toLocaleString()}<br>Browser: ${navigator.userAgent}</p></div>` },
+                            toRecipients: [
+                                { emailAddress: { address: "anslee.erickson@wbmason.com" } },
+                                { emailAddress: { address: "matt.bleakley@wbmason.com" } },
+                                { emailAddress: { address: "taylor.whitaker@wbmason.com" } },
+                                { emailAddress: { address: "vanessa.mclellan@wbmason.com" } }
+                            ]
+                        },
+                        saveToSentItems: "false"
+                    };
+                    await fetch(`${GRAPH_URL}/me/sendMail`, { method: 'POST', headers: { 'Authorization': `Bearer ${mailToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(mailBody) });
+                    window.showToast("Issue Reported & Devs Notified", "success");
+                    window.saveToAuditLog('Issue Report', issue);
+                } 
+            } catch(e) { 
+                console.error("Bug Report Error:", e);
+                window.showToast("Failed to report issue", "error"); 
+            }
+        }
     }
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -1505,6 +1601,7 @@
             
             <div class="flex items-center gap-3 ml-auto pr-4">
                 <button onclick="window.showFailedSaves()" id="notification-bell" class="bell-btn hidden bg-transparent border-none" title="View Failed Operations"><i class="fas fa-bell"></i><span id="bell-badge" class="bell-badge">0</span></button>
+                <button onclick="window.reportIssue()" class="hover:text-red-600 transition-colors bg-transparent border-none" title="Report Issue" style="color: var(--text-muted);"><i class="fas fa-bug"></i></button>
                 <button onclick="window.promptAdminLogin()" class="hover:text-brand transition-colors bg-transparent border-none" title="Admin Override" style="color: var(--text-muted);"><i class="fas fa-user-lock"></i></button>
                 
                 <div class="flex items-center gap-3 pl-4 border-l" style="border-color: var(--border-color)">
@@ -1596,7 +1693,7 @@
                     <div class="grid grid-cols-4 gap-1 text-xs mb-1 flex-shrink-0 text-center items-center">
                         <div class="relative hover:bg-blue-50 rounded-md border p-1.5 transition-all text-center bg-gray-50/50 flex flex-col justify-center shadow-sm" style="background-color: var(--bg-input); border-color: var(--border-color);">
                             <label onclick="window.updateAndOpenScript('Contact', document.getElementById('contact-name-most').value)" class="text-[8px] uppercase font-black text-muted mb-1 tracking-wider cursor-pointer hover:text-blue-600 block">Contact</label>
-                            <input type="text" id="contact-name-most" oninput="window.markDirty()" class="font-bold text-center text-[11px] p-0 h-auto bg-transparent border-none focus:ring-0 shadow-none w-full outline-none" readonly>
+                            <input type="text" id="contact-name-most" onclick="navigator.clipboard.writeText(this.value); window.showToast('Copied!', 'success');" class="font-bold text-center text-[11px] p-0 h-auto bg-transparent border-none focus:ring-0 shadow-none w-full outline-none cursor-pointer" readonly>
                         </div>
                         <div class="relative hover:bg-blue-50 rounded-md border p-1.5 transition-all text-center bg-gray-50/50 flex flex-col justify-center shadow-sm" style="background-color: var(--bg-input); border-color: var(--border-color);">
                             <label onclick="window.updateAndOpenScript('Last Order', document.getElementById('last-order-date').value)" class="text-[8px] uppercase font-black text-muted mb-1 tracking-wider cursor-pointer hover:text-blue-600 block">Last Order</label>
@@ -1604,11 +1701,11 @@
                         </div>
                          <div class="relative hover:bg-blue-50 rounded-md border p-1.5 transition-all text-center bg-gray-50/50 flex flex-col justify-center shadow-sm" style="background-color: var(--bg-input); border-color: var(--border-color);">
                             <label onclick="window.updateAndOpenScript('Phone', document.getElementById('contact-phone-primary').value)" class="text-[8px] uppercase font-black text-muted mb-1 tracking-wider cursor-pointer hover:text-blue-600 block">Phone</label>
-                            <input type="text" id="contact-phone-primary" oninput="window.markDirty()" class="text-center text-[11px] p-0 h-auto bg-transparent border-none shadow-none focus:ring-0 w-full outline-none" readonly value="--">
+                            <input type="text" id="contact-phone-primary" onclick="navigator.clipboard.writeText(this.value); window.showToast('Copied!', 'success');" class="text-center text-[11px] p-0 h-auto bg-transparent border-none shadow-none focus:ring-0 w-full outline-none cursor-pointer" readonly value="--">
                         </div>
                         <div class="relative hover:bg-blue-50 rounded-md border p-1.5 transition-all text-center bg-gray-50/50 flex flex-col justify-center shadow-sm" style="background-color: var(--bg-input); border-color: var(--border-color);">
                             <label onclick="window.updateAndOpenScript('Email', document.getElementById('contact-email-most').value)" class="text-[8px] uppercase font-black text-blue-600 cursor-pointer hover:text-blue-800 block">*Email</label>
-                            <input type="email" id="contact-email-most" oninput="window.markDirty()" class="font-bold text-center text-[11px] p-0 h-auto bg-transparent border-none shadow-none w-full outline-none" readonly>
+                            <input type="email" id="contact-email-most" onclick="navigator.clipboard.writeText(this.value); window.showToast('Copied!', 'success');" class="font-bold text-center text-[11px] p-0 h-auto bg-transparent border-none shadow-none w-full outline-none cursor-pointer" readonly>
                         </div>
                         <div class="hidden"><input type="email" id="contact-email-latest"><input type="text" id="contact-name-latest"></div>
                     </div>
@@ -1642,7 +1739,7 @@
                                     <i class="fas fa-paste mr-1"></i>Template
                                 </button>
                                 
-                                <textarea id="qb-notes-input" name="generalNote" wrap="on" oninput="window.markDirty()" class="note-textarea w-full p-2 pr-20 text-sm font-mono rounded border h-full resize-none min-h-[200px] custom-scrollbar whitespace-pre overflow-x-auto" disabled placeholder="Enter note box here..."></textarea>
+                                <textarea id="qb-notes-input" name="generalNote" wrap="off" oninput="window.markDirty()" class="note-textarea w-full p-2 pr-20 text-sm font-mono rounded border h-full resize-none min-h-[200px] custom-scrollbar whitespace-pre overflow-x-auto" disabled placeholder="Enter note box here..."></textarea>
                             </div>
 
                             <div class="grid grid-cols-5 gap-2 flex-shrink-0 p-2 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
@@ -1731,9 +1828,6 @@
                                 <button onclick="window.open('https://www.iteminfo.com', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-info-circle text-teal-600"></i> ItemInfo</button>
                                 <button onclick="window.open('https://wbmasonco.sharepoint.com/sites/WBMasonDaytonaQA/Knowledge%20Base/Forms/AllItems.aspx', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-book text-cyan-600"></i> KB</button>
                                 <button onclick="window.open('https://e42.ultipro.com/Login.aspx?ReturnUrl=%2f', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-id-card text-indigo-600"></i> UltiPro</button>
-                                <div class="col-span-2 flex flex-col mt-2">
-                                    <button onclick="window.openCallScript()" id="btn-script" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate flex justify-center items-center gap-2 rounded-b-none border-b-0"><i class="fas fa-comment-dots text-pink-500"></i> Call Script</button>
-                                </div>
                             </div>
                             
                             <div class="flex flex-col gap-1 p-2 border rounded flex-shrink-0 mt-2" style="background-color: var(--bg-input); border-color: var(--border-color);">
