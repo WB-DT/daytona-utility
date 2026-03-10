@@ -77,7 +77,7 @@
         .duplicate-flash { animation: redFlash 2s infinite; border-color: var(--accent-danger) !important; border-width: 2px; }
         @keyframes redFlash { 0% { box-shadow: 0 0 0 0 rgba(239,68,68,0.7); } 70% { box-shadow: 0 0 0 10px rgba(239,68,68,0); } 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); } }
         
-        .note-textarea { width: 100%; resize: none; overflow-y: auto; overflow-x: auto; min-height: 0; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 0.375rem; padding: 0.5rem; font-family: monospace; color: var(--text-main); white-space: pre !important; }
+        .note-textarea { width: 100%; resize: none; overflow-y: auto; overflow-x: hidden; min-height: 0; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 0.375rem; padding: 0.5rem; font-family: monospace; color: var(--text-main); white-space: pre-wrap !important; word-wrap: break-word !important; }
         .editable-field.is-editable, .note-textarea.is-editable { background-color: var(--bg-card) !important; border: 2px solid var(--accent-warning) !important; color: var(--text-main) !important; }
         #competitor-display.is-editable { background-color: var(--bg-card) !important; border: 2px solid var(--accent-warning) !important; color: var(--text-main) !important; }
         .read-only-link { cursor: pointer; color: var(--primary) !important; font-weight: bold; background: transparent !important; border: none !important; }
@@ -176,8 +176,7 @@
     window.stripHTML = function(html) { 
         if (!html) return ''; 
         let tmp = document.createElement("DIV"); 
-        let withLineBreaks = String(html).replace(/<br\s*[\/]?>/gi, '\n').replace(/<\/p>/gi, '\n');
-        tmp.innerHTML = withLineBreaks; 
+        tmp.innerHTML = String(html); 
         return (tmp.textContent || tmp.innerText || "").replace(/[\r\n\t]+/g, ' ').replace(/\s\s+/g, ' ').trim(); 
     }
     
@@ -282,12 +281,15 @@
         document.getElementById('profile-modal').classList.remove('hidden');
     };
 
-    window.resolveUnsaved = function(save) {
+    window.resolveUnsaved = async function(save) {
         document.getElementById('unsaved-changes-modal').style.display = 'none';
-        if (save) { window.handleCustomSave(null, true); }
-        else {
-            window.hasUnsavedChanges = false;
-            if (window.targetSelectId) { window.performSelect(window.targetSelectId); window.targetSelectId = null; }
+        if (save) { 
+            await window.handleCustomSave(null, true); 
+        }
+        window.hasUnsavedChanges = false;
+        if (window.targetSelectId) { 
+            window.performSelect(window.targetSelectId); 
+            window.targetSelectId = null; 
         }
     };
 
@@ -299,7 +301,7 @@
         
         let startStr = d + (t ? `T${t}:00` : 'T09:00:00');
         let dtStart = new Date(startStr);
-        let endDt = new Date(dtStart.getTime() + 30 * 60000); 
+        let dtEnd = new Date(dtStart.getTime() + 30 * 60000); 
         
         const subject = encodeURIComponent(`Follow Up: ${currentSelectedRecord.cr714_company} (${currentRecordId})`);
         const body = encodeURIComponent(`Account: ${currentRecordId}\nCompany: ${currentSelectedRecord.cr714_company}\nContact: ${document.getElementById('contact-name-most').value}\nPhone: ${document.getElementById('contact-phone-primary').value}`);
@@ -446,9 +448,9 @@
     }
 
     window.login = function() {
-        // Explicitly request basic User profile AND Mail.Send on login to ensure token can be fetched silently later. 
-        // Note: Calendars and Mail.Read are strictly excluded to avoid admin blocks.
-        msalInstance.loginPopup({ scopes: ["User.Read", "Mail.Send"] }).then(resp => {
+        // Explicitly ONLY request basic User profile read on login to prevent immediate Admin blocks.
+        // Other scopes will be requested conditionally only if the user explicitly triggers an action requiring them.
+        msalInstance.loginPopup({ scopes: ["User.Read"] }).then(resp => {
             msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
         }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
     }
@@ -642,12 +644,18 @@
         
         const fullNote = newNoteEntry + rebuiltNotes;
         
-        // Correctly parse and assemble the follow up date and time into a single valid ISO string
         let d = document.getElementById('follow-up-date').value;
         let t = document.getElementById('follow-up-time').value;
         let iso = null;
         if (d) {
-            iso = t ? `${d}T${t}:00Z` : `${d}T00:00:00Z`;
+            try {
+                let dt = new Date(`${d}T${t || '00:00'}:00`);
+                if(!isNaN(dt.getTime())) {
+                    iso = dt.toISOString();
+                }
+            } catch(e) {
+                iso = t ? `${d}T${t}:00Z` : `${d}T00:00:00Z`; // Fallback
+            }
         }
 
         try {
@@ -676,12 +684,13 @@
             window.updateNotesPreview(); 
             window.filterAndSortGallery(); 
             window.updateMiniCounter(); 
-            window.hasUnsavedChanges = false; 
             
-            // Reset Opp Type specificially after save
+            // Cleanly reset prompt flags to stop bleeding
+            document.getElementById('qb-notes-input').value = '';
             document.getElementById('opp-type-select').value = '';
-            
+            window.hasUnsavedChanges = false; 
             window.takeSnapshot(currentSelectedRecord);
+            
         } catch(e) { window.addToFailedQueue("Save Record", () => window.handleCustomSave(autoNote, quiet)); }
     }
 
@@ -799,7 +808,6 @@
         if(!window.checkEmailRateLimit()) return;
         window.showToast("Sending...", "processing");
         try {
-            // Explicitly request Mail.Send ONLY when the user clicks the Send button inside the modal
             const token = await window.getToken("Mail.Send");
             const ccValue = document.getElementById('email-modal-cc').value.trim();
             const ccRecipients = ccValue ? [{ emailAddress: { address: ccValue } }] : [];
@@ -977,6 +985,7 @@
     window.performSelect = async function(id) {
         window.closeAllSidebarTabs(); 
         window.isPopulating = true; 
+        window.hasUnsavedChanges = false;
         currentRecordId = String(id); 
         currentSelectedRecord = allRecords.find(r => String(r.cr714_id) === currentRecordId); 
         window.filterAndSortGallery(); window.updateMiniCounter();
@@ -1038,7 +1047,6 @@
             }
         }
         
-        // Fully reset tracking flags so the prompt loop doesn't happen
         window.hasUnsavedChanges = false; 
         setTimeout(() => { window.isPopulating = false; }, 50);
     }
@@ -1442,10 +1450,7 @@
     window.closeUnifiedSidebar = function() { document.getElementById('unified-sidebar').classList.remove('active'); document.body.classList.remove('split-screen'); }
     window.closeAllSidebarTabs = function() { window.closeUnifiedSidebar(); } 
 
-    window.updateAndOpenScript = function(field, value, isInputClick = false) { 
-        // If clicking directly into the input to copy, don't pop the script up
-        if(isInputClick) return;
-        
+    window.updateAndOpenScript = function(field, value) { 
         const rep = currentUserRepName || "your rep"; const val = value || "(Unknown)"; let scriptText = ""; 
         if (field === 'Contact') { scriptText = `Hi ${val}, my name is ${rep} with W.B. Mason. I am your dedicated account representative. I'm calling today to quickly introduce myself and see if there are any immediate needs I can assist you with?`; } 
         else if (field === 'Last Order') { scriptText = `Hi, I noticed your last order was on ${val}. I wanted to check in and see if you were ready to restock on any essentials?`; } 
@@ -1509,53 +1514,6 @@
     window.openSecretModal = function() {
         document.getElementById('secret-modal').classList.remove('hidden');
         document.getElementById('secret-modal').style.display = 'flex';
-    }
-
-    window.reportIssue = async function() {
-        const issue = prompt("Please briefly describe the issue:");
-        if(issue) {
-            window.showToast("Reporting...", "processing");
-            try {
-                const dvToken = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
-                
-                // Ensure Mail.Send token is acquired ONLY when this specific action is triggered
-                const mailToken = await window.getToken("Mail.Send");
-
-                const payload = {
-                    cr714_topic: `ACT Bug: ${issue.substring(0, 30)}`,
-                    cr714_description: `User: ${currentUserRepName}\nIssue: ${issue}\nTime: ${new Date().toISOString()}\nBrowser: ${navigator.userAgent}`,
-                    cr714_requesteremail: msalAccount ? msalAccount.username : currentUserRepName,
-                    cr714_bucket: "App Bug",
-                    statuscode: 1
-                };
-                
-                const res = await fetch(`${DATAVERSE_URL}/cr714_cr_bugtrackers`, { 
-                    method: 'POST', headers: { 'Authorization': `Bearer ${dvToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) 
-                });
-
-                if(res.ok) {
-                    const mailBody = {
-                        message: {
-                            subject: `🚨 ACT BUG REPORT: ${currentUserRepName}`,
-                            body: { contentType: "HTML", content: `<div style="font-family: Arial, sans-serif; color: #333;"><h2 style="color: #ef4444;">New Bug Reported</h2><p><strong>Reported By:</strong> ${currentUserRepName}</p><p><strong>Description:</strong> ${issue}</p><hr style="border: 0; border-top: 1px solid #eee;"><p style="font-size: 11px; color: #666;">Time: ${new Date().toLocaleString()}<br>Browser: ${navigator.userAgent}</p></div>` },
-                            toRecipients: [
-                                { emailAddress: { address: "anslee.erickson@wbmason.com" } },
-                                { emailAddress: { address: "matt.bleakley@wbmason.com" } },
-                                { emailAddress: { address: "taylor.whitaker@wbmason.com" } },
-                                { emailAddress: { address: "vanessa.mclellan@wbmason.com" } }
-                            ]
-                        },
-                        saveToSentItems: "false"
-                    };
-                    await fetch(`${GRAPH_URL}/me/sendMail`, { method: 'POST', headers: { 'Authorization': `Bearer ${mailToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(mailBody) });
-                    window.showToast("Issue Reported & Devs Notified", "success");
-                    window.saveToAuditLog('Issue Report', issue);
-                } 
-            } catch(e) { 
-                console.error("Bug Report Error:", e);
-                window.showToast("Failed to report issue", "error"); 
-            }
-        }
     }
 
     document.addEventListener('DOMContentLoaded', () => {
@@ -1697,7 +1655,7 @@
                         </div>
                         <div class="relative hover:bg-blue-50 rounded-md border p-1.5 transition-all text-center bg-gray-50/50 flex flex-col justify-center shadow-sm" style="background-color: var(--bg-input); border-color: var(--border-color);">
                             <label onclick="window.updateAndOpenScript('Last Order', document.getElementById('last-order-date').value)" class="text-[8px] uppercase font-black text-muted mb-1 tracking-wider cursor-pointer hover:text-blue-600 block">Last Order</label>
-                            <input type="text" id="last-order-date" class="text-center bg-transparent border-none text-gray-700 text-[11px] p-0 h-auto shadow-none w-full outline-none" style="color: var(--text-main);" readonly value="--">
+                            <input type="text" id="last-order-date" class="text-center bg-transparent border-none text-gray-700 text-[11px] p-0 h-auto shadow-none w-full outline-none cursor-pointer" style="color: var(--text-main);" readonly value="--">
                         </div>
                          <div class="relative hover:bg-blue-50 rounded-md border p-1.5 transition-all text-center bg-gray-50/50 flex flex-col justify-center shadow-sm" style="background-color: var(--bg-input); border-color: var(--border-color);">
                             <label onclick="window.updateAndOpenScript('Phone', document.getElementById('contact-phone-primary').value)" class="text-[8px] uppercase font-black text-muted mb-1 tracking-wider cursor-pointer hover:text-blue-600 block">Phone</label>
@@ -1739,7 +1697,7 @@
                                     <i class="fas fa-paste mr-1"></i>Template
                                 </button>
                                 
-                                <textarea id="qb-notes-input" name="generalNote" wrap="on" oninput="window.markDirty()" class="note-textarea w-full p-2 pr-20 text-sm font-mono rounded border h-full resize-none min-h-[200px] custom-scrollbar whitespace-pre overflow-x-auto" disabled placeholder="Enter note box here..."></textarea>
+                                <textarea id="qb-notes-input" name="generalNote" wrap="off" oninput="window.markDirty()" class="note-textarea w-full p-2 pr-20 text-sm font-mono rounded border h-full resize-none min-h-[200px] custom-scrollbar whitespace-pre-wrap break-words overflow-y-auto overflow-x-hidden" disabled placeholder="Enter note box here..."></textarea>
                             </div>
 
                             <div class="grid grid-cols-5 gap-2 flex-shrink-0 p-2 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
@@ -1760,7 +1718,6 @@
                                     <div id="competitor-dropdown" class="absolute top-full mt-1 left-0 w-48 border shadow-2xl rounded z-[9999] hidden flex-col items-stretch gap-0 py-1 text-xs" style="background-color: var(--bg-card); border-color: var(--border-color); color: var(--text-main);">
                                         <label class="px-3 py-1.5 hover:bg-black/10 cursor-pointer flex items-center gap-2 m-0"><input type="checkbox" value="Amazon" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Amazon</span></label>
                                         <label class="px-3 py-1.5 hover:bg-black/10 cursor-pointer flex items-center gap-2 m-0"><input type="checkbox" value="Staples" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Staples</span></label>
-                                        <label class="px-3 py-1.5 hover:bg-black/10 cursor-pointer flex items-center gap-2 m-0"><input type="checkbox" value="Staples" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Sam's Club</span></label>
                                         <label class="px-3 py-1.5 hover:bg-black/10 cursor-pointer flex items-center gap-2 m-0"><input type="checkbox" value="Office Depot" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Office Depot</span></label>
                                         <label class="px-3 py-1.5 hover:bg-black/10 cursor-pointer flex items-center gap-2 m-0"><input type="checkbox" value="Quill" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Quill</span></label>
                                         <label class="px-3 py-1.5 hover:bg-black/10 cursor-pointer flex items-center gap-2 m-0"><input type="checkbox" value="Uline" class="comp-chk w-3 h-3" onchange="window.updateCompetitorValue()"> <span>Uline</span></label>
