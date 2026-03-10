@@ -194,13 +194,12 @@
     // --- UTILITY FUNCTIONS ---
     window.escapeHTML = function(str) { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'})[m]); }
     
-    // New function to strip HTML out of notes cleanly
+    // New function to strip HTML out of notes cleanly and replace line breaks with spaces to naturally wrap
     window.stripHTML = function(html) { 
         if (!html) return ''; 
         let tmp = document.createElement("DIV"); 
-        let withLineBreaks = String(html).replace(/<br\s*[\/]?>/gi, '\n').replace(/<\/p>/gi, '\n');
-        tmp.innerHTML = withLineBreaks; 
-        return (tmp.textContent || tmp.innerText || "").replace(/\n\s*\n+/g, '\n').trim(); 
+        tmp.innerHTML = String(html); 
+        return (tmp.textContent || tmp.innerText || "").replace(/\s+/g, ' ').trim(); 
     }
     
     window.getElementValue = function(id) { const el=document.getElementById(id); return el ? (el.value?.trim() ?? el.textContent?.trim() ?? null) : null; }
@@ -311,19 +310,11 @@
         if (window.targetSelectId) { window.performSelect(window.targetSelectId); window.targetSelectId = null; }
     };
 
-    window.createCalendarEvent = async function() {
+    window.createCalendarEvent = function() {
         if(!currentSelectedRecord) return;
         const d = document.getElementById('follow-up-date').value;
         const t = document.getElementById('follow-up-time').value;
         if(!d) { window.showToast("Select a date first", "error"); return; }
-        
-        try {
-            // Check for Graph token to ensure we actually have calendar rights before firing off
-            await window.getToken("Calendars.ReadWrite");
-        } catch(e) {
-            window.showToast("Calendar permissions required.", "error");
-            return;
-        }
         
         let startStr = d + (t ? `T${t}:00` : 'T09:00:00');
         let dt = new Date(startStr);
@@ -473,9 +464,9 @@
     }
 
     window.login = function() {
-        // Mail.Read scope strictly removed to prevent cross-tenant Admin Consent blockers
-        // Added Mail.Send and Calendars.ReadWrite back here to request at login as they are standard scopes and shouldn't trigger admin blocks.
-        msalInstance.loginPopup({ scopes: ["User.Read", "Mail.Send", "Calendars.ReadWrite"] }).then(resp => {
+        // ONLY Request base profile. We explicitly DO NOT ask for Mail or Calendar scopes upfront to prevent Admin Consent blocks.
+        // It will only ask IF/WHEN they explicitly try to send a direct graph email later.
+        msalInstance.loginPopup({ scopes: ["User.Read"] }).then(resp => {
             msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
         }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
     }
@@ -570,6 +561,7 @@
             let token;
             try {
                 // Reverted to exactly what worked 2 versions ago with double slash to fix AAD token issues
+                // Wrapped with silentFallback so it never pops up an error box for the user
                 token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
             } catch(tokenErr) {
                 console.warn("D365 wbmasonco token blocked by admin consent, skipping D365 overlay.", tokenErr);
@@ -594,7 +586,8 @@
         allRecords = []; duplicateRecordIds = new Set();
         try {
             // Using exact matching scope format with double slash to prevent admin prompts
-            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation", true);
+            // Deliberately NOT using silent fallback here so they can explicitly authenticate to Dataverse
+            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
             const reqOptions = { method: 'GET', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="*"' }, cache: 'no-store' };
             let targetRep = currentUserRepName;
 
@@ -633,40 +626,10 @@
             
             window.updateStats(); window.populateActionFilter(); if(typeof window.loadGalleryPrefs === 'function') window.loadGalleryPrefs(); window.filterAndSortGallery(); document.getElementById('global-loader').style.opacity = '0'; setTimeout(()=>document.getElementById('global-loader').style.display='none', 300);
             
-            window.checkAndSendIntroEmail();
         } catch (e) { 
             list.innerHTML = `<div class="p-4 text-red-600 text-center">Error: ${e.message}<br><button onclick="window.loadRecords()" class="mt-2 underline font-bold">Retry</button></div>`; document.getElementById('global-loader').style.display='none';
         }
     }
-
-    window.checkAndSendIntroEmail = async function() {
-        let knownIntros = [];
-        try { knownIntros = JSON.parse(localStorage.getItem('daytona_known_intros') || '[]'); } catch(e) {}
-        
-        const newIntroAccounts = allRecords.filter(r => {
-            const hasIntro = r.cr714_intro && String(r.cr714_intro).trim() !== '';
-            return hasIntro && !knownIntros.includes(String(r.cr714_id));
-        });
-
-        if (newIntroAccounts.length > 0 && msalAccount) {
-            const emailLines = newIntroAccounts.map(r => `<li><b>${window.escapeHTML(r.cr714_company)} (${r.cr714_id}):</b> ${window.escapeHTML(r.cr714_intro)}</li>`).join('');
-            try {
-                const token = await window.getToken("Mail.Send", true);
-                const mailBody = {
-                    message: {
-                        subject: `New Intros Detected - ACT System`,
-                        body: { contentType: "HTML", content: `<div style="font-family: Arial, sans-serif;"><h3>New Accounts with Intros:</h3><ul>${emailLines}</ul><p style="color: #666; font-size: 12px;">This is an automated alert from the ACT App.</p></div>` },
-                        toRecipients: [{ emailAddress: { address: msalAccount.username } }]
-                    },
-                    saveToSentItems: "false"
-                };
-                await fetch(`https://graph.microsoft.com/v1.0/me/sendMail`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(mailBody) });
-                
-                newIntroAccounts.forEach(r => knownIntros.push(String(r.cr714_id)));
-                localStorage.setItem('daytona_known_intros', JSON.stringify(knownIntros));
-            } catch (e) { console.warn("Failed to send intro alert email", e); }
-        }
-    };
 
     window.markDirty = function() { window.hasUnsavedChanges = true; }
 
@@ -852,6 +815,7 @@
         if(!window.checkEmailRateLimit()) return;
         window.showToast("Sending...", "processing");
         try {
+            // Added Mail.Send scope request strictly here so it doesn't block the initial login
             const token = await window.getToken("Mail.Send");
             const ccValue = document.getElementById('email-modal-cc').value.trim();
             const ccRecipients = ccValue ? [{ emailAddress: { address: ccValue } }] : [];
@@ -1014,14 +978,6 @@
         });
     }
 
-    window.stripHTML = function(html) {
-        if (!html) return '';
-        let tmp = document.createElement("DIV");
-        let withLineBreaks = String(html).replace(/<br\s*[\/]?>/gi, '\n').replace(/<\/p>/gi, '\n');
-        tmp.innerHTML = withLineBreaks;
-        return (tmp.textContent || tmp.innerText || "").replace(/\n\s*\n+/g, '\n').trim();
-    };
-
     window.selectRecord = function(id) { if(window.isDirty()) { window.targetSelectId = id; document.getElementById('unsaved-changes-modal').classList.remove('hidden'); document.getElementById('unsaved-changes-modal').style.display='flex'; } else { window.performSelect(id); } }
 
     window.performSelect = async function(id) {
@@ -1168,8 +1124,16 @@
         const introDisp = document.getElementById('display-intro');
         if (introDisp) {
             introDisp.innerText = introVal ? introVal : '--';
-            if (introVal) introDisp.classList.add('text-orange-500');
-            else introDisp.classList.remove('text-orange-500');
+            const parentBox = introDisp.parentElement;
+            if (introVal && String(introVal).trim() !== '') {
+                introDisp.style.color = '#1d4ed8'; // Blue-700
+                parentBox.style.backgroundColor = '#dbeafe'; // Blue-100
+                parentBox.style.borderColor = '#93c5fd'; // Blue-300
+            } else {
+                introDisp.style.color = 'var(--text-main)';
+                parentBox.style.backgroundColor = 'var(--bg-input)';
+                parentBox.style.borderColor = 'var(--border-color)';
+            }
         }
         
         // Setup custom competitor dropdown state
@@ -2073,60 +2037,4 @@
                 <h3 class="font-bold text-lg text-blue-600"><i class="fas fa-history mr-2"></i>Today's Activity Log</h3>
                 <button onclick="document.getElementById('activity-modal').style.display='none';" class="text-gray-400 hover:text-red-500 text-xl bg-transparent border-none">&times;</button>
             </div>
-            <div id="activity-log-list" class="flex-grow overflow-y-auto p-2 bg-white custom-scrollbar" style="background-color: var(--bg-card);"></div>
-            <div class="p-4 border-t bg-gray-50 flex justify-between" style="background-color: var(--bg-header) !important;">
-                <button onclick="window.exportActivityLog()" class="btn-secondary text-xs"><i class="fas fa-file-csv mr-2"></i>Export CSV</button>
-                <button onclick="window.downloadAuditLog()" class="btn-secondary text-xs"><i class="fas fa-download mr-2"></i>Download JSON</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="profile-modal" class="modal-overlay hidden" style="display:none; z-index: 9100;">
-        <div class="modal-content w-80 shadow-2xl rounded-xl relative">
-            <button onclick="document.getElementById('profile-modal').style.display='none';" class="absolute top-2 right-2 text-gray-400 hover:text-red-500 bg-transparent border-none text-xl">&times;</button>
-            <div id="profile-content" class="mt-4 flex flex-col items-center"></div>
-            <div class="mt-6 flex justify-center w-full">
-                <button onclick="window.logout()" class="btn-danger-outline text-xs w-full"><i class="fas fa-sign-out-alt mr-2"></i>Logout</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="signature-modal" class="modal-overlay hidden" style="display:none; z-index: 9200;">
-        <div class="modal-content w-[600px] shadow-2xl rounded-xl">
-            <h3 class="text-lg font-bold mb-4 text-primary"><i class="fas fa-pen-nib mr-2"></i>Edit Email Signature</h3>
-            <p class="text-xs text-muted mb-2">You can type custom HTML or plain text here.</p>
-            <div id="signature-editor-visual" class="w-full h-48 border rounded p-4 mb-4 overflow-y-auto bg-gray-50 text-sm font-mono custom-scrollbar whitespace-pre-wrap outline-none focus:ring-2 focus:ring-blue-500" contenteditable="true" style="background-color: var(--bg-input); border-color: var(--border-color); color: var(--text-main);"></div>
-            <div class="flex justify-end gap-2">
-                <button onclick="document.getElementById('signature-modal').style.display='none';" class="btn-secondary text-sm px-4">Cancel</button>
-                <button onclick="window.saveSignature()" class="btn-primary text-sm px-6">Save Signature</button>
-            </div>
-        </div>
-    </div>
-
-    <div id="admin-modal" class="modal-overlay hidden" style="display:none; z-index: 9200;">
-        <div class="modal-content w-80 text-left shadow-2xl rounded-xl relative">
-            <button onclick="document.getElementById('admin-modal').style.display='none';" class="absolute top-2 right-2 text-gray-400 hover:text-red-500 bg-transparent border-none text-xl">&times;</button>
-            <h3 class="text-lg font-bold mb-4 text-brand"><i class="fas fa-user-shield mr-2"></i>Admin Access</h3>
-            <div id="admin-step-1">
-                <input type="password" id="admin-password" class="p-2 w-full border rounded mb-4" placeholder="Enter password...">
-                <button onclick="window.checkAdminPassword()" class="btn-primary w-full">Unlock</button>
-            </div>
-            <div id="admin-step-2" class="hidden">
-                <p class="text-xs text-green-600 font-bold mb-2"><i class="fas fa-check-circle"></i> Access Granted</p>
-                <label class="text-xs font-bold uppercase text-muted block mb-1">Target Rep Name</label>
-                <input type="text" id="override-rep-name" name="overrideRepName" class="p-2 mb-3 border border-blue-300 w-full" placeholder="e.g. John Doe">
-                <div class="flex justify-end gap-2 mt-4"><button onclick="window.confirmAdminOverride()" class="btn-primary text-xs w-full bg-blue-600">Load Rep Data</button></div>
-            </div>
-        </div>
-    </div>
-
-    <div id="secret-modal" class="modal-overlay hidden" style="display:none; z-index: 9999;">
-        <div class="modal-content text-center bg-black border border-gray-800 p-4 rounded-xl shadow-2xl">
-            <button onclick="document.getElementById('secret-modal').style.display='none';" class="absolute top-2 right-2 text-white hover:text-red-500 font-bold bg-transparent border-none text-xl">&times;</button>
-            <img src="https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/ACT%20Logo%20GIF.gif" class="w-64 h-auto rounded-lg mx-auto mb-4 border border-gray-700" alt="ACT Secret Logo">
-            <p class="font-mono text-xs text-green-500 mt-2">A.C.T System Connected.</p>
-        </div>
-    </div>
-
-</body>
-</html>
+            <div id="activity-log-list" class="
