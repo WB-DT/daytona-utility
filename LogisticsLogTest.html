@@ -568,8 +568,13 @@
                     const item = r.cr714_item || 'N/A';
                     
                     let ownerRaw = r['cr714_logisticsowner@OData.Community.Display.V1.FormattedValue'] || r.cr714_logisticsowner || 'Unassigned';
-                    if(ownerRaw.toLowerCase().includes("matt") || ownerRaw.toLowerCase().startsWith("m ")) ownerRaw = "Matt Bleakley";
-                    else ownerRaw = ownerRaw.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                    const issueType = r['cr714_issue@OData.Community.Display.V1.FormattedValue'] || r.cr714_issue || '';
+                    if (issueType.includes("Route Update (Must provide current route, new route, and the contact from the branch requesting the change)")) {
+                        ownerRaw = "Tier 2";
+                    } else {
+                        if(ownerRaw.toLowerCase().includes("matt") || ownerRaw.toLowerCase().startsWith("m ")) ownerRaw = "Matt Bleakley";
+                        else ownerRaw = ownerRaw.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                    }
 
                     let searchValues = [];
                     let otherNotes = [];
@@ -1056,6 +1061,7 @@
             const { type, data, stats, whsList, statusList, ownerList, mapPoints, fullData: workerFull, conflicts, autoResolvable, activeMinDate, activeMaxDate } = e.data;
             if(type === 'RENDER') { 
                 fullData = data; filteredData = data; globalReps = ownerList || [];
+                checkAndNotifyTier2(data);
                 
                 populateCheckboxDropdown('dd-wh', whsList, 'cb-wh', 'btn-lbl-wh', 'All Warehouses');
                 populateCheckboxDropdown('dd-status', statusList, 'cb-status', 'btn-lbl-status', 'All Statuses');
@@ -2456,6 +2462,28 @@
                 const res = await fetch(`${DATA_API}/${ENTITY_SET}(${guid})`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } });
                 if(res.ok) { Toastify({text:"Record Deleted", style:{background:"#ef4444"}}).showToast(); closeDetail(); refreshData(true); }
             } catch(e){}
+        }
+
+        async function checkAndNotifyTier2(data) {
+            const pending = data.filter(t => t.owner === "Tier 2" && (!t.mgrEmailDate || t.mgrEmailDate === 'N/A'));
+            if (pending.length === 0) return;
+            const token = await msalInstance.acquireTokenSilent({ scopes: ["Mail.Send"], account: msalAccount }).catch(() => msalInstance.acquireTokenPopup({ scopes: ["Mail.Send"] }));
+            for (const t of pending) {
+                const email = {
+                    message: {
+                        subject: `Tier 2 Route Update - ${t.company} [${t.order}]`,
+                        body: { contentType: "HTML", content: `<div style="font-family: Arial; border-left: 4px solid #fbbf24; padding: 15px;"><h2>Tier 2 Assignment</h2><p>New Route Update assigned to Tier 2.</p><hr><b>Order #:</b> ${t.order}<br><b>Customer:</b> ${t.company}<br><b>Issue:</b> ${t.issue}</div>` },
+                        toRecipients: [{ emailAddress: { address: "kersti.straub@wbmason.com" } }, { emailAddress: { address: "brandon.neely@wbmason.com" } }, { emailAddress: { address: "anslee.erickson@wbmason.com" } }]
+                    }
+                };
+                try {
+                    const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", { method: "POST", headers: { "Authorization": `Bearer ${token.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify(email) });
+                    if (res.ok) {
+                        const dToken = await getToken(ENV_DATA);
+                        await fetch(`${DATA_API}/${ENTITY_SET}(${t.guid})`, { method: 'PATCH', headers: { 'Authorization': `Bearer ${dToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ "cr714_managerappemailtimestamp": new Date().toISOString() }) });
+                    }
+                } catch(e) {}
+            }
         }
     </script>
 </body>
