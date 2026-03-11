@@ -66,7 +66,7 @@
         .btn-secondary:hover { background-color: rgba(0,0,0,0.05); }
         .btn-danger-outline { background: transparent; border: 1px solid var(--accent-danger); color: var(--accent-danger); font-weight: 600; padding: 0.5rem 1rem; border-radius: 0.375rem; cursor: pointer; transition: all 0.2s; }
 
-        .stats-pill { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 4px 16px; border-radius: 8px; background: var(--bg-input); border: 1px solid var(--border-color); min-width: 80px; height: 50px; cursor: pointer; transition: transform 0.1s; }
+        .stats-pill { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 4px 16px; border-radius: 8px; background: var(--bg-input); border: 1px solid var(--border-color); min-width: 80px; height: 50px; cursor: transition: transform 0.1s; }
         .stats-pill:hover { transform: translateY(-2px); box-shadow: var(--shadow); background: var(--bg-card); }
         .stats-label { font-size: 0.65rem; text-transform: uppercase; color: var(--text-muted); font-weight: 700; margin-bottom: 2px; }
         .stats-value { font-size: 1.2rem; font-weight: 800; color: var(--text-main); line-height: 1; }
@@ -74,7 +74,7 @@
         .gallery-list { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding: 2px; }
         .gallery-item { padding: 0.5rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.5rem; cursor: pointer; position: relative; padding-bottom: 0.75rem; }
         .gallery-item.is-selected { background-color: var(--primary) !important; color: var(--primary-fg) !important; border-color: var(--primary) !important; }
-        .gallery-item.is-selected .gallery-item-id, .gallery-item.is-selected .gallery-item-company, .gallery-item.is-selected .text-muted, .gallery-item.is-selected [class*="text-red-"], .gallery-item.is-selected [class*="text-blue-"], .gallery-item.is-selected [class*="text-orange-"] { color: var(--primary-fg) !important; border-color: rgba(255,255,255,0.3) !important; background-color: rgba(255,255,255,0.1) !important;}
+        .gallery-item.is-selected .gallery-item-id, .gallery-item.is-selected .gallery-item-company, .gallery-item.is-selected .text-muted, .gallery-item.is-selected [class*="text-red-"], .gallery-item.is-selected [class*="text-blue-"], .gallery-item.is-selected [class*="text-orange-"], .gallery-item.is-selected [class*="text-green-"] { color: var(--primary-fg) !important; border-color: rgba(255,255,255,0.3) !important; background-color: rgba(255,255,255,0.1) !important;}
         .gallery-item-id { color: var(--primary); font-weight: 700; font-size: 0.9rem; } 
         .gallery-item-company { color: var(--text-main); font-weight: 600; font-size: 0.85rem; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .duplicate-flash { animation: redFlash 2s infinite; border-color: var(--accent-danger) !important; border-width: 2px; }
@@ -151,6 +151,7 @@
         .outlook-label { width: 60px; color: var(--text-muted); font-size: 13px; font-weight: 600; }
         .outlook-input { flex-grow: 1; border: none !important; background: transparent !important; outline: none !important; font-size: 14px; color: var(--text-main) !important; padding: 0 !important; box-shadow: none !important; }
         .outlook-input:focus { border: none !important; box-shadow: none !important; }
+        .outlook-input::placeholder { color: var(--text-muted); opacity: 0.8; }
         .outlook-toolbar { padding: 8px 16px; display: flex; gap: 8px; border-bottom: 1px solid var(--border-color); background: var(--bg-header); }
         .outlook-tool-btn { background: transparent; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; color: var(--text-main); transition: background 0.2s; }
         .outlook-tool-btn:hover { background: rgba(128,128,128,0.1); }
@@ -209,7 +210,8 @@
     
     window.saveToAuditLog = function(type, details) { 
         let log = []; try { log = JSON.parse(localStorage.getItem('daytona_audit_log') || '[]'); } catch(e) {} 
-        log.push({ timestamp: new Date().toISOString(), recordId: currentRecordId || 'N/A', type: type, details: details }); 
+        let compName = currentSelectedRecord ? currentSelectedRecord.cr714_company : 'Unknown Company';
+        log.push({ timestamp: new Date().toISOString(), recordId: currentRecordId || 'N/A', companyName: compName, type: type, details: details }); 
         localStorage.setItem('daytona_audit_log', JSON.stringify(log)); window.updateStats(); 
     }
 
@@ -378,11 +380,13 @@
             const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
             const payload = { statecode: 1, statuscode: 2, cr714_actionmessage: `[CLOSED]: ${reason}` };
             
-            const res = await fetch(`${DATAVERSE_URL}/${currentSelectedRecord.source_table}(${currentSelectedRecord.source_id})`, { 
-                method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) 
-            });
-            
-            if(!res.ok) throw new Error("Close Failed");
+            // Loop through all sources to ensure they are all closed out
+            for (let src of currentSelectedRecord.sources) {
+                const res = await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, { 
+                    method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) 
+                });
+                if(!res.ok) console.warn("Failed to close table", src.table);
+            }
             
             window.saveToAuditLog("Close Account", reason);
             allRecords = allRecords.filter(r => String(r.cr714_id) !== String(currentRecordId));
@@ -583,30 +587,63 @@
             const prosReq = fetch(`${DATAVERSE_URL}/cr714_prospectingdatasets?$filter=cr714_repassigned eq '${targetRep}' and statecode eq 0`, reqOptions);
             let profileReq = fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$filter=cr714_employeename eq '${targetRep}'`, reqOptions);
 
-            const [amRes, cadenceRes, prosRes, profileRes] = await Promise.all([amReq, cadenceReq, prosReq, profileReq]);
+            const [amRes, cadenceRes, prosRes, profileRes] = await Promise.all([amReq, cadenceReq, prosRes, profileReq]);
 
             const amData = await amRes.json(); const cadenceData = await cadenceRes.json(); const prosData = await prosRes.json();
             const profileData = profileRes.ok ? await profileRes.json() : { value: [] };
             if (profileData.value && profileData.value.length > 0) currentUserProfile = profileData.value[0];
 
-            const mapRecord = (r, type) => {
+            let allRaw = [];
+            if(amData.value) amData.value.forEach(r => allRaw.push({ ...r, _dsType: 'AM', _priority: 1 }));
+            if(cadenceData.value) cadenceData.value.forEach(r => allRaw.push({ ...r, _dsType: 'Cadence', _priority: 2 }));
+            if(prosData.value) prosData.value.forEach(r => allRaw.push({ ...r, _dsType: 'Prospecting', _priority: 3 }));
+
+            // Sort so we build recordsMap prioritizing AM -> Cadence -> Prospecting 
+            allRaw.sort((a,b) => a._priority - b._priority);
+
+            let recordsMap = new Map();
+            allRaw.forEach(r => {
+                let type = r._dsType;
+                let id = r.cr714_accountnum;
+                if(!id) return;
+
                 let qbNotes = type === 'AM' ? r.cr714_accountmanagementnotes : (type === 'Cadence' ? r.cr714_qbnotes : r.cr714_prospectingnotes);
-                return {
-                    cr714_id: r.cr714_accountnum, cr714_company: r.cr714_accountname || r.cr714_company || r.cr714_acctname, cr714_rep: r.cr714_rep || r.cr714_retentionrep || r.cr714_repassigned, cr714_action: r.cr714_action, cr714_followup: r.cr714_followup || r.cr714_followupdate,
-                    cr714_namemost: r.cr714_namemost, cr714_namelatest: r.cr714_namelatest, cr714_primaryphone: window.formatPhone(r.cr714_phone || r.cr714_primaryphone), cr714_emailmost: r.cr714_emailmost, cr714_emaillatest: r.cr714_emaillatest || r.cr714_email_latest, cr714_lastorderdate: r.cr714_lastorderdate || '--',
-                    cr714_qbnotes: qbNotes || '', cr714_managernotes: r.cr714_managernotes, cr714_importantaccountinformation: r.cr714_importantaccountinformation || r.cr714_importantaccountinfo, cr714_actionmessage: r.cr714_actionmessage, cr714_billingaddress: r.cr714_address || r.cr714_billingaddress,
-                    cr714_actionemailsent: r.cr714_actionemailsent || r.cr714_emailsenttimestamp || null,
-                    cr714_intro: r.cr714_intro || '',
-                    source_table: type === 'AM' ? 'cr714_accountmanagementdatasets' : (type === 'Cadence' ? 'cr714_cadencedatasets' : 'cr714_prospectingdatasets'), source_dataset_type: type, source_id: r.cr714_accountmanagementdatasetid || r.cr714_cadencedatasetid || r.cr714_prospectingdatasetid
-                };
-            };
+                let sTable = type === 'AM' ? 'cr714_accountmanagementdatasets' : (type === 'Cadence' ? 'cr714_cadencedatasets' : 'cr714_prospectingdatasets');
+                let sId = r.cr714_accountmanagementdatasetid || r.cr714_cadencedatasetid || r.cr714_prospectingdatasetid;
 
-            if(amData.value) amData.value.forEach(r => allRecords.push(mapRecord(r, 'AM')));
-            if(cadenceData.value) cadenceData.value.forEach(r => allRecords.push(mapRecord(r, 'Cadence')));
-            if(prosData.value) prosData.value.forEach(r => allRecords.push(mapRecord(r, 'Prospecting')));
+                let sourceObj = { type: type, table: sTable, id: sId, action: r.cr714_action, rawNotes: qbNotes, message: r.cr714_actionmessage };
 
-            const seen = new Set();
-            allRecords = allRecords.filter(item => { if (seen.has(item.cr714_id)) { duplicateRecordIds.add(item.cr714_id); return false; } seen.add(item.cr714_id); return true; });
+                if(recordsMap.has(id)) {
+                    let existing = recordsMap.get(id);
+                    existing.sources.push(sourceObj);
+                    duplicateRecordIds.add(id); // track duplicates intentionally for visual flagging
+                } else {
+                    let mapped = {
+                        cr714_id: id,
+                        cr714_company: r.cr714_accountname || r.cr714_company || r.cr714_acctname,
+                        cr714_rep: r.cr714_rep || r.cr714_retentionrep || r.cr714_repassigned,
+                        cr714_action: r.cr714_action,
+                        cr714_actionmessage: r.cr714_actionmessage,
+                        cr714_namemost: r.cr714_namemost || r.cr714_namelatest,
+                        cr714_primaryphone: window.formatPhone(r.cr714_phone || r.cr714_primaryphone),
+                        cr714_emailmost: r.cr714_emailmost || r.cr714_emaillatest || r.cr714_email_latest,
+                        cr714_lastorderdate: r.cr714_lastorderdate || '--',
+                        cr714_qbnotes: sourceObj.rawNotes, // Main raw block maintained for compatibility
+                        cr714_managernotes: r.cr714_managernotes,
+                        cr714_importantaccountinformation: r.cr714_importantaccountinformation || r.cr714_importantaccountinfo,
+                        cr714_billingaddress: r.cr714_address || r.cr714_billingaddress,
+                        cr714_followup: r.cr714_followup || r.cr714_followupdate,
+                        cr714_actionemailsent: r.cr714_actionemailsent || r.cr714_emailsenttimestamp || null,
+                        cr714_intro: r.cr714_intro || '',
+                        sources: [sourceObj],
+                        primaryType: type,
+                        source_dataset_type: type
+                    };
+                    recordsMap.set(id, mapped);
+                }
+            });
+
+            allRecords = Array.from(recordsMap.values());
             
             if(document.getElementById('stat-total')) document.getElementById('stat-total').textContent = allRecords.length; 
             if (currentUserRepName && document.getElementById('welcome-message')) { document.getElementById('welcome-message').innerHTML = `<i class="fas fa-user-circle text-xl"></i> <span class="hidden md:inline">${currentUserRepName}</span>`; }
@@ -632,24 +669,8 @@
         let note = autoNote ? autoNote : (document.getElementById('qb-notes-input').value || "").replace(QB_NOTES_TEMPLATE, '').trim();
         const timeStamp = new Date().toLocaleString(); const userStamp = currentUserRepName || "Unknown User";
         
-        let headerLabel = currentSelectedRecord ? currentSelectedRecord.source_dataset_type : 'Unknown';
+        let headerLabel = currentSelectedRecord ? currentSelectedRecord.primaryType : 'Unknown';
         const newNoteEntry = note ? `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId}]\n${metaString}\n${note}\n\n------------------------------\n` : `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId}]\n${metaString}\n(Metadata Update)\n\n------------------------------\n`;
-        
-        let rawEntries = (currentSelectedRecord.cr714_qbnotes || "").split(/-{20,}/);
-        let validEntries = rawEntries.filter(e => {
-            if (!e.trim()) return false;
-            let match = e.match(/(?:Modified By:|by:)\s*(.*)/i);
-            let author = match ? match[1].trim() : "";
-            if (author === "Unknown User" || author === "Unknown") return false;
-            let textOnly = e.replace(/Modified By:.*\n/i, '').replace(/Modified On:.*\n/i, '').replace(/{{METADATA:.*?}}/i, '').replace(/\[List:.*?\]/i, '').trim();
-            if(!textOnly) return false;
-            return true;
-        });
-        
-        let rebuiltNotes = validEntries.map(e => e.trim()).join('\n\n------------------------------\n');
-        if (rebuiltNotes) rebuiltNotes = '\n\n' + rebuiltNotes + '\n\n------------------------------\n';
-        
-        const fullNote = newNoteEntry + rebuiltNotes;
         
         let d = document.getElementById('follow-up-date').value;
         let t = document.getElementById('follow-up-time').value;
@@ -668,24 +689,58 @@
         try {
             const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
-            let payload = {};
-            if (iso !== null) payload.cr714_followup = iso;
-            else payload.cr714_followup = null;
             
-            if (currentSelectedRecord.source_table === 'cr714_accountmanagementdatasets') {
-                payload.cr714_namemost = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most'); payload.cr714_accountmanagementnotes = fullNote;
-            } else if (currentSelectedRecord.source_table === 'cr714_cadencedatasets') {
-                payload.cr714_namemost = get('contact-name-most'); payload.cr714_primaryphone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most'); payload.cr714_qbnotes = fullNote;
-            } else if (currentSelectedRecord.source_table === 'cr714_prospectingdatasets') {
-                payload.cr714_namelatest = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_email_latest = get('contact-email-most'); payload.cr714_prospectingnotes = fullNote;
+            // Loop and save to all linked sources to ensure sync
+            for (let i = 0; i < currentSelectedRecord.sources.length; i++) {
+                let src = currentSelectedRecord.sources[i];
+                let payload = {};
+                if (iso !== null) payload.cr714_followup = iso;
+                else payload.cr714_followup = null;
+
+                if (i === 0) {
+                    // Only append note strictly to the primary source to prevent duplication in merged history
+                    let rawEntries = (src.rawNotes || "").split(/-{20,}/);
+                    let validEntries = rawEntries.filter(e => {
+                        if (!e.trim()) return false;
+                        let match = e.match(/(?:Modified By:|by:)\s*(.*)/i);
+                        let author = match ? match[1].trim() : "";
+                        if (author === "Unknown User" || author === "Unknown") return false;
+                        let textOnly = e.replace(/Modified By:.*\n/i, '').replace(/Modified On:.*\n/i, '').replace(/{{METADATA:.*?}}/i, '').replace(/\[List:.*?\]/i, '').trim();
+                        if(!textOnly) return false;
+                        return true;
+                    });
+                    
+                    let rebuiltNotes = validEntries.map(e => e.trim()).join('\n\n------------------------------\n');
+                    if (rebuiltNotes) rebuiltNotes = '\n\n' + rebuiltNotes + '\n\n------------------------------\n';
+                    
+                    const fullNote = newNoteEntry + rebuiltNotes;
+
+                    if (src.table === 'cr714_accountmanagementdatasets') {
+                        payload.cr714_namemost = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most'); payload.cr714_accountmanagementnotes = fullNote;
+                    } else if (src.table === 'cr714_cadencedatasets') {
+                        payload.cr714_namemost = get('contact-name-most'); payload.cr714_primaryphone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most'); payload.cr714_qbnotes = fullNote;
+                    } else if (src.table === 'cr714_prospectingdatasets') {
+                        payload.cr714_namelatest = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_email_latest = get('contact-email-most'); payload.cr714_prospectingnotes = fullNote;
+                    }
+                    src.rawNotes = fullNote;
+                    currentSelectedRecord.cr714_qbnotes = fullNote; // Update runtime cache mapping
+                } else {
+                    // Just update core contact info to keep it synced
+                    if (src.table === 'cr714_accountmanagementdatasets') {
+                        payload.cr714_namemost = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most');
+                    } else if (src.table === 'cr714_cadencedatasets') {
+                        payload.cr714_namemost = get('contact-name-most'); payload.cr714_primaryphone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most');
+                    } else if (src.table === 'cr714_prospectingdatasets') {
+                        payload.cr714_namelatest = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_email_latest = get('contact-email-most');
+                    }
+                }
+
+                await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers: headers, body: JSON.stringify(payload) });
             }
 
-            const res = await fetch(`${DATAVERSE_URL}/${currentSelectedRecord.source_table}(${currentSelectedRecord.source_id})`, { method: 'PATCH', headers: headers, body: JSON.stringify(payload) });
-            if(!res.ok) throw new Error("Save Error.");
             if(!quiet) window.showToast("Saved!", "success");
             
             window.saveToAuditLog('Save', `Note: ${note}`); 
-            currentSelectedRecord.cr714_qbnotes = fullNote; 
             currentSelectedRecord.cr714_followup = iso; 
             document.querySelectorAll('.empty-field-warning').forEach(el => el.classList.remove('empty-field-warning')); 
             window.updateNotesPreview(); 
@@ -721,7 +776,7 @@
 
             if (actionType === 'FULL_MOVE' || actionType === 'COPY_ONLY') {
                 const createPayload = {
-                    cr714_accountnum: currentSelectedRecord.cr714_id, cr714_companyname: currentSelectedRecord.cr714_company, cr714_repname: currentUserRepName, cr714_action: currentSelectedRecord.cr714_action, cr714_actionmessage: currentSelectedRecord.cr714_actionmessage, cr714_namemost: get('contact-name-most'), cr714_primaryphone: get('contact-phone-primary'), cr714_emailmost: get('contact-email-most'), cr714_qbnotes: currentSelectedRecord.cr714_qbnotes, cr714_source_dataset: dsMap[currentSelectedRecord.source_dataset_type] || null,
+                    cr714_accountnum: currentSelectedRecord.cr714_id, cr714_companyname: currentSelectedRecord.cr714_company, cr714_repname: currentUserRepName, cr714_action: currentSelectedRecord.cr714_action, cr714_actionmessage: currentSelectedRecord.cr714_actionmessage, cr714_namemost: get('contact-name-most'), cr714_primaryphone: get('contact-phone-primary'), cr714_emailmost: get('contact-email-most'), cr714_qbnotes: currentSelectedRecord.cr714_qbnotes, cr714_source_dataset: dsMap[currentSelectedRecord.primaryType] || null,
                     cr714_status: actionType === 'COPY_ONLY' ? "Inactive" : "Active", cr714_lastinteractiondate: todayStr
                 };
                 if(get('follow-up-date')) createPayload.cr714_followup = `${get('follow-up-date')}T${get('follow-up-time') || '00:00'}:00Z`;
@@ -730,8 +785,10 @@
             }
 
             if (actionType === 'FULL_MOVE' || actionType === 'DEACTIVATE_ONLY') {
-                const deactivateRes = await fetch(`${DATAVERSE_URL}/${currentSelectedRecord.source_table}(${currentSelectedRecord.source_id})`, { method: 'PATCH', headers: headers, body: JSON.stringify({ statecode: 1, statuscode: 2 }) });
-                if(!deactivateRes.ok) throw new Error("Failed to deactivate origin record.");
+                for (let src of currentSelectedRecord.sources) {
+                    const deactivateRes = await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers: headers, body: JSON.stringify({ statecode: 1, statuscode: 2 }) });
+                    if(!deactivateRes.ok) throw new Error("Failed to deactivate origin record.");
+                }
                 allRecords = allRecords.filter(r => r.cr714_id !== currentSelectedRecord.cr714_id); 
                 window.filterAndSortGallery();
             }
@@ -778,7 +835,8 @@
         }
         signature = signature.replace(/\[Rep Name\]/g, repName).replace(/\[Phone\]/g, repPhone).replace(/\[Email\]/g, repEmail);
 
-        const wrapperStart = `<div style="font-family: 'Aptos', 'Segoe UI', Arial, sans-serif; font-size: 11pt; color: #1f2937; line-height: 1.4; max-width: 600px;">`;
+        // REMOVED: color: #1f2937; -> It now inherits properly to match light/dark themes in the editor UI
+        const wrapperStart = `<div style="font-family: 'Aptos', 'Segoe UI', Arial, sans-serif; font-size: 11pt; line-height: 1.4; max-width: 600px;">`;
         const wrapperEnd = `</div>`; const pStyle = `margin: 0 0 16px 0; padding: 0;`;
         const benefitsList = `<div style="${pStyle}"><strong>Here are some things that you can always expect from us at WB Mason:</strong></div><ul style="margin: 0 0 16px 20px; padding: 0;"><li><strong>Customized pricing</strong> on the products your business actually uses</li><li><strong>Free delivery</strong>, with no order minimums</li><li><strong>Personalized support</strong> including a personal driver, customer service representative, and inside sales representative</li><li><strong>One-stop shopping</strong> for all your workplace products</li></ul>`;
         const customNotesPlaceholder = `<div style="${pStyle} color:dodgerblue; font-size: 14px; font-weight: bold;">[Custom Email Notes will be placed here - Type over this]</div>`;
@@ -875,9 +933,14 @@
             if(document.getElementById('filter-florida').checked) { const fAddr = r.cr714_billingaddress || ''; if(!/\b(fl|florida)\b/i.test(fAddr)) return false; }
             if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) { if (!r.cr714_managernotes || r.cr714_managernotes.trim() === '') return false; }
             if(document.getElementById('filter-has-intro').checked) { 
-                const parsedNotes = window.parseNotes(r.cr714_qbnotes || '');
-                const noteIntro = parsedNotes.length > 0 ? parsedNotes[0].metaIntro : '';
-                const hasIntro = (r.cr714_intro && String(r.cr714_intro).trim() !== '') || (noteIntro && String(noteIntro).trim() !== '');
+                let hasIntro = false;
+                if (r.cr714_intro && String(r.cr714_intro).trim() !== '') hasIntro = true;
+                if (!hasIntro) {
+                    for (let src of r.sources) {
+                        let parsedNotes = window.parseNotes(src.rawNotes || '');
+                        if (parsedNotes.length > 0 && parsedNotes[0].metaIntro && String(parsedNotes[0].metaIntro).trim() !== '') { hasIntro = true; break; }
+                    }
+                }
                 if (!hasIntro) return false; 
             }
             if(filter && r.cr714_action !== filter) return false; 
@@ -912,10 +975,9 @@
         filtered.forEach(r => {
             const div = document.createElement('div'); const isSent = sentRecs.includes(String(r.cr714_id)); const isDuplicate = duplicateRecordIds.has(r.cr714_id);
             const hasMsg = (r.cr714_actionmessage && r.cr714_actionmessage.trim().length > 0); const updatedToday = isToday(r.modifiedon); const shouldPulse = hasMsg && updatedToday;
-            div.className = `gallery-item ${currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${shouldPulse ? 'response-pulse' : ''} ${isDuplicate ? 'duplicate-flash' : ''}`; if(isDuplicate) div.title = "Duplicate Account detected in lists";
+            div.className = `gallery-item ${currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${shouldPulse ? 'response-pulse' : ''} ${isDuplicate ? 'duplicate-flash' : ''}`; if(isDuplicate) div.title = "Account present in multiple lists";
             div.onclick = () => window.selectRecord(r.cr714_id);
             
-            let listAbbr = r.source_dataset_type === 'AM' ? 'AM' : (r.source_dataset_type === 'Cadence' ? 'CAD' : 'PSP');
             let emailHtml = '';
             let emailDate = r.cr714_actionemailsent || r.cr714_emailsenttimestamp; 
             if (isSent) {
@@ -942,13 +1004,27 @@
             }
             
             let introHtml = '';
-            const parsedNotes = window.parseNotes(r.cr714_qbnotes || '');
-            const fallbackIntro = parsedNotes.length > 0 ? parsedNotes[0].metaIntro : '';
-            const finalIntroVal = (r.cr714_intro && String(r.cr714_intro).trim() !== '') ? r.cr714_intro : fallbackIntro;
-            
-            if (finalIntroVal && String(finalIntroVal).trim() !== '') {
-                introHtml = `<div class="text-[9px] text-orange-600 font-bold w-full truncate mt-1" title="Intro: ${window.escapeHTML(finalIntroVal)}"><i class="fas fa-handshake mr-1"></i>${window.escapeHTML(finalIntroVal)}</div>`;
+            let combinedIntro = r.cr714_intro;
+            if (!combinedIntro) {
+                for (let src of r.sources) {
+                    let p = window.parseNotes(src.rawNotes || '');
+                    if(p.length > 0 && p[0].metaIntro) { combinedIntro = p[0].metaIntro; break; }
+                }
             }
+            let displayIntroStr = '';
+            if (combinedIntro && String(combinedIntro).trim() !== '') {
+                let ci = String(combinedIntro).trim();
+                displayIntroStr = (ci.toLowerCase() === 'yes' || ci.toLowerCase() === 'y') ? 'Intro' : ci;
+                introHtml = `<div class="text-[9px] text-orange-600 font-bold w-full truncate mt-1" title="Intro: ${window.escapeHTML(displayIntroStr)}"><i class="fas fa-handshake mr-1"></i>${window.escapeHTML(displayIntroStr)}</div>`;
+            }
+
+            let sourcesHtml = r.sources.map(s => {
+                let c = s.type === 'AM' ? 'text-green-800 bg-green-100 border-green-300' :
+                        s.type === 'Cadence' ? 'text-blue-800 bg-blue-100 border-blue-300' :
+                        'text-orange-800 bg-orange-100 border-orange-300';
+                let abbr = s.type === 'AM' ? 'AM' : (s.type === 'Cadence' ? 'CAD' : 'PSP');
+                return `<div class="text-[9px] font-bold border px-1 rounded ${c}">${abbr}</div>`;
+            }).join('');
 
             div.innerHTML = `
                 <div class="flex justify-between items-center w-full mb-1">
@@ -969,8 +1045,8 @@
                             ${pref.showRep ? window.escapeHTML(r.cr714_rep) : ''}
                         </div>
                         <div class="flex flex-col items-end gap-1 ml-auto">
-                            <div class="text-[9px] font-bold text-green-800 bg-green-100 border border-green-300 px-1 rounded">
-                                ${listAbbr}
+                            <div class="flex gap-1">
+                                ${sourcesHtml}
                             </div>
                             ${r.cr714_action ? `<div class="text-[9px] font-bold text-purple-800 bg-purple-100 border border-purple-300 px-1 rounded max-w-[120px] truncate" title="${window.escapeHTML(r.cr714_action)}">${window.escapeHTML(r.cr714_action)}</div>` : ''}
                         </div>
@@ -1117,8 +1193,12 @@
     window.populateForm = function(rec) {
         document.getElementById('acct-number-header').innerText = rec.cr714_id || '--'; document.getElementById('acct-company').innerText = rec.cr714_company || '--'; 
         
-        let listAbbr = rec.source_dataset_type === 'AM' ? 'AM' : (rec.source_dataset_type === 'Cadence' ? 'CAD' : 'PSP');
-        document.getElementById('form-action-value').innerText = `${listAbbr} | ${window.escapeHTML(rec.cr714_action || '--')}`;
+        let sourcesFormHtml = rec.sources.map(s => {
+            let abbr = s.type === 'AM' ? 'AM' : (s.type === 'Cadence' ? 'CAD' : 'PSP');
+            let color = s.type === 'AM' ? 'text-green-700 border-green-200' : (s.type === 'Cadence' ? 'text-blue-700 border-blue-200' : 'text-orange-700 border-orange-200');
+            return `<span class="px-1.5 py-0.5 rounded border bg-black/5 text-[9px] font-bold ${color}">${abbr}: ${s.action || 'No Action'}</span>`;
+        }).join('');
+        document.getElementById('form-action-value').innerHTML = sourcesFormHtml;
         document.getElementById('form-msg-value').innerText = rec.cr714_actionmessage || '--';
         document.getElementById('d365-address-display').innerText = rec.cr714_billingaddress || '--'; 
         
@@ -1151,12 +1231,24 @@
         setVal('opp-type-select', ''); // Opp Type deliberately not restored per user requirement
 
         // Populate Intro as read-only display directly from the dataset row first, fallback to parsed note
-        const introVal = rec.cr714_intro || metaIntro || '';
+        let combinedIntro = rec.cr714_intro;
+        if (!combinedIntro) {
+            for (let src of rec.sources) {
+                let p = window.parseNotes(src.rawNotes || '');
+                if(p.length > 0 && p[0].metaIntro) { combinedIntro = p[0].metaIntro; break; }
+            }
+        }
+        let displayIntroStr = '--';
+        if (combinedIntro && String(combinedIntro).trim() !== '') {
+            let ci = String(combinedIntro).trim();
+            displayIntroStr = (ci.toLowerCase() === 'yes' || ci.toLowerCase() === 'y') ? 'Intro' : ci;
+        }
+
         const introDisp = document.getElementById('display-intro');
         const introContainerBox = document.getElementById('intro-container-box');
         if (introDisp) {
-            introDisp.innerText = introVal ? introVal : '--';
-            if (introVal && String(introVal).trim() !== '') {
+            introDisp.innerText = displayIntroStr;
+            if (displayIntroStr !== '--') {
                 introDisp.style.color = '#1e3a8a'; // Deep blue text
                 if(introContainerBox) {
                     introContainerBox.style.backgroundColor = '#dbeafe'; // Light blue background
@@ -1310,7 +1402,16 @@
         
         if(showPrev) {
             p.innerHTML = '<div class="text-center italic mt-10 text-muted">Loading history...</div>';
-            let history = window.parseNotes(currentSelectedRecord.cr714_qbnotes || '');
+            let history = [];
+            
+            // Loop through all sources to aggregate note history uniformly
+            currentSelectedRecord.sources.forEach(src => {
+                let parsed = window.parseNotes(src.rawNotes || '');
+                parsed.forEach(n => {
+                    n.sourceType = src.type;
+                    history.push(n);
+                });
+            });
             
             if (!currentSelectedRecord.logisticsFetched) {
                 currentSelectedRecord.logisticsData = await window.fetchLogisticsForAccount(currentSelectedRecord.cr714_id);
@@ -1327,17 +1428,29 @@
                 p.innerHTML = history.map(h => {
                     const border = h.isLogistics ? 'border-left-color: #f59e0b; background-color: #fffbeb;' : '';
                     const headerColor = h.isLogistics ? 'background-color: #fef3c7;' : '';
+                    
+                    let srcColor = h.sourceType === 'AM' ? 'bg-green-100 text-green-800 border-green-300' :
+                                   h.sourceType === 'Cadence' ? 'bg-blue-100 text-blue-800 border-blue-300' :
+                                   h.sourceType === 'Prospecting' ? 'bg-orange-100 text-orange-800 border-orange-300' : '';
+                    let srcAbbr = h.sourceType === 'AM' ? 'AM' : (h.sourceType === 'Cadence' ? 'CAD' : (h.sourceType === 'Prospecting' ? 'PSP' : ''));
+                    let srcBadge = srcAbbr ? `<span class="px-1.5 py-0.5 rounded text-[8px] border font-bold ${srcColor} mr-2">${srcAbbr}</span>` : '';
+
                     let metaHtml = '';
                     if (h.metaLoc || h.metaDm || h.metaComp || h.metaOpp || h.metaIntro) {
+                        let formattedIntro = h.metaIntro;
+                        if (formattedIntro && String(formattedIntro).trim() !== '') {
+                            let fi = String(formattedIntro).trim();
+                            formattedIntro = (fi.toLowerCase() === 'yes' || fi.toLowerCase() === 'y') ? 'Intro' : fi;
+                        }
                         metaHtml = `<div class="flex flex-wrap gap-3 mb-2 text-[10px] text-muted p-1.5 rounded border bg-black/5" style="border-color: var(--border-color);">
                             ${h.metaLoc ? `<span title="Location"><i class="fas fa-map-marker-alt text-blue-500 mr-1"></i><b>Loc:</b> ${window.escapeHTML(h.metaLoc)}</span>` : ''}
                             ${h.metaDm ? `<span title="Decision Maker"><i class="fas fa-user-tie text-green-500 mr-1"></i><b>DM:</b> ${window.escapeHTML(h.metaDm)}</span>` : ''}
                             ${h.metaComp ? `<span title="Competitor"><i class="fas fa-store-slash text-red-500 mr-1"></i><b>Comp:</b> ${window.escapeHTML(h.metaComp)}</span>` : ''}
                             ${h.metaOpp ? `<span title="Opportunity Type"><i class="fas fa-bullseye text-purple-500 mr-1"></i><b>Opp:</b> ${window.escapeHTML(h.metaOpp)}</span>` : ''}
-                            ${h.metaIntro ? `<span title="Intro"><i class="fas fa-handshake text-orange-500 mr-1"></i><b>Intro:</b> ${window.escapeHTML(h.metaIntro)}</span>` : ''}
+                            ${h.metaIntro ? `<span title="Intro"><i class="fas fa-handshake text-orange-500 mr-1"></i><b>Intro:</b> ${window.escapeHTML(formattedIntro)}</span>` : ''}
                         </div>`;
                     }
-                    return `<div class="note-card" style="${border}"><div class="note-card-header" style="${headerColor}"><span>${h.date}</span><span>${h.author}</span></div><div class="note-card-body">${metaHtml}${window.escapeHTML(h.text)}</div></div>`;
+                    return `<div class="note-card" style="${border}"><div class="note-card-header" style="${headerColor}"><span>${srcBadge}${h.date}</span><span>${h.author}</span></div><div class="note-card-body">${metaHtml}${window.escapeHTML(h.text)}</div></div>`;
                 }).join('');
             } else { p.innerHTML = '<div class="text-center italic mt-10 text-muted">No history found</div>'; }
         } else { p.innerHTML = '<div class="text-center italic mt-10 text-muted">History hidden</div>'; }
@@ -1501,13 +1614,64 @@
             } catch(e) { console.warn("Failed to send manager email", e); }
         }
         
+        try {
+            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
+            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+            // Loop through all data sources connected to this account to push the help status correctly so the manager dashboard picks it up
+            for (let src of currentSelectedRecord.sources) {
+                await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, {
+                    method: 'PATCH', headers: headers, body: JSON.stringify({ cr714_actionmessage: `[HELP REQUEST]: ${v}` })
+                });
+                src.message = `[HELP REQUEST]: ${v}`;
+            }
+            currentSelectedRecord.cr714_actionmessage = `[HELP REQUEST]: ${v}`;
+            document.getElementById('form-msg-value').innerText = `[HELP REQUEST]: ${v}`;
+        } catch(e) { console.error("Dataverse help update failed", e); }
+        
         document.getElementById('internal-note-input').value=''; 
         window.toggleInternalNote(); 
         window.showToast("Help Request Sent"); 
     }
 
     window.downloadAuditLog = function() { const log = localStorage.getItem('daytona_audit_log') || '[]'; const blob = new Blob([log], {type: 'application/json'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `daytona_audit_log_${new Date().toLocaleDateString('en-CA')}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); window.showToast("Log downloaded", "success"); }
-    window.showActivityLog = function(type) { const list = document.getElementById('activity-log-list'); list.innerHTML = ""; let log = []; try { log = JSON.parse(localStorage.getItem('daytona_audit_log') || '[]'); } catch(e) {} const today = new Date().toLocaleDateString('en-CA'); const filtered = log.filter(entry => { if(!entry.timestamp) return false; return entry.timestamp.startsWith(today); }); if(filtered.length === 0) { list.innerHTML = "<div class='text-muted italic text-center p-4'>No activity recorded today.</div>"; } else { filtered.reverse().forEach(item => { const time = new Date(item.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}); const d = document.createElement('div'); d.className = `p-3 border-b flex items-start gap-3 cursor-pointer`; d.innerHTML = `<div class="flex-grow min-w-0"><div class="flex justify-between items-center mb-1"><span class="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded border text-blue-600" style="background-color: var(--bg-input); border-color: var(--border-color);">${item.type}</span><span class="text-[10px] text-muted">${time}</span></div><div class="text-xs text-main truncate">${item.details}</div></div>`; list.appendChild(d); }); } document.getElementById('activity-modal').classList.remove('hidden'); document.getElementById('activity-modal').style.display = 'flex'; }
+    
+    window.showActivityLog = function(type) { 
+        const list = document.getElementById('activity-log-list'); list.innerHTML = ""; 
+        let log = []; try { log = JSON.parse(localStorage.getItem('daytona_audit_log') || '[]'); } catch(e) {} 
+        const today = new Date().toLocaleDateString('en-CA'); 
+        const filtered = log.filter(entry => { if(!entry.timestamp) return false; return entry.timestamp.startsWith(today); }); 
+        
+        if(filtered.length === 0) { 
+            list.innerHTML = "<div class='text-muted italic text-center p-4'>No activity recorded today.</div>"; 
+        } else { 
+            filtered.reverse().forEach(item => { 
+                const time = new Date(item.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}); 
+                const d = document.createElement('div'); 
+                d.className = `p-3 border-b flex items-start gap-3 cursor-pointer hover:bg-black/5 transition-colors`; 
+                d.onclick = () => { 
+                    if(item.recordId && item.recordId !== 'N/A') {
+                        document.getElementById('activity-modal').style.display='none';
+                        window.selectRecord(item.recordId);
+                    }
+                };
+                
+                let recDisplay = '';
+                if(item.recordId && item.recordId !== 'N/A') {
+                    let compName = item.companyName;
+                    if(!compName) {
+                        const rec = allRecords.find(r => String(r.cr714_id) === String(item.recordId));
+                        if(rec) compName = rec.cr714_company;
+                    }
+                    recDisplay = `<div class="text-xs font-bold mb-0.5 truncate" style="color: var(--primary);"><i class="fas fa-building mr-1"></i>${item.recordId} ${compName ? '- ' + compName : ''}</div>`;
+                }
+
+                d.innerHTML = `<div class="flex-grow min-w-0"><div class="flex justify-between items-center mb-1"><span class="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded border text-blue-600" style="background-color: var(--bg-input); border-color: var(--border-color);">${item.type}</span><span class="text-[10px] text-muted">${time}</span></div>${recDisplay}<div class="text-xs text-main truncate">${item.details}</div></div>`; 
+                list.appendChild(d); 
+            }); 
+        } 
+        document.getElementById('activity-modal').classList.remove('hidden'); document.getElementById('activity-modal').style.display = 'flex'; 
+    }
+    
     window.exportActivityLog = function() { let log = []; try { log = JSON.parse(localStorage.getItem('daytona_audit_log') || '[]'); } catch(e) {} const today = new Date().toLocaleDateString('en-CA'); const filtered = log.filter(entry => entry.timestamp && entry.timestamp.startsWith(today)); if(filtered.length === 0) { window.showToast("No activity to export", "info"); return; } let csv = "Timestamp,Type,Details\n"; filtered.forEach(item => { csv += `${item.timestamp},${item.type},"${(item.details||'').replace(/"/g, '""')}"\n`; }); const blob = new Blob([csv], {type: 'text/csv'}); const url = window.URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `Activity_${today}.csv`; document.body.appendChild(a); a.click(); document.body.removeChild(a); }
 
     window.promptAdminLogin = function() { document.getElementById('admin-modal').classList.remove('hidden'); document.getElementById('admin-modal').style.display='flex'; }
@@ -1849,7 +2013,7 @@
                                     <div class="flex flex-col min-w-0 w-full">
                                         <div class="flex items-center gap-1 mb-1 pb-1 border-b border-orange-500/20 font-black" style="color: var(--text-main);">
                                             <span class="text-[8px] uppercase tracking-wider opacity-70">Current Action Strategy:</span>
-                                            <span id="form-action-value" class="text-[11px] tracking-tight text-blue-600">--</span>
+                                            <div id="form-action-value" class="flex flex-wrap gap-1 ml-auto">--</div>
                                         </div>
                                         <div class="form-wide-value whitespace-normal leading-tight" style="max-height: 5em; overflow-y: auto;">
                                             <span id="form-msg-value" class="text-[10px] font-bold italic" style="color: var(--text-main);">--</span>
