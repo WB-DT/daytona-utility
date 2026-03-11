@@ -568,19 +568,8 @@
                     const item = r.cr714_item || 'N/A';
                     
                     let ownerRaw = r['cr714_logisticsowner@OData.Community.Display.V1.FormattedValue'] || r.cr714_logisticsowner || 'Unassigned';
-
-// Check for Route Update Issue auto-assignment
-const issueType = r['cr714_issue@OData.Community.Display.V1.FormattedValue'] || r.cr714_issue || '';
-if (issueType.includes("Route Update (Must provide current route, new route, and the contact from the branch requesting the change)")) {
-    ownerRaw = "Tier 2";
-} else {
-    // Standard normalization logic
-    if(ownerRaw.toLowerCase().includes("matt") || ownerRaw.toLowerCase().startsWith("m ")) {
-        ownerRaw = "Matt Bleakley";
-    } else {
-        ownerRaw = ownerRaw.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-    }
-}
+                    if(ownerRaw.toLowerCase().includes("matt") || ownerRaw.toLowerCase().startsWith("m ")) ownerRaw = "Matt Bleakley";
+                    else ownerRaw = ownerRaw.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
                     let searchValues = [];
                     let otherNotes = [];
@@ -783,7 +772,6 @@ if (issueType.includes("Route Update (Must provide current route, new route, and
                 const mapPoints = filtered.filter(t => t.lat && t.lng).map(t => ({ lat: parseFloat(t.lat), lng: parseFloat(t.lng), id: t.id, status: t.status }));
                 
                 self.postMessage({ type: 'RENDER_FILTERED', data: filtered, stats, mapPoints, fullData: globalDb, activeMinDate: minDate, activeMaxDate: maxDate });
-        
             }
         };
     </script>
@@ -1068,28 +1056,6 @@ if (issueType.includes("Route Update (Must provide current route, new route, and
             const { type, data, stats, whsList, statusList, ownerList, mapPoints, fullData: workerFull, conflicts, autoResolvable, activeMinDate, activeMaxDate } = e.data;
             if(type === 'RENDER') { 
                 fullData = data; filteredData = data; globalReps = ownerList || [];
-
-                if (res.ok) {
-                // Visual confirmation in the app
-                Toastify({
-                    text: `AUTO-DISPATCH: Tier 2 notified for SO ${t.order}`,
-                    duration: 5000,
-                    gravity: "top", 
-                    position: "right",
-                    style: { background: "linear-gradient(to right, #fbbf24, #d97706)", color: "#000", fontWeight: "bold" }
-                }).showToast();
-
-                // Update Dataverse so it doesn't email again on the next refresh
-                const dataToken = await getToken(ENV_DATA);
-                await fetch(`${DATA_API}/${ENTITY_SET}(${t.guid})`, {
-                    method: 'PATCH',
-                    headers: { 'Authorization': `Bearer ${dataToken}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ "cr714_managerappemailtimestamp": new Date().toISOString() })
-                });
-                
-                // Locally update the object so the UI reflects the email was sent immediately
-                t.mgrEmailDate = new Date().toLocaleDateString('en-US', {month:'short', day:'numeric'}) + ' ' + new Date().toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'});
-            }
                 
                 populateCheckboxDropdown('dd-wh', whsList, 'cb-wh', 'btn-lbl-wh', 'All Warehouses');
                 populateCheckboxDropdown('dd-status', statusList, 'cb-status', 'btn-lbl-status', 'All Statuses');
@@ -2491,66 +2457,6 @@ if (issueType.includes("Route Update (Must provide current route, new route, and
                 if(res.ok) { Toastify({text:"Record Deleted", style:{background:"#ef4444"}}).showToast(); closeDetail(); refreshData(true); }
             } catch(e){}
         }
-        async function checkAndNotifyTier2(data) {
-    // Filter for Route Updates that haven't had a "Manager Email" timestamp yet
-    const pendingNotifications = data.filter(t => 
-        t.issue.includes("Route Update") && 
-        t.owner === "Tier 2" && 
-        (!t.mgrEmailDate || t.mgrEmailDate === 'N/A')
-    );
-
-    if (pendingNotifications.length === 0) return;
-
-    const tokenResponse = await msalInstance.acquireTokenSilent({ scopes: ["Mail.Send"], account: msalAccount })
-        .catch(async () => await msalInstance.acquireTokenPopup({ scopes: ["Mail.Send"] }));
-
-    for (const t of pendingNotifications) {
-        const emailPayload = {
-            message: {
-                subject: `AUTO-NOTIFICATION: Tier 2 Route Update - ${t.company} [${t.order}]`,
-                body: { 
-                    contentType: "HTML", 
-                    content: `
-                        <div style="font-family: Arial; border-left: 4px solid #fbbf24; padding-left: 15px;">
-                            <h2 style="color: #fbbf24;">Tier 2 Assignment Notice</h2>
-                            <p>A new Route Update request has been automatically assigned to Tier 2.</p>
-                            <hr>
-                            <b>Customer:</b> ${t.company} (${t.accountNum})<br>
-                            <b>Order #:</b> ${t.order}<br>
-                            <b>Issue:</b> ${t.issue}<br>
-                            <b>Description:</b> ${t.description}<br>
-                        </div>` 
-                },
-                toRecipients: [
-                    { emailAddress: { address: "kersti.straub@wbmason.com" } },
-                    { emailAddress: { address: "brandon.neely@wbmason.com" } },
-                    { emailAddress: { address: "anslee.erickson@wbmason.com" } }
-                ]
-            }
-        };
-
-        try {
-            const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
-                method: "POST",
-                headers: { "Authorization": `Bearer ${tokenResponse.accessToken}`, "Content-Type": "application/json" },
-                body: JSON.stringify(emailPayload)
-            });
-
-            if (res.ok) {
-                // Update Dataverse so it doesn't email again on the next refresh
-                const dataToken = await getToken(ENV_DATA);
-                await fetch(`${DATA_API}/${ENTITY_SET}(${t.guid})`, {
-                    method: 'PATCH',
-                    headers: { 'Authorization': `Bearer ${dataToken}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ "cr714_managerappemailtimestamp": new Date().toISOString() })
-                });
-                console.log(`Tier 2 Notification sent for ${t.order}`);
-            }
-        } catch (e) {
-            console.error("Failed to send Tier 2 auto-notification", e);
-        }
-    }
-}
     </script>
 </body>
 </html>
