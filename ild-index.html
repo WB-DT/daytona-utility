@@ -465,8 +465,11 @@
         } catch(e) { console.error("Employee fetch err", e); showToast("Failed to load hierarchy", "error"); }
     };
 
-    const fetchPaginatedData = async (table, token, stateArray, label) => {
-        let url = `${DATAVERSE_URL}/${table}?$filter=statecode eq 0&$select=cr714_accountnum,cr714_company,cr714_accountname,cr714_acctname,cr714_rep,cr714_retentionrep,cr714_repassigned,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_qbnotes,cr714_accountmanagementnotes,cr714_prospectingnotes,modifiedon,cr714_actionemailsent,cr714_emailsenttimestamp`;
+    // Modified to accept dynamic Select fields so Dataverse doesn't throw 400 Bad Request
+    const fetchPaginatedData = async (table, selectStr, token, stateArray, label) => {
+        // Safe encoding for filter string
+        const filterStr = encodeURIComponent("statecode eq 0");
+        let url = `${DATAVERSE_URL}/${table}?$filter=${filterStr}&$select=${selectStr}`;
         
         while(url) {
             const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.maxpagesize=5000' }});
@@ -502,9 +505,15 @@
         rawAccounts = []; mergedAccounts = [];
         try {
             const token = await getToken();
-            updateLoader(30, "Fetching AM Datasets..."); await fetchPaginatedData('cr714_accountmanagementdatasets', token, rawAccounts, 'AM');
-            updateLoader(60, "Fetching Cadence Datasets..."); await fetchPaginatedData('cr714_cadencedatasets', token, rawAccounts, 'Cadence');
-            updateLoader(85, "Fetching Prospecting Datasets..."); await fetchPaginatedData('cr714_prospectingdatasets', token, rawAccounts, 'Prospecting');
+            
+            // Defining exact columns per table to avoid 400 errors
+            const amSelect = 'cr714_accountnum,cr714_company,cr714_rep,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_accountmanagementnotes,modifiedon,cr714_actionemailsent';
+            const cadSelect = 'cr714_accountnum,cr714_accountname,cr714_retentionrep,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_qbnotes,modifiedon,cr714_emailsenttimestamp';
+            const proSelect = 'cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_prospectingnotes,modifiedon,cr714_emailsenttimestamp';
+
+            updateLoader(30, "Fetching AM Datasets..."); await fetchPaginatedData('cr714_accountmanagementdatasets', amSelect, token, rawAccounts, 'AM');
+            updateLoader(60, "Fetching Cadence Datasets..."); await fetchPaginatedData('cr714_cadencedatasets', cadSelect, token, rawAccounts, 'Cadence');
+            updateLoader(85, "Fetching Prospecting Datasets..."); await fetchPaginatedData('cr714_prospectingdatasets', proSelect, token, rawAccounts, 'Prospecting');
             
             updateLoader(95, "Merging Records...");
             // Merge logic
@@ -1030,18 +1039,21 @@
     const pollLiveUpdates = async () => {
         try {
             const token = await getToken();
+            // Using precise select strings to prevent 400 Bad Request
             const queries = [
-                { t: 'cr714_accountmanagementdatasets', label: 'AM' },
-                { t: 'cr714_cadencedatasets', label: 'Cadence' },
-                { t: 'cr714_prospectingdatasets', label: 'Prospecting' }
+                { t: 'cr714_accountmanagementdatasets', label: 'AM', select: 'cr714_accountnum,cr714_company,cr714_rep,cr714_actionmessage,modifiedon' },
+                { t: 'cr714_cadencedatasets', label: 'Cadence', select: 'cr714_accountnum,cr714_accountname,cr714_retentionrep,cr714_actionmessage,modifiedon' },
+                { t: 'cr714_prospectingdatasets', label: 'Prospecting', select: 'cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_actionmessage,modifiedon' }
             ];
             
             let foundUpdates = false;
             let newLastPoll = new Date().toISOString();
 
             for(let q of queries) {
-                // Poll for records modified since last check, that have a message
-                const url = `${DATAVERSE_URL}/${q.t}?$select=cr714_accountnum,cr714_company,cr714_accountname,cr714_rep,cr714_repassigned,cr714_actionmessage,modifiedon&$filter=modifiedon gt ${lastPollTime} and cr714_actionmessage ne null`;
+                // Safely URL-encode the filter parameter
+                const filterStr = encodeURIComponent(`modifiedon gt ${lastPollTime} and cr714_actionmessage ne null`);
+                const url = `${DATAVERSE_URL}/${q.t}?$select=${q.select}&$filter=${filterStr}`;
+                
                 const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
                 if(!res.ok) continue;
                 const data = await res.json();
@@ -1051,7 +1063,7 @@
                     if((msg.includes('[HELP') || msg.includes('[CLOSED')) && !msg.includes('[RESOLVED]')) {
                         foundUpdates = true;
                         // Trigger Toast
-                        let comp = r.cr714_company || r.cr714_accountname;
+                        let comp = r.cr714_company || r.cr714_accountname || r.cr714_acctname;
                         showToast(`New Action Required: ${comp} (${q.label})`, 'warning');
                         
                         // Update memory state
