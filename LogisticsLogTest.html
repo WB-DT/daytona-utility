@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLeap v106.16 | Master Command</title>
+    <title>LogiLeap v106.17 | Master Command</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -1055,6 +1055,7 @@
         worker.onmessage = (e) => {
             const { type, data, stats, whsList, statusList, ownerList, mapPoints, fullData: workerFull, conflicts, autoResolvable, activeMinDate, activeMaxDate } = e.data;
             if(type === 'RENDER') { 
+                });
                 fullData = data; filteredData = data; globalReps = ownerList || [];
                 
                 populateCheckboxDropdown('dd-wh', whsList, 'cb-wh', 'btn-lbl-wh', 'All Warehouses');
@@ -2331,7 +2332,14 @@
 
         async function saveRecord(autoNext = false) {
             const guid = document.getElementById('sys-guid').innerText;
-            const payload = { "cr714_disposition": document.getElementById('m-status').value, "cr714_logisticsowner": document.getElementById('m-owner').value, "cr714_logisticsnotes": document.getElementById('m-notes').value };
+            const newOwner = document.getElementById('m-owner').value;
+            const payload = { "cr714_disposition": document.getElementById('m-status').value, "cr714_logisticsowner": newOwner, "cr714_logisticsnotes": document.getElementById('m-notes').value };
+            
+            // This is the correct place for the trigger
+            const currentRecord = fullData.find(x => x.guid === guid);
+            if (newOwner === "Furniture" && currentRecord.owner !== "Furniture") {
+                triggerFurnitureEmail(currentRecord);
+            }
             try {
                 const token = await getToken(ENV_DATA);
                 const res = await fetch(`${DATA_API}/${ENTITY_SET}(${guid})`, { method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'OData-MaxVersion': '4.0', 'OData-Version': '4.0' }, body: JSON.stringify(payload) });
@@ -2456,6 +2464,45 @@
                 const res = await fetch(`${DATA_API}/${ENTITY_SET}(${guid})`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } });
                 if(res.ok) { Toastify({text:"Record Deleted", style:{background:"#ef4444"}}).showToast(); closeDetail(); refreshData(true); }
             } catch(e){}
+        }
+
+        async function triggerFurnitureEmail(t) {
+            try {
+                const tokenResponse = await msalInstance.acquireTokenSilent({ scopes: ["Mail.Send"], account: msalAccount })
+                    .catch(async () => await msalInstance.acquireTokenPopup({ scopes: ["Mail.Send"] }));
+
+                const emailPayload = {
+                    message: {
+                        subject: `FURNITURE ASSIGNED: ${t.company} [${t.order}]`,
+                        body: { 
+                            contentType: "HTML", 
+                            content: `<div style="font-family: Arial; border-left: 4px solid #2dd4bf; padding: 15px;">
+                                <h2 style="color: #2dd4bf;">Furniture Assignment Notice</h2>
+                                <p>A record has been assigned to the Furniture Logistics Owner.</p>
+                                <hr>
+                                <b>Customer:</b> ${t.company}<br>
+                                <b>Order #:</b> ${t.order}<br>
+                                <b>Issue:</b> ${t.issue}<br>
+                                <b>Description:</b> ${t.description}</div>` 
+                        },
+                        toRecipients: [{ emailAddress: { address: "anslee.erickson@wbmason.com" } }]
+                    }
+                };
+
+                await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${tokenResponse.accessToken}`, "Content-Type": "application/json" },
+                    body: JSON.stringify(emailPayload)
+                });
+                
+                // Patch Dataverse so we know the notification for this specific assignment event is done
+                const dToken = await getToken(ENV_DATA);
+                await fetch(`${DATA_API}/${ENTITY_SET}(${t.guid})`, {
+                    method: 'PATCH',
+                    headers: { 'Authorization': `Bearer ${dToken}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ "cr714_managerappemailtimestamp": new Date().toISOString() })
+                });
+            } catch(e) { console.error("Furniture notification failed", e); }
         }
     </script>
 </body>
