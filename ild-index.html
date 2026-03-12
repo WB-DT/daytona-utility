@@ -173,7 +173,7 @@
 
     <!-- PERSISTENT TOP FILTER BAR (WIDE OPEN BY DEFAULT) -->
     <div class="horizontal-filters" id="horizontal-filters">
-        <div class="flex items-center gap-2 text-[10px] font-black uppercase text-muted mr-2 tracking-widest"><i class="fas fa-filter text-primary"></i> Team Filter</div>
+        <div class="flex items-center gap-2 text-[10px] font-black uppercase text-muted mr-2 tracking-widest"><i class="fas fa-filter text-primary"></i> Multi-Filter</div>
         <div id="filter-container" class="flex items-center gap-2"></div>
         <div class="h-6 w-[1px] bg-gray-300 mx-2"></div>
         <button onclick="applyFilters()" class="btn-primary text-[10px] py-2 px-4 uppercase font-black shadow-sm">Sync Filters</button>
@@ -486,6 +486,22 @@
         { id: 'cr714_employeename', label: 'Rep Name' }
     ];
 
+    // RESTORED LOADER UI HELPER
+    const updateLoader = (pct, text, count) => {
+        if(pct !== null) {
+            const pb = document.getElementById('loader-progress');
+            if(pb) pb.style.width = `${pct}%`;
+        }
+        if(text) {
+            const lt = document.getElementById('loader-text');
+            if(lt) lt.innerText = text;
+        }
+        if(count !== undefined) {
+            const lc = document.getElementById('loader-count');
+            if(lc) lc.innerText = `${count.toLocaleString()} records loaded`;
+        }
+    };
+
     // --- MS GRAPH SILENT EMAIL UTILITY ---
     const sendSilentEmail = async (repName, subject, bodyHTML) => {
         try {
@@ -494,7 +510,7 @@
                  showToast(`Email error: No address found for ${repName}`, "error");
                  return false;
             }
-            // Logic placeholder for constructive Graph API call
+            // Logic placeholder for Graph API integration
             console.log(`[SILENT EMAIL] To: ${emp.cr714_repname} | Subject: ${subject}`);
             showToast(`Silent email drafted for ${repName}.`, "success");
             return true;
@@ -529,7 +545,7 @@
         updateLoader(10, "Mining HR Records...");
         try {
             const token = await getToken();
-            const res = await fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s`, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.include-annotations="*"' }});
+            const res = await fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s`, { headers: { 'Authorization': `Bearer ${token}` }});
             if(res.ok) { 
                 const data = await res.json(); 
                 employeesData = data.value.map(e => ({
@@ -844,16 +860,17 @@
         chartEngagement = new Chart(document.getElementById('chart-engagement').getContext('2d'), { type: 'bar', data: { labels, datasets: [{ label: 'Emails', data: top5.map(r => r[1].emails), backgroundColor: '#3b82f6' }, { label: 'Touched', data: top5.map(r => r[1].touched), backgroundColor: '#10b981' }] }, options: { responsive: true, maintainAspectRatio: false } });
     };
 
-    // --- ACTIONS & PATCHING ---
+    // --- PATCHING & ACTIONS ---
     window.saveManagerNote = async () => {
         if(!activeAccountId) return;
-        const account = teamFilteredAccounts.find(a => a.cr714_id === activeAccountId);
+        const account = teamFilteredAccounts.find(a => a.cr714_id === id);
+        if(!account) return;
         const note = document.getElementById('fv-manager-note').value.trim();
         const markRes = document.getElementById('fv-mark-resolved').checked;
         const formAction = document.getElementById('fv-action-select').value;
         const silentNotify = document.getElementById('fv-notify-email').checked;
         
-        showToast("Synchronizing State...", "info");
+        showToast("Processing Enterprise Patch...", "info");
         try {
             const token = await getToken();
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -869,9 +886,29 @@
             if(note) account.managerNotes = note;
             if(formAction) account.action = formAction;
             if(markRes) { account.isHelp = false; account.isClose = false; }
-            showToast("Success.", "success");
+            showToast("Synchronization complete.", "success");
             renderAccountList(false); selectAccount(activeAccountId); 
-        } catch(e) { showToast("Patch Error", "error"); }
+        } catch(e) { showToast("API Patch Failure", "error"); }
+    };
+
+    window.quickResolve = async () => {
+        if(!activeAccountId) return;
+        const account = teamFilteredAccounts.find(a => a.cr714_id === activeAccountId);
+        showToast("Force Resolving...", "info");
+        try {
+            const token = await getToken();
+            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+            for(let src of account.sources) {
+                if(!String(src.message || '').includes('[RESOLVED]')) {
+                    let payload = { cr714_actionmessage: `[RESOLVED] ${src.message || ''}` };
+                    src.message = payload.cr714_actionmessage;
+                    await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
+                }
+            }
+            account.isHelp = false; account.isClose = false; 
+            showToast("State synchronized.", "success");
+            renderAccountList(false); selectAccount(activeAccountId);
+        } catch(e) { showToast("State sync error", "error"); }
     };
 
     window.pushIntroEmail = async () => {
@@ -921,6 +958,7 @@
         } catch(e) { showToast("Batch Error", "error"); }
     };
 
+    // --- DRILLDOWN ---
     window.openDrilldown = (repName, metric) => {
         const now = new Date();
         drilldownRepContext = repName;
@@ -937,7 +975,7 @@
         document.getElementById('dd-sync-btn').classList.remove('hidden');
         document.getElementById('dd-body').innerHTML = currentDrilldownData.map(a => `
             <tr class="hover:bg-gray-100 transition-colors">
-                <td class="font-black text-primary uppercase">${a.cr714_id}</td>
+                <td class="font-black text-primary uppercase font-mono">${a.cr714_id}</td>
                 <td class="font-bold">${escapeHTML(a.company)}</td>
                 <td class="text-muted uppercase text-[10px]">${escapeHTML(a.rep)}</td>
                 <td><span class="px-2 py-0.5 rounded border border-gray-200 bg-white text-[9px] font-black uppercase">${escapeHTML(a.action || 'Idle')}</span></td>
@@ -962,13 +1000,48 @@
         if(chk) { chk.checked = true; updateFilterState('cr714_employeename', chk); applyFilters(); document.getElementById('drilldown-modal').style.display = 'none'; switchTab('dashboard'); }
     };
 
+    // --- COMMON ---
     window.toggleBulkSelection = (id, e) => { if(bulkSelectedIds.has(id)) bulkSelectedIds.delete(id); else bulkSelectedIds.add(id); updateBulkUI(); };
     window.updateBulkUI = () => { document.getElementById('bulk-action-bar').classList.toggle('show', bulkSelectedIds.size > 0); document.getElementById('bulk-count').innerText = bulkSelectedIds.size; };
     window.clearBulkSelection = () => { bulkSelectedIds.clear(); updateBulkUI(); renderAccountList(false); };
     window.changeGridPage = (dir) => { let max = Math.ceil(listDisplayAccounts.length / gridPageSize) || 1; gridPage = Math.min(max, Math.max(1, gridPage + dir)); renderAccountList(false); };
-    window.exportUnfilteredDatabase = () => { if(mergedAccounts.length===0) return; let csv = ["Account ID,Company,Rep,Action,Last Update,Intro"]; mergedAccounts.forEach(a => csv.push(`"${a.cr714_id}","${escapeHTML(a.company)}","${escapeHTML(a.rep)}","${escapeHTML(a.action || '')}","${a.modifiedon}","${a.intro}"`)); let b = new Blob([csv.join('\n')], {type:'text/csv'}); let a = document.createElement('a'); a.href=URL.createObjectURL(b); a.download=`Full_Database.csv`; a.click(); };
+    window.exportUnfilteredDatabase = () => { if(mergedAccounts.length===0) return; let csv = ["Account ID,Company,Rep,Action,Last Update,Email Date"]; mergedAccounts.forEach(a => csv.push(`"${a.cr714_id}","${escapeHTML(a.company)}","${escapeHTML(a.rep)}","${escapeHTML(a.action || '')}","${a.modifiedon}","${a.emailDate}"`)); let b = new Blob([csv.join('\n')], {type:'text/csv'}); let a = document.createElement('a'); a.href=URL.createObjectURL(b); a.download=`Full_Database_${new Date().toISOString().split('T')[0]}.csv`; a.click(); };
     window.exportReportCSV = () => { let tab = activeReportTab; let id = tab === 'overview' ? 'scorecard-table' : (tab === 'actions' ? 'actions-table' : 'engagement-table'); let rows = document.querySelectorAll(`#${id} tr`); let csv = []; rows.forEach(r => { if(r.style.display==='none')return; let d = []; r.querySelectorAll('td, th').forEach(c => d.push(`"${c.innerText.trim().replace(/"/g, '""')}"`)); csv.push(d.join(',')); }); let b = new Blob([csv.join('\n')], {type:'text/csv'}); let a = document.createElement('a'); a.href=URL.createObjectURL(b); a.download=`${tab}_analytics.csv`; a.click(); };
     window.exportDrilldownCSV = () => { let csv = ["Account ID,Company,Rep,Action,Last Update"]; currentDrilldownData.forEach(a => csv.push(`"${a.cr714_id}","${escapeHTML(a.company)}","${escapeHTML(a.rep)}","${escapeHTML(a.action || '')}","${a.modifiedon}"`)); let b = new Blob([csv.join('\n')], {type:'text/csv'}); let a = document.createElement('a'); a.href=URL.createObjectURL(b); a.download=`drilldown.csv`; a.click(); };
+
+    // --- LIVE POLLING ---
+    const pollLiveUpdates = async () => {
+        try {
+            const token = await getToken();
+            const tables = [
+                { t: 'cr714_accountmanagementdatasets', select: 'cr714_accountnum,cr714_company,cr714_rep,cr714_actionmessage,modifiedon' },
+                { t: 'cr714_cadencedatasets', select: 'cr714_accountnum,cr714_accountname,cr714_retentionrep,cr714_actionmessage,modifiedon' },
+                { t: 'cr714_prospectingdatasets', select: 'cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_actionmessage,modifiedon' }
+            ];
+            let foundUpdates = false;
+            let newLastPoll = new Date().toISOString();
+            for(let query of tables) {
+                const filterStr = encodeURIComponent(`modifiedon gt ${lastPollTime} and cr714_actionmessage ne null`);
+                const url = `${DATAVERSE_URL}/${query.t}?$filter=${filterStr}&$select=${query.select}`;
+                const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+                if(!res.ok) continue;
+                const data = await res.json();
+                data.value.forEach(r => {
+                    let msg = String(r.cr714_actionmessage || '').toUpperCase();
+                    if((msg.includes('[HELP') || msg.includes('[CLOSED')) && !msg.includes('[RESOLVED]')) {
+                        foundUpdates = true;
+                        let comp = r.cr714_company || r.cr714_accountname || r.cr714_acctname;
+                        showToast(`New Action Required: ${comp}`, 'warning');
+                        let existing = mergedAccounts.find(a => a.cr714_id === r.cr714_accountnum);
+                        if(existing) { existing.message = r.cr714_actionmessage; existing.modifiedon = r.modifiedon; existing.isHelp = msg.includes('[HELP'); existing.isClose = msg.includes('[CLOSED'); }
+                    }
+                });
+            }
+            if(foundUpdates) { applyFilters(); }
+            lastPollTime = newLastPoll;
+            document.getElementById('sync-time-display').innerText = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        } catch(e) {}
+    };
 
     document.addEventListener("DOMContentLoaded", () => {
         msalInstance.handleRedirectPromise().then(resp => {
