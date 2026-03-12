@@ -490,7 +490,7 @@
         { id: 'cr714_managerassigned', label: 'Manager' },
         { id: 'cr714_srmanager', label: 'Sr Manager' },
         { id: 'cr714_supervisors', label: 'Supervisor' },
-        { id: 'cr714_department', label: 'Department' },
+        { id: 'cr714_departmentname', label: 'Department' },
         { id: 'cr714_employeename', label: 'Rep Name' }
     ];
 
@@ -539,7 +539,7 @@
         return "Just now";
     };
 
-    // --- MS GRAPH SILENT EMAIL UTILITY (FULLY IMPLEMENTED) ---
+    // --- MS GRAPH SILENT EMAIL UTILITY ---
     const getGraphToken = async () => {
         const account = msalInstance.getAllAccounts()[0];
         const req = { scopes: ["Mail.Send"], account };
@@ -579,7 +579,7 @@
         }
     };
 
-    // --- FETCHING (PRECISE SELECTS TO AVOID 400 ERRORS & MAXIMIZE SPEED) ---
+    // --- FETCHING ENGINE (PRECISE SCHEMAS) ---
     const getToken = async () => {
         const account = msalInstance.getAllAccounts()[0];
         const req = { scopes: ["https://org23279050.crm.dynamics.com//user_impersonation"], account };
@@ -614,13 +614,12 @@
         window.updateLoader(10, "Mining Dataverse HR Records...");
         try {
             const token = await getToken();
-            const empSelect = "cr714_employeename,cr714_status,cr714_department,cr714_titlename,cr714_repname,cr714_supervisors,cr714_srmanager,cr714_managerassigned,cr714_secondarymanager,statecode";
-            const res = await fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$select=${empSelect}`, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.include-annotations="*"' }});
+            const res = await fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s`, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.include-annotations="*"' }});
             if(res.ok) { 
                 const data = await res.json(); 
                 employeesData = data.value.map(e => ({
                     ...e,
-                    cr714_department: e['cr714_department@OData.Community.Display.V1.FormattedValue'] || e['cr714_department@OCommunity.Display.V1.FormattedValue'] ||  "Corporate"
+                    cr714_departmentname: e['cr714_department@OData.Community.Display.V1.FormattedValue'] || e['cr714_department@OCommunity.Display.V1.FormattedValue'] || e.cr714_departmentname || "Corporate"
                 })).filter(e => e.statecode === 0 || e.cr714_status === 1); 
             }
         } catch(e) {}
@@ -636,7 +635,7 @@
             data.value.forEach(r => {
                 let id = r.cr714_accountnum; if(!id) return;
                 
-                // Flexible assignment handling differing schemas
+                // Account name mapping corrected per table schemas
                 let company = r.cr714_accountname || r.cr714_company || r.cr714_acctname || "Unknown Company";
                 let rep = r.cr714_rep || r.cr714_retentionrep || r.cr714_repassigned || "Unassigned";
                 let rawNotes = r.cr714_accountmanagementnotes || r.cr714_qbnotes || r.cr714_prospectingnotes;
@@ -658,6 +657,7 @@
                 if(msgUpper.includes('[HELP REQUEST]')) existing.isHelp = true;
                 if(msgUpper.includes('[CLOSED]')) existing.isClose = true;
                 if(r.cr714_action && r.cr714_action !== existing.action) existing.action = r.cr714_action; 
+                // Not all tables may return intro depending on schema, so we only flag true if present
                 if(r.cr714_intro) existing.intro = true;
             });
             totalLoadedRecords += data.value.length;
@@ -674,8 +674,8 @@
         try {
             const token = await getToken();
             
-            // STRICTLY MATCHED SCHEMAS FROM THE PROVIDED APP TO PREVENT 400 BAD REQUESTS
-            const amSelect = "cr714_accountnum,cr714_accountname,cr714_rep,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_accountmanagementnotes,modifiedon,cr714_actionemailsent,cr714_accountmanagementdatasetid,cr714_intro";
+            // STRICTLY MATCHED SCHEMAS: Removed cr714_intro from AM dataset as it causes 400 error.
+            const amSelect = "cr714_accountnum,cr714_accountname,cr714_rep,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_accountmanagementnotes,modifiedon,cr714_actionemailsent,cr714_accountmanagementdatasetid";
             const cadSelect = "cr714_accountnum,cr714_company,cr714_retentionrep,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_qbnotes,modifiedon,cr714_emailsenttimestamp,cr714_cadencedatasetid,cr714_intro";
             const proSelect = "cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_prospectingnotes,modifiedon,cr714_emailsenttimestamp,cr714_prospectingdatasetid,cr714_intro";
 
@@ -797,8 +797,12 @@
 
     window.applyFilters = () => {
         let isAnyActive = Object.values(activeFilters).some(s => s.size > 0);
+        
+        // Critical Fix: Always start fresh from mergedAccounts
+        let workingSet = [...mergedAccounts]; 
+        
         if(!isAnyActive) {
-            teamFilteredAccounts = mergedAccounts;
+            teamFilteredAccounts = workingSet;
         } else {
             let validReps = new Set();
             employeesData.forEach(e => {
@@ -806,8 +810,9 @@
                 for(let col of FILTER_COLS) { if(activeFilters[col.id].size > 0 && !activeFilters[col.id].has(e[col.id])) { match = false; break; } }
                 if(match && e.cr714_employeename) validReps.add(e.cr714_employeename);
             });
-            teamFilteredAccounts = mergedAccounts.filter(a => validReps.has(a.rep));
+            teamFilteredAccounts = workingSet.filter(a => validReps.has(a.rep));
         }
+        
         document.getElementById('fs-accts').innerText = teamFilteredAccounts.length;
         const filterState = {}; for(let key in activeFilters) { filterState[key] = Array.from(activeFilters[key]); }
         localStorage.setItem('act_mgr_filters', JSON.stringify(filterState));
@@ -1023,7 +1028,7 @@
             for(let src of account.sources) {
                 let payload = {};
                 
-                // Append manager notes securely to the primary history text fields as requested
+                // Append manager notes securely to the primary history text fields
                 if (note) {
                     payload.cr714_managernotes = note;
                     const timeStamp = new Date().toLocaleString();
@@ -1163,7 +1168,7 @@
         try {
             const token = await getToken();
             const tables = [
-                { t: 'cr714_accountmanagementdatasets', select: 'cr714_accountnum,cr714_accountname,cr714_rep,cr714_actionmessage,modifiedon,cr714_intro' },
+                { t: 'cr714_accountmanagementdatasets', select: 'cr714_accountnum,cr714_accountname,cr714_rep,cr714_actionmessage,modifiedon' },
                 { t: 'cr714_cadencedatasets', select: 'cr714_accountnum,cr714_company,cr714_retentionrep,cr714_actionmessage,modifiedon,cr714_intro' },
                 { t: 'cr714_prospectingdatasets', select: 'cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_actionmessage,modifiedon,cr714_intro' }
             ];
@@ -1211,4 +1216,3 @@
 </script>
 </body>
 </html>
-
