@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. v1.24 - Complete Toolkit</title>
+    <title>A.C.T. v1.26 - Complete Toolkit</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -177,7 +177,21 @@
     const IMG_CHAIR = "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/WB%20Chair%20Mat.png";
     const IMG_CATALOG = "https://github.com/WB-DT/daytona-utility/blob/main/WB%20Logo%203.4.2026.png?raw=true"; 
 
-    // Explicitly define window object references to guarantee accessibility
+    // --- AUTHENTICATION INIT ---
+    const msalConfig = {
+        auth: {
+            clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee",
+            authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401",
+            redirectUri: "https://WB-DT.github.io/daytona-utility/"
+        },
+        cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false }
+    };
+    
+    // Bind MSAL objects explicitly to global window object
+    window.msalInstance = typeof msal !== 'undefined' ? new msal.PublicClientApplication(msalConfig) : null;
+    window.msalAccount = null;
+
+    // --- GLOBALS ---
     window.selectRecord = null;
     window.performSelect = null;
     
@@ -365,161 +379,156 @@
 
     // --- MSAL & APP SETUP ---
 
-    window.insertTemplate = function() {
-        const input = document.getElementById('qb-notes-input');
-        if(input && !input.disabled) {
-            input.value += (input.value ? '\n\n' : '') + QB_NOTES_TEMPLATE;
-            window.markDirty();
-            input.focus();
+    window.getToken = async function(scope, silentFallback = false) {
+        if(!window.msalInstance) throw new Error("MSAL not loaded");
+        const account = window.msalInstance.getAllAccounts()[0]; 
+        const request = { scopes: [scope], account: account };
+        try { 
+            return (await window.msalInstance.acquireTokenSilent(request)).accessToken; 
+        } catch (e) { 
+            if(silentFallback) {
+                console.warn(`Silent token fetch failed for ${scope}. Ignoring to prevent popup loop.`);
+                throw e; 
+            }
+            console.log(`Interactive token request needed for ${scope}`);
+            return (await window.msalInstance.acquireTokenPopup(request)).accessToken; 
         }
-    };
-
-    window.showUserProfileCard = function() {
-        if(!currentUserProfile && !msalAccount) return;
-        const name = currentUserProfile?.cr714_employeename || msalAccount?.name || 'Unknown User';
-        const email = msalAccount?.username || 'No Email';
-        const phone = window.currentUserGraphPhone || currentUserProfile?.cr714_extension || '--';
-        const mgr = currentUserProfile?.cr714_managerassigned || '--';
-        
-        let html = `
-            <div class="text-center w-full">
-                <i class="fas fa-user-circle text-6xl text-blue-500 mb-4 block"></i>
-                <h3 class="text-xl font-bold">${name}</h3>
-                <p class="text-sm text-muted mb-4">${email}</p>
-                <div class="grid grid-cols-2 gap-2 text-left bg-gray-50 p-3 rounded border w-full" style="background-color: var(--bg-input); border-color: var(--border-color);">
-                    <div><span class="text-[10px] font-bold uppercase text-muted block">Phone/Ext</span><span class="text-sm font-semibold">${phone}</span></div>
-                    <div><span class="text-[10px] font-bold uppercase text-muted block">Manager</span><span class="text-sm font-semibold">${mgr}</span></div>
-                </div>
-            </div>
-        `;
-        document.getElementById('profile-content').innerHTML = html;
-        document.getElementById('profile-modal').style.display = 'flex';
-        document.getElementById('profile-modal').classList.remove('hidden');
-    };
-
-    window.resolveUnsaved = async function(save) {
-        document.getElementById('unsaved-changes-modal').style.display = 'none';
-        if (save) { 
-            await window.handleCustomSave(null, true); 
-        }
-        window.hasUnsavedChanges = false;
-        if (window.targetSelectId) { 
-            window.performSelect(window.targetSelectId); 
-            window.targetSelectId = null; 
-        }
-    };
-
-    window.createCalendarEvent = function() {
-        if(!currentSelectedRecord) return;
-        const d = document.getElementById('follow-up-date').value;
-        const t = document.getElementById('follow-up-time').value;
-        if(!d) { window.showToast("Select a date first", "error"); return; }
-        
-        let startStr = d + (t ? `T${t}:00` : 'T09:00:00');
-        let dtStart = new Date(startStr);
-        let dtEnd = new Date(dtStart.getTime() + 30 * 60000); 
-        
-        const subject = encodeURIComponent(`Follow Up: ${currentSelectedRecord.cr714_company} (${currentRecordId})`);
-        const body = encodeURIComponent(`Account: ${currentRecordId}\nCompany: ${currentSelectedRecord.cr714_company}\nContact: ${document.getElementById('contact-name-most').value}\nPhone: ${document.getElementById('contact-phone-primary').value}`);
-        
-        // Deep link correctly requests Outlook Online event creation without background Graph scopes
-        const url = `https://outlook.office.com/calendar/0/deeplink/compose?subject=${subject}&startdt=${dtStart.toISOString()}&enddt=${dtEnd.toISOString()}&body=${body}`;
-        window.open(url, '_blank');
-    };
-
-    window.addToFailedQueue = function(operationName, retryFunc) {
-        failedSaves.push({ name: operationName, func: retryFunc, time: new Date().toLocaleTimeString() });
-        const badge = document.getElementById('bell-badge');
-        const bell = document.getElementById('notification-bell');
-        if(badge && bell) {
-            badge.innerText = failedSaves.length;
-            bell.classList.remove('hidden');
-        }
-        window.showToast(`${operationName} failed. Added to queue.`, "error");
-    };
-
-    window.showFailedSaves = function() {
-        const list = document.getElementById('failed-items-list');
-        list.innerHTML = failedSaves.length === 0 ? "<div class='text-muted text-center p-2 text-xs'>No failed operations.</div>" : 
-            failedSaves.map((f) => `<div class='border-b p-2 flex justify-between' style='border-color: var(--border-color);'><span>${f.name}</span><span class='text-[10px] text-muted'>${f.time}</span></div>`).join('');
-        document.getElementById('failed-saves-modal').style.display = 'flex';
-    };
-
-    window.retryFailedSaves = async function() {
-        document.getElementById('failed-saves-modal').style.display = 'none';
-        let queue = [...failedSaves];
-        failedSaves = [];
-        document.getElementById('bell-badge').innerText = '0';
-        document.getElementById('notification-bell').classList.add('hidden');
-        
-        for(let item of queue) {
-            window.showToast(`Retrying: ${item.name}`, "processing");
-            try { await item.func(); } catch(e) {}
-        }
-    };
-
-    window.loadOrFetchSignature = async function() {
-        let sig = localStorage.getItem('daytona_signature');
-        if (sig && sig.trim() !== '') return sig;
-        return null;
     }
 
-    window.saveSignature = function() {
-        const html = document.getElementById('signature-editor-visual').innerHTML;
-        localStorage.setItem('daytona_signature', html);
-        document.getElementById('signature-modal').style.display = 'none';
-        window.showToast("Signature Saved", "success");
-    };
+    window.startClock = function() { setInterval(() => { const el = document.getElementById('clock-display'); if(el) el.innerText = new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(); }, 1000); }
 
-    window.logout = function() {
-        msalInstance.logoutPopup().then(() => { window.location.reload(); });
-    };
-
-    window.confirmCloseAccount = async function() {
-        if(!currentSelectedRecord) return;
-        const reason = document.getElementById('close-reason-input').value;
-        if(!reason) { window.showToast("Reason required", "error"); return; }
+    window.initializeApp = function() {
+        document.getElementById('login-container').style.display = 'none';
+        document.getElementById('main-app-container').style.display = 'flex';
         
-        window.showToast("Closing Account...", "processing");
-        try {
-            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
-            const payload = { statecode: 1, statuscode: 2, cr714_actionmessage: `[CLOSED]: ${reason}` };
-            
-            // Loop through all sources to ensure they are all closed out gracefully without halting on 1 failure
-            for (let src of currentSelectedRecord.sources) {
-                try {
-                    await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, { 
-                        method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) 
-                    });
-                } catch(err) { console.warn(`Failed to close sub-table ${src.table}`, err); }
-            }
-            
-            window.saveToAuditLog("Close Account", reason);
-            allRecords = allRecords.filter(r => String(r.cr714_id) !== String(currentRecordId));
-            window.filterAndSortGallery();
-            document.getElementById('close-account-modal').style.display = 'none';
-            document.getElementById('close-reason-input').value = '';
-            
-            document.getElementById('acct-number-header').innerText = '--';
-            document.getElementById('acct-company').innerText = '--';
-            currentRecordId = null; currentSelectedRecord = null;
-            
-            window.showToast("Account Closed Successfully", "success");
-        } catch(e) { 
-            window.addToFailedQueue("Close Account", () => window.confirmCloseAccount()); 
+        const lastRunDate = localStorage.getItem('daytona_last_run_date');
+        const todayStr = new Date().toLocaleDateString('en-CA');
+        if (lastRunDate !== todayStr) { localStorage.setItem('daytona_sent_records', '[]'); localStorage.setItem('daytona_last_run_date', todayStr); }
+
+        window.fetchGraphProfile();
+        window.initSidebarTabs(); 
+        window.loadRecords();
+        window.loadFontSize();
+        window.checkEmailRateLimit();
+        window.startClock();
+        window.loadSavedTheme();
+        
+        document.addEventListener('keydown', (e) => { if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); document.getElementById('search-bar')?.focus(); }});
+    }
+
+    window.login = () => {
+        if(window.msalInstance) {
+            window.msalInstance.loginPopup({ scopes: ["User.Read", "Mail.Send"] })
+            .then(r => { window.msalAccount = r.account; currentUserRepName = r.account.name; window.initializeApp(); })
+            .catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
         }
     };
 
-    // --- TAB PRELOADS & KB DICTIONARY ---
-    const CORE_TABS = [
-        { id: 'summary', title: 'Summary', template: 'https://go.masonville.com/#/customer/' },
-        { id: 'sales', title: 'Sales', template: 'https://go.masonville.com/#/report/{id}/Four%20Month%20Sales' },
-        { id: 'csw', title: 'CSW', template: 'https://wbmasonco.crm.dynamics.com/main.aspx?appid=9e06e7d4-8616-eb11-a817-000d3a8b6b20&pagetype=search&searchText=' }
-    ];
+    window.fetchGraphProfile = async function() {
+        try {
+            const token = await window.getToken("User.Read", true);
+            const res = await fetch("https://graph.microsoft.com/v1.0/me?$select=displayName,userPrincipalName,businessPhones", { headers: { 'Authorization': `Bearer ${token}` } });
+            if(res.ok) {
+                const data = await res.json();
+                if(data.businessPhones && data.businessPhones.length > 0) window.currentUserGraphPhone = data.businessPhones[0]; 
+            }
+        } catch(e) { console.warn("Graph fetch error", e); }
+    }
 
-    const KB_ARTICLES = [
-        {n:"2026 Holiday Schedule",c:"Tools and Resources",d:"W.B. Mason Co. 2026 Holiday Schedule"},{n:"Account Close Request Checklist",c:"Account Maintenance",d:"Before sending an account closure request to Tier 2, you must complete the checklist in this article."},{n:"Account Name Changes & Migrating Pricing and Users",c:"Account Maintenance",d:"Explains how to change the name on an account and when a new account needs to be created. How to mirror pricing and migrate/move existing users to new accounts."},{n:"Adding a Credit Card to the User",c:"Account Maintenance",d:"How to add a personal credit card that only one user can view/use and how to fix the rejected by card issuer error."},{n:"Adding, Changing, and Deactivating a Delivery Address in AX",c:"Account Maintenance",d:"All about addresses! How to add a new address, deactivate or delete an old address, or change an existing address."},{n:"Address Formatting",c:"Account Maintenance",d:"Proper formatting for addresses."},{n:"Addressing an Incorrect or Duplicate PO",c:"Order Processing",d:"If a customer calls stating an invoice has an incorrect PO number or duplicate PO number."},{n:"ALB-NY Orders Sourced From PHI-PA, COL-MD, OR CEN-NJ",c:"Logistics",d:"Orders that drop to PHI-PA, COL-MD or CEN-NJ for ALB-NY Delivery Routes"},{n:"All About Contacts",c:"Account Maintenance",d:"Everything you need to know about the contacts window."},{n:"Alternative Item Status Check",c:"Quotes/Product Information",d:"The difference between a substitute and an alternative item, as well as the definitions of different item statuses."},{n:"Amazingly Low Prices for your NEW Customers!",c:"Tools and Resources",d:"Low prices for new customers!"},{n:"Applying Competitor Coupons",c:"Order Processing",d:"How to apply competitor coupons."},{n:"AR Cheat Sheet",c:"AR",d:"The do's and dont's of AR."},{n:"Archived Data",c:"Account Maintenance",d:"What the archived data indicator means in AX."},{n:"Assembly & Installation",c:"Furniture",d:"How to appropriately add assembly to a chair order."},{n:"Assigning an Account to Yourself",c:"Account Maintenance",d:"How to properly assign an account to yourself in AX."},{n:"Avaya Phone & Aux Codes",c:"Tools and Resources",d:"Avaya Phone and Aux codes definitions."},{n:"Avaya Touch Phone Home Screen Error",c:"Tools and Resources",d:"Enable Quick Touch Panel."},{n:"Awarded Bid Handoff Guide",c:"Quotes/Product Information",d:"Internal workflow for awarded bids."},{n:"Backorder Report and Call Scripts",c:"Order Processing",d:"How to run the backorder report and call scripts for when you reach out to the customer."},{n:"Basic Phone Procedures",c:"Tools and Resources",d:"Basic functions on the Avaya desk phone."},{n:"Beverage Rental Increases",c:"Beverage/Food Service",d:"Handling beverage rental increases."},{n:"Bids",c:"Quotes/Product Information",d:"Guide to next steps for bids."},{n:"Biggest Loser and Low Margin Emails",c:"Reports",d:"Handling biggest loser and low margin emails."},{n:"Billing Only Non-Adjusting VS. Billing Only",c:"AR",d:"Difference between BONA and BO orders."},{n:"Blanket Order (Bill Now Ship Later) Steps for Order Entry",c:"Order Processing",d:"How to create a blanket order."},{n:"Brother Sales Flyers and Agreement Forms",c:"Vendor Trainings and Promos",d:"Brother printers and pricing programs."},{n:"Bundles to Boxes - Updates to the Shipping & Packaging Category",c:"Pack & Ship / JanSan",d:"UOM of boxes updated."},{n:"C2159950 - NYC Department of Education",c:"Schools",d:"NY DOE account information."},{n:"Call Codes",c:"Tools and Resources",d:"Q-Gate Call Codes."},{n:"Call Script - Empathy",c:"Tools and Resources",d:"Empathy call scripts."},{n:"Caller Verification and Identifying Fraud",c:"Tools and Resources",d:"How to identify fraudulent calls and emails."},{n:"Calls Not Linking to Q Gate and CSW",c:"CSW",d:"Troubleshoot QGate linking issues."},{n:"Cancellation Codes",c:"Order Processing",d:"Breakdown of cancellation reason codes."},{n:"Cancelling an Order",c:"Order Processing",d:"How and when to cancel an order."},{n:"Carpet Cleaner Repair Service - Albany Only",c:"Tools and Resources",d:"Fixing carpet cleaners in Albany."},{n:"Checking Stock",c:"Quotes/Product Information",d:"Check stock levels in AX."},{n:"Clear Coupon Button",c:"Order Processing",d:"How the Clear Coupons button helps."},{n:"Coffee & Water Coolers - Service and Procedures",c:"Beverage/Food Service",d:"Service requests and procedures."},{n:"COI - Certificate of Insurance",c:"Forms & Documents",d:"Obtaining a COI."},{n:"Cold Call Flyer 2025",c:"Tools and Resources",d:"2025 Cold Call Flyer."},{n:"Common Tech Issues and How to Fix Them",c:"Tools and Resources",d:"Common tech issues and fixes."},{n:"Communication with Sales Representatives",c:"Tools and Resources",d:"When to reach out to sales reps."},{n:"Copy Machine Services",c:"Order Processing",d:"Copy machine service requests."},{n:"Corrugated Box Strength Explained",c:"Pack & Ship / JanSan",d:"Interpreting box strength."},{n:"Couriers",c:"Logistics",d:"Third-party couriers and tracking."},{n:"Creating a New Sister Account In AX",c:"Account Maintenance",d:"Creating sister accounts."},{n:"Creating Account Relationships",c:"Account Maintenance",d:"Link customer to multiple accounts."},{n:"Creating and Understanding Sales Orders in AX",c:"Order Processing",d:"Guide to order creation in AX."},{n:"Credit Auto-Apply Feature - Offsets for Credit and Re-orders Guide",c:"AR",d:"Using credit auto-apply."},{n:"Credit Card Authorization (Pay Bill, Open Credits & Price Changes)",c:"AR",d:"Credit card authorizations and holds."},{n:"Credit References",c:"AR",d:"Using WB Mason as credit reference."},{n:"Custom Center Stage or Home Page",c:"Account Maintenance",d:"Custom homepage requests."},{n:"Custom Print",c:"Custom Print",d:"Custom print forms and ETAs."},{n:"Customer Received More Than They Ordered",c:"Order Processing",d:"Handling over-shipments."},{n:"Customer Service Workspace (CSW) and Purchasing Cases",c:"CSW",d:"Navigating CSW and purchasing cases."},{n:"Customer Toolbox",c:"Account Maintenance",d:"Buttons in the customer toolbox."},{n:"Customers on Credit Hold",c:"AR",d:"Finding AR contact for credit holds."},{n:"Daily Driver Delivery Info",c:"Logistics",d:"Driver delivery information."},{n:"Daily Reports and What to Do With Them",c:"Reports",d:"Handling daily reports."},{n:"Daytona Beach Attendance Policy Guide",c:"Tools and Resources",d:"Attendance policy guide."},{n:"Daytona Branch Info",c:"Tools and Resources",d:"Branch information and contacts."},{n:"Daytona Phone Extensions, Fax Number, and Loops",c:"Tools and Resources",d:"Phone extensions and contacts."},{n:"Delivery Fees on Residential & Open Web Orders",c:"Logistics",d:"Delivery fees reference table."},{n:"Delivery Tracking & Carton Details - in the Sales Order Toolbox",c:"Logistics",d:"Delivery tracking in AX."},{n:"Direct Ship or SP Richards",c:"Logistics",d:"Identifying shipping origins."},{n:"Disaster Plans (Continued Service During an Emergency)",c:"Tools and Resources",d:"Handling disaster plans."},{n:"Donation Requests",c:"Tools and Resources",d:"Sending donation requests."},{n:"Driver's Handheld Scanners & Hard Stop Messages",c:"Logistics",d:"Scanners and hard stops."},{n:"Emailing a Warehouse",c:"Logistics",d:"Warehouse email templates."},{n:"Employee Dress Code",c:"Tools and Resources",d:"Employee dress code explained."},{n:"Entering a Return (Item Already Picked Up or Refused)",c:"Order Processing",d:"Processing credits for picked-up items."},{n:"Expired K-Cups",c:"Beverage/Food Service",d:"Handling expired K-cups."},{n:"Finding Credits",c:"Order Processing",d:"Finding returns and credits."},{n:"Food Service",c:"Beverage/Food Service",d:"Food service products and catalogs."},{n:"Forms, Email Templates, and Rebate Center!",c:"Forms & Documents",d:"Various forms and templates."},{n:"Furniture Procedure",c:"Furniture",d:"Furniture forms and direct orders."},{n:"Futureship",c:"Order Processing",d:"Setting future ship dates."},{n:"Getting to Know the Customer Service Workstation",c:"Order Processing",d:"Crash course in AX CSW."},{n:"Glossary of Terms",c:"Tools and Resources",d:"Commonly used terms and definitions."},{n:"GUI & MVGO Process",c:"Tools and Resources",d:"Linking GUI notes to MVGO."},{n:"HON EDI Order Alerts",c:"Furniture",d:"Addressing Hon EDI alerts."},{n:"How to Add a Credit Card to the Main Table Form",c:"Account Maintenance",d:"Adding CCs to main table form."},{n:"How to Add a Printer and Scan to Network Folder",c:"Tools and Resources",d:"Printer and scanner setup."},{n:"How To Assign A Cost Center To A User In AX",c:"Account Maintenance",d:"Assigning cost centers."},{n:"How To Assign A Delivery Address To A User",c:"Account Maintenance",d:"Assigning delivery addresses."},{n:"How to Disable Payment Reminders",c:"AR",d:"Disabling payment reminders."},{n:"How To Email An Invoice From The Collection Workstation",c:"AR",d:"Emailing invoices from CSW."},{n:"How to Find a Bin Location and Inventory Corrections",c:"Logistics",d:"Finding item bin locations."},{n:"How to Find the Customer Service Workstation",c:"Order Processing",d:"Locating AX in Microsoft Dynamics."},{n:"How to Link an Email to CSW",c:"CSW",d:"Linking emails to CSW."},{n:"How to Process a Return & New Order (Example)",c:"Order Processing",d:"Example of short and reorder."},{n:"How to Process a Return & New Order (Process)",c:"Order Processing",d:"Processing returns and new orders."},{n:"How to Process a Return in AX",c:"Order Processing",d:"Step-by-step return guide."},{n:"How to Process Miss-Sorts",c:"Order Processing",d:"Handling miss-sorted items."},{n:"How to Safeguard Your Computer Files",c:"Tools and Resources",d:"Saving files securely."},{n:"How to Save a Quote PDF In AX",c:"Quotes/Product Information",d:"Saving quotes as PDFs."},{n:"How to Use the Non-Buy List Filters in Excel",c:"Reports",d:"Navigating non-buy lists."},{n:"HP Printers and Toners",c:"Vendor Trainings and Promos",d:"HP printers and toners reference."},{n:"Hub and Spoke Warehouse Map",c:"Logistics",d:"Reading the warehouse map."},{n:"Inclusion & Exclusion Lists",c:"Account Maintenance",d:"Restricting and unrestricting accounts."},{n:"Incorrect Freight Charges",c:"Logistics",d:"Handling incorrect freight charges."},{n:"Inventory Button in the Sales Line Toolbox and How to Track ADOT",c:"Logistics",d:"Tracking ADOT information."},{n:"Invoice Account - Do Not Touch!",c:"Account Maintenance",d:"Invoice account settings."},{n:"Invoice Received Before Item(s)",c:"Order Processing",d:"Invoices received before items."},{n:"Item Details Explained",c:"Quotes/Product Information",d:"Explaining item details."},{n:"Item Substitutions & What to Tell Your Customer",c:"Quotes/Product Information",d:"Explaining item substitutions."},{n:"Item Visibility & Website Issues",c:"Account Maintenance",d:"Troubleshooting website issues."},{n:"Kimberly Clark Resources",c:"Quotes/Product Information",d:"KCP products and resources."},{n:"Knowing Your Competitor",c:"Quotes/Product Information",d:"Hidden costs of competitors."},{n:"Line Details - In the Line Toolbox",c:"Quotes/Product Information",d:"Options in line details."},{n:"Live Chat",c:"Tools and Resources",d:"Using the Live Chat feature."},{n:"Loading Orders on Hold - Key Accounts",c:"Order Processing",d:"Loading hold orders for key accounts."},{n:"Login Information Sheet",c:"Tools and Resources",d:"Tracking logins and passwords."},{n:"Logistics Process",c:"Logistics",d:"Handling order requests and issues."},{n:"Logistics Text-a-Driver Form",c:"Logistics",d:"Completing the Text-A-Driver form."},{n:"Masonville Go Icons, Account Risks, PPL Updates, and Bug Fixes",c:"Tools and Resources",d:"MVGO icons and bug fixes."},{n:"MDM Opps",c:"Tools and Resources",d:"MDM do's and don'ts."},{n:"Minority Women Owned Business Enterprises (MWBE) Accounts",c:"Account Maintenance",d:"MWBE accounts information."},{n:"Mixed Cartons, Container Count & Types, and Carton ID Report",c:"Logistics",d:"Container count and PO numbers."},{n:"Net 30 Terms",c:"Account Maintenance",d:"Setting up Net 30 terms."},{n:"New Account - Forwarding a Lead",c:"Account Maintenance",d:"Forwarding new account leads."},{n:"New Account Requests or Accounts in Planning Status",c:"Account Maintenance",d:"New account enrollment."},{n:"Objections and Rebuttals",c:"Tools and Resources",d:"Handling customer objections."},{n:"On Hold Report Codes",c:"Reports",d:"OnHold codes and descriptions."},{n:"Open Web Pricing",c:"Account Maintenance",d:"Fixing open web pricing issues."},{n:"Order Team - Louise Brown Accounts",c:"Tools and Resources",d:"Assisting Order Team accounts."},{n:"Orders Not Invoicing (ONI) Reports",c:"Reports",d:"Running and handling ONI reports."},{n:"Over Shipment Web Return Hold",c:"Order Processing",d:"Handling over-shipments and web returns."},{n:"Pack and Ship Collection",c:"Pack & Ship / JanSan",d:"Pack and ship resources."},{n:"Paper & Ice Melt Truckload Orders",c:"CSW",d:"Truckload orders process."},{n:"Paper 101",c:"Quotes/Product Information",d:"Information about paper properties."},{n:"Penny Dispenser Program",c:"Pack & Ship / JanSan",d:"Georgia Pacific Penny Program."},{n:"PO Qty ETA",c:"CSW",d:"Understanding PO delivery dates."},{n:"PPL Classifications",c:"Quotes/Product Information",d:"PPL classifications breakdown."},{n:"Pricing Contract",c:"Quotes/Product Information",d:"Managing PPLs in AX."},{n:"Printed Forms for Sales Orders Instructions",c:"Order Processing",d:"Accessing printed forms."},{n:"Proper Email Etiquette",c:"Tools and Resources",d:"Email etiquette tips."},{n:"Proper Voicemail Etiquette",c:"Tools and Resources",d:"Voicemail etiquette tips."},{n:"Punchout Accounts Overview",c:"Account Maintenance",d:"Punchout accounts overview."},{n:"Punchout Order Details Button in AX",c:"Order Processing",d:"Punchout order details."},{n:"Purchasing - Sub Exclusions",c:"CSW",d:"Requesting sub exclusions."},{n:"Quality Assurance",c:"Tools and Resources",d:"QA process and coaching."},{n:"Quote Definitions",c:"Quotes/Product Information",d:"Common quote terms."},{n:"Quote Follow Up Email Notification",c:"Quotes/Product Information",d:"Automated follow-up process for quotes."},{n:"Quotes - Templates",c:"Quotes/Product Information",d:"Quote comparison templates."},{n:"Quotes Help & FAQs",c:"Quotes/Product Information",d:"Submitting quotes and FAQs."},{n:"Reaching Out to an Outside Representative",c:"Tools and Resources",d:"Contacting outside reps."},{n:"Rebates",c:"Tools and Resources",d:"Handling rebate inquiries."},{n:"Release Orders on CC Hold OE",c:"Order Processing",d:"Handling CC Hold OE orders."},{n:"Release Review Orders",c:"Schools",d:"Handling school release review orders."},{n:"Rep Email Coverage Procedure",c:"Tools and Resources",d:"Email coverage procedures."},{n:"Replace Invalid Items Button",c:"Order Processing",d:"Using the Replace Invalid Items button."},{n:"Replacement Keys for Hon Desks and Drawers",c:"Furniture",d:"Requesting Hon replacement keys."},{n:"Resolving an Auto-Resolved Purchasing Case",c:"CSW",d:"Resolving purchasing cases."},{n:"Return Codes",c:"Order Processing",d:"Return codes and descriptions."},{n:"Return Policy",c:"Order Processing",d:"Return policy details."},{n:"Safety Data Sheets and Where To Find Them",c:"Quotes/Product Information",d:"Locating Safety Data Sheets."},{n:"Sales Flyers and Sell Sheets",c:"Vendor Trainings and Promos",d:"Sales flyers and promos."},{n:"Sales Order Header Information",c:"Order Processing",d:"Sales Order Header info breakdown."},{n:"Sales Order Toolbox",c:"Order Processing",d:"Sales Order Toolbox buttons."},{n:"Sales Tax Nexus",c:"Tools and Resources",d:"Sales tax nexus explained."},{n:"Saving Files in OneDrive",c:"Tools and Resources",d:"Saving files to OneDrive."},{n:"School Procedures",c:"Schools",d:"School Team resources and procedures."},{n:"Searching the KB and Saving Your Favorites",c:"Tools and Resources",d:"Bookmarking and searching the KB."},{n:"Short Ships and Proof of Delivery",c:"Logistics",d:"Tracking missing items."},{n:"SP Richards Order Tracking",c:"Tools and Resources",d:"Tracking SP Richards orders."},{n:"Stamps, Embossers, Name Plates, & Name Badges",c:"Custom Print",d:"Creating custom stamps and nameplates."},{n:"Starco(Diamond) Products",c:"Quotes/Product Information",d:"Starco Chemical product lineup."},{n:"State of NJ Voucher Accounts",c:"Schools",d:"Processing NJ Voucher orders."},{n:"Steps to Resolve Q-Gate Error from Change that Microsoft Made to Log In Process",c:"Tools and Resources",d:"Resolving Q-Gate login errors."},{n:"Subscription Orders",c:"Order Processing",d:"Subscription order details."},{n:"Summary Statements",c:"Account Maintenance",d:"Enabling summary billing."},{n:"Tax Exemption",c:"AR",d:"Handling tax exempt accounts."},{n:"Tech Team Help Form",c:"Quotes/Product Information",d:"Submitting tech help forms."},{n:"Tier 2 - Form & Function",c:"Account Maintenance",d:"Tier 2 responsibilities and guidelines."},{n:"Tracking an Order",c:"Logistics",d:"Tracking orders in AX."},{n:"Training Presentations and Vendor Presentations Collection",c:"Vendor Trainings and Promos",d:"Training and vendor presentations."},{n:"Understanding Substitutes in Creating a New Order",c:"Quotes/Product Information",d:"Item substitutions explained."},{n:"Unit Conversion in Item Quick View",c:"Quotes/Product Information",d:"UOM conversion in Item Quick View."},{n:"Units of Measure",c:"Order Processing",d:"UOM acronyms."},{n:"Unknown Returns (Order On Hold - Misc Credit Return)",c:"Order Processing",d:"Addressing unidentified item returns."},{n:"Up Sell Cross Sell (Increase Order Size and Profit)",c:"Order Processing",d:"Upselling and cross-selling strategies."},{n:"Updating an Invoice",c:"Account Maintenance",d:"Making changes to existing invoices."},{n:"Usage Reports and Itemized Lists",c:"Reports",d:"Acquiring usage reports."},{n:"Using the Categories Column in the Knowledge Base.aspx",c:"Tools and Resources",d:"Using KB categories."},{n:"W.B Mason's 7 Things",c:"Tools and Resources",d:"7 Things PDF."},{n:"W.B. Mason Knowledge Base (Daytona)",c:"Tools and Resources",d:"Knowledge Base main."},{n:"Warm Transfers and Conference Calls",c:"Tools and Resources",d:"Warm transfers and conference calls."},{n:"WB Email Signature",c:"Tools and Resources",d:"WB email signature format."},{n:"WhattaBargain Locations & Events",c:"Furniture",d:"WhattaBargain info."},{n:"Zip Exclusion (Items Excluded by Zip Code)",c:"Quotes/Product Information",d:"Zip Exclusions explained."}
-    ];
+    // --- SIDEBAR TABS LOGIC ---
+    window.initSidebarTabs = function() {
+        const area = document.getElementById('sidebar-content-area');
+        const strip = document.getElementById('sidebar-tab-strip');
+        area.innerHTML = ''; strip.innerHTML = '';
+        CORE_TABS.forEach((t, idx) => {
+            const btn = document.createElement('div');
+            btn.className = `sidebar-tab ${idx===0 ? 'active' : ''}`;
+            btn.id = `tab-btn-${t.id}`;
+            btn.onclick = () => window.switchSidebarTab(t.id);
+            btn.innerHTML = `<span>${t.title}</span>`;
+            strip.appendChild(btn);
+
+            const frame = document.createElement('div');
+            frame.id = `sidebar-frame-${t.id}`;
+            frame.className = `sidebar-iframe-container ${idx===0 ? 'active' : ''}`;
+            frame.innerHTML = `<iframe src="${t.staticUrl || 'about:blank'}"></iframe>`;
+            area.appendChild(frame);
+        });
+        window.currentActiveTabId = CORE_TABS[0].id;
+    }
+
+    window.switchSidebarTab = function(id) {
+        window.currentActiveTabId = id;
+        document.querySelectorAll('.sidebar-tab').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.sidebar-iframe-container').forEach(f => f.classList.remove('active'));
+        document.getElementById(`tab-btn-${id}`).classList.add('active');
+        document.getElementById(`sidebar-frame-${id}`).classList.add('active');
+    }
+
+    window.openSidebarTab = function(id, title, targetUrl) {
+        document.getElementById('unified-sidebar').classList.add('active');
+        document.body.classList.add('split-screen');
+        
+        let iframe = document.querySelector(`#sidebar-frame-${id} iframe`);
+        if (!iframe) {
+            const strip = document.getElementById('sidebar-tab-strip');
+            const area = document.getElementById('sidebar-content-area');
+            const btn = document.createElement('div');
+            btn.className = `sidebar-tab`;
+            btn.id = `tab-btn-${id}`;
+            btn.onclick = () => window.switchSidebarTab(id);
+            btn.innerHTML = `<span>${title}</span>`;
+            strip.appendChild(btn);
+            const frame = document.createElement('div');
+            frame.id = `sidebar-frame-${id}`;
+            frame.className = `sidebar-iframe-container`;
+            frame.innerHTML = `<iframe src="${targetUrl}"></iframe>`;
+            area.appendChild(frame);
+        } else if (targetUrl) {
+            iframe.src = targetUrl;
+        }
+        window.switchSidebarTab(id);
+    }
+
+    window.handleContextButton = function(type) {
+        let id = currentRecordId;
+        if(!id) { const input = prompt("Enter Account Number to view:"); if(!input) return; id = input.trim(); }
+        if(type === 'summary') window.openSidebarTab('summary', 'Summary', `https://go.masonville.com/#/customer/${encodeURIComponent(id)}`);
+        if(type === 'sales') window.openSidebarTab('sales', 'Sales', `https://go.masonville.com/#/report/${encodeURIComponent(id)}/Four%20Month%20Sales`);
+        if(type === 'csw') { const appId = "9e06e7d4-8616-eb11-a817-000d3a8b6b20"; window.openSidebarTab('csw', 'CSW', `https://wbmasonco.crm.dynamics.com/main.aspx?appid=${appId}&pagetype=search&searchText=${encodeURIComponent(id)}`); }
+    }
+
+    // --- FETCH DATA ---
+    window.fetchLogisticsForAccount = async function(accountId) {
+        try {
+            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation", true);
+            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="*"' };
+            let res = await fetch(`${DATAVERSE_URL}/cr714_logisticslog_2s?$filter=cr714_accountnumber eq '${accountId}'`, { headers });
+            if(res.ok) { const data = await res.json(); return data.value || []; }
+        } catch(e) { console.error("Logistics error", e); }
+        return [];
+    }
+
+    window.fetchD365Account = async function(accountId) {
+        try {
+            let token;
+            try {
+                token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+            } catch(tokenErr) {
+                console.warn("D365 wbmasonco token blocked by admin consent, skipping D365 overlay.", tokenErr);
+                return null;
+            }
+            if(!token) return null;
+            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
+            const cleanId = String(accountId).trim();
+            const res = await fetch(`${PRIMARY_CRM_URL}/accounts?$filter=accountnumber eq '${cleanId}'&$expand=primarycontactid($select=fullname,telephone1,emailaddress1)`, { headers });
+            if(res.ok) {
+                const data = await res.json();
+                if(data.value && data.value.length > 0) return data.value[0];
+            }
+        } catch(e) { console.warn("D365 lookup error", e); }
+        return null;
+    }
 
     window.loadRecords = async function() {
         const list = document.getElementById('record-gallery-list');
@@ -550,6 +559,7 @@
             if(cadenceData.value) cadenceData.value.forEach(r => allRaw.push({ ...r, _dsType: 'Cadence', _priority: 2 }));
             if(prosData.value) prosData.value.forEach(r => allRaw.push({ ...r, _dsType: 'Prospecting', _priority: 3 }));
 
+            // Sort so we build recordsMap prioritizing AM -> Cadence -> Prospecting 
             allRaw.sort((a,b) => a._priority - b._priority);
 
             let recordsMap = new Map();
@@ -567,7 +577,7 @@
                 if(recordsMap.has(id)) {
                     let existing = recordsMap.get(id);
                     existing.sources.push(sourceObj);
-                    duplicateRecordIds.add(String(id)); 
+                    duplicateRecordIds.add(String(id)); // track duplicates intentionally for visual flagging
                 } else {
                     let mapped = {
                         cr714_id: id,
@@ -579,7 +589,7 @@
                         cr714_primaryphone: window.formatPhone(r.cr714_phone || r.cr714_primaryphone),
                         cr714_emailmost: r.cr714_emailmost || r.cr714_emaillatest || r.cr714_email_latest,
                         cr714_lastorderdate: r.cr714_lastorderdate || '--',
-                        cr714_qbnotes: sourceObj.rawNotes, 
+                        cr714_qbnotes: sourceObj.rawNotes, // Main raw block maintained for compatibility
                         cr714_managernotes: r.cr714_managernotes,
                         cr714_importantaccountinformation: r.cr714_importantaccountinformation || r.cr714_importantaccountinfo,
                         cr714_billingaddress: r.cr714_address || r.cr714_billingaddress,
@@ -633,7 +643,7 @@
                     iso = dt.toISOString();
                 }
             } catch(e) {
-                iso = t ? `${d}T${t}:00Z` : `${d}T00:00:00Z`; 
+                iso = t ? `${d}T${t}:00Z` : `${d}T00:00:00Z`; // Fallback
             }
         }
 
@@ -754,7 +764,7 @@
         const contactInput = document.getElementById('contact-name-most');
         const contactName = contactInput ? contactInput.value : "Customer"; 
         const repName = currentUserRepName || "W.B. Mason Rep"; 
-        const repEmail = msalAccount ? msalAccount.username : "";
+        const repEmail = window.msalAccount ? window.msalAccount.username : "";
         
         let ext = "XXXX";
         if (window.currentUserGraphPhone) { ext = window.currentUserGraphPhone.slice(-4); } 
@@ -942,7 +952,6 @@
             if(document.getElementById('filter-sent-only').checked && !isSent) return false; 
             if(document.getElementById('filter-hidesent').checked && isSent) return false; 
             if(document.getElementById('filter-florida').checked) { const fAddr = r.cr714_billingaddress || ''; if(!/\b(fl|florida)\b/i.test(fAddr)) return false; }
-            if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) { if (!r.cr714_managernotes || r.cr714_managernotes.trim() === '') return false; }
             
             if(document.getElementById('filter-has-intro').checked) { 
                 let hasIntro = false;
@@ -981,13 +990,6 @@
         const list = document.getElementById('record-gallery-list'); list.innerHTML = '';
         const statTotal = document.getElementById('stat-total'); if(statTotal) statTotal.textContent = allRecords.length;
         const viewStat = document.getElementById('stat-filtered'); if(viewStat) viewStat.textContent = filtered.length;
-        
-        let mgrCount = allRecords.filter(r => r.cr714_managernotes && r.cr714_managernotes.trim() !== '').length;
-        let bellContainer = document.getElementById('mgr-notes-bell-container');
-        if (bellContainer) {
-            if (mgrCount > 0) { bellContainer.classList.remove('hidden'); document.getElementById('mgr-notes-count').innerText = mgrCount; } 
-            else { bellContainer.classList.add('hidden'); }
-        }
 
         if(filtered.length === 0) { list.innerHTML = '<div class="text-center p-4 text-xs italic">No records found.</div>'; return; }
         
@@ -1271,7 +1273,7 @@
         window.handleCustomSave(`[Help Request]: ${v}`, true); 
         
         const mgrName = currentUserProfile?.cr714_managerassigned;
-        if (mgrName && msalAccount) {
+        if (mgrName && window.msalAccount) {
             const mgrEmail = mgrName.trim().replace(/\s+/g, '.').toLowerCase() + '@wbmason.com';
             try {
                 // Ensure Mail.Send token is acquired ONLY when this specific action is triggered
@@ -1378,7 +1380,7 @@
                 const payload = {
                     cr714_topic: `ACT Bug: ${issue.substring(0, 30)}`,
                     cr714_description: `User: ${currentUserRepName}\nIssue: ${issue}\nTime: ${new Date().toISOString()}\nBrowser: ${navigator.userAgent}`,
-                    cr714_requesteremail: msalAccount ? msalAccount.username : currentUserRepName,
+                    cr714_requesteremail: window.msalAccount ? window.msalAccount.username : currentUserRepName,
                     cr714_bucket: "App Bug",
                     statuscode: 1
                 };
@@ -1435,65 +1437,35 @@
         }
     }
 
-    // --- GLOBAL EVENT LISTENERS ---
-    document.addEventListener('click', (e) => {
-        const editor = document.getElementById('email-modal-body');
-        if (e.target.tagName === 'IMG' && editor && editor.contains(e.target)) {
-            document.querySelectorAll('.img-resizable').forEach(w => {
-                const img = w.querySelector('img');
-                w.replaceWith(img);
-            });
-            const wrapper = document.createElement('div');
-            wrapper.className = 'img-resizable active';
-            wrapper.style.display = 'inline-block';
-            wrapper.style.position = 'relative';
-            wrapper.style.border = '2px dashed #0078d4';
-            e.target.replaceWith(wrapper);
-            wrapper.appendChild(e.target);
-            
-            let handle = document.createElement('div');
-            handle.className = 'resize-handle';
-            handle.style.position = 'absolute';
-            handle.style.bottom = '-5px';
-            handle.style.right = '-5px';
-            handle.style.width = '10px';
-            handle.style.height = '10px';
-            handle.style.backgroundColor = '#0078d4';
-            handle.style.borderRadius = '50%';
-            handle.style.cursor = 'nwse-resize';
-            handle.style.zIndex = '10';
-            wrapper.appendChild(handle);
-        } else if (!e.target.closest('.img-resizable') && editor && !e.target.closest('#email-modal-body')) {
-            document.querySelectorAll('.img-resizable').forEach(w => {
-                const img = w.querySelector('img');
-                w.replaceWith(img);
-            });
-        }
-    });
-
-    document.addEventListener('mousedown', (e) => {
-        if (e.target.classList.contains('resize-handle')) {
-            const wrapper = e.target.parentElement;
-            const img = wrapper.querySelector('img');
-            const startX = e.clientX; 
-            const startWidth = img.offsetWidth;
-            const onMouseMove = (moveEvent) => {
-                img.style.width = (startWidth + (moveEvent.clientX - startX)) + 'px';
-            };
-            const onMouseUp = () => {
-                document.removeEventListener('mousemove', onMouseMove);
-                document.removeEventListener('mouseup', onMouseUp);
-            };
-            document.addEventListener('mousemove', onMouseMove);
-            document.addEventListener('mouseup', onMouseUp);
-            e.preventDefault(); 
-        }
-    });
-
+    // --- GLOBAL INIT ---
     document.addEventListener('DOMContentLoaded', () => {
         window.loadSavedTheme();
-        document.addEventListener('click', function(event) { if (!event.target.matches('#theme-toggle-btn') && !event.target.closest('#theme-toggle-btn')) { const menu = document.getElementById('theme-menu'); if (menu && menu.classList.contains('show')) { menu.classList.remove('show'); } } if (!event.target.closest('.theme-dropdown')) { const settings = document.getElementById('gallery-settings-menu'); if(settings && settings.style.display === 'block') settings.style.display = 'none'; } });
-        msalInstance.handleRedirectPromise().then(resp => { if (resp && resp.account) { msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp(); } else { const accounts = msalInstance.getAllAccounts(); if(accounts.length > 0) { msalAccount = accounts[0]; currentUserRepName = msalAccount.name; window.initializeApp(); } else { document.getElementById('global-loader').style.display='none'; document.getElementById('login-container').classList.remove('hidden'); document.getElementById('login-container').style.display='flex'; } } }).catch(e => { console.error(e); document.getElementById('global-loader').style.display='none'; document.getElementById('login-container').style.display='flex'; });
+        
+        if (window.msalInstance) {
+            window.msalInstance.handleRedirectPromise().then(resp => { 
+                if (resp && resp.account) { 
+                    window.msalAccount = resp.account; 
+                    currentUserRepName = resp.account.name; 
+                    window.initializeApp(); 
+                } else { 
+                    const accounts = window.msalInstance.getAllAccounts(); 
+                    if(accounts.length > 0) { 
+                        window.msalAccount = accounts[0]; 
+                        currentUserRepName = accounts[0].name; 
+                        window.initializeApp(); 
+                    } else { 
+                        document.getElementById('global-loader').style.display='none'; 
+                        document.getElementById('login-container').classList.remove('hidden'); 
+                        document.getElementById('login-container').style.display='flex'; 
+                    } 
+                } 
+            }).catch(e => { 
+                console.error(e); 
+                document.getElementById('global-loader').style.display='none'; 
+                document.getElementById('login-container').style.display='flex'; 
+            });
+        }
+        
         const resizer = document.getElementById('history-resizer'); const grid = document.querySelector('.app-grid'); const historyCol = document.getElementById('history-column');
         if (resizer && grid && historyCol) {
             let isResizing = false; let startX, startWidth; const savedWidth = localStorage.getItem('daytona_history_width'); if (savedWidth) grid.style.setProperty('--history-width', savedWidth);
@@ -1803,6 +1775,7 @@
                     <div class="card-header p-2 border-b flex-shrink-0 flex-col items-start gap-1">
                         <div class="flex justify-between w-full items-center">
                             <span class="text-xs font-bold text-muted uppercase">History Feed</span>
+                            <label class="cursor-pointer flex items-center gap-1 select-none text-[9px] font-bold text-muted"><input type="checkbox" id="show-prev-note" checked onchange="window.updateNotesPreview()"> Show History</label>
                         </div>
                     </div>
                     <div class="notes-container flex flex-col h-full overflow-hidden" id="history-container">
