@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLeap v106.17 | Master Command</title>
+    <title>LogiLeap v106.18 | Master Command</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -568,8 +568,18 @@
                     const item = r.cr714_item || 'N/A';
                     
                     let ownerRaw = r['cr714_logisticsowner@OData.Community.Display.V1.FormattedValue'] || r.cr714_logisticsowner || 'Unassigned';
-                    if(ownerRaw.toLowerCase().includes("matt") || ownerRaw.toLowerCase().startsWith("m ")) ownerRaw = "Matt Bleakley";
-                    else ownerRaw = ownerRaw.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                    const issueType = r['cr714_issue@OData.Community.Display.V1.FormattedValue'] || r.cr714_issue || '';
+                    
+                    const createdDate = r.createdon ? new Date(r.createdon).toLocaleDateString('en-CA') : '';
+                    const todayStr = new Date().toLocaleDateString('en-CA');
+
+                    // If it is a Route Update and was created TODAY, assign to Tier 2
+                    if (issueType.includes("Route Update") && createdDate === todayStr) {
+                        ownerRaw = "Tier 2";
+                    } else {
+                        if(ownerRaw.toLowerCase().includes("matt") || ownerRaw.toLowerCase().startsWith("m ")) ownerRaw = "Matt Bleakley";
+                        else ownerRaw = ownerRaw.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+                    }
 
                     let searchValues = [];
                     let otherNotes = [];
@@ -1055,9 +1065,15 @@
         worker.onmessage = (e) => {
             const { type, data, stats, whsList, statusList, ownerList, mapPoints, fullData: workerFull, conflicts, autoResolvable, activeMinDate, activeMaxDate } = e.data;
             if(type === 'RENDER') { 
+                const todayStr = new Date().toLocaleDateString('en-CA');
+                data.forEach(t => {
+                    if (t.owner === "Tier 2" && t.date === todayStr && (!t.mgrEmailDate || t.mgrEmailDate === 'N/A')) {
+                        triggerTier2Email(t);
+                    }
+                });
                 fullData = data; filteredData = data; globalReps = ownerList || [];
-                
-                populateCheckboxDropdown('dd-wh', whsList, 'cb-wh', 'btn-lbl-wh', 'All Warehouses');
+
+                opulateCheckboxDropdown('dd-wh', whsList, 'cb-wh', 'btn-lbl-wh', 'All Warehouses');
                 populateCheckboxDropdown('dd-status', statusList, 'cb-status', 'btn-lbl-status', 'All Statuses');
                 populateCheckboxDropdown('dd-owner', globalReps, 'cb-owner', 'btn-lbl-owner', 'All Owners');
                 populateCheckboxDropdown('dd-rr', globalReps, 'cb-rr', 'btn-lbl-rr', 'Assign: Select Reps');
@@ -2512,6 +2528,46 @@
                     body: JSON.stringify({ "cr714_managerappemailtimestamp": new Date().toISOString() })
                 });
             } catch(e) { console.error("Furniture notification failed", e); }
+        }
+        
+        async function triggerTier2Email(t) {
+            try {
+                const tokenResponse = await msalInstance.acquireTokenSilent({ scopes: ["Mail.Send"], account: msalAccount })
+                    .catch(async () => await msalInstance.acquireTokenPopup({ scopes: ["Mail.Send"] }));
+
+                const emailPayload = {
+                    message: {
+                        subject: `TIER 2 ROUTE UPDATE: ${t.company} [${t.order}]`,
+                        body: { 
+                            contentType: "HTML", 
+                            content: `<div style="font-family: Arial; border-left: 4px solid #f59e0b; padding: 15px;">
+                                <h2 style="color: #f59e0b;">Tier 2 Assignment Notice</h2>
+                                <p>A new Route Update request has been automatically assigned to Tier 2.</p>
+                                <hr>
+                                <b>Customer:</b> ${t.company}<br>
+                                <b>Order #:</b> ${t.order}<br>
+                                <b>Issue:</b> ${t.issue}<br>
+                                <b>Description:</b> ${t.description}</div>` 
+                        },
+                        toRecipients: [{ emailAddress: { address: "anslee.erickson@wbmason.com" } }]
+                    }
+                };
+
+                const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${tokenResponse.accessToken}`, "Content-Type": "application/json" },
+                    body: JSON.stringify(emailPayload)
+                });
+
+                if (res.ok) {
+                    const dToken = await getToken(ENV_DATA);
+                    await fetch(`${DATA_API}/${ENTITY_SET}(${t.guid})`, {
+                        method: 'PATCH',
+                        headers: { 'Authorization': `Bearer ${dToken}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ "cr714_managerappemailtimestamp": new Date().toISOString() })
+                    });
+                }
+            } catch(e) { console.error("Tier 2 notification failed", e); }
         }
     </script>
 </body>
