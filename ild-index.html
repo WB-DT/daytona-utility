@@ -576,7 +576,7 @@
         }
     };
 
-    // --- FETCHING (WIDE OPEN ENGINE WITHOUT SELECT CONSTRAINTS) ---
+    // --- FETCHING (PRECISE SELECTS TO AVOID 400 ERRORS & MAXIMIZE SPEED) ---
     const getToken = async () => {
         const account = msalInstance.getAllAccounts()[0];
         const req = { scopes: ["https://org23279050.crm.dynamics.com//user_impersonation"], account };
@@ -611,7 +611,8 @@
         window.updateLoader(10, "Mining Dataverse HR Records...");
         try {
             const token = await getToken();
-            const res = await fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s`, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.include-annotations="*"' }});
+            const empSelect = "cr714_employeename,cr714_status,cr714_department,cr714_departmentname,cr714_titlename,cr714_repname,cr714_supervisors,cr714_srmanager,cr714_managerassigned,cr714_secondarymanager,statecode";
+            const res = await fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$select=${empSelect}`, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.include-annotations="*"' }});
             if(res.ok) { 
                 const data = await res.json(); 
                 employeesData = data.value.map(e => ({
@@ -622,10 +623,9 @@
         } catch(e) {}
     };
 
-    const fetchPaginatedData = async (table, token, globalAccountMap, typeLabel) => {
+    const fetchPaginatedData = async (table, selectStr, token, globalAccountMap, typeLabel) => {
         const filterStr = encodeURIComponent("statecode eq 0");
-        // DELIBERATELY REMOVED $SELECT TO PREVENT DATAVERSE 400 ERRORS ON MISSING COLUMNS
-        let url = `${DATAVERSE_URL}/${table}?$filter=${filterStr}`;
+        let url = `${DATAVERSE_URL}/${table}?$filter=${filterStr}&$select=${selectStr}`;
         while(url) {
             const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.maxpagesize=5000' }});
             if(!res.ok) break;
@@ -668,11 +668,15 @@
         mergedAccounts = []; totalLoadedRecords = 0;
         try {
             const token = await getToken();
+            const amSelect = "cr714_accountnum,cr714_company,cr714_rep,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_accountmanagementnotes,modifiedon,cr714_actionemailsent,cr714_accountmanagementdatasetid,cr714_intro";
+            const cadSelect = "cr714_accountnum,cr714_accountname,cr714_retentionrep,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_qbnotes,modifiedon,cr714_emailsenttimestamp,cr714_cadencedatasetid,cr714_intro";
+            const proSelect = "cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_action,cr714_actionmessage,cr714_managernotes,cr714_prospectingnotes,modifiedon,cr714_emailsenttimestamp,cr714_prospectingdatasetid,cr714_intro";
+            
             const globalAccountMap = new Map();
             await Promise.all([
-                fetchPaginatedData('cr714_accountmanagementdatasets', token, globalAccountMap, 'AM'),
-                fetchPaginatedData('cr714_cadencedatasets', token, globalAccountMap, 'Cadence'),
-                fetchPaginatedData('cr714_prospectingdatasets', token, globalAccountMap, 'Prospecting')
+                fetchPaginatedData('cr714_accountmanagementdatasets', amSelect, token, globalAccountMap, 'AM'),
+                fetchPaginatedData('cr714_cadencedatasets', cadSelect, token, globalAccountMap, 'Cadence'),
+                fetchPaginatedData('cr714_prospectingdatasets', proSelect, token, globalAccountMap, 'Prospecting')
             ]);
             mergedAccounts = Array.from(globalAccountMap.values());
             window.populateDynamicActionDropdowns();
@@ -1126,14 +1130,15 @@
         try {
             const token = await getToken();
             const tables = [
-                { t: 'cr714_accountmanagementdatasets', select: '' },
-                { t: 'cr714_cadencedatasets', select: '' },
-                { t: 'cr714_prospectingdatasets', select: '' }
+                { t: 'cr714_accountmanagementdatasets', select: 'cr714_accountnum,cr714_company,cr714_rep,cr714_actionmessage,modifiedon,cr714_intro' },
+                { t: 'cr714_cadencedatasets', select: 'cr714_accountnum,cr714_accountname,cr714_retentionrep,cr714_actionmessage,modifiedon,cr714_intro' },
+                { t: 'cr714_prospectingdatasets', select: 'cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_actionmessage,modifiedon,cr714_intro' }
             ];
             let foundUpdates = false; let newLastPoll = new Date().toISOString();
             for(let query of tables) {
-                const filterStr = encodeURIComponent(`modifiedon gt ${lastPollTime}`);
-                const url = `${DATAVERSE_URL}/${query.t}?$filter=${filterStr}`;
+                // Ensure silent request for token in case MSAL session expired during 60s window
+                const filterStr = encodeURIComponent(`modifiedon gt ${lastPollTime} and cr714_actionmessage ne null`);
+                const url = `${DATAVERSE_URL}/${query.t}?$filter=${filterStr}&$select=${query.select}`;
                 const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
                 if(!res.ok) continue;
                 const data = await res.json();
