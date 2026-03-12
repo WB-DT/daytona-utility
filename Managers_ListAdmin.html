@@ -358,15 +358,15 @@
     }
 
     // --- 6. CORE LOGIC ---
-    window.selectRecord = function(id) { 
-        if(window.isDirty()) { 
-            window.targetSelectId = id; 
-            document.getElementById('unsaved-changes-modal').classList.remove('hidden'); 
-            document.getElementById('unsaved-changes-modal').style.display='flex'; 
-        } else { 
-            window.performSelect(id); 
-        } 
-    };
+window.selectRecord = function(id) { 
+        if(window.hasUnsavedChanges) { 
+            window.targetSelectId = id; 
+            document.getElementById('unsaved-changes-modal').classList.remove('hidden'); 
+            document.getElementById('unsaved-changes-modal').style.display='flex'; 
+        } else { 
+            window.performSelect(id); 
+        } 
+    };
     
     window.performSelect = async function(id) {
         window.closeAllSidebarTabs(); 
@@ -1488,7 +1488,332 @@
             });
         }
     });
+// =====================================================================
+    // --- MISSING FUNCTIONS PAYLOAD (Recovered & Adapted from v1.0) ---
+    // =====================================================================
 
+    // 1. Form Population & Snapshot
+    window.populateForm = function(rec) {
+        const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val || ''; };
+        const setTxt = (id, val) => { const el = document.getElementById(id); if(el) el.innerText = val || '--'; };
+        
+        setVal('contact-name-most', rec.cr714_namemost);
+        setVal('contact-phone-primary', rec.cr714_primaryphone);
+        setVal('contact-email-most', rec.cr714_emailmost);
+        
+        setTxt('acct-company', rec.cr714_company);
+        setTxt('acct-number-header', rec.cr714_id);
+        setTxt('form-action-value', rec.cr714_action || 'None');
+        setTxt('form-msg-value', rec.cr714_actionmessage || 'No action message');
+        
+        let sentRecs = []; try { sentRecs = JSON.parse(localStorage.getItem('daytona_sent_records') || '[]'); } catch(e) {}
+        if(sentRecs.includes(String(rec.cr714_id))) document.getElementById('profile-sent-badge')?.classList.remove('hidden');
+        else document.getElementById('profile-sent-badge')?.classList.add('hidden');
+
+        let metaLoc='', metaDm='', metaComp='', metaOpp='', metaIntro='';
+        const rawNotes = rec.cr714_qbnotes || '';
+        const metaMatch = rawNotes.match(/{{METADATA:(.*?)}}/);
+        if(metaMatch && metaMatch[1]) {
+            metaMatch[1].split('|').forEach(p => {
+                const kv = p.split('=');
+                if(kv[0].trim()==='Loc') metaLoc=kv[1]||'';
+                if(kv[0].trim()==='DM') metaDm=kv[1]||'';
+                if(kv[0].trim()==='Comp') metaComp=kv[1]||'';
+                if(kv[0].trim()==='Opp') metaOpp=kv[1]||'';
+                if(kv[0].trim()==='Intro') metaIntro=kv[1]||'';
+            });
+        }
+        
+        setVal('input-location', metaLoc); 
+        setVal('input-dm', metaDm); 
+        setVal('input-competitor', metaComp); 
+        setVal('opp-type-select', metaOpp);
+        
+        const compDisplay = document.getElementById('competitor-display');
+        if(compDisplay) compDisplay.innerText = metaComp || 'Select...';
+
+        const introDisplay = document.getElementById('display-intro');
+        if(introDisplay) introDisplay.innerText = metaIntro || '--';
+
+        const notesInput = document.getElementById('qb-notes-input');
+        if(notesInput) { notesInput.value = ""; notesInput.placeholder = QB_NOTES_TEMPLATE; }
+        
+        const dd = document.getElementById('email-template-dropdown');
+        if(dd) {
+            dd.innerHTML = "";
+            const opts = ["Prospecting", "No Jan", "No DEC/JAN", "FebruaryNonBuy ASAP", "Chair Mat Contest"];
+            opts.forEach(o => { const opt = document.createElement('option'); opt.value=o; opt.text=o; dd.appendChild(opt); });
+            dd.disabled = false;
+        }
+
+        if(rec.cr714_followup) {
+            const rawIso = rec.cr714_followup;
+            if(rawIso.length >= 10) {
+                setVal('follow-up-date', rawIso.substring(0, 10));
+                const dt = new Date(rawIso);
+                if(!isNaN(dt) && rawIso.includes('T') && !rawIso.includes('T00:00:00')) {
+                    const hh = dt.getUTCHours().toString().padStart(2, '0');
+                    const mm = dt.getUTCMinutes().toString().padStart(2, '0');
+                    setVal('follow-up-time', `${hh}:${mm}`);
+                } else { setVal('follow-up-time', ''); }
+            }
+        } else { setVal('follow-up-date', ''); setVal('follow-up-time', ''); }
+    };
+
+    window.takeSnapshot = function(rec) {
+        const getVal = (id) => document.getElementById(id)?.value || '';
+        window.currentRecordSnapshot = {
+            loc: getVal('input-location'),
+            dm: getVal('input-dm'),
+            comp: getVal('input-competitor'),
+            opp: getVal('opp-type-select'),
+            date: getVal('follow-up-date'),
+            time: getVal('follow-up-time')
+        };
+    };
+
+    window.isDirty = function() {
+        return window.hasUnsavedChanges;
+    };
+
+    window.resolveUnsaved = function(shouldSave) {
+        document.getElementById('unsaved-changes-modal').classList.add('hidden');
+        document.getElementById('unsaved-changes-modal').style.display='none';
+        if(shouldSave) {
+            window.handleCustomSave(null, true).then(() => {
+                window.hasUnsavedChanges = false;
+                if(window.targetSelectId) window.performSelect(window.targetSelectId);
+            });
+        } else {
+            window.hasUnsavedChanges = false;
+            if(window.targetSelectId) window.performSelect(window.targetSelectId);
+        }
+    };
+
+    // 2. UI Toggles & Workspace Modifiers
+    window.toggleEditMode = function(forceEnable = true) {
+        isEditMode = forceEnable;
+        const formInputs = document.querySelectorAll('.editable-field, #qb-notes-input, #input-location, #input-dm, #input-competitor, #opp-type-select');
+        const navBtns = document.querySelectorAll('.quick-action-btn, #launch-email-button, #help-button, #mvgo-button, #close-button');
+        
+        formInputs.forEach(el => { 
+            el.disabled = !forceEnable; 
+            if(forceEnable) el.classList.add('is-editable'); 
+            else el.classList.remove('is-editable'); 
+        });
+        
+        navBtns.forEach(btn => btn.disabled = !forceEnable);
+        
+        const saveControls = document.getElementById('save-controls');
+        if(saveControls) saveControls.style.display = forceEnable ? 'flex' : 'none';
+        
+        const editBtn = document.getElementById('editModeButton');
+        if(editBtn) editBtn.style.display = forceEnable ? 'none' : 'block';
+    };
+
+    window.toggleGallery = function() {
+        const col = document.getElementById('gallery-column');
+        if(col) col.classList.toggle('collapsed');
+        const grid = document.querySelector('.app-grid');
+        if(grid) grid.classList.toggle('sidebar-collapsed');
+    };
+
+    window.expandLeftWorkspace = function() {
+        const leftPanel = document.getElementById('left-workspace-panel');
+        const icon = document.getElementById('expand-workspace-icon');
+        if (leftPanel.classList.contains('expanded')) {
+            leftPanel.classList.remove('expanded');
+            if(icon) icon.className = 'fas fa-expand text-xs';
+        } else {
+            leftPanel.classList.add('expanded');
+            if(icon) icon.className = 'fas fa-compress text-xs';
+        }
+    };
+
+    window.insertTemplate = function() { 
+        const input = document.getElementById('qb-notes-input');
+        if(!input) return;
+        const currentVal = input.value;
+        if(currentVal.includes("Locations:") && currentVal.includes("Monthly spend:")) {
+            window.showToast("Template already inserted.", "info"); return;
+        }
+        input.value = QB_NOTES_TEMPLATE + "\n" + currentVal;
+        window.markDirty();
+    };
+
+    // 3. New Competitor Dropdown Logic (Adapted for V1.28)
+    window.toggleCompetitorDropdown = function() {
+        const dd = document.getElementById('competitor-dropdown');
+        if(dd.classList.contains('hidden')) {
+            dd.classList.remove('hidden');
+            dd.style.display = 'flex';
+        } else {
+            window.closeCompetitorDropdown();
+        }
+    };
+
+    window.closeCompetitorDropdown = function() {
+        const dd = document.getElementById('competitor-dropdown');
+        if(dd) {
+            dd.classList.add('hidden');
+            dd.style.display = 'none';
+        }
+    };
+
+    window.updateCompetitorValue = function() {
+        const checkboxes = document.querySelectorAll('.comp-chk:checked');
+        let vals = Array.from(checkboxes).map(cb => cb.value);
+        
+        const otherChk = document.getElementById('comp-chk-other');
+        if(otherChk && otherChk.checked) {
+            const otherTxt = document.getElementById('comp-other-text').value.trim();
+            if(otherTxt) {
+                vals = vals.filter(v => v !== 'Other');
+                vals.push(otherTxt);
+            }
+        }
+        
+        const finalStr = vals.join(', ');
+        const display = document.getElementById('competitor-display');
+        const hiddenInput = document.getElementById('input-competitor');
+        
+        if(display) display.innerText = finalStr || 'Select...';
+        if(hiddenInput) hiddenInput.value = finalStr;
+        window.markDirty();
+    };
+
+    window.toggleOtherCompetitor = function(checkbox) {
+        const txtInput = document.getElementById('comp-other-text');
+        if(checkbox.checked) {
+            txtInput.classList.remove('hidden');
+            txtInput.focus();
+        } else {
+            txtInput.classList.add('hidden');
+            txtInput.value = '';
+        }
+        window.updateCompetitorValue();
+    };
+
+    // Auto-close competitor dropdown when clicking outside
+    document.addEventListener('click', function(e) {
+        const compContainer = document.getElementById('competitor-container');
+        const dd = document.getElementById('competitor-dropdown');
+        if (compContainer && dd && !compContainer.contains(e.target)) {
+            window.closeCompetitorDropdown();
+        }
+    });
+
+    // 4. Failed Saves & Queue Processing
+    window.addToFailedQueue = function(desc, func) {
+        failedSaves.push({ desc, func });
+        window.updateFailedBadge();
+        window.showToast("Operation failed. Added to queue.", "error");
+    };
+
+    window.updateFailedBadge = function() {
+        const badge = document.getElementById('bell-badge');
+        const btn = document.getElementById('notification-bell');
+        if(failedSaves.length > 0) {
+            if(badge) badge.innerText = failedSaves.length;
+            if(btn) btn.classList.remove('hidden');
+        } else {
+            if(btn) btn.classList.add('hidden');
+        }
+    };
+
+    window.showFailedSaves = function() {
+        const list = document.getElementById('failed-items-list');
+        if(!list) return;
+        list.innerHTML = "";
+        if (failedSaves.length === 0) { 
+            list.innerHTML = "<p class='p-3 text-muted text-center italic'>No failed operations.</p>"; 
+        } else {
+            failedSaves.forEach((item, idx) => {
+                const d = document.createElement('div');
+                d.className = "p-2 border-b border-gray-200 text-xs flex justify-between items-center";
+                d.innerHTML = `<span>${item.desc}</span> <button onclick="window.retryOne(${idx})" class="text-blue-500 hover:underline">Retry</button>`;
+                list.appendChild(d);
+            });
+        }
+        const modal = document.getElementById('failed-saves-modal');
+        if(modal) { modal.classList.remove('hidden'); modal.style.display = 'flex'; }
+    };
+
+    window.retryOne = async function(idx) {
+        const item = failedSaves[idx];
+        if(item) {
+            await item.func();
+            failedSaves.splice(idx, 1);
+            window.updateFailedBadge();
+            window.showFailedSaves(); 
+        }
+    };
+
+    window.retryFailedSaves = async function() {
+        window.showToast("Retrying all...", "processing");
+        const queue = [...failedSaves];
+        failedSaves = [];
+        window.updateFailedBadge();
+        for (const item of queue) { await item.func(); }
+        const modal = document.getElementById('failed-saves-modal');
+        if(modal) { modal.classList.add('hidden'); modal.style.display = 'none'; }
+    };
+
+    // 5. Auth, Modals, Calendar & Email Signatures
+    window.confirmCloseAccount = function() {
+        const reason = document.getElementById('close-reason-input')?.value;
+        if(!reason) { window.showToast("Reason required.", "error"); return; }
+        const modal = document.getElementById('close-account-modal');
+        if(modal) { modal.classList.add('hidden'); modal.style.display='none'; }
+        window.handleCustomSave(`[Account Closed]: ${reason}`, true);
+        window.showToast("Account Closed", "success");
+    };
+
+    window.logout = function() {
+        if(window.msalInstance) window.msalInstance.logoutPopup();
+    };
+    
+    window.showUserProfileCard = function() { 
+        if(currentUserProfile) {
+            const elName = document.getElementById('popout-name'); 
+            if(elName) elName.innerText = currentUserProfile.name || window.msalAccount?.name || '--';
+            const elTitle = document.getElementById('popout-title'); 
+            if(elTitle) elTitle.innerText = currentUserProfile.jobTitle || 'Sales Representative';
+        } else if (window.msalAccount) {
+            const elName = document.getElementById('popout-name'); 
+            if(elName) elName.innerText = window.msalAccount.name;
+        }
+        const modal = document.getElementById('profile-modal');
+        if(modal) { modal.classList.remove('hidden'); modal.style.display = 'flex'; }
+    };
+
+    window.loadOrFetchSignature = async function() {
+        return localStorage.getItem('daytona_signature') || '';
+    };
+
+    window.saveSignature = function() {
+        const sigEditor = document.getElementById('signature-editor-visual');
+        if(sigEditor) {
+            localStorage.setItem('daytona_signature', sigEditor.innerHTML);
+            window.showToast("Signature Saved", "success");
+        }
+        const modal = document.getElementById('signature-modal');
+        if(modal) { modal.classList.add('hidden'); modal.style.display='none'; }
+    };
+
+    window.createCalendarEvent = async function() {
+        if(!currentRecordId) { window.showToast("Select a record first", "error"); return; }
+        const d = document.getElementById('follow-up-date')?.value;
+        const t = document.getElementById('follow-up-time')?.value;
+        if(!d || !t) { window.showToast("Set Date & Time first", "error"); return; }
+        
+        window.showToast("Calendar Invite Stub Executed", "success");
+        window.saveToAuditLog("Calendar", `Follow Up Set for ${d} at ${t}`);
+    };
+
+    // =====================================================================
+    // --- END OF PAYLOAD ---
+    // =====================================================================
     document.addEventListener('mousedown', (e) => {
         if (e.target.classList.contains('resize-handle')) {
             const wrapper = e.target.parentElement;
