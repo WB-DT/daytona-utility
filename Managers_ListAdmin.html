@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. v1.22 - Complete Toolkit</title>
+    <title>A.C.T. v1.23 - Complete Toolkit</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -177,18 +177,101 @@
     const IMG_CHAIR = "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/WB%20Chair%20Mat.png";
     const IMG_CATALOG = "https://github.com/WB-DT/daytona-utility/blob/main/WB%20Logo%203.4.2026.png?raw=true"; 
 
-    // Explicitly define functions on window object to ensure absolute global accessibility
-    window.selectRecord = null;
-    window.performSelect = null;
-    
     let currentThemeIdx=0, isEditMode=true, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentUserRepName=null, currentUserProfile=null;
     let failedSaves = []; let duplicateRecordIds = new Set(); let emailAttachments = [];
     window.hasUnsavedChanges = false; window.targetSelectId = null; window.currentRecordSnapshot = null; window.currentUserGraphPhone = null; window.isPopulating = false;
 
+    // Explicitly define functions on window object to ensure absolute global accessibility
+    window.selectRecord = function(id) { 
+        if(window.isDirty()) { 
+            window.targetSelectId = id; 
+            document.getElementById('unsaved-changes-modal').classList.remove('hidden'); 
+            document.getElementById('unsaved-changes-modal').style.display='flex'; 
+        } else { 
+            window.performSelect(id); 
+        } 
+    };
+    
+    window.performSelect = async function(id) {
+        window.closeAllSidebarTabs(); 
+        window.isPopulating = true; 
+        window.hasUnsavedChanges = false;
+        currentRecordId = String(id); 
+        currentSelectedRecord = allRecords.find(r => String(r.cr714_id) === currentRecordId); 
+        window.filterAndSortGallery(); window.updateMiniCounter();
+        
+        if(currentSelectedRecord) { 
+            window.populateForm(currentSelectedRecord); 
+            window.takeSnapshot(currentSelectedRecord); 
+            window.toggleEditMode(true); 
+            
+            const historyCheck = document.getElementById('show-prev-note');
+            if(historyCheck) historyCheck.checked = true; 
+            window.updateNotesPreview();
+            
+            // Note Discrepancy indicator for multi-list records
+            const alertContainer = document.getElementById('in-form-alerts');
+            alertContainer.innerHTML = ''; 
+            const notePopulated = currentSelectedRecord.sources.some(s => (s.rawNotes || '').trim() !== '');
+            const someEmpty = currentSelectedRecord.sources.some(s => !(s.rawNotes || '').trim());
+            
+            if (currentSelectedRecord.sources.length > 1 && notePopulated && someEmpty) {
+                alertContainer.innerHTML += `<div class="alert-box sync"><span class="alert-label"><i class="fas fa-link mr-1"></i>Unified Sync Available</span>Account is on ${currentSelectedRecord.sources.length} lists. History is currently fragmented. Saving will consolidate and push to all lists automatically.</div>`;
+            }
+
+            const d365Acct = await window.fetchD365Account(id);
+            if (d365Acct) {
+                const pc = d365Acct.primarycontactid || {};
+                const setVal = (elId, val) => { const el=document.getElementById(elId); if(el && val) el.value = val; };
+                
+                let newName = pc.fullname || d365Acct.name;
+                let newPhone = window.formatPhone(pc.telephone1 || d365Acct.telephone1);
+                let newEmail = pc.emailaddress1 || d365Acct.emailaddress1;
+                
+                if (newName && newName !== currentSelectedRecord.cr714_namemost) setVal('contact-name-most', newName);
+                if (newPhone && newPhone !== currentSelectedRecord.cr714_primaryphone) setVal('contact-phone-primary', newPhone);
+                if (newEmail && newEmail !== currentSelectedRecord.cr714_emailmost) setVal('contact-email-most', newEmail);
+                
+                let d365Addr = [d365Acct.address1_line1, d365Acct.address1_city, d365Acct.address1_stateorprovince].filter(Boolean).join(', ');
+                document.getElementById('d365-address-display').innerText = d365Addr || currentSelectedRecord.cr714_billingaddress || '--';
+                
+                const rawAccountMessage = d365Acct.mss_messagecenter || d365Acct.description || d365Acct.wbm_accountmessage || d365Acct.wbm_deliveryinstructions || "";
+                const accountMessage = window.stripHTML(String(rawAccountMessage));
+                if (accountMessage && accountMessage.trim() !== '') {
+                    alertContainer.innerHTML += `<div class="alert-box declining overflow-y-auto max-h-24 custom-scrollbar"><span class="alert-label"><i class="fas fa-exclamation-triangle mr-1"></i>D365 Account Note</span>${window.escapeHTML(accountMessage)}</div>`;
+                }
+                
+                if (d365Acct.statecode === 1) { // 1 corresponds to inactive in D365 statuscodes typically
+                    let act = (currentSelectedRecord.cr714_action || '').toLowerCase();
+                    if (!act.includes('cadence') && !localStorage.getItem('daytona_keep_inactive_' + id)) {
+                        window.pendingInactiveId = id;
+                        window.moveAccountToMaster('COPY_ONLY');
+                        document.getElementById('inactive-prompt-modal').classList.remove('hidden');
+                        document.getElementById('inactive-prompt-modal').style.display = 'flex';
+                    }
+                }
+                window.takeSnapshot(currentSelectedRecord);
+            }
+            
+            const cswAppId = "9e06e7d4-8616-eb11-a817-000d3a8b6b20";
+            const preloads = {
+                'summary': `https://go.masonville.com/#/customer/${encodeURIComponent(id)}`,
+                'sales': `https://go.masonville.com/#/report/${encodeURIComponent(id)}/Four%20Month%20Sales`,
+                'csw': `https://wbmasonco.crm.dynamics.com/main.aspx?appid=${cswAppId}&pagetype=search&searchText=${encodeURIComponent(id)}`
+            };
+            for(const [tId, url] of Object.entries(preloads)) {
+                const iframe = document.querySelector(`#sidebar-frame-${tId} iframe`);
+                if(iframe) iframe.src = url;
+            }
+        }
+        
+        window.hasUnsavedChanges = false; 
+        setTimeout(() => { window.isPopulating = false; }, 50);
+    };
+
     // --- UTILITY FUNCTIONS ---
     window.escapeHTML = function(str) { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'})[m]); }
     
-    // Cleanly strips HTML, replacing messy D365 line breaks with simple spaces so it formats properly in alert boxes
     window.stripHTML = function(html) { 
         if (!html) return ''; 
         let tmp = document.createElement("DIV"); 
@@ -308,18 +391,6 @@
         document.getElementById('profile-content').innerHTML = html;
         document.getElementById('profile-modal').style.display = 'flex';
         document.getElementById('profile-modal').classList.remove('hidden');
-    };
-
-    window.resolveUnsaved = async function(save) {
-        document.getElementById('unsaved-changes-modal').style.display = 'none';
-        if (save) { 
-            await window.handleCustomSave(null, true); 
-        }
-        window.hasUnsavedChanges = false;
-        if (window.targetSelectId) { 
-            window.performSelect(window.targetSelectId); 
-            window.targetSelectId = null; 
-        }
     };
 
     window.createCalendarEvent = function() {
@@ -898,6 +969,20 @@
     window.removeAttachment = function(name, btn) {
         emailAttachments = emailAttachments.filter(a => a.name !== name);
         btn.parentElement.remove();
+    };
+
+    window.insertInlineImage = function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            const editor = document.getElementById('email-modal-body');
+            editor.focus();
+            document.execCommand('insertImage', false, ev.target.result);
+            e.target.value = ''; 
+            window.showToast("Image inserted. Click to resize.", "success");
+        };
+        reader.readAsDataURL(file);
     };
 
     window.handleModalSend = async function() {
@@ -1846,8 +1931,8 @@
                                     </div>
                                 </div>
                             </div>
-                            <button onclick="window.openMVGOModal()" id="mvgo-button" class="btn-secondary flex-1 text-[10px] px-2 h-8 truncate shadow-sm flex items-center justify-center gap-2" style="color: #0284c7; border-color: #0ea5e9;" disabled><i class="fas fa-rocket"></i> MVGO</button>
-                            <button onclick="window.openCloseAccountModal()" id="close-button" class="btn-secondary flex-1 text-[10px] px-2 h-8 truncate shadow-sm flex items-center justify-center gap-2" style="color: #dc2626; border-color: #fca5a5;" disabled><i class="fas fa-ban"></i> Close</button>
+                            <button onclick="window.openMVGOModal()" id="mvgo-button" class="btn-secondary flex-1 text-[10px] px-2 h-8 truncate shadow-sm flex items-center justify-center gap-2" style="color: #0284c7; border-color: #0ea5e9;" disabled><i class="fas fa-rocket"></i> MVGO Launcher</button>
+                            <button onclick="window.openCloseAccountModal()" id="close-button" class="btn-secondary flex-1 text-[10px] px-2 h-8 truncate shadow-sm flex items-center justify-center gap-2" style="color: #dc2626; border-color: #fca5a5;" disabled><i class="fas fa-ban"></i> Close Account</button>
                         </div>
                     </div>
                 </div>
@@ -2023,6 +2108,7 @@
                 <button class="outlook-ribbon-btn" onclick="window.openSignatureModal()"><i class="fas fa-pen-nib"></i> Signature</button>
                 
                 <input type="file" id="email-attachment-input" class="hidden" multiple onchange="window.handleFileSelect(event)">
+                <input type="file" id="inline-image-input" class="hidden" accept="image/*" onchange="window.insertInlineImage(event)">
                 <div id="email-attachments-list" class="flex gap-2 ml-4 overflow-x-auto"></div>
             </div>
             <div class="flex flex-col flex-grow overflow-hidden" style="background-color: var(--bg-card);">
@@ -2035,6 +2121,7 @@
                     <button class="outlook-tool-btn underline" onmousedown="event.preventDefault(); document.execCommand('underline', false, null)">U</button>
                     <div class="outlook-ribbon-separator"></div>
                     <button class="outlook-tool-btn" onmousedown="event.preventDefault(); let url = prompt('Enter link URL:'); if(url) document.execCommand('createLink', false, url);"><i class="fas fa-link"></i></button>
+                    <button class="outlook-tool-btn" onmousedown="event.preventDefault(); document.getElementById('inline-image-input').click();" title="Insert Image"><i class="fas fa-image"></i></button>
                 </div>
                 <div id="email-modal-body" class="outlook-editor" contenteditable="true"></div>
             </div>
