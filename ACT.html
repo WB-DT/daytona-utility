@@ -176,6 +176,9 @@
     let currentThemeIdx=0, isEditMode=true, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentUserRepName=null, currentUserProfile=null;
     let failedSaves = []; let duplicateRecordIds = new Set();
     window.hasUnsavedChanges = false; window.targetSelectId = null; window.currentRecordSnapshot = null; window.currentUserGraphPhone = null; window.isPopulating = false;
+    
+    // --- EMAIL ATTACHMENTS STATE ---
+    let pendingAttachments = [];
 
     // --- UTILITY FUNCTIONS ---
     window.escapeHTML = function(str) { if (!str) return ''; return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#039;'})[m]); }
@@ -256,6 +259,45 @@
         });
         return parsed;
     }
+
+    // --- EMAIL ATTACHMENT FUNCTIONS (UPDATED FOR LARGE FILES) ---
+    window.handleAttachmentSelection = async function(event) {
+        const files = event.target.files;
+        if (!files || files.length === 0) return;
+
+        // Store the raw File object instead of immediately reading to Base64 to save memory
+        for (let file of files) {
+            pendingAttachments.push(file); 
+        }
+        event.target.value = ''; // Reset input so same file can be selected again if removed
+        window.renderAttachmentUI();
+    };
+
+    window.renderAttachmentUI = function() {
+        let container = document.getElementById('email-attachments-container');
+        if (!container) return;
+        container.innerHTML = pendingAttachments.map((file, idx) => `
+            <div class="flex items-center gap-2 px-2 py-1 rounded text-xs border shadow-sm ${file.size > 3 * 1024 * 1024 ? 'border-red-400 bg-red-50' : ''}" style="border-color: var(--border-color); background-color: var(--bg-input);">
+                <i class="fas fa-file ${file.size > 3 * 1024 * 1024 ? 'text-red-500' : 'text-blue-500'}"></i> <span class="truncate max-w-[150px]" style="color: var(--text-main);">${file.name}</span>
+                <span class="text-muted">(${(file.size/1024/1024).toFixed(2)}MB)</span>
+                <button onclick="window.removeAttachment(${idx})" class="text-red-500 hover:text-red-700 ml-1" title="Remove attachment"><i class="fas fa-times"></i></button>
+            </div>
+        `).join('');
+    };
+
+    window.removeAttachment = function(idx) {
+        pendingAttachments.splice(idx, 1);
+        window.renderAttachmentUI();
+    };
+    
+    window.fileToBase64 = function(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => resolve(reader.result.split(',')[1]);
+            reader.onerror = error => reject(error);
+        });
+    };
 
     // --- RESTORED MISSING FUNCTIONS ---
 
@@ -420,18 +462,18 @@
     const msalInstance = new msal.PublicClientApplication(msalConfig);
     let msalAccount = null;
 
-    // Graceful getToken function: Handles silent failovers and explicit interaction requests cleanly
-    window.getToken = async function(scope, silentFallback = false) {
+    // Graceful getToken function: Handles silent failovers and explicit interaction requests cleanly.
+    window.getToken = async function(scopeStr, silentFallback = false) {
         const account = msalInstance.getAllAccounts()[0]; 
-        const request = { scopes: [scope], account: account };
+        const request = { scopes: scopeStr.split(" "), account: account };
         try { 
             return (await msalInstance.acquireTokenSilent(request)).accessToken; 
         } catch (e) { 
             if(silentFallback) {
-                console.warn(`Silent token fetch failed for ${scope}. Ignoring to prevent popup loop.`);
+                console.warn(`Silent token fetch failed for ${scopeStr}. Ignoring to prevent popup loop.`);
                 throw e; 
             }
-            console.log(`Interactive token request needed for ${scope}`);
+            console.log(`Interactive token request needed for ${scopeStr}`);
             return (await msalInstance.acquireTokenPopup(request)).accessToken; 
         }
     }
@@ -460,7 +502,6 @@
 
     window.login = function() {
         // Explicitly request basic User profile AND Mail.Send on login to ensure token can be fetched silently later. 
-        // Note: Calendars and Mail.Read are strictly excluded to avoid admin blocks.
         msalInstance.loginPopup({ scopes: ["User.Read", "Mail.Send"] }).then(resp => {
             msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
         }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
@@ -813,6 +854,10 @@
     window.launchEmailLogic = async function() {
         if(!currentSelectedRecord) return;
         
+        // Reset attachments for new email
+        pendingAttachments = [];
+        if(window.renderAttachmentUI) window.renderAttachmentUI();
+
         const emailInput = document.getElementById('contact-email-most');
         const email = emailInput ? emailInput.value : '';
         const templateDropdown = document.getElementById('email-template-dropdown');
@@ -834,15 +879,14 @@
         
         let signature = await window.loadOrFetchSignature();
         if (!signature || signature.trim() === '') {
-            signature = `<br><br><div style="font-family: 'Aptos', sans-serif;">Sincerely,<br>${repName} | W.B. MASON<br>${repPhone} | ${repEmail}<br><br><a href="${catalogRequestUrl}" target="_blank"><img src="${IMG_CATALOG}" alt="Request a Catalog" style="max-width:100px;"></a></div>`;
+            signature = `<br><br><div style="font-family: 'Aptos', sans-serif;">Sincerely,<br>${repName} | W.B. MASON<br>${repPhone} | ${repEmail}<br><br><a href="${catalogRequestUrl}" target="_blank"><img src="${IMG_CATALOG}" alt="Request a Catalog" style="max-width:480px;max-height:640px"></a></div>`;
         }
         signature = signature.replace(/\[Rep Name\]/g, repName).replace(/\[Phone\]/g, repPhone).replace(/\[Email\]/g, repEmail);
 
-        // REMOVED: color: #1f2937; -> It now inherits properly to match light/dark themes in the editor UI
         const wrapperStart = `<div style="font-family: 'Aptos', 'Segoe UI', Arial, sans-serif; font-size: 11pt; line-height: 1.4; max-width: 600px;">`;
         const wrapperEnd = `</div>`; const pStyle = `margin: 0 0 16px 0; padding: 0;`;
         const benefitsList = `<div style="${pStyle}"><strong>Here are some things that you can always expect from us at WB Mason:</strong></div><ul style="margin: 0 0 16px 20px; padding: 0;"><li><strong>Customized pricing</strong> on the products your business actually uses</li><li><strong>Free delivery</strong>, with no order minimums</li><li><strong>Personalized support</strong> including a personal driver, customer service representative, and inside sales representative</li><li><strong>One-stop shopping</strong> for all your workplace products</li></ul>`;
-        const customNotesPlaceholder = `<div style="${pStyle} color:dodgerblue; font-size: 14px; font-weight: bold;">[Custom Email Notes will be placed here - Type over this]</div>`;
+        const customNotesPlaceholder = `<div style="${pStyle} color:dodgerblue; font-size: 14px; font-weight: bold;"></div>`;
 
         if (template === "Prospecting") {
             subject = "Intro / W.B. Mason"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">My name is ${repName} and I'm your dedicated account representative at W.B. Mason. I wanted to briefly introduce myself and see if there are any immediate needs I can help you with today.</div><div style="${pStyle}">We offer a wide range of products beyond just office supplies, including breakroom essentials, janitorial supplies, and furniture.</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
@@ -850,6 +894,8 @@
             subject = "Checking in - W.B. Mason"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">I’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed and we all know how time can slip by and then you realize you’re out of something you meant to order.</div><div style="${pStyle}">I just received a coupon you can use through the end of the month when you checkout online. Let me know if I can help find any items for you or get an order placed. We even match/beat competitor prices if you’re finding a lower price elsewhere!</div><div style="${pStyle}">Where else are you having to shop, aside from WB Mason, that I can beat pricing on for you?</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
         } else if (template === "No DEC/JAN") { 
             subject = "Checking in - W.B. Mason"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">I’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed in December and I know with the holidays, time can slip by and then you realize you’re out of something you meant to order. <span style="background-color:yellow; color:black;">Are you finding lower prices elsewhere?</span></div><div style="${pStyle}">I just received a coupon you can use through the end of the month when you checkout online. Let me know if I can help find any items for you or get an order placed.</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
+        } else if (template === "FebruaryNonBuy ASAP") { 
+            subject = "Lucky for you, 10% off!"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">I’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed in February and I know how time can slip by and then you realize you’re out of something you meant to order. <br><br><span style="background-color:yellow; color:black;">Are you finding lower prices elsewhere?</span></div><div style="${pStyle} text-align:center;"><img src="https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/10%20percent%20shamrock.jfif" alt="Lucky You 10% Off" style="max-width:100%; border-radius:8px;"></div><div style="${pStyle}">I just received a coupon you can use through the end of the month when you checkout online. Let me know if I can help find any items for you or get an order placed.</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
         } else if (template === "Chair Mat Contest") { 
             subject = "A Promo That Matters"; body = `${wrapperStart}<div style="${pStyle}">Hi <span style="color:green;"><b>${currentSelectedRecord.cr714_company}</b></span>,</div><div style="${pStyle}">I wanted to reach out as it looks like you’ve purchased a chair with us recently. Are you in need of a chair mat for your office? Chair mats protect your floors from wear and tear, and gives your chair a smoother rolling surface, reducing joint and muscle pain, making them a great ergonomic choice for your office!</div><div style="${pStyle}">Please see attached link for both carpeted and hardwood options: <b><a href="https://www.wbmason.com/shop?q=everlife" target="_blank" style="color:#0b66c3;text-decoration:none;">Shop Chair Mats | W.B. Mason</a>.</b></div><div style="${pStyle}">I’m happy to help narrow down selections and help search for what will best fit your business needs. Let me know how I can assist!</div>${customNotesPlaceholder}<div style="${pStyle}; text-align:center;"><a href="https://www.wbmason.com/shop?q=everlife" target="_blank"><img src="${IMG_CHAIR}" style="max-width:100%;"></a></div>${signature}${wrapperEnd}`;
         } else {
@@ -872,26 +918,102 @@
         document.getElementById('email-modal').style.display = 'flex';
     }
 
+    window.openOutlookWebDraft = function() {
+        const to = document.getElementById('email-modal-to').value;
+        const cc = document.getElementById('email-modal-cc').value;
+        const subject = encodeURIComponent(document.getElementById('email-modal-subject').value);
+        
+        // Outlook Web deep links only accept plain text body cleanly.
+        let tmp = document.createElement("DIV");
+        tmp.innerHTML = document.getElementById('email-modal-body').innerHTML;
+        const rawBody = tmp.innerText || tmp.textContent || "";
+        const body = encodeURIComponent(rawBody);
+
+        let url = `https://outlook.office.com/mail/deeplink/compose?to=${to}&subject=${subject}&body=${body}`;
+        if (cc) url += `&cc=${cc}`;
+
+        window.open(url, '_blank');
+
+        window.handleCustomSave(`[Email Drafted via Outlook Web]: ${document.getElementById('email-modal-subject').value}`, true);
+        
+        document.getElementById('large-attachment-modal').style.display = 'none';
+        document.getElementById('email-modal').style.display = 'none';
+        window.showToast("Opened in Outlook Web", "success");
+    }
+
+    window.removeLargeFilesAndSend = function() {
+        pendingAttachments = pendingAttachments.filter(f => f.size <= 3 * 1024 * 1024);
+        window.renderAttachmentUI();
+        document.getElementById('large-attachment-modal').style.display = 'none';
+        window.handleModalSend(); // Resume send with valid files only
+    }
+
     window.handleModalSend = async function() {
         if(!window.checkEmailRateLimit()) return;
+
+        // Verify if any files exceed 3MB limit
+        const hasLargeAttachments = pendingAttachments.some(f => f.size > 3 * 1024 * 1024);
+        if (hasLargeAttachments) {
+            document.getElementById('large-attachment-modal').classList.remove('hidden');
+            document.getElementById('large-attachment-modal').style.display = 'flex';
+            return; // Pause execution and await user decision
+        }
+
         window.showToast("Sending...", "processing");
+
         try {
-            // Explicitly request Mail.Send ONLY when the user clicks the Send button inside the modal
-            const token = await window.getToken("Mail.Send");
             const ccValue = document.getElementById('email-modal-cc').value.trim();
             const ccRecipients = ccValue ? [{ emailAddress: { address: ccValue } }] : [];
-            const mailBody = { message: { subject: document.getElementById('email-modal-subject').value, body: { contentType: "HTML", content: document.getElementById('email-modal-body').innerHTML }, toRecipients: [{ emailAddress: { address: document.getElementById('email-modal-to').value } }], ccRecipients: ccRecipients }, saveToSentItems: "true" };
-            const res = await fetch(`${GRAPH_URL}/me/sendMail`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(mailBody) });
-            if(!res.ok) throw new Error("Graph API Error");
+            const subject = document.getElementById('email-modal-subject').value;
+            const content = document.getElementById('email-modal-body').innerHTML;
+            const toRecipients = [{ emailAddress: { address: document.getElementById('email-modal-to').value } }];
+
+            const token = await window.getToken("Mail.Send");
             
-            await window.handleCustomSave(`[Email Sent]: ${mailBody.message.subject}`, true);
+            let base64Attachments = [];
+            for (let f of pendingAttachments) {
+                base64Attachments.push({
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": f.name,
+                    "contentType": f.type,
+                    "contentBytes": await window.fileToBase64(f)
+                });
+            }
+
+            const mailBody = { 
+                message: { subject, body: { contentType: "HTML", content }, toRecipients, ccRecipients }, 
+                saveToSentItems: "true" 
+            };
+            if (base64Attachments.length > 0) mailBody.message.attachments = base64Attachments;
+
+            const res = await fetch(`${GRAPH_URL}/me/sendMail`, { 
+                method: 'POST', 
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, 
+                body: JSON.stringify(mailBody) 
+            });
+            
+            if(!res.ok) throw new Error("Graph API Error on sendMail");
+
+            // Cleanup & Tracking
+            await window.handleCustomSave(`[Email Sent]: ${subject}`, true);
             let timestamps = []; try { timestamps = JSON.parse(localStorage.getItem('daytona_email_timestamps') || '[]'); } catch(e) {}
             timestamps.push(Date.now()); try { localStorage.setItem('daytona_email_timestamps', JSON.stringify(timestamps)); } catch(e) {} window.checkEmailRateLimit();
             let sentRecs = []; try { sentRecs = JSON.parse(localStorage.getItem('daytona_sent_records') || '[]'); } catch(e) {}
             if(!sentRecs.includes(currentRecordId)) { sentRecs.push(currentRecordId); try { localStorage.setItem('daytona_sent_records', JSON.stringify(sentRecs)); } catch(e) {} }
-            document.getElementById('profile-sent-badge').classList.remove('hidden'); document.getElementById('email-modal').classList.add('hidden'); document.getElementById('email-modal').style.display = 'none'; window.showToast("Email Sent!", "success");
+            
+            pendingAttachments = [];
+            window.renderAttachmentUI();
+
+            const sentBadge = document.getElementById('profile-sent-badge');
+            if (sentBadge) sentBadge.classList.remove('hidden'); 
+
+            document.getElementById('email-modal').classList.add('hidden'); 
+            document.getElementById('email-modal').style.display = 'none'; 
+            window.showToast("Email Sent!", "success");
+
         } catch(e) { 
-            window.showToast("Mail send failed or cancelled.", "error");
+            console.error("Mail Send Error:", e);
+            window.showToast(`Mail send failed: ${e.message}`, "error");
         }
     }
 
@@ -933,6 +1055,7 @@
             if (!r.cr714_id) return false; const isSent = sentRecs.includes(String(r.cr714_id));
             if(document.getElementById('filter-sent-only').checked && !isSent) return false; 
             if(document.getElementById('filter-hidesent').checked && isSent) return false; 
+            if(document.getElementById('filter-multilist') && document.getElementById('filter-multilist').checked && !duplicateRecordIds.has(String(r.cr714_id))) return false;
             if(document.getElementById('filter-florida').checked) { const fAddr = r.cr714_billingaddress || ''; if(!/\b(fl|florida)\b/i.test(fAddr)) return false; }
             if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) { if (!r.cr714_managernotes || r.cr714_managernotes.trim() === '') return false; }
             if(document.getElementById('filter-has-intro').checked) { 
@@ -1299,8 +1422,22 @@
         const actionLower = (rec.cr714_action || "").toLowerCase(); const dd = document.getElementById('email-template-dropdown'); dd.innerHTML = "";
         
         const cadenceTemplates = [ {val: "No Jan", txt: "No Jan"}, {val: "No DEC/JAN", txt: "No DEC/JAN"}, {val: "No NOV/DEC/JAN", txt: "No NOV/DEC/JAN"}, {val: "NONBUY", txt: "NONBUY"}, {val: "NOVNoSales", txt: "NOVNoSales"}, {val: "NONovDec", txt: "NONovDec"} ];
-        const allTemplates = [ {val: "Prospecting", txt: "Prospecting"}, {val: "Chair Mat Contest", txt: "Chair Mat Contest"}, {val: "Print Opp!", txt: "Print Opp!"}, {val: "Print Nonbuy!", txt: "Print Nonbuy!"}, {val: "Green Category.msg", txt: "Green Category"}, {val: "Green Follow Up Email.msg", txt: "Green Follow Up"}, {val: "Green Non-Buy Email.msg", txt: "Green Non-Buy"}, {val: "Yellow Non-Buy Email.msg", txt: "Yellow Non-Buy"} ];
-        if (actionLower === 'cadence' || actionLower === 'mandown') { cadenceTemplates.forEach(o => { const opt = document.createElement('option'); opt.value = o.val; opt.textContent = o.txt; dd.appendChild(opt); }); dd.value = cadenceTemplates[0].val; dd.disabled = false; } else { let match = allTemplates.find(t => t.val.toLowerCase() === actionLower); if (match) { const opt = document.createElement('option'); opt.value = match.val; opt.textContent = match.txt; opt.selected = true; dd.appendChild(opt); dd.disabled = false; } else { const opt = document.createElement('option'); opt.text = "-- No Template Available --"; dd.appendChild(opt); dd.disabled = true; } }
+        const allTemplates = [ {val: "Prospecting", txt: "Prospecting"}, {val: "Chair Mat Contest", txt: "Chair Mat Contest"}, {val: "Print Opp!", txt: "Print Opp!"}, {val: "Print Nonbuy!", txt: "Print Nonbuy!"}, {val: "Green Category.msg", txt: "Green Category"}, {val: "Green Follow Up Email.msg", txt: "Green Follow Up"}, {val: "Green Non-Buy Email.msg", txt: "Green Non-Buy"}, {val: "Yellow Non-Buy Email.msg", txt: "Yellow Non-Buy"}, {val: "FebruaryNonBuy ASAP", txt: "FebruaryNonBuy ASAP"} ];
+        
+        if (actionLower === 'cadence' || actionLower === 'mandown') { 
+            cadenceTemplates.forEach(o => { const opt = document.createElement('option'); opt.value = o.val; opt.textContent = o.txt; dd.appendChild(opt); }); 
+            dd.value = cadenceTemplates[0].val; 
+            dd.disabled = false; 
+        } else { 
+            let match = allTemplates.find(t => t.val.toLowerCase() === actionLower); 
+            if (match) { 
+                const opt = document.createElement('option'); opt.value = match.val; opt.textContent = match.txt; opt.selected = true; dd.appendChild(opt); 
+                dd.disabled = false; 
+            } else { 
+                const opt = document.createElement('option'); opt.text = "-- No Template Available --"; dd.appendChild(opt); 
+                dd.disabled = true; 
+            } 
+        }
         
         const dEl = document.getElementById('follow-up-date'), tEl = document.getElementById('follow-up-time');
         if(rec.cr714_followup) { const rawIso = rec.cr714_followup; if(rawIso.length >= 10) { dEl.value = rawIso.substring(0, 10); const dt = new Date(rawIso); if(!isNaN(dt) && rawIso.includes('T') && !rawIso.includes('T00:00:00Z') && !rawIso.includes('T00:00:00')) { const hh = dt.getUTCHours().toString().padStart(2, '0'); const mm = dt.getUTCMinutes().toString().padStart(2, '0'); tEl.value = `${hh}:${mm}`; } else { tEl.value = ''; } } else { dEl.value=''; tEl.value=''; } } else { dEl.value=''; tEl.value=''; }
@@ -1407,14 +1544,22 @@
             p.innerHTML = '<div class="text-center italic mt-10 text-muted">Loading history...</div>';
             let history = [];
             
+            // Deduplicate notes by their pure text content
+            let uniqueNotes = new Map();
+            
             // Loop through all sources to aggregate note history uniformly
             currentSelectedRecord.sources.forEach(src => {
                 let parsed = window.parseNotes(src.rawNotes || '');
                 parsed.forEach(n => {
-                    n.sourceType = src.type;
-                    history.push(n);
+                    let key = n.text.trim();
+                    if (!uniqueNotes.has(key)) {
+                        n.sourceType = src.type;
+                        uniqueNotes.set(key, n);
+                    }
                 });
             });
+            
+            history = Array.from(uniqueNotes.values());
             
             if (!currentSelectedRecord.logisticsFetched) {
                 currentSelectedRecord.logisticsData = await window.fetchLogisticsForAccount(currentSelectedRecord.cr714_id);
@@ -1843,6 +1988,7 @@
             </select>
              
              <label class="cursor-pointer select-none hidden"><input type="checkbox" id="filter-mgrnotes" class="filter-pill-input" onchange="window.filterAndSortGallery()"></label>
+             <label class="cursor-pointer select-none"><input type="checkbox" id="filter-multilist" name="filterMultiList" class="filter-pill-input" onchange="window.filterAndSortGallery()"><span class="filter-pill-label"><i class="fas fa-layer-group"></i> Multi-List</span></label>
              <label class="cursor-pointer select-none"><input type="checkbox" id="filter-followup" name="filterFollowup" class="filter-pill-input" onchange="window.filterAndSortGallery()"><span class="filter-pill-label"><i class="fas fa-clock"></i> Follow Ups</span></label>
              <label class="cursor-pointer select-none"><input type="checkbox" id="filter-nonotes" name="filterNoNotes" class="filter-pill-input" onchange="window.filterAndSortGallery()"><span class="filter-pill-label"><i class="fas fa-sticky-note"></i> No Notes</span></label>
              <label class="cursor-pointer select-none"><input type="checkbox" id="filter-norecent" name="filterNoRecent" class="filter-pill-input" onchange="window.filterAndSortGallery()"><span class="filter-pill-label"><i class="fas fa-history"></i> No Recent (>30d)</span></label>
@@ -2091,6 +2237,18 @@
 
     <!-- OVERLAYS AND MODALS -->
 
+    <div id="large-attachment-modal" class="modal-overlay hidden" style="display:none; z-index: 9300;">
+        <div class="modal-content w-96 text-center shadow-2xl rounded-xl">
+            <h3 class="text-xl font-bold mb-4 text-red-600"><i class="fas fa-file-archive mr-2"></i>Attachment Too Large</h3>
+            <p class="text-sm mb-6 text-muted">Files over 3MB cannot be sent directly through the app due to server restrictions.</p>
+            <div class="flex flex-col gap-3">
+                <button onclick="window.openOutlookWebDraft()" class="btn-primary bg-blue-600"><i class="fas fa-external-link-alt mr-2"></i>Open in Outlook Web</button>
+                <button onclick="window.removeLargeFilesAndSend()" class="btn-secondary text-red-600 border-red-200 hover:bg-red-50"><i class="fas fa-trash-alt mr-2"></i>Drop Large File & Send</button>
+                <button onclick="document.getElementById('large-attachment-modal').style.display='none';" class="text-xs text-muted underline mt-2 bg-transparent border-none hover:text-blue-500 cursor-pointer">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <div id="unified-sidebar" class="sidebar-modal">
         <div class="p-3 border-b flex justify-between items-center modal-header-custom" style="height:50px;">
             <div id="sidebar-tab-strip" class="sidebar-tab-header h-full flex-grow overflow-x-auto no-scrollbar"></div>
@@ -2243,13 +2401,19 @@
                 <div class="outlook-field-row"><label class="outlook-label">Cc</label><input type="text" id="email-modal-cc" class="outlook-input" placeholder="CC Email"></div>
                 <div class="outlook-field-row"><label class="outlook-label">Subject</label><input type="text" id="email-modal-subject" class="outlook-input font-semibold" placeholder="Subject"></div>
                 <div class="outlook-toolbar">
-                    <button class="outlook-tool-btn font-bold">B</button>
-                    <button class="outlook-tool-btn italic">I</button>
-                    <button class="outlook-tool-btn underline">U</button>
+                    <button class="outlook-tool-btn font-bold" title="Bold">B</button>
+                    <button class="outlook-tool-btn italic" title="Italic">I</button>
+                    <button class="outlook-tool-btn underline" title="Underline">U</button>
                     <div class="outlook-ribbon-separator"></div>
-                    <button class="outlook-tool-btn"><i class="fas fa-link"></i></button>
-                    <button class="outlook-tool-btn"><i class="fas fa-image"></i></button>
+                    <button class="outlook-tool-btn" title="Insert Link"><i class="fas fa-link"></i></button>
+                    <button class="outlook-tool-btn" title="Insert Image"><i class="fas fa-image"></i></button>
+                    <div class="outlook-ribbon-separator"></div>
+                    <input type="file" id="email-attachment-input" class="hidden" multiple onchange="window.handleAttachmentSelection(event)">
+                    <button class="outlook-tool-btn" title="Attach File" onclick="document.getElementById('email-attachment-input').click()"><i class="fas fa-paperclip"></i></button>
                 </div>
+                <!-- Container to hold selected attachments visually before sending -->
+                <div id="email-attachments-container" class="flex flex-wrap gap-2 px-4 pb-2 empty:hidden" style="background-color: var(--bg-card);"></div>
+                
                 <div id="email-modal-body" class="outlook-editor" contenteditable="true"></div>
             </div>
         </div>
