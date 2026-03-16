@@ -58,6 +58,8 @@
         .list-item { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.5rem; padding: 0.75rem; margin-bottom: 0.5rem; cursor: pointer; transition: all 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.05); position: relative; color: var(--text-main); display: flex; flex-direction: column; gap: 4px; border-width: 1px; }
         .list-item:hover { transform: translateY(-2px); box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-color: var(--primary); }
         .list-item.active { border-left: 4px solid var(--primary); background: rgba(15, 118, 110, 0.05); }
+        .list-item.needs-help { border-left: 4px solid var(--accent-danger); }
+        .list-item.close-req { border-left: 4px solid var(--accent-warning); }
         .list-item.bulk-selected { border-color: var(--primary); background-color: rgba(20, 184, 166, 0.1); }
         
         .badge-ds { font-size: 9px; padding: 2px 6px; border-radius: 4px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -720,7 +722,12 @@
     </div>
 
 <script>
-    // --- ENTERPRISE ENGINE ---
+    // --- ENTERPRISE JS ENGINE ---
+    window.escapeJS = function(str) {
+        if (!str) return '';
+        return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
+    };
+
     const DATAVERSE_URL = "https://org23279050.crm.dynamics.com/api/data/v9.2";
     const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: "https://WB-DT.github.io/daytona-utility/" }, cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false } };
     const msalInstance = new msal.PublicClientApplication(msalConfig);
@@ -809,7 +816,6 @@
     
     window.exportUnfilteredDatabase = function() { if(mergedAccounts.length===0) return; let csv = ["Account ID,Company,Rep,Action,Last Update,Email Date,Intro"]; mergedAccounts.forEach(a => csv.push(`"${a.cr714_id}","${window.escapeHTML(a.company)}","${window.escapeHTML(a.rep)}","${window.escapeHTML(a.action || '')}","${a.modifiedon}","${a.emailDate}","${a.intro}"`)); let b = new Blob([csv.join('\n')], {type:'text/csv'}); let u = URL.createObjectURL(b); let a = document.createElement('a'); a.href=u; a.download=`Full_Database_${new Date().toISOString().split('T')[0]}.csv`; a.click(); };
     
-    // SAFE EXPORT: Eliminates hidden columns and normalizes multiline text
     window.exportReportCSV = function() { 
         let tab = activeReportTab; 
         let id = tab === 'overview' ? 'scorecard-table' : (tab === 'actions' ? 'actions-table' : (tab === 'engagement' ? 'engagement-table' : 'monthly-table')); 
@@ -888,17 +894,15 @@
     };
 
     document.addEventListener('click', (e) => {
-        if(!e.target.closest('.col-toggle-menu') && !e.target.closest('[id^="col-toggle-"]')) {
-            document.querySelectorAll('.col-toggle-menu').forEach(m => m.classList.remove('show'));
+        const xlMenu = document.getElementById('excel-filter-menu');
+        if (xlMenu && !xlMenu.contains(e.target) && !e.target.closest('th')) {
+            xlMenu.style.display = 'none';
         }
+        
         if(!e.target.closest('.multiselect-container')) {
             let changed = false;
             document.querySelectorAll('.multiselect-dropdown').forEach(d => { if (d.classList.contains('show')) { d.classList.remove('show'); changed = true; } });
             if (changed) window.applyFilters(true);
-        }
-        const xlMenu = document.getElementById('excel-filter-menu');
-        if (xlMenu && !xlMenu.contains(e.target) && !e.target.closest('th')) {
-            xlMenu.style.display = 'none';
         }
     });
 
@@ -988,6 +992,7 @@
             if(!token) return null;
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
             const cleanId = String(accountId).trim();
+            // Fetch everything natively, expanding contacts
             const expandStr = "primarycontactid($select=fullname,telephone1,emailaddress1),contact_customer_accounts($select=fullname,jobtitle,telephone1,mobilephone,emailaddress1)";
             const res = await fetch(`https://wbmasonco.crm.dynamics.com/api/data/v9.2/accounts?$filter=accountnumber eq '${cleanId}'&$expand=${expandStr}`, { headers });
             
@@ -1738,12 +1743,14 @@
         }
         document.getElementById('fv-contact-list').innerHTML = contactsHtml;
         
-        let addr1 = d365Acct.address1_composite;
-        let addr2 = d365Acct.address2_composite;
+        let addr1 = [];
+        for(let key in d365Acct) { if(key.startsWith('address1_') && d365Acct[key] && typeof d365Acct[key] === 'string' && !key.includes('telephone') && !key.includes('composite')) addr1.push(d365Acct[key]); }
+        let addr2 = [];
+        for(let key in d365Acct) { if(key.startsWith('address2_') && d365Acct[key] && typeof d365Acct[key] === 'string' && !key.includes('telephone') && !key.includes('composite')) addr2.push(d365Acct[key]); }
         
         let combinedAddress = "";
-        if(addr1) combinedAddress += `<div style="margin-bottom: 6px;"><span style="font-weight: 800; font-size: 9px; opacity: 0.6; text-transform: uppercase;">Main Address:</span><br/>${window.escapeHTML(addr1).replace(/&#13;&#10;|\r\n|\n/g, '<br/>')}</div>`;
-        if(addr2) combinedAddress += `<div><span style="font-weight: 800; font-size: 9px; opacity: 0.6; text-transform: uppercase;">Delivery Address:</span><br/>${window.escapeHTML(addr2).replace(/&#13;&#10;|\r\n|\n/g, '<br/>')}</div>`;
+        if(addr1.length > 0) combinedAddress += `<div style="margin-bottom: 6px;"><span style="font-weight: 800; font-size: 9px; opacity: 0.6; text-transform: uppercase;">Main Address:</span><br/>${window.escapeHTML(addr1.join(', '))}</div>`;
+        if(addr2.length > 0) combinedAddress += `<div><span style="font-weight: 800; font-size: 9px; opacity: 0.6; text-transform: uppercase;">Delivery Address:</span><br/>${window.escapeHTML(addr2.join(', '))}</div>`;
         
         document.getElementById('fv-address').innerHTML = combinedAddress || window.escapeHTML(account.address) || '--';
         
@@ -1789,81 +1796,81 @@
 
     window.parseNoteHistory = function(rawNotesStr, sourceLabel, modifiedOn) {
         if(!rawNotesStr || rawNotesStr.trim() === '') return [];
-        let cleanRaw = stripJson(rawNotesStr); 
         
-        if (cleanRaw.startsWith('[') && cleanRaw.endsWith(']')) {
+        let jsonPart = [];
+        let textPart = rawNotesStr.trim();
+
+        // Safely extract and remove JSON array if it was injected at the bottom
+        let jsonStartIndex = textPart.indexOf('[{"date":');
+        if (jsonStartIndex === -1) jsonStartIndex = textPart.indexOf('[\n  {\n    "date":');
+        if (jsonStartIndex === -1) jsonStartIndex = textPart.search(/\[\s*\{\s*"date"/);
+
+        if (jsonStartIndex !== -1) {
+            let jStr = textPart.substring(jsonStartIndex);
             try {
-                let parsedJson = JSON.parse(cleanRaw);
-                parsedJson.forEach(item => { if(!item.src) item.src = sourceLabel; });
-                return parsedJson;
-            } catch(e) {}
-        }
-
-        cleanRaw = cleanRaw.replace(/\r\n/g, '\n');
-        if(!cleanRaw.includes('------------------------------') && !cleanRaw.toLowerCase().includes('modified by')) {
-             let fbDate = modifiedOn ? new Date(modifiedOn).toLocaleDateString() : "Unknown Date";
-             return [{ date: fbDate, author: "Legacy / Imported Note", text: cleanRaw.trim(), src: sourceLabel, tags: [], metaLoc:'', metaDm:'', metaComp:'', metaOpp:'', metaIntro:'' }];
-        }
-
-        const rawEntries = cleanRaw.split(/-{20,}/).filter(e => e.trim().length > 0); 
-        const parsed = [];
-        
-        rawEntries.forEach(entry => {
-            const lines = entry.trim().split('\n'); let date = "Unknown Date"; let author = "Unknown"; let textLines = []; let tags = [];
-            let metaLoc='', metaDm='', metaComp='', metaOpp='', metaIntro='';
-            
-            const metaMatch = entry.match(/{{METADATA:(.*?)}}/);
-            if (metaMatch && metaMatch[1]) {
-                metaMatch[1].split('|').forEach(p => {
-                    const kv = p.split('=');
-                    if (kv[0]==='Loc') metaLoc = kv[1]||'';
-                    if (kv[0]==='DM') metaDm = kv[1]||'';
-                    if (kv[0]==='Comp') metaComp = kv[1]||'';
-                    if (kv[0]==='Opp') metaOpp = kv[1]||'';
-                    if (kv[0]==='Intro') metaIntro = kv[1]||'';
-                });
-            }
-
-            for(let i=0; i<lines.length; i++) {
-                const line = lines[i].trim();
-                if (line.toLowerCase().includes('modified on:')) { date = line.split(/modified on:/i)[1]?.trim() || "Unknown Date"; continue; }
-                if (line.toLowerCase().includes('modified by:') || line.toLowerCase().startsWith('by:')) { author = line.split(/(?:modified by:|by:)/i)[1]?.trim() || "Unknown"; continue; }
-                if (line.startsWith("{{METADATA:")) { tags.push("System Action Logged"); continue; }
-                if (line.startsWith("[List:") || line.startsWith("[Play:") || line.startsWith("[Email:") || line.startsWith("[Manager Override") || line.startsWith("[Manager Reassignment")) { tags.push(line.replace(/[\[\]]/g, '')); continue; }
-                if (line !== "") { textLines.push(lines[i]); }
-            }
-            if (textLines.length > 0 || tags.length > 0 || metaLoc || metaDm || metaComp || metaOpp || metaIntro) { 
-                parsed.push({ date, author, text: textLines.join('\n').trim(), src: sourceLabel, tags, metaLoc, metaDm, metaComp, metaOpp, metaIntro }); 
-            }
-        });
-        
-        let finalParsed = [];
-        parsed.forEach(p => {
-            if (p.date === "Unknown Date" && p.author === "Unknown" && finalParsed.length > 0) {
-                finalParsed[finalParsed.length - 1].text += "\n\n" + p.text;
-            } else {
-                finalParsed.push(p);
-            }
-        });
-
-        // RE-INJECT JSON FROM BOTTOM IF IT EXISTS
-        if (rawNotesStr && rawNotesStr.includes('[{"date":')) {
-            try {
-                let jStr = rawNotesStr.substring(rawNotesStr.indexOf('[{"date":'));
                 let pJson = JSON.parse(jStr);
                 pJson.forEach(item => { if(!item.src) item.src = sourceLabel; });
-                finalParsed = pJson.concat(finalParsed);
+                jsonPart = pJson;
+                textPart = textPart.substring(0, jsonStartIndex).trim(); 
             } catch(e) {}
-        } else if (rawNotesStr && rawNotesStr.search(/\[\s*\{\s*"date"/) !== -1) {
+        } else if (textPart.startsWith('[') && textPart.endsWith(']')) {
             try {
-                let match = rawNotesStr.search(/\[\s*\{\s*"date"/);
-                let pJson = JSON.parse(rawNotesStr.substring(match));
+                let pJson = JSON.parse(textPart);
                 pJson.forEach(item => { if(!item.src) item.src = sourceLabel; });
-                finalParsed = pJson.concat(finalParsed);
+                return pJson;
             } catch(e) {}
         }
 
-        return finalParsed;
+        if (!textPart) return jsonPart; 
+
+        let legacyParsed = [];
+        textPart = textPart.replace(/\r\n/g, '\n');
+        
+        if(!textPart.includes('------------------------------') && !textPart.toLowerCase().includes('modified by')) {
+             let fbDate = modifiedOn ? new Date(modifiedOn).toLocaleDateString() : "Unknown Date";
+             legacyParsed = [{ date: fbDate, author: "Legacy / Imported Note", text: textPart, src: sourceLabel, tags: [], metaLoc:'', metaDm:'', metaComp:'', metaOpp:'', metaIntro:'' }];
+        } else {
+            const rawEntries = textPart.split(/-{20,}/).filter(e => e.trim().length > 0); 
+            rawEntries.forEach(entry => {
+                const lines = entry.trim().split('\n'); let date = "Unknown Date"; let author = "Unknown"; let textLines = []; let tags = [];
+                let metaLoc='', metaDm='', metaComp='', metaOpp='', metaIntro='';
+                
+                const metaMatch = entry.match(/{{METADATA:(.*?)}}/);
+                if (metaMatch && metaMatch[1]) {
+                    metaMatch[1].split('|').forEach(p => {
+                        const kv = p.split('=');
+                        if (kv[0]==='Loc') metaLoc = kv[1]||'';
+                        if (kv[0]==='DM') metaDm = kv[1]||'';
+                        if (kv[0]==='Comp') metaComp = kv[1]||'';
+                        if (kv[0]==='Opp') metaOpp = kv[1]||'';
+                        if (kv[0]==='Intro') metaIntro = kv[1]||'';
+                    });
+                }
+
+                for(let i=0; i<lines.length; i++) {
+                    const line = lines[i].trim();
+                    if (line.toLowerCase().includes('modified on:')) { date = line.split(/modified on:/i)[1]?.trim() || "Unknown Date"; continue; }
+                    if (line.toLowerCase().includes('modified by:') || line.toLowerCase().startsWith('by:')) { author = line.split(/(?:modified by:|by:)/i)[1]?.trim() || "Unknown"; continue; }
+                    if (line.startsWith("{{METADATA:")) { tags.push("System Action Logged"); continue; }
+                    if (line.startsWith("[List:") || line.startsWith("[Play:") || line.startsWith("[Email:") || line.startsWith("[Manager Override") || line.startsWith("[Manager Reassignment")) { tags.push(line.replace(/[\[\]]/g, '')); continue; }
+                    if (line !== "") { textLines.push(lines[i]); }
+                }
+                if (textLines.length > 0 || tags.length > 0 || metaLoc || metaDm || metaComp || metaOpp || metaIntro) { 
+                    legacyParsed.push({ date, author, text: textLines.join('\n').trim(), src: sourceLabel, tags, metaLoc, metaDm, metaComp, metaOpp, metaIntro }); 
+                }
+            });
+        }
+        
+        let finalLegacy = [];
+        legacyParsed.forEach(p => {
+            if (p.date === "Unknown Date" && p.author === "Unknown" && finalLegacy.length > 0) {
+                finalLegacy[finalLegacy.length - 1].text += "\n\n" + p.text;
+            } else {
+                finalLegacy.push(p);
+            }
+        });
+
+        return jsonPart.concat(finalLegacy);
     };
 
     window.exportHistory = function() {
@@ -2119,6 +2126,7 @@
         }
     };
 
+    // --- ANALYTICS & MoM ---
     window.renderReports = function() {
         if(!document.getElementById('tab-reports').classList.contains('active')) return;
         
@@ -2215,33 +2223,35 @@
             let touchPct = stats.total > 0 ? Math.round((stats.touched / stats.total) * 100) : 0;
             let emailPct = stats.total > 0 ? Math.round((stats.emails / stats.total) * 100) : 0;
             let safeRep = window.escapeHTML(rep);
+            let jsRep = window.escapeJS(rep);
 
             scorecardBody.innerHTML += `
                 <tr class="hover:bg-gray-50 transition-colors">
-                    <td class="font-black text-primary drilldown-cell uppercase" onclick="window.openDrilldown('${safeRep}', 'total')">${safeRep}</td>
-                    <td class="drilldown-cell" onclick="window.openDrilldown('${safeRep}', 'total')">${stats.total}</td>
-                    <td class="font-black drilldown-cell" onclick="window.openDrilldown('${safeRep}', 'touched')">${stats.touched}</td>
-                    <td class="drilldown-cell text-red-500 font-black" onclick="window.openDrilldown('${safeRep}', 'stale')">${stats.stale}</td>
-                    <td class="drilldown-cell text-blue-600 font-bold" onclick="window.openDrilldown('${safeRep}', 'emails')">${stats.emails}</td>
-                    <td class="drilldown-cell text-orange-500 font-black" onclick="window.openDrilldown('${safeRep}', 'requests')">${stats.requests}</td>
-                    <td class="drilldown-cell text-teal-600 font-black" onclick="window.openDrilldown('${safeRep}', 'intro')">${stats.intro}</td>
+                    <td class="font-black text-primary drilldown-cell uppercase" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
+                    <td class="drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${stats.total}</td>
+                    <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touched}</td>
+                    <td class="drilldown-cell text-red-500 font-black" onclick="window.openDrilldown('${jsRep}', 'stale')">${stats.stale}</td>
+                    <td class="drilldown-cell text-blue-600 font-bold" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
+                    <td class="drilldown-cell text-orange-500 font-black" onclick="window.openDrilldown('${jsRep}', 'requests')">${stats.requests}</td>
+                    <td class="drilldown-cell text-teal-600 font-black" onclick="window.openDrilldown('${jsRep}', 'intro')">${stats.intro}</td>
                 </tr>`;
 
             let actionTds = dynamicActionSet.map((act) => {
                 let isZero = globalActions[act] === 0;
                 let hiddenCls = isZero ? ' hidden-force' : '';
-                return `<td class="text-center ${hiddenCls}"><div class="bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded shadow-sm inline-block min-w-[30px] drilldown-cell" onclick="window.openDrilldown('${safeRep}', 'action_${window.escapeHTML(act)}')">${stats.actions[act]}</div></td>`;
+                let jsAct = window.escapeJS(act);
+                return `<td class="text-center ${hiddenCls}"><div class="bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded shadow-sm inline-block min-w-[30px] drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'action_${jsAct}')">${stats.actions[act]}</div></td>`;
             }).join('');
-            actionsBody.innerHTML += `<tr class="hover:bg-gray-50"><td class="font-black uppercase text-primary drilldown-cell" onclick="window.openDrilldown('${safeRep}', 'total')">${safeRep}</td><td class="font-black drilldown-cell">${stats.total}</td>${actionTds}</tr>`;
+            actionsBody.innerHTML += `<tr class="hover:bg-gray-50"><td class="font-black uppercase text-primary drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td><td class="font-black drilldown-cell">${stats.total}</td>${actionTds}</tr>`;
 
             let touchColor = touchPct > 75 ? 'bg-green-500' : (touchPct > 40 ? 'bg-yellow-500' : 'bg-red-500');
             engagementBody.innerHTML += `
                 <tr class="hover:bg-gray-50 transition-colors">
-                    <td class="font-black uppercase text-primary drilldown-cell" onclick="window.openDrilldown('${safeRep}', 'total')">${safeRep}</td>
+                    <td class="font-black uppercase text-primary drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
                     <td class="font-black drilldown-cell">${stats.total}</td>
-                    <td class="drilldown-cell" onclick="window.openDrilldown('${safeRep}', 'emails')"><div class="flex justify-between text-[10px] mb-1 font-black"><span>${stats.emails} / ${stats.total}</span><span>${emailPct}%</span></div><div class="w-full bg-gray-200 h-1.5 rounded-full"><div class="bg-blue-500 h-1.5 rounded-full" style="width: ${emailPct}%"></div></div></td>
-                    <td class="drilldown-cell" onclick="window.openDrilldown('${safeRep}', 'touched')"><div class="flex justify-between text-[10px] mb-1 font-black"><span>${stats.touched} / ${stats.total}</span><span>${touchPct}%</span></div><div class="w-full bg-gray-200 h-1.5 rounded-full"><div class="${touchColor} h-1.5 rounded-full" style="width: ${touchPct}%"></div></div></td>
-                    <td class="drilldown-cell" onclick="window.openDrilldown('${safeRep}', 'stale')"><div class="flex justify-between text-[10px] mb-1 font-black text-red-500"><span>${stats.stale} / ${stats.total}</span><span>${Math.round((stats.stale/Math.max(1,stats.total))*100)}%</span></div><div class="w-full bg-gray-200 h-1.5 rounded-full"><div class="bg-red-500 h-1.5 rounded-full" style="width: ${Math.round((stats.stale/Math.max(1,stats.total))*100)}%"></div></div></td>
+                    <td class="drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'emails')"><div class="flex justify-between text-[10px] mb-1 font-black"><span>${stats.emails} / ${stats.total}</span><span>${emailPct}%</span></div><div class="w-full bg-gray-200 h-1.5 rounded-full"><div class="bg-blue-500 h-1.5 rounded-full" style="width: ${emailPct}%"></div></div></td>
+                    <td class="drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'touched')"><div class="flex justify-between text-[10px] mb-1 font-black"><span>${stats.touched} / ${stats.total}</span><span>${touchPct}%</span></div><div class="w-full bg-gray-200 h-1.5 rounded-full"><div class="${touchColor} h-1.5 rounded-full" style="width: ${touchPct}%"></div></div></td>
+                    <td class="drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'stale')"><div class="flex justify-between text-[10px] mb-1 font-black text-red-500"><span>${stats.stale} / ${stats.total}</span><span>${Math.round((stats.stale/Math.max(1,stats.total))*100)}%</span></div><div class="w-full bg-gray-200 h-1.5 rounded-full"><div class="bg-red-500 h-1.5 rounded-full" style="width: ${Math.round((stats.stale/Math.max(1,stats.total))*100)}%"></div></div></td>
                 </tr>`;
 
             if (monthlyData[rep]) {
@@ -2258,7 +2268,8 @@
 
         sortedReps.forEach(([rep, stats]) => {
             let safeRep = window.escapeHTML(rep);
-            let rowHtml = `<td class="font-black uppercase text-primary drilldown-cell" onclick="window.openDrilldown('${safeRep}', 'total')">${safeRep}</td>`;
+            let jsRep = window.escapeJS(rep);
+            let rowHtml = `<td class="font-black uppercase text-primary drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>`;
             allMonths.forEach(m => {
                 let touched = monthlyData[rep] && monthlyData[rep][m] ? monthlyData[rep][m].touched : 0;
                 let emails = monthlyData[rep] && monthlyData[rep][m] ? monthlyData[rep][m].emails : 0;
@@ -2627,6 +2638,68 @@
          btn.disabled = true; btn.innerText = "Sending...";
          await window.sendSilentEmail(account.rep, `NEW INTRO: ${account.company}`, `<p>A new Intro record <b>${account.cr714_id}</b> has been assigned to you.</p><p>Please prioritize outreach.</p>`);
          btn.disabled = false; btn.innerText = "Push Intro Email to Rep";
+    };
+
+    // --- LIVE POLLING ---
+    const pollLiveUpdates = async () => {
+        try {
+            const token = await getToken();
+            const tables = [
+                { t: 'cr714_accountmanagementdatasets', select: 'cr714_accountnum,cr714_accountname,cr714_rep,cr714_action,cr714_actionmessage,cr714_help,modifiedon' },
+                { t: 'cr714_cadencedatasets', select: 'cr714_accountnum,cr714_company,cr714_retentionrep,cr714_action,cr714_actionmessage,cr714_recordstatus,modifiedon,cr714_intro' },
+                { t: 'cr714_prospectingdatasets', select: 'cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_action,cr714_actionmessage,cr714_help,modifiedon,cr714_intro' }
+            ];
+            let foundUpdates = false; let newLastPoll = new Date().toISOString();
+            
+            for(let query of tables) {
+                const filterStr = encodeURIComponent(`modifiedon gt ${lastPollTime}`);
+                const url = `${DATAVERSE_URL}/${query.t}?$filter=${filterStr}&$select=${query.select}`;
+                const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' } });
+                if(!res.ok) continue;
+                const data = await res.json();
+                data.value.forEach(r => {
+                    let existing = mergedAccounts.find(a => a.cr714_id === r.cr714_accountnum);
+                    if(existing) { 
+                        existing.modifiedon = r.modifiedon;
+                        let cleanActionMsg = stripJson(r.cr714_actionmessage);
+                        let msg = String(cleanActionMsg || '').toUpperCase();
+                        let rHelp = r['cr714_help@OData.Community.Display.V1.FormattedValue'] || r.cr714_help || 
+                                    r['cr714_recordstatus@OData.Community.Display.V1.FormattedValue'] || r.cr714_recordstatus || '';
+                        let hs = String(rHelp).toUpperCase();
+                        
+                        if(((msg.includes('[HELP') || msg.includes('[CLOSED')) || (hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED')) && !msg.includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR') {
+                            if (existing.helpStatus !== rHelp || existing.message !== cleanActionMsg) {
+                                foundUpdates = true; 
+                                window.showToast(`Action Required: ${r.cr714_company || r.cr714_accountname || r.cr714_acctname}`, 'warning');
+                                existing.message = cleanActionMsg; 
+                                existing.helpStatus = rHelp;
+                                existing.isHelp = msg.includes('[HELP') || hs === 'HELP REQUESTED'; 
+                                existing.isClose = msg.includes('[CLOSED') || hs === 'CLOSE REQUESTED'; 
+                            }
+                        }
+                        
+                        if(r.cr714_intro && !existing.intro) {
+                            existing.intro = true;
+                            foundUpdates = true;
+                            window.showToast(`New Intro: ${r.cr714_company || r.cr714_accountname || r.cr714_acctname}`, 'success');
+                        }
+                        
+                        if(r.cr714_action && existing.action !== r.cr714_action) {
+                            existing.action = r.cr714_action;
+                            foundUpdates = true;
+                        }
+                    }
+                });
+            }
+            if(foundUpdates) { 
+                window.applyFilters(true); 
+                document.getElementById('nav-bell-icon').classList.add('bell-bounce');
+                let count = parseInt(document.getElementById('nav-bell-badge').innerText || 0) + 1;
+                document.getElementById('nav-bell-badge').innerText = count;
+                document.getElementById('nav-bell-badge').classList.remove('hidden-force');
+            }
+            lastPollTime = newLastPoll; document.getElementById('sync-time-display').innerText = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        } catch(e) {}
     };
 
     document.addEventListener("DOMContentLoaded", () => {
