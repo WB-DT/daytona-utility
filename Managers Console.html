@@ -65,6 +65,7 @@
         .badge-am { background-color: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
         .badge-cad { background-color: #dbeafe; color: #1e3a8a; border: 1px solid #bfdbfe; }
         .badge-pro { background-color: #ffedd5; color: #9a3412; border: 1px solid #fed7aa; }
+        .badge-lb { background-color: #f3e8ff; color: #6b21a8; border: 1px solid #d8b4fe; }
 
         .multiselect-container { position: relative; min-width: 170px; flex-shrink: 0; }
         .multiselect-header { background: var(--bg-input); border: 1px solid var(--border-color); padding: 0.4rem 0.75rem; border-radius: 0.375rem; cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-size: 0.7rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-main); }
@@ -639,6 +640,7 @@
                                         <label class="flex items-center gap-2 text-xs font-black cursor-pointer"><input type="checkbox" id="chk-reassign-am" checked class="w-4 h-4 accent-blue-600"> Account Management (AM)</label>
                                         <label class="flex items-center gap-2 text-xs font-black cursor-pointer"><input type="checkbox" id="chk-reassign-cad" checked class="w-4 h-4 accent-blue-600"> Cadence</label>
                                         <label class="flex items-center gap-2 text-xs font-black cursor-pointer"><input type="checkbox" id="chk-reassign-pro" checked class="w-4 h-4 accent-blue-600"> Prospecting</label>
+                                        <label class="flex items-center gap-2 text-xs font-black cursor-pointer"><input type="checkbox" id="chk-reassign-lb" checked class="w-4 h-4 accent-blue-600"> Louise Brown</label>
                                     </div>
                                     <p class="text-[9px] text-muted mt-1 uppercase font-bold tracking-tight">Only updates the Rep column in the selected datasets.</p>
                                 </div>
@@ -1157,22 +1159,30 @@
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
             const cleanId = String(accountId).trim();
             
-            // Explicitly select fields needed for address logic & contacts to ensure they are returned
-            const selectStr = "name,accountnumber,address1_composite,address1_line1,address1_line2,address1_city,address1_stateorprovince,address1_postalcode,address2_composite,address2_line1,address2_line2,address2_city,address2_stateorprovince,address2_postalcode,telephone1,emailaddress1,description,accountcategorycode,_ownerid_value,_mss_salesrepid_value,mss_messagecenter";
+            const selectStr = "accountid,name,accountnumber,address1_composite,address1_line1,address1_line2,address1_city,address1_stateorprovince,address1_postalcode,address2_composite,address2_line1,address2_line2,address2_city,address2_stateorprovince,address2_postalcode,telephone1,emailaddress1,description,accountcategorycode,_ownerid_value,_mss_salesrepid_value,mss_messagecenter";
             
-            // Attempt 1: Fetch with multiple contacts relation
-            let expandStr = "primarycontactid($select=fullname,telephone1,emailaddress1),contact_customer_accounts($select=fullname,jobtitle,telephone1,mobilephone,emailaddress1)";
-            let res = await fetch(`https://wbmasonco.crm.dynamics.com/api/data/v9.2/accounts?$filter=accountnumber eq '${cleanId}'&$select=${selectStr}&$expand=${expandStr}`, { headers });
+            const expandStr = "primarycontactid($select=fullname,telephone1,emailaddress1)";
+            const res = await fetch(`https://wbmasonco.crm.dynamics.com/api/data/v9.2/accounts?$filter=accountnumber eq '${cleanId}'&$select=${selectStr}&$expand=${expandStr}`, { headers });
             
-            // If contact_customer_accounts is invalid for this environment and throws 400 Bad Request, seamlessly fallback to primary contact only
-            if (!res.ok && res.status === 400) {
-                expandStr = "primarycontactid($select=fullname,telephone1,emailaddress1)";
-                res = await fetch(`https://wbmasonco.crm.dynamics.com/api/data/v9.2/accounts?$filter=accountnumber eq '${cleanId}'&$select=${selectStr}&$expand=${expandStr}`, { headers });
-            }
-
             if(res.ok) {
                 const data = await res.json();
-                if(data.value && data.value.length > 0) return data.value[0];
+                if(data.value && data.value.length > 0) {
+                    let accountData = data.value[0];
+                    
+                    if (accountData.accountid) {
+                        try {
+                            const contactsRes = await fetch(`https://wbmasonco.crm.dynamics.com/api/data/v9.2/contacts?$filter=_parentcustomerid_value eq '${accountData.accountid}'&$select=fullname,jobtitle,telephone1,mobilephone,emailaddress1`, { headers });
+                            if (contactsRes.ok) {
+                                const cData = await contactsRes.json();
+                                accountData.contact_customer_accounts = cData.value;
+                            }
+                        } catch (ce) {
+                            console.warn("Secondary contacts fetch skipped", ce);
+                        }
+                    }
+                    
+                    return accountData;
+                }
             }
         } catch(e) { console.error("D365 Fetch Error:", e); }
         return null;
@@ -1252,7 +1262,8 @@
             const tables = [
                 { t: 'cr714_accountmanagementdatasets', select: 'cr714_accountnum,cr714_accountname,cr714_rep,cr714_action,cr714_actionmessage,cr714_help,modifiedon' },
                 { t: 'cr714_cadencedatasets', select: 'cr714_accountnum,cr714_company,cr714_retentionrep,cr714_action,cr714_actionmessage,cr714_recordstatus,modifiedon,cr714_intro' },
-                { t: 'cr714_prospectingdatasets', select: 'cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_action,cr714_actionmessage,cr714_help,modifiedon,cr714_intro' }
+                { t: 'cr714_prospectingdatasets', select: 'cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_action,cr714_actionmessage,cr714_help,modifiedon,cr714_intro' },
+                { t: 'cr714_louisebrowndatasets', select: 'cr714_accountnum,cr714_accountname,cr714_assignedrep,cr714_action,cr714_actionmessage,cr714_help,modifiedon,cr714_intro' }
             ];
             let foundUpdates = false; let newLastPoll = new Date().toISOString();
             
@@ -1374,18 +1385,18 @@
                 let id = r.cr714_accountnum; if(!id) return;
                 
                 let company = r.cr714_accountname || r.cr714_company || r.cr714_acctname || "Unknown Company";
-                let localRep = r.cr714_rep || r.cr714_retentionrep || r.cr714_repassigned || "Unassigned";
+                let localRep = r.cr714_rep || r.cr714_retentionrep || r.cr714_repassigned || r.cr714_assignedrep || "Unassigned";
                 let emailDate = r.cr714_actionemailsent || r.cr714_emailsenttimestamp;
-                let recordId = r.cr714_accountmanagementdatasetid || r.cr714_cadencedatasetid || r.cr714_prospectingdatasetid; 
+                let recordId = r.cr714_accountmanagementdatasetid || r.cr714_cadencedatasetid || r.cr714_prospectingdatasetid || r.cr714_louisebrowndatasetid; 
 
                 let contact = r.cr714_namemost || r.cr714_namelatest || '--';
                 let phone = window.formatPhone(r.cr714_primaryphone || r.cr714_phone);
-                let email = r.cr714_emailmost || r.cr714_email_latest || '--';
+                let email = r.cr714_emailmost || r.cr714_email_latest || r.cr714_emaillatest || '--';
                 let address = r.cr714_billingaddress || r.cr714_address || '--';
                 let createDate = new Date(r.createdon || r.modifiedon || 0);
 
                 let cleanActionMsg = window.stripJson(r.cr714_actionmessage);
-                let cleanManagerNote = window.stripJson(r.cr714_managernotes);
+                let cleanManagerNote = window.stripJson(r.cr714_managernotes || r.cr714_notesfr);
                 let stCode = r.statecode === 1 ? 'Inactive' : 'Active';
 
                 if(!globalAccountMap.has(id)) {
@@ -1413,10 +1424,10 @@
                     existing.statecode = stCode;
                 }
 
-                existing.sources.push({ type: typeLabel, table, id: recordId, message: cleanActionMsg, rawNotes: r.cr714_managernotes || r.cr714_actionmessage || '', rep: localRep });
+                existing.sources.push({ type: typeLabel, table, id: recordId, message: cleanActionMsg, rawNotes: r.cr714_managernotes || r.cr714_notesfr || r.cr714_actionmessage || '', rep: localRep });
                 if(r.modifiedon > existing.modifiedon) existing.modifiedon = r.modifiedon;
                 
-                let combinedRaw = String(r.cr714_managernotes || '') + " " + String(r.cr714_actionmessage || '');
+                let combinedRaw = String(r.cr714_managernotes || r.cr714_notesfr || '') + " " + String(r.cr714_actionmessage || '');
                 if (/\[Email:|Manager Update:|NEW INTRO:/i.test(combinedRaw)) {
                     let parsedHist = window.parseNoteHistory(combinedRaw, typeLabel, r.modifiedon);
                     parsedHist.forEach(h => {
@@ -1467,12 +1478,14 @@
             const amSelect = "cr714_accountnum,cr714_accountname,cr714_rep,cr714_action,cr714_actionmessage,cr714_managernotes,modifiedon,createdon,cr714_help,cr714_actionemailsent,cr714_accountmanagementdatasetid,cr714_address,cr714_namemost,cr714_phone,cr714_emailmost";
             const cadSelect = "cr714_accountnum,cr714_company,cr714_retentionrep,cr714_action,cr714_actionmessage,cr714_managernotes,modifiedon,createdon,cr714_recordstatus,cr714_cadencedatasetid,cr714_intro,cr714_billingaddress,cr714_namemost,cr714_primaryphone,cr714_emailmost";
             const proSelect = "cr714_accountnum,cr714_acctname,cr714_repassigned,cr714_action,cr714_actionmessage,cr714_managernotes,modifiedon,createdon,cr714_help,cr714_emailsenttimestamp,cr714_prospectingdatasetid,cr714_intro,cr714_address,cr714_namelatest,cr714_phone,cr714_email_latest";
+            const lbSelect = "cr714_accountnum,cr714_accountname,cr714_assignedrep,cr714_action,cr714_actionmessage,cr714_notesfr,modifiedon,createdon,cr714_help,cr714_actionemailsent,cr714_louisebrowndatasetid,cr714_intro,cr714_address,cr714_namemost,cr714_phone,cr714_emaillatest";
 
             const globalAccountMap = new Map();
             await Promise.all([
                 window.fetchPaginatedData('cr714_accountmanagementdatasets', amSelect, token, globalAccountMap, 'AM'),
                 window.fetchPaginatedData('cr714_cadencedatasets', cadSelect, token, globalAccountMap, 'Cadence'),
-                window.fetchPaginatedData('cr714_prospectingdatasets', proSelect, token, globalAccountMap, 'Prospecting')
+                window.fetchPaginatedData('cr714_prospectingdatasets', proSelect, token, globalAccountMap, 'Prospecting'),
+                window.fetchPaginatedData('cr714_louisebrowndatasets', lbSelect, token, globalAccountMap, 'Louise Brown')
             ]);
             window.mergedAccounts = Array.from(globalAccountMap.values());
             window.populateDynamicActionSet();
@@ -1745,7 +1758,7 @@
             else if (a.sources.length > 1) pulseClass = 'pulse-multi';
 
             let dsBadges = a.sources.map(s => {
-                let bClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : 'badge-pro');
+                let bClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : (s.type === 'Prospecting' ? 'badge-pro' : 'badge-lb'));
                 return `<span class="badge-ds ${bClass}">${s.type}</span>`;
             }).join('');
 
@@ -1844,6 +1857,7 @@
                     if (src.table === 'cr714_accountmanagementdatasets') fields = "cr714_accountmanagementnotes,cr714_importantaccountinformation";
                     else if (src.table === 'cr714_cadencedatasets') fields = "cr714_qbnotes";
                     else if (src.table === 'cr714_prospectingdatasets') fields = "cr714_prospectingnotes,cr714_importantaccountinfo";
+                    else if (src.table === 'cr714_louisebrowndatasets') fields = "cr714_notesfr";
                     
                     const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})?$select=${fields}`, { headers });
                     if (res.ok) {
@@ -1856,6 +1870,8 @@
                         } else if (src.table === 'cr714_prospectingdatasets') {
                             src.rawNotes = data.cr714_prospectingnotes || "";
                             account.importantInfo = data.cr714_importantaccountinfo || account.importantInfo;
+                        } else if (src.table === 'cr714_louisebrowndatasets') {
+                            src.rawNotes = data.cr714_notesfr || "";
                         }
                     }
                 }
@@ -1895,7 +1911,7 @@
         });
         
         document.getElementById('fv-history').innerHTML = window.currentModalHistory.map(h => {
-            let srcColor = h.src === 'AM' ? 'bg-green-100 text-green-800 border-green-300' : h.src === 'Cadence' ? 'bg-blue-100 text-blue-800 border-blue-300' : 'bg-orange-100 text-orange-800 border-orange-300';
+            let srcColor = h.src === 'AM' ? 'bg-green-100 text-green-800 border-green-300' : h.src === 'Cadence' ? 'bg-blue-100 text-blue-800 border-blue-300' : h.src === 'Louise Brown' ? 'bg-purple-100 text-purple-800 border-purple-300' : 'bg-orange-100 text-orange-800 border-orange-300';
             let srcBadge = h.src ? `<span class="px-1.5 py-0.5 rounded text-[8px] border font-bold ${srcColor} mr-2">${h.src}</span>` : '';
             
             let metaHtml = '';
@@ -1960,11 +1976,21 @@
         
         let addr1Comp = d365Acct.address1_composite;
         if (!addr1Comp && (d365Acct.address1_line1 || d365Acct.address1_city)) {
-            addr1Comp = [d365Acct.address1_line1, d365Acct.address1_line2, d365Acct.address1_city, d365Acct.address1_stateorprovince, d365Acct.address1_postalcode].filter(Boolean).join(', ');
+            let parts = [];
+            if (d365Acct.address1_line1) parts.push(d365Acct.address1_line1);
+            if (d365Acct.address1_line2) parts.push(d365Acct.address1_line2);
+            let cityStateZip = [d365Acct.address1_city, d365Acct.address1_stateorprovince, d365Acct.address1_postalcode].filter(Boolean).join(', ');
+            if (cityStateZip) parts.push(cityStateZip);
+            addr1Comp = parts.join('\n');
         }
         let addr2Comp = d365Acct.address2_composite;
         if (!addr2Comp && (d365Acct.address2_line1 || d365Acct.address2_city)) {
-            addr2Comp = [d365Acct.address2_line1, d365Acct.address2_line2, d365Acct.address2_city, d365Acct.address2_stateorprovince, d365Acct.address2_postalcode].filter(Boolean).join(', ');
+            let parts = [];
+            if (d365Acct.address2_line1) parts.push(d365Acct.address2_line1);
+            if (d365Acct.address2_line2) parts.push(d365Acct.address2_line2);
+            let cityStateZip = [d365Acct.address2_city, d365Acct.address2_stateorprovince, d365Acct.address2_postalcode].filter(Boolean).join(', ');
+            if (cityStateZip) parts.push(cityStateZip);
+            addr2Comp = parts.join('\n');
         }
         
         let combinedAddress = "";
@@ -1973,7 +1999,7 @@
         }
 
         if(addr2Comp) {
-            combinedAddress += `<div><span style="font-weight: 800; font-size: 9px; opacity: 0.6; text-transform: uppercase;">Delivery Address:</span><br/>${window.escapeHTML(addr2Comp).replace(/&#13;&#10;|\r\n|\n/g, '<br/>')}</div>`;
+            combinedAddress += `<div style="margin-top: 6px;"><span style="font-weight: 800; font-size: 9px; opacity: 0.6; text-transform: uppercase;">Delivery Address:</span><br/>${window.escapeHTML(addr2Comp).replace(/&#13;&#10;|\r\n|\n/g, '<br/>')}</div>`;
         }
         
         document.getElementById('fv-address').innerHTML = combinedAddress || window.escapeHTML(account.address) || '--';
@@ -2393,20 +2419,31 @@
             if(act && globalActions[act] !== undefined) { globalActions[act]++; stats.actions[act]++; totalActionable++; }
             else if (act) { globalActions['Other']++; stats.actions['Other']++; totalActionable++; }
 
-            if (a.modifiedon) {
-                const d = new Date(a.modifiedon);
+            // MoM Logic using FULL history
+            if (!monthlyData[a.rep]) monthlyData[a.rep] = {};
+            
+            let accountHistory = [];
+            a.sources.forEach(src => {
+                accountHistory = accountHistory.concat(window.parseNoteHistory(src.rawNotes, src.type, a.modifiedon));
+            });
+            
+            accountHistory.forEach(h => {
+                if (h.date === 'Permanent' || h.date === 'Unknown Date') return;
+                const d = new Date(h.date);
+                if (isNaN(d.getTime())) return;
+                
                 const mKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-                if(!monthlyData[a.rep]) monthlyData[a.rep] = {};
                 if(!monthlyData[a.rep][mKey]) monthlyData[a.rep][mKey] = { touched: 0, emails: 0 };
+                
                 monthlyData[a.rep][mKey].touched++;
-            }
-            if (a.emailDate) {
-                const ed = new Date(a.emailDate);
-                const eMKey = `${ed.getFullYear()}-${String(ed.getMonth() + 1).padStart(2, '0')}`;
-                if(!monthlyData[a.rep]) monthlyData[a.rep] = {};
-                if(!monthlyData[a.rep][eMKey]) monthlyData[a.rep][eMKey] = { touched: 0, emails: 0 };
-                monthlyData[a.rep][eMKey].emails++;
-            }
+                
+                let txt = String(h.text || '').toUpperCase();
+                let isEmail = txt.includes('[EMAIL:') || txt.includes('MANAGER UPDATE:') || txt.includes('NEW INTRO:');
+                if (!isEmail && h.tags) {
+                    isEmail = h.tags.some(t => String(t).toUpperCase().includes('EMAIL DISPATCHED') || String(t).toUpperCase().includes('EMAIL:'));
+                }
+                if (isEmail) monthlyData[a.rep][mKey].emails++;
+            });
         });
 
         const scorecardBody = document.getElementById('scorecard-body'); scorecardBody.innerHTML = '';
@@ -2542,9 +2579,10 @@
         const chkAm = document.getElementById('chk-reassign-am').checked;
         const chkCad = document.getElementById('chk-reassign-cad').checked;
         const chkPro = document.getElementById('chk-reassign-pro').checked;
+        const chkLb = document.getElementById('chk-reassign-lb').checked;
         
         if(!targetRep) { window.showToast("Please enter a New Representative Name to generate a preview.", "error"); return; }
-        if(!chkAm && !chkCad && !chkPro) { window.showToast("You must select at least one dataset to target.", "error"); return; }
+        if(!chkAm && !chkCad && !chkPro && !chkLb) { window.showToast("You must select at least one dataset to target.", "error"); return; }
         
         const previewBody = document.getElementById('reassign-preview-body');
         let html = '';
@@ -2552,7 +2590,7 @@
 
         window.teamFilteredAccounts.forEach(a => {
             a.sources.forEach(src => {
-                if ((src.type === 'AM' && chkAm) || (src.type === 'Cadence' && chkCad) || (src.type === 'Prospecting' && chkPro)) {
+                if ((src.type === 'AM' && chkAm) || (src.type === 'Cadence' && chkCad) || (src.type === 'Prospecting' && chkPro) || (src.type === 'Louise Brown' && chkLb)) {
                     if (src.rep !== targetRep) {
                         html += `<tr class="border-b border-gray-200 hover:bg-gray-100">
                                     <td class="py-1 px-2 text-center"><input type="checkbox" class="reassign-row-cb accent-primary cursor-pointer" data-id="${a.cr714_id}" data-type="${src.type}" checked></td>
@@ -2599,6 +2637,7 @@
                         if (src.table === 'cr714_accountmanagementdatasets') payload.cr714_rep = targetRep;
                         else if (src.table === 'cr714_cadencedatasets') payload.cr714_retentionrep = targetRep;
                         else if (src.table === 'cr714_prospectingdatasets') payload.cr714_repassigned = targetRep;
+                        else if (src.table === 'cr714_louisebrowndatasets') payload.cr714_assignedrep = targetRep;
                         
                         const timeStamp = new Date().toLocaleString();
                         const userStamp = window.currentUserName + " (Manager)";
@@ -2611,6 +2650,7 @@
                         if (src.table === 'cr714_accountmanagementdatasets') payload.cr714_accountmanagementnotes = fullNoteJSON;
                         else if (src.table === 'cr714_cadencedatasets') payload.cr714_qbnotes = fullNoteJSON;
                         else if (src.table === 'cr714_prospectingdatasets') payload.cr714_prospectingnotes = fullNoteJSON;
+                        else if (src.table === 'cr714_louisebrowndatasets') payload.cr714_notesfr = fullNoteJSON;
                         
                         patchPromises.push(fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers, body: JSON.stringify(payload) }));
                     }
@@ -2662,6 +2702,7 @@
                     if (src.table === 'cr714_accountmanagementdatasets') payload.cr714_accountmanagementnotes = fullNoteJSON;
                     else if (src.table === 'cr714_cadencedatasets') payload.cr714_qbnotes = fullNoteJSON;
                     else if (src.table === 'cr714_prospectingdatasets') payload.cr714_prospectingnotes = fullNoteJSON;
+                    else if (src.table === 'cr714_louisebrowndatasets') payload.cr714_notesfr = fullNoteJSON;
                     src.rawNotes = fullNoteJSON;
                 } else if (markRes) {
                     payload.cr714_managernotes = null;
@@ -2800,6 +2841,7 @@
                             if (src.table === 'cr714_accountmanagementdatasets') payload.cr714_accountmanagementnotes = fullNoteJSON;
                             else if (src.table === 'cr714_cadencedatasets') payload.cr714_qbnotes = fullNoteJSON;
                             else if (src.table === 'cr714_prospectingdatasets') payload.cr714_prospectingnotes = fullNoteJSON;
+                            else if (src.table === 'cr714_louisebrowndatasets') payload.cr714_notesfr = fullNoteJSON;
                             src.rawNotes = fullNoteJSON;
                         } else if (markRes) {
                             payload.cr714_managernotes = null;
