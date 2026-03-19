@@ -310,69 +310,64 @@
 
     // --- MASONVILLE HAR SILENT PUSH ---
 window.pushToMasonvilleSilent = async function(accountId, notesPayload) {
-    try {
-        // 1. Load the file (Rename to .json on your server for better compatibility)
-        const harResponse = await fetch('./go.masonville.com.json');
-        if (!harResponse.ok) throw new Error("HAR data file missing.");
-        const harData = await harResponse.json();
+        try {
+            // 1. Ensure file is renamed to .json on your server to avoid GitHub Pages blocks
+            const harResponse = await fetch('./go.masonville.com.json');
+            if (!harResponse.ok) throw new Error("HAR data file missing.");
+            const harData = await harResponse.json();
 
-        // 2. Find the request in the HAR
-        const targetEntry = harData.log.entries.find(e => 
-            e.request.url.includes("masonville.com") && 
-            (e.request.method === "POST" || e.request.method === "PATCH") &&
-            e.request.postData
-        );
+            // 2. Specifically target the Activities API endpoint seen in your error log
+            const targetEntry = harData.log.entries.find(e => 
+                e.request.url.includes("Activities") && 
+                e.request.method === "POST" &&
+                e.request.postData
+            );
 
-        if (!targetEntry) throw new Error("Could not find a valid Save request in HAR.");
+            if (!targetEntry) throw new Error("Activities request template not found in HAR.");
 
-        const req = targetEntry.request;
-        const headers = {};
-        
-        // 3. Strip "Forbidden" browser headers that trigger ERR_FAILED
-        const forbidden = [
-            'content-length', 'host', 'origin', 'referer', 'cookie', 
-            'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 
-            'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'
-        ];
+            const req = targetEntry.request;
+            const headers = { 'Content-Type': 'application/json' };
+            
+            // 3. Strip all browser-managed and sec- headers that trigger Status 0 failures
+            const forbidden = [
+                'content-length', 'host', 'origin', 'referer', 'cookie', 
+                'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 
+                'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'priority'
+            ];
 
-        req.headers.forEach(h => {
-            const name = h.name.toLowerCase();
-            // Remove browser-managed headers and any that start with a colon (HTTP/2 internal)
-            if (!forbidden.includes(name) && !name.startsWith(':')) {
-                headers[h.name] = h.value;
+            req.headers.forEach(h => {
+                const name = h.name.toLowerCase();
+                if (!forbidden.includes(name) && !name.startsWith(':')) {
+                    headers[h.name] = h.value;
+                }
+            });
+
+            // 4. Extract and inject live notes into the Dynamics payload (mss_salescall)
+            let payload = JSON.parse(req.postData.text);
+            payload.description = notesPayload; 
+            payload.subject = `ACT Call Log - Account ${accountId}`;
+
+            // 5. MANDATORY: Route through a CORS proxy to bridge GitHub and Masonville domains
+            const finalUrl = `https://corsproxy.io/?${encodeURIComponent(req.url)}`;
+
+            const response = await fetch(finalUrl, {
+                method: req.method,
+                headers: headers,
+                body: JSON.stringify(payload)
+            });
+
+            if (response.ok) {
+                console.log("Masonville Silent Sync Successful");
+                return true;
             }
-        });
-
-        // 4. Update the JSON payload with the LIVE notes from your app
-        let payload = JSON.parse(req.postData.text);
-        payload.description = notesPayload; 
-        payload.subject = `ACT Call Log - Account ${accountId}`; // Update subject dynamically
-
-        // 5. USE A CORS PROXY (The essential bridge for GitHub Pages)
-        // This tunnels the request to Masonville so the browser doesn't block the origin.
-        const proxyUrl = "https://corsproxy.io/?";
-        const finalUrl = proxyUrl + encodeURIComponent(req.url);
-
-        const response = await fetch(finalUrl, {
-            method: req.method,
-            headers: headers,
-            body: JSON.stringify(payload)
-        });
-
-        if (response.ok) {
-            window.showToast("Masonville Synced!", "success");
-            return true;
-        } else {
             throw new Error(`Sync Error: ${response.status}`);
+
+        } catch (error) {
+            console.error("Silent Push Error:", error);
+            window.showToast(`Masonville Sync Failed: ${error.message}`, "error");
+            return false;
         }
-
-    } catch (error) {
-        console.error("Silent Push Error:", error);
-        window.showToast(`Masonville Sync Failed: ${error.message}`, "error");
-        return false;
-    }
-};
-
+    };
     window.parseNotes = function(rawNotes) {
         if (!rawNotes) return []; let cleanRaw = rawNotes.replace(/\r\n/g, '\n'); const rawEntries = cleanRaw.split(/-{20,}/).filter(e => e.trim().length > 0); const parsed = [];
         rawEntries.forEach(entry => {
