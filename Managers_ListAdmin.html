@@ -311,43 +311,44 @@
     // --- MASONVILLE HAR SILENT PUSH ---
 window.pushToMasonvilleSilent = async function(accountId, notesPayload) {
         try {
-            // 1. Ensure file is renamed to .json on your server to avoid GitHub Pages blocks
+            // 1. Fetch the data map (Rename your .har to .json on your repo)
             const harResponse = await fetch('./go.masonville.com.json');
-            if (!harResponse.ok) throw new Error("HAR data file missing.");
+            if (!harResponse.ok) throw new Error("Data file (go.masonville.com.json) not found on server.");
             const harData = await harResponse.json();
 
-            // 2. Specifically target the Activities API endpoint seen in your error log
+            // 2. Locate the specific 'mss_salescall' save request from your latest HAR
             const targetEntry = harData.log.entries.find(e => 
-                e.request.url.includes("Activities") && 
+                (e.request.url.includes("mss_salescalls") || e.request.url.includes("Activities")) && 
                 e.request.method === "POST" &&
                 e.request.postData
             );
 
-            if (!targetEntry) throw new Error("Activities request template not found in HAR.");
+            if (!targetEntry) throw new Error("Save template not found in provided HAR file.");
 
             const req = targetEntry.request;
-            const headers = { 'Content-Type': 'application/json' };
+            const headers = { 'Content-Type': 'application/json; charset=UTF-8' };
             
-            // 3. Strip all browser-managed and sec- headers that trigger Status 0 failures
+            // 3. STRIP ALL BROWSER-RESTRICTED HEADERS
+            // 'net::ERR_FAILED' occurs when we try to set headers the browser owns (like sec- or priority).
             const forbidden = [
-                'content-length', 'host', 'origin', 'referer', 'cookie', 
-                'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 
-                'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'priority'
+                'content-length', 'host', 'origin', 'referer', 'cookie', 'priority', 'user-agent', 'accept-encoding', 'connection', 'date', 'dnt', 'via', 'upgrade'
             ];
 
             req.headers.forEach(h => {
                 const name = h.name.toLowerCase();
-                if (!forbidden.includes(name) && !name.startsWith(':')) {
+                // Strip: forbidden list, any starting with 'sec-', and HTTP/2 pseudo-headers starting with ':'
+                if (!forbidden.includes(name) && !name.startsWith('sec-') && !name.startsWith(':')) {
                     headers[h.name] = h.value;
                 }
             });
 
-            // 4. Extract and inject live notes into the Dynamics payload (mss_salescall)
+            // 4. Reconstruct and inject your live note into the Dynamics payload
             let payload = JSON.parse(req.postData.text);
             payload.description = notesPayload; 
             payload.subject = `ACT Call Log - Account ${accountId}`;
 
-            // 5. MANDATORY: Route through a CORS proxy to bridge GitHub and Masonville domains
+            // 5. TUNNEL VIA PROXY
+            // This is the only way to avoid the Status 0 CORS block on the browser side.
             const finalUrl = `https://corsproxy.io/?${encodeURIComponent(req.url)}`;
 
             const response = await fetch(finalUrl, {
@@ -357,10 +358,12 @@ window.pushToMasonvilleSilent = async function(accountId, notesPayload) {
             });
 
             if (response.ok) {
-                console.log("Masonville Silent Sync Successful");
+                console.log("Masonville Background Sync Successful.");
                 return true;
+            } else {
+                const errDetail = await response.text();
+                throw new Error(`Sync Error: ${response.status} - ${errDetail.substring(0, 50)}`);
             }
-            throw new Error(`Sync Error: ${response.status}`);
 
         } catch (error) {
             console.error("Silent Push Error:", error);
