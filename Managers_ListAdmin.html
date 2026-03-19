@@ -309,73 +309,69 @@
     }
 
     // --- MASONVILLE HAR SILENT PUSH ---
-    window.pushToMasonvilleSilent = async function(accountId, notesPayload) {
-        try {
-            const harResponse = await fetch('./go.masonville.com.json');
-            if (!harResponse.ok) throw new Error("go.masonville.com.json missing from directory.");
-            const harData = await harResponse.json();
+window.pushToMasonvilleSilent = async function(accountId, notesPayload) {
+    try {
+        // 1. Load the file (Rename to .json on your server for better compatibility)
+        const harResponse = await fetch('./go.masonville.com.json');
+        if (!harResponse.ok) throw new Error("HAR data file missing.");
+        const harData = await harResponse.json();
 
-            // Locate the target POST/PATCH request in the HAR file
+        // 2. Find the request in the HAR
         const targetEntry = harData.log.entries.find(e => 
             e.request.url.includes("masonville.com") && 
             (e.request.method === "POST" || e.request.method === "PATCH") &&
             e.request.postData
-        );;
+        );
 
-            if (!targetEntry) throw new Error("No valid POST/PATCH request found in HAR.");
+        if (!targetEntry) throw new Error("Could not find a valid Save request in HAR.");
 
-            const req = targetEntry.request;
+        const req = targetEntry.request;
+        const headers = {};
+        
+        // 3. Strip "Forbidden" browser headers that trigger ERR_FAILED
+        const forbidden = [
+            'content-length', 'host', 'origin', 'referer', 'cookie', 
+            'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 
+            'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'
+        ];
 
-            // Rebuild Headers to bypass Preflight/CORS strictness
-            const headers = {};
-const forbiddenHeaders = ['content-length', 'host', 'origin', 'referer', 'cookie', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site'];
-
-// Then apply it:
-req.headers.forEach(h => {
-    const headerName = h.name.toLowerCase();
-    if (!forbiddenHeaders.includes(headerName) && !headerName.startsWith(':')) {
-        headers[h.name] = h.value;
-    }
-});
-
-            // Extract Payload and dynamically inject UI data
-            let payloadData = req.postData.text;
-            
-            try {
-                let parsedPayload = JSON.parse(payloadData);
-                // Adjust payload dynamically based on captured app data
-                if (parsedPayload) {
-                    parsedPayload.description = notesPayload;
-                    parsedPayload.subject = `ACT Call Log - Account ${accountId}`;
-                }
-                payloadData = JSON.stringify(parsedPayload);
-            } catch(e) {
-                console.warn("Payload wasn't standard JSON, pushing raw HAR format.");
+        req.headers.forEach(h => {
+            const name = h.name.toLowerCase();
+            // Remove browser-managed headers and any that start with a colon (HTTP/2 internal)
+            if (!forbidden.includes(name) && !name.startsWith(':')) {
+                headers[h.name] = h.value;
             }
+        });
 
-            // Execute the Fetch (Toggle useCorsProxy to true if strict origins block the request)
-            const useCorsProxy = false; 
-            const finalUrl = useCorsProxy ? `https://corsproxy.io/?${encodeURIComponent(req.url)}` : req.url;
+        // 4. Update the JSON payload with the LIVE notes from your app
+        let payload = JSON.parse(req.postData.text);
+        payload.description = notesPayload; 
+        payload.subject = `ACT Call Log - Account ${accountId}`; // Update subject dynamically
 
-            const response = await fetch(finalUrl, {
-                method: req.method,
-                headers: headers,
-                body: payloadData
-            });
+        // 5. USE A CORS PROXY (The essential bridge for GitHub Pages)
+        // This tunnels the request to Masonville so the browser doesn't block the origin.
+        const proxyUrl = "https://corsproxy.io/?";
+        const finalUrl = proxyUrl + encodeURIComponent(req.url);
 
-            if (response.ok) {
-                console.log("Masonville Silent Push Successful");
-                return true;
-            } else {
-                throw new Error(`Server responded with Status: ${response.status}`);
-            }
+        const response = await fetch(finalUrl, {
+            method: req.method,
+            headers: headers,
+            body: JSON.stringify(payload)
+        });
 
-        } catch (error) {
-            console.error("Silent Push Error:", error);
-            window.showToast(`Masonville Sync Failed: ${error.message}`, "error");
-            return false;
+        if (response.ok) {
+            window.showToast("Masonville Synced!", "success");
+            return true;
+        } else {
+            throw new Error(`Sync Error: ${response.status}`);
         }
-    };
+
+    } catch (error) {
+        console.error("Silent Push Error:", error);
+        window.showToast(`Masonville Sync Failed: ${error.message}`, "error");
+        return false;
+    }
+};
 
     window.parseNotes = function(rawNotes) {
         if (!rawNotes) return []; let cleanRaw = rawNotes.replace(/\r\n/g, '\n'); const rawEntries = cleanRaw.split(/-{20,}/).filter(e => e.trim().length > 0); const parsed = [];
