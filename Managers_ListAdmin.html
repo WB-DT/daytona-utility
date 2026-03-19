@@ -297,6 +297,15 @@
         log.push({ timestamp: new Date().toISOString(), recordId: currentRecordId || 'N/A', companyName: compName, type: type, details: details }); 
         localStorage.setItem('daytona_audit_log', JSON.stringify(log)); window.updateStats(); 
     }
+    
+    window.logToAdminConsole = function(msg) {
+        const consoleEl = document.getElementById('admin-console-log');
+        if (consoleEl) {
+            const time = new Date().toLocaleTimeString();
+            consoleEl.value += `[${time}] ${msg}\n`;
+            consoleEl.scrollTop = consoleEl.scrollHeight; 
+        }
+    };
 
     window.fetchWithPolling = async function(url, options) {
         let res = await fetch(url, options);
@@ -1541,6 +1550,95 @@
         window.isScrollingMore = false;
     }
 
+    window.logToAdminConsole = function(msg) {
+        const consoleEl = document.getElementById('admin-console-log');
+        if (consoleEl) {
+            const time = new Date().toLocaleTimeString();
+            consoleEl.value += `[${time}] ${msg}\n`;
+            consoleEl.scrollTop = consoleEl.scrollHeight; 
+        }
+    };
+
+    window.generateMVGOUrl = async function() {
+        const check = (id, text) => document.getElementById(id).checked ? (text + ", ") : "";
+        let reqAction = check('mvgo-check-save', "Save/Trouble") + check('mvgo-check-loss', "Loss/Winback") + check('mvgo-check-new', "New Buyer") + check('mvgo-check-buying', "Buying");
+        let catOpp = check('mvgo-cat-water', "Water") + check('mvgo-cat-jan', "Janitorial") + check('mvgo-cat-hosp', "Hospitality") + check('mvgo-cat-food', "Food") + check('mvgo-cat-break', "Breakroom") + check('mvgo-cat-ship', "Shipping") + check('mvgo-cat-furn', "Furniture") + check('mvgo-cat-office', "Office") + check('mvgo-cat-auto', "Auto") + check('mvgo-cat-print', "Print");
+        let concern = check('mvgo-con-pricing', "Pricing") + check('mvgo-con-service', "Service") + check('mvgo-con-dm', "DM");
+        
+        const userNotes = document.getElementById('mvgo-notes').value || '';
+        const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+        const contactName = document.getElementById('mvgo-contact')?.value || '';
+        const phoneStr = document.getElementById('mvgo-phone')?.value || '';
+        const addrStr = document.getElementById('mvgo-address')?.value || '';
+
+        // Clean trailing commas
+        reqAction = reqAction.replace(/, $/, '');
+        catOpp = catOpp.replace(/, $/, '');
+        concern = concern.replace(/, $/, '');
+
+        // Build the multiline string exactly as the SPA does
+        const details = `Action Plan --- Created On: ${today}\n\nRequested Action(s):\n${reqAction}\n\nCategory Opportunities:\n${catOpp}\n\nConcern(s):\n${concern}\nOther: \n\nContact Info:\nName: ${contactName}\nPhone Number: ${phoneStr}\nAddress:\n${addrStr}\n\nInside Sales Note: \n${userNotes}`;
+        
+        window.showToast("Pushing Lead Silently...", "processing");
+        window.logToAdminConsole(`Attempting silent push for account ${currentRecordId}...`);
+
+        try {
+            // 1. Grab the existing D365 token your app already uses
+            const token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+            if (!token) throw new Error("D365 Authentication Token missing.");
+
+            // 2. Construct the exact JSON payload the HAR file revealed
+            const payload = {
+                "subject": `${currentSelectedRecord.cr714_company} - ISReq`,
+                "mss_salescalltrigger": "ISReq",
+                "mss_salescalltriggerdetails": details,
+                "regardingobjectid_account_mss_salescall@odata.bind": `/accounts(${currentRecordId})`
+            };
+
+            window.logToAdminConsole(`Payload constructed. Sending POST to mss_salescalls...`);
+
+            // 3. Post it directly to the D365 backend API (Bypassing the SPA entirely)
+            const response = await fetch(`${PRIMARY_CRM_URL}/mss_salescalls`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'Prefer': 'return=representation'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(`Dataverse API returned HTTP ${response.status}: ${errText}`);
+            }
+
+            window.logToAdminConsole(`SUCCESS: Lead created silently. HTTP 200 OK.`);
+
+            // Compact note for history
+            const historyStamp = `[MVGO LEAD CREATED] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
+            const qbInput = document.getElementById('qb-notes-input');
+            
+            // Push the MVGO note back into the main note box along with the MVGO tag and await save
+            qbInput.value = historyStamp + (userNotes ? ` | Note: ${userNotes}` : '') + (qbInput.value ? '\n\n' + qbInput.value : '');
+            
+            // AWAIT the save so it fully processes the note before wiping it
+            await window.handleCustomSave(null, true); 
+            
+            // Clear immediately after saving to reset UI correctly
+            qbInput.value = "";
+            window.markDirty();
+            
+            document.getElementById('mvgo-modal').style.display = 'none'; 
+            window.showToast("MVGO Lead Created Successfully!", "success");
+
+        } catch (error) {
+            console.error("Silent push failed:", error);
+            window.logToAdminConsole(`ERROR: ${error.message}`);
+            window.showToast("Silent push failed. Check console.", "error");
+        }
+    }
+
     window.selectRecord = function(id) { 
         if(window.isDirty()) { 
             window.targetSelectId = id; 
@@ -1618,499 +1716,6 @@
         
         window.hasUnsavedChanges = false; 
         setTimeout(() => { window.isPopulating = false; }, 50);
-    }
-
-    // Stricter dirty check to ensure we aren't accidentally tripping it on empty notes
-    window.isDirty = function() {
-        if(!window.currentRecordSnapshot || window.isPopulating) return false;
-        if(window.hasUnsavedChanges) return true; // manual dirty flag
-        
-        const snap = window.currentRecordSnapshot; 
-        const getCurrent = (id) => (document.getElementById(id)?.value || '').trim(); 
-        const getSnap = (val) => (val || '').trim();
-        
-        if(getCurrent('input-location') !== getSnap(snap.loc)) return true; 
-        if(getCurrent('input-dm') !== getSnap(snap.dm)) return true; 
-        if(getCurrent('input-competitor') !== getSnap(snap.comp)) return true; 
-        if(getCurrent('opp-type-select') !== getSnap(snap.oppType)) return true;
-        
-        let currentNote = getCurrent('qb-notes-input'); 
-        let templateTrimmed = QB_NOTES_TEMPLATE.trim();
-        if(currentNote !== '' && currentNote !== templateTrimmed) return true;
-        
-        if(getCurrent('follow-up-date') !== getSnap(snap.fuDate)) return true; 
-        if(getCurrent('follow-up-time') !== getSnap(snap.fuTime)) return true; 
-        
-        return false;
-    }
-
-    window.takeSnapshot = function(rec) {
-        const raw = rec.cr714_qbnotes || ''; let metaLoc = '', metaDm = '', metaComp = '', metaOpp = '', metaIntro = ''; const metaMatch = raw.match(/{{METADATA:(.*?)}}/);
-        if(metaMatch && metaMatch[1]) { const parts = metaMatch[1].split('|'); parts.forEach(p => { const kv = p.split('='); if(kv[0].trim() === 'Loc') metaLoc = kv[1] || ''; if(kv[0].trim() === 'DM') metaDm = kv[1] || ''; if(kv[0].trim() === 'Comp') metaComp = kv[1] || ''; if(kv[0].trim() === 'Opp') metaOpp = kv[1] || ''; if(kv[0].trim() === 'Intro') metaIntro = kv[1] || ''; }); }
-        window.currentRecordSnapshot = { loc: metaLoc, dm: metaDm, comp: metaComp, oppType: '', fuDate: document.getElementById('follow-up-date')?.value || '', fuTime: document.getElementById('follow-up-time')?.value || '' };
-    }
-
-    window.toggleGallery = function() { 
-        const col = document.getElementById('gallery-column');
-        col.classList.toggle('collapsed'); 
-        document.querySelector('.app-grid').classList.toggle('sidebar-collapsed'); 
-        
-        const searchBar = document.getElementById('search-bar');
-        const filterContainer = document.getElementById('filter-bar-container');
-        const normalContainer = document.getElementById('gallery-normal-content');
-        if (col.classList.contains('collapsed')) {
-            filterContainer.insertBefore(searchBar, filterContainer.firstChild);
-            searchBar.classList.add('w-48'); searchBar.classList.remove('w-full');
-        } else {
-            normalContainer.appendChild(searchBar);
-            searchBar.classList.remove('w-48'); searchBar.classList.add('w-full');
-        }
-    }
-    
-    window.expandLeftWorkspace = function() {
-        const p = document.getElementById('left-workspace-panel');
-        p.classList.toggle('expanded');
-        const icon = document.getElementById('expand-workspace-icon');
-        if(p.classList.contains('expanded')) { icon.classList.replace('fa-expand', 'fa-compress'); } 
-        else { icon.classList.replace('fa-compress', 'fa-expand'); }
-    }
-
-    window.populateForm = function(rec) {
-        document.getElementById('acct-number-header').innerText = rec.cr714_id || '--'; document.getElementById('acct-company').innerText = rec.cr714_company || '--'; 
-        
-        let sourcesFormHtml = rec.sources.map(s => {
-            let abbr = s.type === 'AM' ? 'AM' : (s.type === 'Cadence' ? 'CAD' : (s.type === 'LB' ? 'LB' : 'PSP'));
-            let badgeClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : (s.type === 'LB' ? 'badge-lb' : 'badge-psp'));
-            return `<span class="px-1.5 py-0.5 rounded border text-[9px] font-bold ${badgeClass}">${abbr}: ${s.action || 'No Action'}</span>`;
-        }).join('');
-        document.getElementById('form-action-value').innerHTML = sourcesFormHtml;
-        document.getElementById('form-msg-value').innerText = rec.cr714_actionmessage || '--';
-        document.getElementById('d365-address-display').innerText = rec.cr714_billingaddress || '--'; 
-        
-        let sentRecs = []; try { sentRecs = JSON.parse(localStorage.getItem('daytona_sent_records') || '[]'); } catch(e) {} const isSent = sentRecs.includes(String(rec.cr714_id)); const sentBadge = document.getElementById('profile-sent-badge'); if(isSent) sentBadge.classList.remove('hidden'); else sentBadge.classList.add('hidden');
-        const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val || ''; };
-        
-        setVal('contact-name-most', rec.cr714_namemost || rec.cr714_namelatest); 
-        setVal('contact-phone-primary', window.formatPhone(rec.cr714_primaryphone || rec.cr714_phone)); 
-        setVal('contact-email-most', rec.cr714_emailmost || rec.cr714_emaillatest); 
-        setVal('last-order-date', rec.cr714_lastorderdate || '--');
-        
-        const alertContainer = document.getElementById('in-form-alerts'); 
-        alertContainer.innerHTML = ''; 
-        const hasMgr = (rec.cr714_managernotes && rec.cr714_managernotes.trim().length > 0); 
-        const hasImp = (rec.cr714_importantaccountinformation && rec.cr714_importantaccountinformation.trim().length > 0);
-        
-        // Strip HTML from Manager/Important notes before displaying
-        const mgrNoteClean = window.stripHTML(String(rec.cr714_managernotes || ''));
-        const impNoteClean = window.stripHTML(String(rec.cr714_importantaccountinformation || ''));
-
-        if (hasMgr) { alertContainer.innerHTML += `<div class="alert-box mgr flex-1 h-full max-h-24 overflow-y-auto custom-scrollbar"><span class="alert-label">Manager Note</span>${window.escapeHTML(mgrNoteClean)}</div>`; } 
-        if (hasImp) { alertContainer.innerHTML += `<div class="alert-box imp flex-1 h-full max-h-24 overflow-y-auto custom-scrollbar"><span class="alert-label">Important Info</span>${window.escapeHTML(impNoteClean)}</div>`; } 
-
-        const rawNotes = rec.cr714_qbnotes || ''; let metaLoc = '', metaDm = '', metaComp = '', metaOpp = '', metaIntro = ''; const metaMatch = rawNotes.match(/{{METADATA:(.*?)}}/);
-        if(metaMatch && metaMatch[1]) { const parts = metaMatch[1].split('|'); parts.forEach(p => { const kv = p.split('='); if(kv[0].trim() === 'Loc') metaLoc = kv[1] || ''; if(kv[0].trim() === 'DM') metaDm = kv[1] || ''; if(kv[0].trim() === 'Comp') metaComp = kv[1] || ''; if(kv[0].trim() === 'Opp') metaOpp = kv[1] || ''; if(kv[0].trim() === 'Intro') metaIntro = kv[1] || ''; }); }
-        
-        setVal('input-location', metaLoc); 
-        setVal('input-dm', metaDm); 
-        setVal('input-competitor', metaComp); 
-        setVal('opp-type-select', ''); // Opp Type deliberately not restored per user requirement
-
-        // Populate Intro as read-only display directly from the dataset row first, fallback to parsed note
-        let combinedIntro = rec.cr714_intro;
-        if (!combinedIntro) {
-            for (let src of rec.sources) {
-                let p = window.parseNotes(src.rawNotes || '');
-                if(p.length > 0 && p[0].metaIntro) { combinedIntro = p[0].metaIntro; break; }
-            }
-        }
-        let displayIntroStr = '--';
-        if (combinedIntro && String(combinedIntro).trim() !== '') {
-            let ci = String(combinedIntro).trim();
-            displayIntroStr = (ci.toLowerCase() === 'yes' || ci.toLowerCase() === 'y') ? 'Intro' : ci;
-        }
-
-        const introDisp = document.getElementById('display-intro');
-        const introContainerBox = document.getElementById('intro-container-box');
-        if (introDisp) {
-            introDisp.innerText = displayIntroStr;
-            if (displayIntroStr !== '--') {
-                introContainerBox.classList.remove('hidden');
-                introContainerBox.classList.add('flex');
-                introContainerBox.classList.add('active-intro');
-            } else {
-                introContainerBox.classList.add('hidden');
-                introContainerBox.classList.remove('flex');
-            }
-        }
-        
-        // Setup custom competitor dropdown state
-        const parsedComp = metaComp.split(',').map(s => s.trim()).filter(Boolean);
-        document.querySelectorAll('.comp-chk').forEach(chk => chk.checked = false);
-        const otherChk = document.getElementById('comp-chk-other');
-        const otherTxt = document.getElementById('comp-other-text');
-        if(otherChk) otherChk.checked = false;
-        if(otherTxt) { otherTxt.value = ''; otherTxt.classList.add('hidden'); }
-        
-        let hasOther = false;
-        let otherVals = [];
-        parsedComp.forEach(val => {
-            const chk = document.querySelector(`.comp-chk[value="${val}"]`);
-            if (chk) {
-                chk.checked = true;
-            } else {
-                hasOther = true;
-                otherVals.push(val);
-            }
-        });
-        if (hasOther && otherChk && otherTxt) {
-            otherChk.checked = true;
-            otherTxt.value = otherVals.join(', ');
-            otherTxt.classList.remove('hidden');
-        }
-        const finalCompStr = parsedComp.join(', ');
-        const compDisplay = document.getElementById('competitor-display');
-        if(compDisplay) compDisplay.innerText = finalCompStr || 'Select...';
-
-        const inputs = ['input-location', 'input-dm', 'input-competitor', 'opp-type-select']; inputs.forEach(id => document.getElementById(id)?.classList.remove('empty-field-warning')); 
-        document.getElementById('qb-notes-input').value = ""; document.getElementById('qb-notes-input').placeholder = "Enter note box here...";
-        
-        let actionLower = (rec.cr714_action || "").toLowerCase(); 
-        const dd = document.getElementById('email-template-dropdown'); 
-        dd.innerHTML = "";
-        
-        // --- ACTION MAPPINGS LIST ---
-        const actionMappings = {
-            'febmarchnonbuy': 'louise brown 15% off',
-            'aprilmaynonbuy': 'louise brown 15% off',
-            // Add other actions and their matching template names here
-        };
-
-        if (actionMappings[actionLower]) {
-            actionLower = actionMappings[actionLower];
-        }
-        // ----------------------------
-        
-        const cadenceTemplates = [ {val: "No Jan", txt: "No Jan"}, {val: "No DEC/JAN", txt: "No DEC/JAN"}, {val: "No NOV/DEC/JAN", txt: "No NOV/DEC/JAN"}, {val: "NONBUY", txt: "NONBUY"}, {val: "NOVNoSales", txt: "NOVNoSales"}, {val: "NONovDec", txt: "NONovDec"} ];
-        const allTemplates = [ {val: "Prospecting", txt: "Prospecting"}, {val: "Chair Mat Contest", txt: "Chair Mat Contest"}, {val: "Print Opp!", txt: "Print Opp!"}, {val: "Print Nonbuy!", txt: "Print Nonbuy!"}, {val: "Green Category.msg", txt: "Green Category"}, {val: "Green Follow Up Email.msg", txt: "Green Follow Up"}, {val: "Green Non-Buy Email.msg", txt: "Green Non-Buy"}, {val: "Yellow Non-Buy Email.msg", txt: "Yellow Non-Buy"}, {val: "FebruaryNonBuy ASAP", txt: "FebruaryNonBuy ASAP"}, {val: "Louise Brown 15% Off", txt: "Louise Brown 15% Off"} ];
-        
-        if (actionLower === 'cadence' || actionLower === 'mandown') { 
-            cadenceTemplates.forEach(o => { const opt = document.createElement('option'); opt.value = o.val; opt.textContent = o.txt; dd.appendChild(opt); }); 
-            dd.value = cadenceTemplates[0].val; 
-            dd.disabled = false; 
-        } else { 
-            let match = allTemplates.find(t => t.val.toLowerCase() === actionLower); 
-            if (match) { 
-                const opt = document.createElement('option'); opt.value = match.val; opt.textContent = match.txt; opt.selected = true; dd.appendChild(opt); 
-                dd.disabled = false; 
-            } else { 
-                const opt = document.createElement('option'); opt.text = "-- No Template Available --"; dd.appendChild(opt); 
-                allTemplates.forEach(t => { const optAll = document.createElement('option'); optAll.value = t.val; optAll.textContent = t.txt; dd.appendChild(optAll); });
-                dd.disabled = false; 
-            } 
-        }
-        
-        const dEl = document.getElementById('follow-up-date'), tEl = document.getElementById('follow-up-time');
-        if(rec.cr714_followup) { const rawIso = rec.cr714_followup; if(rawIso.length >= 10) { dEl.value = rawIso.substring(0, 10); const dt = new Date(rawIso); if(!isNaN(dt) && rawIso.includes('T') && !rawIso.includes('T00:00:00Z') && !rawIso.includes('T00:00:00')) { const hh = dt.getUTCHours().toString().padStart(2, '0'); const mm = dt.getUTCMinutes().toString().padStart(2, '0'); tEl.value = `${hh}:${mm}`; } else { tEl.value = ''; } } else { dEl.value=''; tEl.value=''; } } else { dEl.value=''; tEl.value=''; }
-        window.updateNotesPreview(); 
-        const ids = ['mvgo-button', 'close-button', 'launch-email-button', 'help-button']; ids.forEach(id => { const el = document.getElementById(id); if(el) el.disabled = false; });
-    }
-
-    window.setLayout = function(mode) { const col = document.getElementById('profile-column'); if(currentSelectedRecord) window.toggleEditMode(true); }
-    window.loadLayoutPreference = function() { window.setLayout('form'); }
-
-    window.toggleEditMode = function(forceEnable = false) { 
-        isEditMode = forceEnable === true ? true : !isEditMode; 
-        const formInputs = document.querySelectorAll('#profile-column input:not([type="hidden"]), #profile-column textarea, #profile-column select, #follow-up-date, #follow-up-time'); 
-        const compDisplay = document.getElementById('competitor-display');
-        
-        if (!isEditMode) { 
-            formInputs.forEach(el => { el.disabled = true; el.classList.remove('is-editable'); }); 
-            if(compDisplay) { compDisplay.classList.remove('is-editable'); compDisplay.style.opacity = '0.6'; compDisplay.style.cursor = 'not-allowed'; }
-            document.getElementById('save-controls').style.display = 'none'; 
-            document.getElementById('editModeButton').style.display = 'inline-block'; 
-            window.closeCompetitorDropdown();
-            return; 
-        } 
-        
-        document.getElementById('editModeButton').style.display = 'none'; 
-        formInputs.forEach(el => { el.disabled = false; el.classList.add('is-editable'); }); 
-        if(compDisplay) { compDisplay.classList.add('is-editable'); compDisplay.style.opacity = '1'; compDisplay.style.cursor = 'pointer'; }
-        document.getElementById('save-controls').style.display = 'flex'; 
-    }
-
-    window.toggleCompetitorDropdown = function() {
-        if (!isEditMode) return;
-        const drop = document.getElementById('competitor-dropdown');
-        if (drop.classList.contains('hidden')) {
-            drop.classList.remove('hidden');
-            drop.classList.add('flex');
-        } else {
-            drop.classList.add('hidden');
-            drop.classList.remove('flex');
-        }
-    };
-
-    window.closeCompetitorDropdown = function() {
-        const drop = document.getElementById('competitor-dropdown');
-        if(drop) {
-            drop.classList.add('hidden');
-            drop.classList.remove('flex');
-        }
-        window.updateCompetitorValue();
-    };
-
-    window.updateCompetitorValue = function() {
-        const checks = document.querySelectorAll('.comp-chk:checked');
-        let vals = Array.from(checks).map(c => c.value);
-        const otherChk = document.getElementById('comp-chk-other');
-        const otherTxt = document.getElementById('comp-other-text');
-        
-        if (otherChk && otherChk.checked) {
-            let otVal = (otherTxt.value || '').trim();
-            if (otVal.toLowerCase() === 'staple') {
-                otVal = 'Staples';
-                otherTxt.value = 'Staples';
-            }
-            if (otVal) vals.push(otVal);
-        }
-        
-        const finalVal = vals.join(', ');
-        const compInput = document.getElementById('input-competitor');
-        const compDisplay = document.getElementById('competitor-display');
-        
-        if(compInput) compInput.value = finalVal;
-        if(compDisplay) compDisplay.innerText = finalVal || 'Select...';
-        
-        window.markDirty();
-    };
-
-    window.toggleOtherCompetitor = function(checkbox) {
-        const txt = document.getElementById('comp-other-text');
-        if(checkbox.checked) {
-            txt.classList.remove('hidden');
-            txt.focus();
-        } else {
-            txt.classList.add('hidden');
-            txt.value = '';
-        }
-        window.updateCompetitorValue();
-    };
-
-    // Close dropdowns when clicking outside
-    document.addEventListener('click', function(event) {
-        const compContainer = document.getElementById('competitor-container');
-        const compDrop = document.getElementById('competitor-dropdown');
-        if (compDrop && !compDrop.classList.contains('hidden') && compContainer && !compContainer.contains(event.target)) {
-            window.closeCompetitorDropdown();
-        }
-        
-        // Also close custom filter dropdowns if clicked outside
-        if (!event.target.closest('.custom-dropdown')) {
-            document.querySelectorAll('.custom-dropdown-menu').forEach(d => {
-                if (!d.classList.contains('hidden')) {
-                    d.classList.add('hidden');
-                    d.classList.remove('flex');
-                }
-            });
-        }
-    });
-
-    window.updateNotesPreview = async function() { 
-        const p = document.getElementById('qb-notes-preview');
-        const showPrev = document.getElementById('show-prev-note')?.checked;
-        if(!currentSelectedRecord) { p.innerHTML = '<div class="text-center italic mt-10 text-muted">Select an account</div>'; return; }
-        
-        if(showPrev) {
-            p.innerHTML = '<div class="text-center italic mt-10 text-muted">Loading history...</div>';
-            let history = [];
-            
-            // Deduplicate notes by their pure text content
-            let uniqueNotes = new Map();
-            
-            // Loop through all sources to aggregate note history uniformly
-            currentSelectedRecord.sources.forEach(src => {
-                let parsed = window.parseNotes(src.rawNotes || '');
-                parsed.forEach(n => {
-                    let key = n.text.trim();
-                    if (!uniqueNotes.has(key)) {
-                        n.sourceType = src.type;
-                        uniqueNotes.set(key, n);
-                    }
-                });
-            });
-            
-            history = Array.from(uniqueNotes.values());
-            
-            if (!currentSelectedRecord.logisticsFetched) {
-                currentSelectedRecord.logisticsData = await window.fetchLogisticsForAccount(currentSelectedRecord.cr714_id);
-                currentSelectedRecord.logisticsFetched = true;
-            }
-            if (currentSelectedRecord.logisticsData && currentSelectedRecord.logisticsData.length > 0) {
-                currentSelectedRecord.logisticsData.forEach(log => {
-                    history.push({ date: log.createdon ? new Date(log.createdon).toLocaleString() : 'Unknown Date', author: log.cr714_logisticsowner || log.createdbyname || 'Logistics Team', text: `[LOGISTICS REQUEST]\nIssue: ${log.cr714_issue || '--'}\nSummary: ${log.cr714_briefsummaryissue || '--'}\nNotes: ${log.cr714_logisticsnotes || '--'}\nStatus: ${log.cr714_disposition || log.statuscodename || '--'}`, isLogistics: true, rawDate: log.createdon ? new Date(log.createdon).getTime() : 0 });
-                });
-            }
-            history.sort((a,b) => { const da = a.rawDate || new Date(a.date).getTime() || 0; const db = b.rawDate || new Date(b.date).getTime() || 0; return db - da; });
-
-            if(history.length > 0) {
-                p.innerHTML = history.map(h => {
-                    const border = h.isLogistics ? 'border-left-color: #f59e0b; background-color: rgba(245, 158, 11, 0.05);' : '';
-                    const headerColor = h.isLogistics ? 'background-color: rgba(245, 158, 11, 0.1);' : '';
-                    
-                    let srcClass = h.sourceType === 'AM' ? 'badge-am' : h.sourceType === 'Cadence' ? 'badge-cad' : h.sourceType === 'LB' ? 'badge-lb' : h.sourceType === 'Prospecting' ? 'badge-psp' : '';
-                    let srcAbbr = h.sourceType === 'AM' ? 'AM' : (h.sourceType === 'Cadence' ? 'CAD' : (h.sourceType === 'LB' ? 'LB' : (h.sourceType === 'Prospecting' ? 'PSP' : '')));
-                    let srcBadge = srcAbbr ? `<span class="px-1.5 py-0.5 rounded text-[8px] border font-bold ${srcClass} mr-2">${srcAbbr}</span>` : '';
-
-                    let metaHtml = '';
-                    if (h.metaLoc || h.metaDm || h.metaComp || h.metaOpp || h.metaIntro) {
-                        let formattedIntro = h.metaIntro;
-                        if (formattedIntro && String(formattedIntro).trim() !== '') {
-                            let fi = String(formattedIntro).trim();
-                            formattedIntro = (fi.toLowerCase() === 'yes' || fi.toLowerCase() === 'y') ? 'Intro' : fi;
-                        }
-                        metaHtml = `<div class="flex flex-wrap gap-3 mb-2 text-[10px] text-muted p-1.5 rounded border bg-black/5" style="border-color: var(--border-color);">
-                            ${h.metaLoc ? `<span title="Location"><i class="fas fa-map-marker-alt text-status-info mr-1"></i><b>Loc:</b> ${window.escapeHTML(h.metaLoc)}</span>` : ''}
-                            ${h.metaDm ? `<span title="Decision Maker"><i class="fas fa-user-tie text-status-success mr-1"></i><b>DM:</b> ${window.escapeHTML(h.metaDm)}</span>` : ''}
-                            ${h.metaComp ? `<span title="Competitor"><i class="fas fa-store-slash text-status-danger mr-1"></i><b>Comp:</b> ${window.escapeHTML(h.metaComp)}</span>` : ''}
-                            ${h.metaOpp ? `<span title="Opportunity Type"><i class="fas fa-bullseye text-purple-500 mr-1"></i><b>Opp:</b> ${window.escapeHTML(h.metaOpp)}</span>` : ''}
-                            ${h.metaIntro ? `<span title="Intro"><i class="fas fa-handshake text-status-warning mr-1"></i><b>Intro:</b> ${window.escapeHTML(formattedIntro)}</span>` : ''}
-                        </div>`;
-                    }
-                    return `<div class="note-card" style="${border}"><div class="note-card-header" style="${headerColor}"><span>${srcBadge}${h.date}</span><span>${h.author}</span></div><div class="note-card-body">${metaHtml}${window.formatNoteText(h.text)}</div></div>`;
-                }).join('');
-            } else { p.innerHTML = '<div class="text-center italic mt-10 text-muted">No history found</div>'; }
-        } else { p.innerHTML = '<div class="text-center italic mt-10 text-muted">History hidden</div>'; }
-    }
-
-    // Modal Operations
-    window.toggleModalFullscreen = function(id) {
-        const modal = document.getElementById(id);
-        if (modal) modal.classList.toggle('fullscreen');
-    };
-
-    window.refreshActiveTab = function() {
-        if(window.currentActiveTabId) {
-            const iframe = document.querySelector(`#sidebar-frame-${window.currentActiveTabId} iframe`);
-            if(iframe) {
-                try { iframe.contentWindow.location.reload(); }
-                catch(e) { iframe.src = iframe.src; }
-            }
-        }
-    };
-
-    window.openKBModal = function() {
-        const list = document.getElementById('kb-article-list'); list.innerHTML = '';
-        KB_ARTICLES.forEach(a => {
-            const btn = document.createElement('button'); btn.className = 'w-full text-left p-2 border-b hover:bg-black/5 text-sm flex justify-between items-center'; 
-            btn.innerHTML = `<div><span class="font-bold text-blue-500 block">${a.n}</span><span class="text-[10px] text-gray-500 truncate block max-w-sm" title="${a.d}">${a.d}</span></div> <span class="text-[9px] px-2 py-1 bg-gray-100 text-gray-600 rounded-full border">${a.c}</span>`;
-            btn.onclick = () => { 
-                const url = `https://wbmasonco.sharepoint.com/sites/WBMasonDaytonaQA/_layouts/15/search.aspx?q=${encodeURIComponent(a.n)}`;
-                window.open(url, '_blank'); 
-                document.getElementById('kb-modal').style.display='none'; 
-            };
-            list.appendChild(btn);
-        });
-        document.getElementById('kb-modal').classList.remove('hidden'); document.getElementById('kb-modal').style.display='flex';
-    }
-    
-    window.filterKB = function() {
-        const q = document.getElementById('kb-search').value.toLowerCase();
-        const list = document.getElementById('kb-article-list'); list.innerHTML = '';
-        KB_ARTICLES.filter(a => a.n.toLowerCase().includes(q) || a.c.toLowerCase().includes(q) || a.d.toLowerCase().includes(q)).forEach(a => {
-            const btn = document.createElement('button'); btn.className = 'w-full text-left p-2 border-b hover:bg-black/5 text-sm flex justify-between items-center'; 
-            btn.innerHTML = `<div><span class="font-bold text-blue-500 block">${a.n}</span><span class="text-[10px] text-gray-500 truncate block max-w-sm" title="${a.d}">${a.d}</span></div> <span class="text-[9px] px-2 py-1 bg-gray-100 text-gray-600 rounded-full border">${a.c}</span>`;
-            btn.onclick = () => { window.open(`https://wbmasonco.sharepoint.com/sites/WBMasonDaytonaQA/_layouts/15/search.aspx?q=${encodeURIComponent(a.n)}`, '_blank'); document.getElementById('kb-modal').style.display='none'; }; 
-            list.appendChild(btn);
-        });
-    }
-
-    window.openMVGOModal = function() {
-        if(!currentSelectedRecord) return;
-        const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val || ''; };
-        setVal('mvgo-account-num', currentSelectedRecord.cr714_id); 
-        setVal('mvgo-company', currentSelectedRecord.cr714_company); 
-        setVal('mvgo-contact', document.getElementById('contact-name-most')?.value); 
-        setVal('mvgo-phone', document.getElementById('contact-phone-primary')?.value); 
-        setVal('mvgo-address', document.getElementById('d365-address-display')?.innerText !== '--' ? document.getElementById('d365-address-display')?.innerText : currentSelectedRecord.cr714_billingaddress); 
-        
-        // Sync note box content directly to MVGO notes
-        setVal('mvgo-notes', document.getElementById('qb-notes-input').value);
-
-        document.getElementById('mvgo-modal').classList.remove('hidden'); 
-        document.getElementById('mvgo-modal').style.display = 'flex';
-    }
-
-    window.generateMVGOUrl = async function() {
-        const check = (id, text) => document.getElementById(id).checked ? (text + ", ") : "";
-        let reqAction = check('mvgo-check-save', "Save/Trouble") + check('mvgo-check-loss', "Loss/Winback") + check('mvgo-check-new', "New Buyer") + check('mvgo-check-buying', "Buying");
-        let catOpp = check('mvgo-cat-water', "Water") + check('mvgo-cat-jan', "Janitorial") + check('mvgo-cat-hosp', "Hospitality") + check('mvgo-cat-food', "Food") + check('mvgo-cat-break', "Breakroom") + check('mvgo-cat-ship', "Shipping") + check('mvgo-cat-furn', "Furniture") + check('mvgo-cat-office', "Office") + check('mvgo-cat-auto', "Auto") + check('mvgo-cat-print', "Print");
-        let concern = check('mvgo-con-pricing', "Pricing") + check('mvgo-con-service', "Service") + check('mvgo-con-dm', "DM");
-        
-        const userNotes = document.getElementById('mvgo-notes').value || '';
-        const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
-        const contactName = document.getElementById('mvgo-contact')?.value || '';
-        const phoneStr = document.getElementById('mvgo-phone')?.value || '';
-        const addrStr = document.getElementById('mvgo-address')?.value || '';
-
-        // Clean trailing commas
-        reqAction = reqAction.replace(/, $/, '');
-        catOpp = catOpp.replace(/, $/, '');
-        concern = concern.replace(/, $/, '');
-
-        // Build the multiline string exactly as the SPA does
-        const details = `Action Plan --- Created On: ${today}\n\nRequested Action(s):\n${reqAction}\n\nCategory Opportunities:\n${catOpp}\n\nConcern(s):\n${concern}\nOther: \n\nContact Info:\nName: ${contactName}\nPhone Number: ${phoneStr}\nAddress:\n${addrStr}\n\nInside Sales Note: \n${userNotes}`;
-        
-        window.showToast("Pushing Lead Silently...", "processing");
-
-        try {
-            // 1. Grab the existing D365 token your app already uses
-            const token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
-            if (!token) throw new Error("D365 Authentication Token missing.");
-
-            // 2. Construct the exact JSON payload the HAR file revealed
-            const payload = {
-                "subject": `${currentSelectedRecord.cr714_company} - ISReq`,
-                "mss_salescalltrigger": "ISReq",
-                "mss_salescalltriggerdetails": details,
-                "regardingobjectid_account_mss_salescall@odata.bind": `/accounts(${currentRecordId})`
-            };
-
-            // 3. Post it directly to the D365 backend API (Bypassing the SPA entirely)
-            const response = await fetch(`${PRIMARY_CRM_URL}/mss_salescalls`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json',
-                    'Prefer': 'return=representation'
-                },
-                body: JSON.stringify(payload)
-            });
-
-            if (!response.ok) {
-                throw new Error(`Dataverse API returned HTTP ${response.status}`);
-            }
-
-            // Compact note for history
-            const historyStamp = `[MVGO LEAD CREATED] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
-            const qbInput = document.getElementById('qb-notes-input');
-            
-            // Push the MVGO note back into the main note box along with the MVGO tag and await save
-            qbInput.value = historyStamp + (userNotes ? ` | Note: ${userNotes}` : '') + (qbInput.value ? '\n\n' + qbInput.value : '');
-            
-            // AWAIT the save so it fully processes the note before wiping it
-            await window.handleCustomSave(null, true); 
-            
-            // Clear immediately after saving to reset UI correctly
-            qbInput.value = "";
-            window.markDirty();
-            
-            document.getElementById('mvgo-modal').style.display = 'none'; 
-            window.showToast("MVGO Lead Created Successfully!", "success");
-
-        } catch (error) {
-            console.error("Silent push failed:", error);
-            window.showToast("Silent push failed. Check console.", "error");
-        }
     }
 
     window.openCloseAccountModal = function() { if(currentRecordId) { document.getElementById('close-account-modal').classList.remove('hidden'); document.getElementById('close-account-modal').style.display='flex'; } }
@@ -2941,18 +2546,27 @@
     </div>
 
     <div id="admin-modal" class="modal-overlay hidden" style="display:none; z-index: 9200;">
-        <div class="modal-content w-80 text-left shadow-2xl rounded-xl relative">
+        <div class="modal-content w-[500px] text-left shadow-2xl rounded-xl relative">
             <button onclick="document.getElementById('admin-modal').style.display='none';" class="absolute top-2 right-2 text-gray-400 hover:text-status-danger bg-transparent border-none text-xl">&times;</button>
             <h3 class="text-lg font-bold mb-4" style="color: var(--primary);"><i class="fas fa-user-shield mr-2"></i>Admin Access</h3>
             <div id="admin-step-1">
                 <input type="password" id="admin-password" class="px-2 w-full border rounded mb-4 h-10" placeholder="Enter password...">
                 <button onclick="window.checkAdminPassword()" class="btn-primary w-full h-10 flex items-center justify-center">Unlock</button>
             </div>
-            <div id="admin-step-2" class="hidden">
-                <p class="text-xs text-status-success font-bold mb-2"><i class="fas fa-check-circle"></i> Access Granted</p>
-                <label class="text-xs font-bold uppercase text-muted block mb-1">Target Rep Name</label>
-                <input type="text" id="override-rep-name" name="overrideRepName" class="px-2 mb-3 border w-full rounded h-10" style="border-color: var(--primary);" placeholder="e.g. John Doe">
-                <div class="flex justify-end gap-2 mt-4"><button onclick="window.confirmAdminOverride()" class="btn-primary text-xs w-full h-10 flex items-center justify-center">Load Rep Data</button></div>
+            <div id="admin-step-2" class="hidden flex flex-col gap-4">
+                <div>
+                    <p class="text-xs text-status-success font-bold mb-2"><i class="fas fa-check-circle"></i> Access Granted</p>
+                    <label class="text-xs font-bold uppercase text-muted block mb-1">Target Rep Name</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="override-rep-name" name="overrideRepName" class="px-2 border w-full rounded h-10" style="border-color: var(--primary);" placeholder="e.g. John Doe">
+                        <button onclick="window.confirmAdminOverride()" class="btn-primary text-xs px-4 h-10 flex items-center justify-center">Load Data</button>
+                    </div>
+                </div>
+                
+                <div class="border-t pt-4" style="border-color: var(--border-color);">
+                    <label class="text-xs font-bold uppercase text-muted block mb-1">System Console Log</label>
+                    <textarea id="admin-console-log" class="w-full h-48 bg-black text-green-400 font-mono text-[10px] p-2 rounded resize-none custom-scrollbar outline-none" readonly>A.C.T. Admin Console Initialized...&#13;&#10;</textarea>
+                </div>
             </div>
         </div>
     </div>
