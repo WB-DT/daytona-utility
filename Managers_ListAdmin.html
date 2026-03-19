@@ -2035,7 +2035,7 @@ window.filterAndSortGallery = function() {
         document.getElementById('mvgo-modal').style.display = 'flex';
     }
 
-    window.generateMVGOUrl = async function() {
+window.generateMVGOUrl = async function() {
         const check = (id, text) => document.getElementById(id).checked ? (text + ", ") : "";
         let reqAction = check('mvgo-check-save', "Save/Trouble") + check('mvgo-check-loss', "Loss/Winback") + check('mvgo-check-new', "New Buyer") + check('mvgo-check-buying', "Buying");
         let catOpp = check('mvgo-cat-water', "Water") + check('mvgo-cat-jan', "Janitorial") + check('mvgo-cat-hosp', "Hospitality") + check('mvgo-cat-food', "Food") + check('mvgo-cat-break', "Breakroom") + check('mvgo-cat-ship', "Shipping") + check('mvgo-cat-furn', "Furniture") + check('mvgo-cat-office', "Office") + check('mvgo-cat-auto', "Auto") + check('mvgo-cat-print', "Print");
@@ -2052,31 +2052,60 @@ window.filterAndSortGallery = function() {
         catOpp = catOpp.replace(/, $/, '');
         concern = concern.replace(/, $/, '');
 
-        // Build the multiline string and correctly encode the entire thing to ensure it passes into MVGO
+        // Build the multiline string exactly as the SPA does
         const details = `Action Plan --- Created On: ${today}\n\nRequested Action(s):\n${reqAction}\n\nCategory Opportunities:\n${catOpp}\n\nConcern(s):\n${concern}\nOther: \n\nContact Info:\nName: ${contactName}\nPhone Number: ${phoneStr}\nAddress:\n${addrStr}\n\nInside Sales Note: \n${userNotes}`;
-        const encodedDetails = encodeURIComponent(details);
         
-        const url = `https://go.masonville.com/#/activityleadcall?repCreditCode=&emptyOwner=TRUE&accountNumber=${encodeURIComponent(currentRecordId)}&salesCallTriggerID=&schedFutureDays=1&salesCallTrigger=ISReq&salesCallTriggerDetails=${encodedDetails}`;
-        
-        // Launch in new tab
-        window.open(url, '_blank');
-        
-        // Compact note for history
-        const historyStamp = `[MVGO LINK SENT] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
-        const qbInput = document.getElementById('qb-notes-input');
-        
-        // Push the MVGO note back into the main note box along with the MVGO tag and await save
-        qbInput.value = historyStamp + (userNotes ? ` | Note: ${userNotes}` : '') + (qbInput.value ? '\n\n' + qbInput.value : '');
-        
-        // AWAIT the save so it fully processes the note before wiping it
-        await window.handleCustomSave(null, true); 
-        
-        // Clear immediately after saving to reset UI correctly
-        qbInput.value = "";
-        window.markDirty();
-        
-        document.getElementById('mvgo-modal').style.display = 'none'; 
-        window.showToast("MVGO Opened & Note Saved", "success");
+        window.showToast("Pushing Lead Silently...", "processing");
+
+        try {
+            // 1. Grab the existing D365 token your app already uses
+            const token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+            if (!token) throw new Error("D365 Authentication Token missing.");
+
+            // 2. Construct the exact JSON payload the HAR file revealed
+            const payload = {
+                "subject": `${currentSelectedRecord.cr714_company} - ISReq`,
+                "mss_salescalltrigger": "ISReq",
+                "mss_salescalltriggerdetails": details,
+                "regardingobjectid_account_mss_salescall@odata.bind": `/accounts(${currentRecordId})`
+            };
+
+            // 3. Post it directly to the D365 backend API (Bypassing the SPA entirely)
+            const response = await fetch(`${PRIMARY_CRM_URL}/mss_salescalls`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'Prefer': 'return=representation'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Dataverse API returned HTTP ${response.status}`);
+            }
+
+            // Compact note for history
+            const historyStamp = `[MVGO LEAD CREATED] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
+            const qbInput = document.getElementById('qb-notes-input');
+            
+            // Push the MVGO note back into the main note box along with the MVGO tag and await save
+            qbInput.value = historyStamp + (userNotes ? ` | Note: ${userNotes}` : '') + (qbInput.value ? '\n\n' + qbInput.value : '');
+            
+            // AWAIT the save so it fully processes the note before wiping it
+            await window.handleCustomSave(null, true); 
+            
+            // Clear immediately after saving to reset UI correctly
+            qbInput.value = "";
+            window.markDirty();
+            
+            document.getElementById('mvgo-modal').style.display = 'none'; 
+            window.showToast("MVGO Lead Created Successfully!", "success");
+
+        } catch (error) {
+            console.error("Silent push failed:", error);
+            window.showToast("Silent push failed. Check console.", "error");
+        }
     }
 
     window.openCloseAccountModal = function() { if(currentRecordId) { document.getElementById('close-account-modal').classList.remove('hidden'); document.getElementById('close-account-modal').style.display='flex'; } }
