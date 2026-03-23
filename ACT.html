@@ -12,7 +12,7 @@
     <style>
         :root { --bg-app: #f1f5f9; --bg-card: #ffffff; --bg-input: #f8fafc; --bg-header: #f8fafc; --text-main: #0f172a; --text-muted: #64748b; --primary: #2563eb; --primary-fg: #ffffff; --accent-danger: #ef4444; --accent-success: #22c55e; --accent-warning: #eab308; --border-color: #cbd5e1; --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); --radius: 0.5rem; --modal-bg: #ffffff; --tab-bg: #e2e8f0; --tab-active-bg: #ffffff; --z-base: 1; --z-sidebar: 100; --z-overlay: 9000; --z-modal: 9100; --z-toast: 9999; --z-loader: 9998; --z-delivery: 8500; }
         [data-theme="midnight"], [data-theme="oled"], [data-theme="matt"], [data-theme="gatsby"], [data-theme="ocean"], [data-theme="forest"], [data-theme="sunset"] { 
-            --bg-app: #0f172a; --bg-card: #1e293b; --bg-input: #334155; --bg-header: #1e293b; --text-main: #f8fafc; --text-muted: #94a3b8; --border-color: #334155; --primary: #38bdf8; --primary-fg: #ffffff; --modal-bg: #1e293b; 
+            --bg-app: #0f172a; --bg-card: #1e293b; --bg-input: #334155; --bg-header: #1e293b; --text-main: #f8fafc; --text-muted: #94a3b8; --border-color: #475569; --primary: #38bdf8; --primary-fg: #ffffff; --modal-bg: #1e293b; 
             
             /* Theme-aware overrides for badges and text in dark mode */
             --intro-bg: rgba(56, 189, 248, 0.1); --intro-border: rgba(56, 189, 248, 0.3); --intro-text: #38bdf8;
@@ -89,7 +89,7 @@
         .stats-label { font-size: 0.65rem; text-transform: uppercase; color: var(--text-muted); font-weight: 700; margin-bottom: 2px; }
         .stats-value { font-size: 1.2rem; font-weight: 800; color: var(--text-main); line-height: 1; }
 
-        .gallery-list { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding: 2px; }
+        .gallery-list { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding: 2px; scroll-behavior: auto; contain: content; }
         .gallery-item { padding: 0.5rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.5rem; cursor: pointer; position: relative; padding-bottom: 0.75rem; transition: all 0.15s; }
         .gallery-item:hover { border-color: var(--primary); }
         .gallery-item.is-selected { background-color: var(--primary) !important; color: var(--primary-fg) !important; border-color: var(--primary) !important; }
@@ -213,10 +213,14 @@
     const IMG_CHAIR = "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/WB%20Chair%20Mat.png";
     const IMG_CATALOG = "https://github.com/WB-DT/daytona-utility/blob/main/WB%20Logo%203.4.2026.png?raw=true"; 
 
-    let currentThemeIdx=0, isEditMode=true, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentUserRepName=null, currentUserProfile=null;
+    let currentThemeIdx=0, isEditMode=true, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentAccountGuid=null, currentUserRepName=null, currentUserProfile=null;
     let failedSaves = []; let duplicateRecordIds = new Set();
     window.hasUnsavedChanges = false; window.targetSelectId = null; window.currentRecordSnapshot = null; window.currentUserGraphPhone = null; window.isPopulating = false;
     
+    // --- PAGINATION / SCROLL STATE ---
+    let galleryDisplayLimit = 50;
+    window.isScrollingMore = false;
+
     // --- EMAIL ATTACHMENTS STATE ---
     let pendingAttachments = [];
 
@@ -304,6 +308,64 @@
         return res;
     }
 
+    window.pushToMasonvilleSilent = async function(accountId, notesPayload, type = "ISCall") {
+        try {
+            const flowUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/9600fc61adea438ba498b1542e38cf47/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Z8KzQY52W_xgt246b_SliGmBgZLFc4MbF9OkFe01Z7Q";
+            
+            // 1. Fetch the logged-in user's internal Dynamics 365 System User GUID
+            let repOwnerGuid = "";
+            try {
+                if (msalAccount && msalAccount.username) {
+                    const d365Token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+                    const userEmail = msalAccount.username.toLowerCase();
+                    // Query the systemusers table to find the matching ID for the current rep
+                    const userRes = await fetch(`https://wbmasonco.crm.dynamics.com/api/data/v9.2/systemusers?$filter=internalemailaddress eq '${userEmail}'&$select=systemuserid`, {
+                        headers: { 'Authorization': `Bearer ${d365Token}`, 'Content-Type': 'application/json' }
+                    });
+                    if (userRes.ok) {
+                        const userData = await userRes.json();
+                        if (userData.value && userData.value.length > 0) {
+                            repOwnerGuid = userData.value[0].systemuserid;
+                        }
+                    }
+                }
+            } catch(e) { 
+                console.warn("Failed to fetch Rep Owner GUID, Flow will fallback to default owner.", e); 
+            }
+            const companyName = currentSelectedRecord ? currentSelectedRecord.cr714_company : "";
+            // 2. Build the payload including the newly fetched Owner GUID
+const payload = {
+    accountId: accountId,
+    notesPayload: notesPayload,
+    subject: `${companyName}/${accountId}`,
+    activityType: type, // New dedicated property
+    regardingGuid: currentAccountGuid || "",
+    repOwnerGuid: repOwnerGuid
+};
+
+            // 3. Push to Power Automate
+            const response = await fetch(flowUrl, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (response.ok) {
+                console.log("Power Automate Sync Successful");
+                return true;
+            } else {
+                throw new Error(`Flow Error: ${response.status}`);
+            }
+
+        } catch (error) {
+            console.error("Sync Error:", error);
+            window.showToast(`Masonville Sync Failed: ${error.message}`, "error");
+            return false;
+        }
+    };
+
     window.parseNotes = function(rawNotes) {
         if (!rawNotes) return []; let cleanRaw = rawNotes.replace(/\r\n/g, '\n'); const rawEntries = cleanRaw.split(/-{20,}/).filter(e => e.trim().length > 0); const parsed = [];
         rawEntries.forEach(entry => {
@@ -385,6 +447,12 @@
         }
     };
 
+    window.saveManualExtension = function() {
+        const ext = document.getElementById('manual-extension-input').value.trim();
+        localStorage.setItem('daytona_user_extension', ext);
+        window.showToast('Extension saved!', 'success');
+    };
+
     window.showUserProfileCard = function() {
         if(!currentUserProfile && !msalAccount) return;
         const name = currentUserProfile?.cr714_employeename || msalAccount?.name || 'Unknown User';
@@ -400,6 +468,14 @@
                 <div class="grid grid-cols-2 gap-2 text-left p-3 rounded border w-full" style="background-color: var(--bg-input); border-color: var(--border-color);">
                     <div><span class="text-[10px] font-bold uppercase text-muted block">Phone/Ext</span><span class="text-sm font-semibold">${phone}</span></div>
                     <div><span class="text-[10px] font-bold uppercase text-muted block">Manager</span><span class="text-sm font-semibold">${mgr}</span></div>
+                </div>
+                <div class="mt-4 w-full text-left p-3 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
+                    <label class="text-[10px] font-bold uppercase text-muted block mb-1">My Extension (Override)</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="manual-extension-input" class="border rounded px-2 py-1 text-xs w-full" placeholder="e.g. 1234" value="${localStorage.getItem('daytona_user_extension') || ''}">
+                        <button onclick="window.saveManualExtension()" class="btn-primary text-xs px-3">Save</button>
+                    </div>
+                    <p class="text-[9px] text-muted mt-1 italic">Saved locally. Overrides MSAL auto-grab.</p>
                 </div>
             </div>
         `;
@@ -524,9 +600,11 @@
     // --- NEW INTROS LOGIC ---
     window.processNewIntros = async function() {
         let knownIntros = [];
-        try { knownIntros = JSON.parse(localStorage.getItem('daytona_known_intros') || '[]'); } catch(e) {}
+        try { knownIntros = JSON.parse(localStorage.getItem('daytona_known_intros') || '[]'); } catch(e) { knownIntros = []; }
+        knownIntros = knownIntros.map(String); // enforce robust string IDs
         
         let newIntros = [];
+        let anyChanges = false;
         
         allRecords.forEach(r => {
             let hasIntro = false;
@@ -542,14 +620,17 @@
                 if(!knownIntros.includes(String(r.cr714_id))) {
                     newIntros.push({ id: r.cr714_id, company: r.cr714_company });
                     knownIntros.push(String(r.cr714_id));
+                    anyChanges = true;
                 }
             }
         });
         
+        // Always enforce local storage save if there were any missing from cache
+        if (anyChanges) {
+            try { localStorage.setItem('daytona_known_intros', JSON.stringify(knownIntros)); } catch(e) {}
+        }
+        
         if (newIntros.length > 0) {
-            // Update local storage so we don't trigger the modal again for these
-            localStorage.setItem('daytona_known_intros', JSON.stringify(knownIntros));
-            
             // Show Popup Modal
             const listHtml = newIntros.map(i => `<div class="p-2 border-b text-sm text-left"><span class="font-bold text-status-info">${i.id}</span> - ${window.escapeHTML(i.company)}</div>`).join('');
             document.getElementById('new-intros-list').innerHTML = listHtml;
@@ -948,7 +1029,17 @@
                     }
                 }
 
-                await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers: headers, body: JSON.stringify(payload) });
+                const response = await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, { 
+    method: 'PATCH', 
+    headers: headers, 
+    body: JSON.stringify(payload) 
+});
+
+if (!response.ok) {
+    const errorData = await response.json();
+    console.error(`Dataverse Error on ${src.table}:`, errorData);
+    throw new Error(`Dataverse rejected the save: ${errorData.error?.message || response.statusText}`);
+}
             }
 
             if (shouldClearManagerNote) {
@@ -957,7 +1048,13 @@
                 if (mgrAlert) mgrAlert.remove();
             }
 
-            if(!quiet) window.showToast("Saved!", "success");
+            if(!quiet) {
+                window.showToast("Saved!", "success");
+                
+                // SILENT PUSH TO MASONVILLE
+                const pushNotes = note ? note : "(Metadata Update)";
+                await window.pushToMasonvilleSilent(currentRecordId, pushNotes);
+            }
             
             window.saveToAuditLog('Save', `Note: ${note}`); 
             currentSelectedRecord.cr714_followup = iso; 
@@ -1045,7 +1142,9 @@
         const repEmail = msalAccount ? msalAccount.username : "";
         
         let ext = "XXXX";
-        if (window.currentUserGraphPhone) { ext = window.currentUserGraphPhone.slice(-4); } 
+        const manualExt = localStorage.getItem('daytona_user_extension');
+        if (manualExt) { ext = manualExt; }
+        else if (window.currentUserGraphPhone) { ext = window.currentUserGraphPhone.slice(-4); } 
         else if (currentUserProfile?.cr714_extension) { ext = currentUserProfile.cr714_extension; } 
         else if (currentUserProfile?.businessPhones?.[0]) { ext = currentUserProfile.businessPhones[0].slice(-4); }
         let repPhone = `508-436-${ext}`;
@@ -1275,7 +1374,7 @@
     window.navigateMiniGallery = function(direction) { if (!window.currentFilteredList || window.currentFilteredList.length === 0) return; let idx = window.currentFilteredList.findIndex(r => String(r.cr714_id) === String(currentRecordId)); if (idx === -1) { idx = 0; } else { idx += direction; if (idx < 0) idx = window.currentFilteredList.length - 1; if (idx >= window.currentFilteredList.length) idx = 0; } window.selectRecord(window.currentFilteredList[idx].cr714_id); };
     
     window.currentFilteredList = []; 
-    window.filterAndSortGallery = function() {
+window.filterAndSortGallery = function() {
         const search = window.getElementValue('search-bar')?.toLowerCase() || ''; 
         const sort = window.getElementValue('sort-dropdown') || 'company-asc'; 
         
@@ -1290,7 +1389,12 @@
 
         const actionChecks = Array.from(document.querySelectorAll('.filter-action-chk:checked')).map(c => c.value);
         
-        // --- Setup Dynamic Legend Array ---
+        if (!window.isScrollingMore) {
+            galleryDisplayLimit = 50;
+            const listContainer = document.getElementById('record-gallery-list');
+            if(listContainer) listContainer.scrollTop = 0;
+        }
+
         let activeFilters = [];
 
         let filtered = allRecords.filter(r => {
@@ -1298,7 +1402,6 @@
             
             const isSentToday = sentRecs.includes(String(r.cr714_id));
             
-            // Single Checkbox Filter Execution
             if(document.getElementById('filter-sent-only').checked && !isSentToday) return false; 
             if(document.getElementById('filter-hidesent').checked && isSentToday) return false; 
             if(document.getElementById('filter-emailed-7d').checked && !emailedLast7DaysIds.includes(String(r.cr714_id))) return false;
@@ -1318,7 +1421,6 @@
                 if (!hasIntro) return false; 
             }
             
-            // Multiple Action Select Logic
             if(actionChecks.length > 0 && (!r.cr714_action || !actionChecks.includes(r.cr714_action))) return false; 
             
             if(document.getElementById('filter-followup').checked && !r.cr714_followup) return false; 
@@ -1335,7 +1437,6 @@
             if(sort.includes('rep')) return sort === 'rep-asc' ? get(a,'cr714_rep').localeCompare(get(b,'cr714_rep')) : get(b,'cr714_rep').localeCompare(get(a,'cr714_rep')); return 0;
         });
 
-        // --- Build Dynamic Legend ---
         if(search) activeFilters.push(`matching "${search}"`);
         if(actionChecks.length > 0) activeFilters.push(`in action(s): ${actionChecks.join(', ')}`);
         if(document.getElementById('filter-multilist').checked) activeFilters.push(`on multiple lists`);
@@ -1344,7 +1445,7 @@
         if(document.getElementById('filter-norecent').checked) activeFilters.push(`untouched for 30+ days`);
         if(document.getElementById('filter-sent-only').checked) activeFilters.push(`emailed today`);
         if(document.getElementById('filter-hidesent').checked) activeFilters.push(`NOT emailed today`);
-        if(document.getElementById('filter-emailed-7d').checked) activeFilters.push(`emailed in the last 7 days`);
+        if(document.getElementById('filter-emailed-7d').checked) activeFilters.push(`recent emails (7d)`);
         if(document.getElementById('filter-has-intro').checked) activeFilters.push(`with an intro`);
         if(document.getElementById('filter-florida').checked) activeFilters.push(`located in Florida`);
         if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) activeFilters.push(`with manager notes`);
@@ -1355,17 +1456,30 @@
         let legendContainer = document.getElementById('filter-legend-container');
         let legendText = document.getElementById('filter-legend-text');
         
+const clearBtn = document.getElementById('clear-filters-btn');
+        
         if (activeFilters.length > 0) {
             legendText.innerHTML = `Showing <b>${filtered.length}</b> account(s) sorted by <b>${sortText}</b>. Filtering to only show accounts <b>${activeFilters.join('</b> and <b>')}</b>.`;
             if(legendContainer) legendContainer.classList.remove('hidden');
+            if(clearBtn) { clearBtn.classList.remove('hidden'); clearBtn.classList.add('flex'); }
         } else {
             if(legendContainer) legendContainer.classList.add('hidden');
+            if(clearBtn) { clearBtn.classList.add('hidden'); clearBtn.classList.remove('flex'); }
         }
 
         window.currentFilteredList = filtered; document.getElementById('mini-total-count').innerText = filtered.length; window.updateMiniCounter();
+        
         const list = document.getElementById('record-gallery-list'); list.innerHTML = '';
         const statTotal = document.getElementById('stat-total'); if(statTotal) statTotal.textContent = allRecords.length;
-        const viewStat = document.getElementById('stat-filtered'); if(viewStat) viewStat.textContent = filtered.length;
+        
+        const totalFiltered = filtered.length;
+        const displayedCount = Math.min(galleryDisplayLimit, totalFiltered);
+        
+        const viewStat = document.getElementById('stat-filtered'); 
+        if(viewStat) viewStat.textContent = `${totalFiltered}`;
+        
+        const visibleCountEl = document.getElementById('gallery-visible-count');
+        if (visibleCountEl) visibleCountEl.textContent = `(${displayedCount} of ${totalFiltered} visible)`;
         
         let mgrCount = allRecords.filter(r => r.cr714_managernotes && r.cr714_managernotes.trim() !== '').length;
         let bellContainer = document.getElementById('mgr-notes-bell-container');
@@ -1374,9 +1488,11 @@
             else { bellContainer.classList.add('hidden'); }
         }
 
-        if(filtered.length === 0) { list.innerHTML = '<div class="text-center p-4 text-xs italic">No records found.</div>'; return; }
+        if(totalFiltered === 0) { list.innerHTML = '<div class="text-center p-4 text-xs italic">No records found.</div>'; return; }
         
-        filtered.forEach(r => {
+        const itemsToDisplay = filtered.slice(0, galleryDisplayLimit);
+
+        itemsToDisplay.forEach(r => {
             const isSent = sentRecs.includes(String(r.cr714_id)); 
             const isDuplicate = duplicateRecordIds.has(String(r.cr714_id));
             const hasMgrNote = (r.cr714_managernotes && String(r.cr714_managernotes).trim() !== '');
@@ -1396,7 +1512,6 @@
                 displayIntroStr = (ci.toLowerCase() === 'yes' || ci.toLowerCase() === 'y') ? 'Intro' : ci;
             }
 
-            // DYNAMIC BORDER PULSE LOGIC
             let pulseClass = '';
             if (hasMgrNote) {
                 pulseClass = 'pulse-red';
@@ -1407,7 +1522,7 @@
             }
 
             const div = document.createElement('div'); 
-            div.className = `gallery-item ${currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${pulseClass}`; 
+            div.className = `gallery-item flex flex-col ${currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${pulseClass}`; 
             
             if(hasMgrNote && pulseClass === 'pulse-red') div.title = "Manager Note Present";
             else if(isDuplicate && pulseClass === 'pulse-yellow') div.title = "Account present in multiple lists";
@@ -1440,23 +1555,20 @@
                 } 
             }
             
-            let introHtml = '';
-            if (hasIntro) {
-                introHtml = `<div class="text-[9px] text-status-warning font-bold w-full truncate mt-1" title="Intro: ${window.escapeHTML(displayIntroStr)}"><i class="fas fa-handshake mr-1"></i>${window.escapeHTML(displayIntroStr)}</div>`;
-            }
-
             let sourcesHtml = r.sources.map(s => {
                 let abbr = s.type === 'AM' ? 'AM' : (s.type === 'Cadence' ? 'CAD' : (s.type === 'LB' ? 'LB' : 'PSP'));
                 let badgeClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : (s.type === 'LB' ? 'badge-lb' : 'badge-psp'));
                 return `<span class="px-1.5 py-0.5 rounded border text-[9px] font-bold ${badgeClass}">${abbr}</span>`;
             }).join('');
 
+            // Added safe layout classes to prevent vertical blowout (min-w-0, truncate, flex-shrink-0)
             div.innerHTML = `
-                <div class="flex justify-between items-center w-full mb-1">
-                    <div class="flex items-center gap-2">
-                        ${pref.showId ? `<span class="gallery-item-id">${r.cr714_id}</span>` : ''}
+                <div class="flex justify-between items-start w-full mb-1 gap-2">
+                    <div class="flex items-center gap-1 min-w-0">
+                        ${pref.showId ? `<span class="gallery-item-id truncate">${r.cr714_id}</span>` : ''}
+                        ${hasIntro ? `<i class="fas fa-handshake text-status-warning text-sm flex-shrink-0" title="Intro: ${window.escapeHTML(displayIntroStr)}"></i>` : ''}
                     </div>
-                    <div class="flex flex-col items-end text-[10px]">
+                    <div class="flex flex-col items-end text-[10px] flex-shrink-0 whitespace-nowrap">
                         ${followUpHtml}
                         ${emailHtml}
                     </div>
@@ -1464,21 +1576,30 @@
                 <div class="gallery-item-company truncate font-bold" title="${window.escapeHTML(r.cr714_company)}">
                     ${window.escapeHTML(r.cr714_company)}
                 </div>
-                ${introHtml}
-                <div class="flex justify-between items-end mt-1">
-                        <div class="text-[9px] text-muted truncate">
-                            ${pref.showRep ? window.escapeHTML(r.cr714_rep) : ''}
-                        </div>
-                        <div class="flex flex-col items-end gap-1 ml-auto">
-                            <div class="flex gap-1">
-                                ${sourcesHtml}
-                            </div>
-                            ${r.cr714_action ? `<div class="text-[9px] font-bold badge-action border px-1 rounded max-w-[120px] truncate" title="${window.escapeHTML(r.cr714_action)}">${window.escapeHTML(r.cr714_action)}</div>` : ''}
-                        </div>
+                <div class="flex justify-between items-end mt-1 gap-2">
+                    <div class="text-[9px] text-muted truncate">
+                        ${pref.showRep ? window.escapeHTML(r.cr714_rep) : ''}
                     </div>
+                    <div class="flex flex-col items-end gap-1 flex-shrink-0 max-w-[70%]">
+                        <div class="flex flex-wrap justify-end gap-1">
+                            ${sourcesHtml}
+                        </div>
+                        ${r.cr714_action ? `<div class="text-[9px] font-bold badge-action border px-1 rounded max-w-full truncate text-right" title="${window.escapeHTML(r.cr714_action)}">${window.escapeHTML(r.cr714_action)}</div>` : ''}
+                    </div>
+                </div>
             `;
             list.appendChild(div);
         });
+
+        // Add "Show More" indicator if there are more records
+        if (galleryDisplayLimit < totalFiltered) {
+            const moreDiv = document.createElement('div');
+            moreDiv.className = "text-center p-4 text-[10px] text-muted animate-pulse mt-2 border-t border-dashed";
+            moreDiv.innerHTML = `<i class="fas fa-arrow-down mr-1"></i> Scroll for more (${totalFiltered - galleryDisplayLimit} remaining)`;
+            list.appendChild(moreDiv);
+        }
+        
+        window.isScrollingMore = false;
     }
 
     window.selectRecord = function(id) { 
@@ -1509,8 +1630,10 @@
             window.updateNotesPreview();
             
             const alertContainer = document.getElementById('in-form-alerts');
+            currentAccountGuid = null; // Reset for new account
             const d365Acct = await window.fetchD365Account(id);
             if (d365Acct) {
+                currentAccountGuid = d365Acct.accountid; // Capture the hidden D365 GUID
                 const pc = d365Acct.primarycontactid || {};
                 const setVal = (elId, val) => { const el=document.getElementById(elId); if(el && val) el.value = val; };
                 
@@ -1674,9 +1797,12 @@
         if (introDisp) {
             introDisp.innerText = displayIntroStr;
             if (displayIntroStr !== '--') {
+                introContainerBox.classList.remove('hidden');
+                introContainerBox.classList.add('flex');
                 introContainerBox.classList.add('active-intro');
             } else {
-                introContainerBox.classList.remove('active-intro');
+                introContainerBox.classList.add('hidden');
+                introContainerBox.classList.remove('flex');
             }
         }
         
@@ -1996,15 +2122,13 @@
 
         // Build the multiline string and correctly encode the entire thing to ensure it passes into MVGO
         const details = `Action Plan --- Created On: ${today}\n\nRequested Action(s):\n${reqAction}\n\nCategory Opportunities:\n${catOpp}\n\nConcern(s):\n${concern}\nOther: \n\nContact Info:\nName: ${contactName}\nPhone Number: ${phoneStr}\nAddress:\n${addrStr}\n\nInside Sales Note: \n${userNotes}`;
-        const encodedDetails = encodeURIComponent(details);
         
-        const url = `https://go.masonville.com/#/activityleadcall?repCreditCode=&emptyOwner=TRUE&accountNumber=${encodeURIComponent(currentRecordId)}&salesCallTriggerID=&schedFutureDays=1&salesCallTrigger=ISReq&salesCallTriggerDetails=${encodedDetails}`;
-        
-        // Launch in new tab
-        window.open(url, '_blank');
+        // SILENT PUSH TO MASONVILLE
+        window.showToast("Syncing with Masonville...", "processing");
+        await window.pushToMasonvilleSilent(currentRecordId, details, "ISReq");
         
         // Compact note for history
-        const historyStamp = `[MVGO LINK SENT] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
+        const historyStamp = `[MVGO SYNCED] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
         const qbInput = document.getElementById('qb-notes-input');
         
         // Push the MVGO note back into the main note box along with the MVGO tag and await save
@@ -2018,7 +2142,7 @@
         window.markDirty();
         
         document.getElementById('mvgo-modal').style.display = 'none'; 
-        window.showToast("MVGO Opened & Note Saved", "success");
+        window.showToast("MVGO Synced & Note Saved", "success");
     }
 
     window.openCloseAccountModal = function() { if(currentRecordId) { document.getElementById('close-account-modal').classList.remove('hidden'); document.getElementById('close-account-modal').style.display='flex'; } }
@@ -2237,7 +2361,50 @@
             const onUp = () => { if (isResizing) { isResizing = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; resizer.classList.remove('bg-blue-500/20'); localStorage.setItem('daytona_history_width', getComputedStyle(grid).getPropertyValue('--history-width')); } };
             resizer.addEventListener('mousedown', (e) => onDown(e.clientX)); document.addEventListener('mousemove', (e) => onMove(e.clientX)); document.addEventListener('mouseup', onUp);
         }
+        
+        // SCROLL LISTENER FOR PAGINATION
+        const galleryList = document.getElementById('record-gallery-list');
+        if (galleryList) {
+            galleryList.addEventListener('scroll', () => {
+                if (galleryList.scrollTop + galleryList.clientHeight >= galleryList.scrollHeight - 50) {
+                    if (galleryDisplayLimit < window.currentFilteredList.length) {
+                        const currentPos = galleryList.scrollTop;
+                        galleryDisplayLimit += 50;
+                        window.isScrollingMore = true;
+                        window.filterAndSortGallery();
+                        galleryList.scrollTop = currentPos;
+                    }
+                }
+            });
+        }
     });
+
+    window.clearAllFilters = function() {
+    // 1. Clear the search bar
+    const searchBar = document.getElementById('search-bar');
+    if (searchBar) searchBar.value = '';
+
+    // 2. Uncheck all standard filter pills
+    const filterIds = [
+        'filter-multilist', 'filter-followup', 'filter-nonotes', 
+        'filter-norecent', 'filter-sent-only', 'filter-hidesent', 
+        'filter-emailed-7d', 'filter-has-intro', 'filter-florida', 
+        'filter-mgrnotes'
+    ];
+    filterIds.forEach(id => {
+        const chk = document.getElementById(id);
+        if (chk) chk.checked = false;
+    });
+
+    // 3. Uncheck all dynamic Action Target dropdown items
+    document.querySelectorAll('.filter-action-chk').forEach(chk => {
+        chk.checked = false;
+    });
+
+    // 4. Run the filter function to reset the view
+    window.filterAndSortGallery();
+};
+    
 </script>
 </head>
 <body class="p-2 md:p-4">
@@ -2304,11 +2471,9 @@
                     Action Target <i class="fas fa-chevron-down"></i>
                 </button>
                 <div id="action-menu" class="absolute top-full left-0 mt-1 w-64 shadow-xl border rounded hidden flex-col z-[9500] max-h-64 overflow-y-auto custom-dropdown-menu custom-scrollbar">
-                    <!-- Checkboxes populate dynamically here via populateActionFilter() -->
-                </div>
+                    </div>
             </div>
              
-            <!-- New Property Filter Pills instead of Dropdown -->
             <div class="flex flex-wrap items-center gap-2 ml-2 border-l pl-2" style="border-color: var(--border-color);">
                 <label class="filter-pill" title="Show accounts present in multiple action lists.">
                     <input type="checkbox" id="filter-multilist" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
@@ -2330,17 +2495,17 @@
                     <input type="checkbox" id="filter-sent-only" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
                     <span class="text-status-success"><i class="fas fa-check-double mr-1"></i> Emailed Today</span>
                 </label>
-                <label class="filter-pill" title="Hide any accounts that you have already emailed today.">
+                <label class="filter-pill" title="Hide any accounts that you have already emailed.">
                     <input type="checkbox" id="filter-hidesent" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
-                    <span class="text-status-danger"><i class="fas fa-eye-slash mr-1"></i> Hide Sent Today</span>
+                    <span class="text-status-danger"><i class="fas fa-eye-slash mr-1"></i> Hide Sent Emails</span>
                 </label>
                 <label class="filter-pill" title="Show accounts that were emailed anytime in the past week.">
                     <input type="checkbox" id="filter-emailed-7d" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
-                    <span class="text-status-info"><i class="fas fa-calendar-week mr-1"></i> Emailed (7d)</span>
+                    <span class="text-status-info"><i class="fas fa-calendar-week mr-1"></i> Recent Emails 7d</span>
                 </label>
                 <label class="filter-pill" title="Show accounts where an introduction has already been completed.">
                     <input type="checkbox" id="filter-has-intro" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
-                    <span><i class="fas fa-handshake text-muted mr-1"></i> Has Intro</span>
+                    <span><i class="fas fa-handshake text-muted mr-1"></i> Intro</span>
                 </label>
                 <label class="filter-pill" title="Show accounts physically located in Florida.">
                     <input type="checkbox" id="filter-florida" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
@@ -2351,20 +2516,25 @@
                     <span>Has Manager Notes</span>
                 </label>
             </div>
-             
+
              <div class="ml-auto flex items-center gap-2">
-                 <div id="email-counter-segment" class="flex justify-between items-center text-[10px] text-muted p-1 bg-gray-50 border rounded-full px-3 mr-2" style="border-color: var(--border-color); background-color: var(--bg-input);">
+                 <div id="email-counter-segment" class="flex justify-between items-center text-[10px] text-muted p-1 bg-gray-50 border rounded px-3 mr-2" style="border-color: var(--border-color); background-color: var(--bg-input);">
                      <span><i class="fas fa-paper-plane text-status-info mr-2"></i>Hourly Limit:</span>
                      <span id="email-hourly-count" class="font-bold ml-2">0/100</span>
                  </div>
                  <button onclick="window.toggleFontSize()" id="font-size-btn" class="btn-secondary text-xs flex items-center gap-2 py-1 px-3 h-8" title="Change Font Size"><i class="fas fa-text-height"></i><span>AA</span></button>
                  <button onclick="window.toggleThemeMode()" id="theme-toggle-btn" class="btn-secondary text-xs flex items-center gap-2 py-1 px-3 h-8" title="Toggle Dark/Light Mode"><i class="fas fa-adjust"></i><span>Theme</span></button>
              </div>
+            
         </div>
-
-        <div id="filter-legend-container" class="w-full text-[10px] text-muted px-4 py-1.5 border-t bg-black/5 hidden" style="border-color: var(--border-color);">
-            <i class="fas fa-info-circle mr-1 text-primary"></i> <span id="filter-legend-text"></span>
-        </div>
+        
+<div id="filter-legend-container" class="w-full flex items-center text-[11px] text-muted px-4 py-1.5 border-t bg-black/5 hidden" style="border-color: var(--border-color);">
+    <button onclick="window.clearAllFilters()" id="clear-filters-btn" class="hidden items-center gap-1 px-2 py-1 rounded border text-[10px] font-bold cursor-pointer transition-all hover:bg-red-50 text-red-600 border-red-200 bg-white mr-3 shadow-sm">
+        <i class="fas fa-times"></i> Clear Filters
+    </button> 
+    <i class="fas fa-info-circle mr-1 text-primary"></i> 
+    <span id="filter-legend-text"></span>
+</div>
 
         <div class="app-grid mt-2">
             <div class="col-left" id="gallery-column">
@@ -2372,10 +2542,10 @@
                      <div class="card-header flex-col items-start gap-2 flex-shrink-0 bg-gray-50 transition-all duration-200" id="gallery-header-container" style="background-color: var(--bg-input) !important;">
                          <div id="gallery-normal-content" class="w-full flex flex-col gap-2">
                              <div class="flex justify-between w-full items-center">
-                                 <span>Account List</span>
+                                 <span>Account List <span id="gallery-visible-count" class="text-xs text-muted font-normal ml-2"></span></span>
                                  <button onclick="window.toggleGallery()" class="text-xs text-muted hover:text-primary" title="Collapse"><i class="fas fa-compress-alt"></i></button>
                              </div>
-                             <input type="text" id="search-bar" name="search" oninput="window.filterAndSortGallery()" placeholder="Search... (/)" class="text-xs w-full h-10 border rounded px-2" />
+                             <input type="text" id="search-bar" name="search" oninput="window.filterAndSortGallery()" placeholder="Search... (/)" class="text-xs w-full h-10 border rounded px-2" style="border-color: var(--border-color);" />
                          </div>
                          <div id="gallery-mini-controls" class="hidden flex-col items-center gap-2 w-full pt-1">
                              <button onclick="window.toggleGallery()" class="text-xs text-status-info hover:text-blue-800 mb-1" title="Expand List"><i class="fas fa-expand-alt"></i></button>
@@ -2396,6 +2566,9 @@
                              <span id="acct-company" class="font-bold truncate text-sm">--</span>
                              <span class="text-muted text-xs">/</span>
                              <span id="acct-number-header" class="text-xs text-muted font-medium">--</span>
+                             <div id="intro-container-box" class="hidden items-center justify-center ml-2 px-2 py-0.5 rounded text-[10px] font-bold transition-colors" style="background-color: var(--intro-bg); border: 1px solid var(--intro-border);">
+                                 <span id="display-intro" style="color: var(--intro-text);">--</span>
+                             </div>
                              <span id="profile-sent-badge" class="hidden bg-green-100 text-status-success text-[9px] px-1 rounded-full font-bold border border-green-200 ml-2" style="background-color: var(--bg-input); border-color: var(--border-color);"><i class="fas fa-check"></i> Sent</span>
                         </div>
                     </div>
@@ -2434,7 +2607,7 @@
                                 <div class="flex items-center gap-2">
                                     <div id="save-controls" class="hidden items-center gap-1">
                                         <button onclick="window.confirmClearChanges()" class="bg-red-100 text-status-danger border px-2 py-0.5 rounded text-[9px] font-bold transition-colors" style="background-color: var(--bg-input); border-color: var(--border-color);">
-                                            <i class="fas fa-times mr-1"></i>CLR
+                                            <i class="fas fa-times mr-1"></i>CLEAR
                                         </button>
                                         <button onclick="window.handleCustomSave()" class="btn-primary px-2 py-0.5 rounded text-[9px] font-bold shadow-sm transition-colors">
                                             <i class="fas fa-save mr-1"></i>SAVE
@@ -2454,7 +2627,7 @@
                                 <textarea id="qb-notes-input" name="generalNote" wrap="off" oninput="window.markDirty()" class="note-textarea w-full p-2 pr-20 text-sm font-mono rounded border h-full resize-none min-h-[200px] custom-scrollbar whitespace-pre-wrap break-words overflow-y-auto overflow-x-hidden" disabled placeholder="Enter note box here..."></textarea>
                             </div>
 
-                            <div class="grid grid-cols-5 gap-2 flex-shrink-0 p-2 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
+                            <div class="grid grid-cols-4 gap-2 flex-shrink-0 p-2 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
                                 <div class="flex flex-col items-center">
                                     <input type="text" id="input-location" oninput="window.markDirty()" placeholder="Locations" class="text-[10px] border rounded p-1 h-6 w-full text-center">
                                     <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Locations</label>
@@ -2487,13 +2660,6 @@
                                         </div>
                                     </div>
                                 </div>
-
-                                <div class="flex flex-col items-center w-full">
-                                    <div class="flex flex-col items-center justify-center p-1 border rounded w-full h-6 overflow-hidden transition-colors" id="intro-container-box" style="background-color: var(--bg-input); border-color: var(--border-color);">
-                                        <span id="display-intro" class="text-[10px] font-bold truncate" style="color: var(--text-main);">--</span>
-                                    </div>
-                                    <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Intro</label>
-                                </div>
                                 
                                 <div class="flex flex-col items-center">
                                     <select id="opp-type-select" onchange="window.markDirty()" class="text-[10px] p-0 border rounded h-6 w-full font-bold text-center">
@@ -2521,7 +2687,7 @@
                                     <div class="flex flex-col min-w-0 w-full">
                                         <div class="flex items-center gap-1 mb-1 pb-1 border-b border-orange-500/20 font-black" style="color: var(--text-main);">
                                             <span class="text-[8px] uppercase tracking-wider opacity-70">Current Action Strategy:</span>
-                                            <div id="form-action-value" class="flex flex-wrap gap-1 ml-auto">--</div>
+                                            <div id="form-action-value" class="flex flex-wrap gap-1">--</div>
                                         </div>
                                         <div class="form-wide-value whitespace-normal leading-tight" style="max-height: 5em; overflow-y: auto;">
                                             <span id="form-msg-value" class="text-[10px] font-bold italic" style="color: var(--text-main);">--</span>
@@ -2548,8 +2714,8 @@
                             <div class="flex flex-col gap-1 p-2 border rounded flex-shrink-0 mt-2" style="background-color: var(--bg-input); border-color: var(--border-color);">
                                 <label class="text-[10px] font-bold text-muted uppercase">Follow Up Scheduler</label>
                                 <div class="flex gap-1 w-full">
-                                    <input type="date" id="follow-up-date" onchange="window.markDirty()" class="text-xs flex-1 editable-field h-7" disabled>
-                                    <input type="time" id="follow-up-time" onchange="window.markDirty()" class="text-xs flex-1 editable-field h-7" disabled>
+                                    <input type="date" id="follow-up-date" onchange="window.markDirty()" class="text-xs flex-1 h-7" disabled>
+                                    <input type="time" id="follow-up-time" onchange="window.markDirty()" class="text-xs flex-1 h-7" disabled>
                                 </div>
                                 <button onclick="window.createCalendarEvent()" class="btn-primary text-xs w-full h-6 py-0 flex items-center justify-center mt-1">Create Event</button>
                             </div>
@@ -2624,7 +2790,7 @@
                 <button onclick="window.closeUnifiedSidebar()" class="text-lg hover:text-status-danger bg-transparent border-none">&times;</button>
             </div>
         </div>
-        <div id="sidebar-content-area" class="sidebar-content-area"></div>
+        <div id="sidebar-content-area"class="sidebar-content-area"></div>
     </div>
 
     <div id="unsaved-changes-modal" class="modal-overlay hidden" style="display:none; z-index: 9500;">
@@ -2717,10 +2883,10 @@
                 </div>
             </div>
             <div class="p-4 border-t flex justify-between items-center flex-shrink-0" style="background-color: var(--bg-header) !important; border-color: var(--border-color);">
-                <p class="text-xs font-semibold text-muted"><i class="fas fa-info-circle mr-1 text-status-info"></i> Clicking 'Launch' will generate the URL and open MVGO in a new tab.</p>
+                <p class="text-xs font-semibold text-muted"><i class="fas fa-info-circle mr-1 text-status-info"></i> Clicking 'Sync' will generate the details and execute a background sync to Masonville.</p>
                 <div class="flex gap-3">
                     <button onclick="document.getElementById('mvgo-modal').style.display = 'none';" class="btn-secondary px-6 shadow-sm h-8 flex items-center justify-center">Cancel</button>
-                    <button onclick="window.generateMVGOUrl()" class="btn-primary px-8 text-sm shadow-md h-8 flex items-center justify-center"><i class="fas fa-external-link-alt mr-2"></i>Launch & Save</button>
+                    <button onclick="window.generateMVGOUrl()" class="btn-primary px-8 text-sm shadow-md h-8 flex items-center justify-center"><i class="fas fa-sync mr-2"></i>Sync & Save</button>
                 </div>
             </div>
         </div>
@@ -2778,7 +2944,6 @@
                     <button class="outlook-tool-btn h-8 w-8 flex items-center justify-center" title="Attach File" onclick="document.getElementById('email-attachment-input').click()"><i class="fas fa-paperclip"></i></button>
                 </div>
                 <div id="email-attachments-container" class="flex flex-wrap gap-2 px-4 pb-2 empty:hidden" style="background-color: var(--bg-card);"></div>
-                
                 <div id="email-modal-body" class="outlook-editor" contenteditable="true"></div>
             </div>
         </div>
