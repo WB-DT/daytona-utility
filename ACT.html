@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. v1.18</title>
+    <title>A.C.T. v2.0</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -12,7 +12,7 @@
     <style>
         :root { --bg-app: #f1f5f9; --bg-card: #ffffff; --bg-input: #f8fafc; --bg-header: #f8fafc; --text-main: #0f172a; --text-muted: #64748b; --primary: #2563eb; --primary-fg: #ffffff; --accent-danger: #ef4444; --accent-success: #22c55e; --accent-warning: #eab308; --border-color: #cbd5e1; --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); --radius: 0.5rem; --modal-bg: #ffffff; --tab-bg: #e2e8f0; --tab-active-bg: #ffffff; --z-base: 1; --z-sidebar: 100; --z-overlay: 9000; --z-modal: 9100; --z-toast: 9999; --z-loader: 9998; --z-delivery: 8500; }
         [data-theme="midnight"], [data-theme="oled"], [data-theme="matt"], [data-theme="gatsby"], [data-theme="ocean"], [data-theme="forest"], [data-theme="sunset"] { 
-            --bg-app: #0f172a; --bg-card: #1e293b; --bg-input: #334155; --bg-header: #1e293b; --text-main: #f8fafc; --text-muted: #94a3b8; --border-color: #334155; --primary: #38bdf8; --primary-fg: #ffffff; --modal-bg: #1e293b; 
+            --bg-app: #0f172a; --bg-card: #1e293b; --bg-input: #334155; --bg-header: #1e293b; --text-main: #f8fafc; --text-muted: #94a3b8; --border-color: #475569; --primary: #38bdf8; --primary-fg: #ffffff; --modal-bg: #1e293b; 
             
             /* Theme-aware overrides for badges and text in dark mode */
             --intro-bg: rgba(56, 189, 248, 0.1); --intro-border: rgba(56, 189, 248, 0.3); --intro-text: #38bdf8;
@@ -89,7 +89,7 @@
         .stats-label { font-size: 0.65rem; text-transform: uppercase; color: var(--text-muted); font-weight: 700; margin-bottom: 2px; }
         .stats-value { font-size: 1.2rem; font-weight: 800; color: var(--text-main); line-height: 1; }
 
-        .gallery-list { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding: 2px; }
+        .gallery-list { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding: 2px; scroll-behavior: auto; contain: content; }
         .gallery-item { padding: 0.5rem; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.5rem; cursor: pointer; position: relative; padding-bottom: 0.75rem; transition: all 0.15s; }
         .gallery-item:hover { border-color: var(--primary); }
         .gallery-item.is-selected { background-color: var(--primary) !important; color: var(--primary-fg) !important; border-color: var(--primary) !important; }
@@ -207,16 +207,24 @@
     const GRAPH_URL = "https://graph.microsoft.com/v1.0";
     const PRIMARY_CRM_URL = "https://wbmasonco.crm.dynamics.com/api/data/v9.2";
     
+    // INJECTED: FLOW_API_URL for Live Sales Sync
+    window.FLOW_API_URL = "https://prod-00.westus.logic.azure.com:443/workflows/YOUR_URL_HERE"; // Update with actual Flow URL
+    
     // --- CONSTANTS ---
     const EMAIL_LIMIT_PER_HOUR = 100;
     const QB_NOTES_TEMPLATE = `Locations: \nNumber of employees: \nCurrent Vendors: \nFrequency of Orders: \nMonthly spend: \nAnyone involved: \nNext Order Expected: \nOPP: \n`;
     const IMG_CHAIR = "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/WB%20Chair%20Mat.png";
     const IMG_CATALOG = "https://github.com/WB-DT/daytona-utility/blob/main/WB%20Logo%203.4.2026.png?raw=true"; 
 
-    let currentThemeIdx=0, isEditMode=true, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentUserRepName=null, currentUserProfile=null;
+    let currentThemeIdx=0, isEditMode=true, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentAccountGuid=null, currentUserRepName=null, currentUserProfile=null;
     let failedSaves = []; let duplicateRecordIds = new Set();
     window.hasUnsavedChanges = false; window.targetSelectId = null; window.currentRecordSnapshot = null; window.currentUserGraphPhone = null; window.isPopulating = false;
+    window.currentRightTab = 'history'; // Track current right column tab
     
+    // --- PAGINATION / SCROLL STATE ---
+    let galleryDisplayLimit = 50;
+    window.isScrollingMore = false;
+
     // --- EMAIL ATTACHMENTS STATE ---
     let pendingAttachments = [];
 
@@ -226,40 +234,26 @@
     // Safely parses and displays text with HTML formatting and links allowed
     window.formatNoteText = function(text) {
         if (!text) return '';
-        
-        // Step 1: Replace system-specific URL string routing
         let decoded = text.replace(/activitysalescall/gi, 'activityleadcall');
-        
-        // Step 2: Ensure basic HTML decoding if it was passed safely via Dataverse
         let tempDiv = document.createElement("textarea");
         tempDiv.innerHTML = decoded;
         decoded = tempDiv.value;
-        
-        // Step 3: Strip completely dangerous tags natively (like script, iframe, object)
         decoded = decoded.replace(/<(script|iframe|object|embed|form|style)[^>]*>[\s\S]*?<\/\1>/gi, '');
-        decoded = decoded.replace(/on\w+="[^"]*"/gi, ''); // Strip inline handlers
-        
-        // Step 4: Escape everything strictly to a baseline safe string
+        decoded = decoded.replace(/on\w+="[^"]*"/gi, ''); 
         let safeText = window.escapeHTML(decoded);
-        
-        // Step 5: Selectively unescape ONLY the formatting tags we want to allow 
         safeText = safeText.replace(/&lt;br\s*[\/]?&gt;/gi, '<br>');
         safeText = safeText.replace(/&lt;b&gt;/gi, '<b>').replace(/&lt;\/b&gt;/gi, '</b>');
         safeText = safeText.replace(/&lt;strong&gt;/gi, '<strong>').replace(/&lt;\/strong&gt;/gi, '</strong>');
         safeText = safeText.replace(/&lt;i&gt;/gi, '<i>').replace(/&lt;\/i&gt;/gi, '</i>');
         safeText = safeText.replace(/&lt;em&gt;/gi, '<em>').replace(/&lt;\/em&gt;/gi, '</em>');
         safeText = safeText.replace(/&lt;u&gt;/gi, '<u>').replace(/&lt;\/u&gt;/gi, '</u>');
-        
-        // Step 6: Robustly unescape and reconstruct anchor links, enforcing target="_blank"
         safeText = safeText.replace(/&lt;a\s+(?:[^&]*?\s+)?href=(&quot;|&#039;|')(.*?)\1(.*?)&gt;(.*?)&lt;\/a&gt;/gi, (match, quote, url, extra, innerText) => {
             let unescapedUrl = url.replace(/&amp;/g, '&');
             return `<a href="${unescapedUrl}" class="text-status-info" style="text-decoration: underline; font-weight: bold;" target="_blank">${innerText}</a>`;
         });
-
         return safeText;
     };
 
-    // Cleanly strips HTML, replacing messy D365 line breaks with simple spaces so it formats properly in alert boxes
     window.stripHTML = function(html) { 
         if (!html) return ''; 
         let tmp = document.createElement("DIV"); 
@@ -294,15 +288,59 @@
         localStorage.setItem('daytona_audit_log', JSON.stringify(log)); window.updateStats(); 
     }
 
-    window.fetchWithPolling = async function(url, options) {
-        let res = await fetch(url, options);
-        if (res.status === 202) {
-            const loc = res.headers.get('location'); let retries=0;
-            while(retries < 40) { await new Promise(r => setTimeout(r, 3000)); let poll = await fetch(loc); if(poll.status === 200) return poll; retries++; }
-            throw new Error("Polling timed out.");
+    window.pushToMasonvilleSilent = async function(accountId, notesPayload) {
+        try {
+            const flowUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/9600fc61adea438ba498b1542e38cf47/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Z8KzQY52W_xgt246b_SliGmBgZLFc4MbF9OkFe01Z7Q";
+            
+            let repOwnerGuid = "";
+            try {
+                if (msalAccount && msalAccount.username) {
+                    const d365Token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+                    const userEmail = msalAccount.username.toLowerCase();
+                    const userRes = await fetch(`https://wbmasonco.crm.dynamics.com/api/data/v9.2/systemusers?$filter=internalemailaddress eq '${userEmail}'&$select=systemuserid`, {
+                        headers: { 'Authorization': `Bearer ${d365Token}`, 'Content-Type': 'application/json' }
+                    });
+                    if (userRes.ok) {
+                        const userData = await userRes.json();
+                        if (userData.value && userData.value.length > 0) {
+                            repOwnerGuid = userData.value[0].systemuserid;
+                        }
+                    }
+                }
+            } catch(e) { 
+                console.warn("Failed to fetch Rep Owner GUID, Flow will fallback to default owner.", e); 
+            }
+
+            // INJECTED: Dynamically fetch the company name to satisfy the string literal in the payload
+            const companyName = currentSelectedRecord ? currentSelectedRecord.cr714_company : "Unknown Company";
+
+            const payload = {
+                accountId: accountId,
+                notesPayload: notesPayload,
+                subject: `${companyName} - ${accountId}`,
+                regardingGuid: currentAccountGuid || "",
+                repOwnerGuid: repOwnerGuid
+            };
+
+            const response = await fetch(flowUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+
+            if (response.ok) {
+                console.log("Power Automate Sync Successful");
+                return true;
+            } else {
+                throw new Error(`Flow Error: ${response.status}`);
+            }
+
+        } catch (error) {
+            console.error("Sync Error:", error);
+            window.showToast(`Masonville Sync Failed: ${error.message}`, "error");
+            return false;
         }
-        return res;
-    }
+    };
 
     window.parseNotes = function(rawNotes) {
         if (!rawNotes) return []; let cleanRaw = rawNotes.replace(/\r\n/g, '\n'); const rawEntries = cleanRaw.split(/-{20,}/).filter(e => e.trim().length > 0); const parsed = [];
@@ -335,6 +373,196 @@
         });
         return parsed;
     }
+
+    // --- INJECTED MASONVILLE DATA TAB LOGIC ---
+    window.switchRightTab = function(tabId) {
+        window.currentRightTab = tabId;
+        
+        document.getElementById('tab-btn-history').className = "flex-1 py-3 text-xs font-bold uppercase transition-colors border-b-2 text-muted border-transparent hover:bg-black/5";
+        document.getElementById('tab-btn-masonville').className = "flex-1 py-3 text-xs font-bold uppercase transition-colors border-b-2 text-muted border-transparent hover:bg-black/5";
+        
+        document.getElementById('right-tab-history').classList.add('hidden');
+        document.getElementById('right-tab-history').classList.remove('flex');
+        document.getElementById('right-tab-masonville').classList.add('hidden');
+        document.getElementById('right-tab-masonville').classList.remove('flex');
+        
+        if (tabId === 'history') {
+            document.getElementById('tab-btn-history').classList.replace('text-muted', 'text-primary');
+            document.getElementById('tab-btn-history').classList.replace('border-transparent', 'border-primary');
+            document.getElementById('right-tab-history').classList.remove('hidden');
+            document.getElementById('right-tab-history').classList.add('flex');
+            window.updateNotesPreview();
+        } else {
+            document.getElementById('tab-btn-masonville').classList.replace('text-muted', 'text-primary');
+            document.getElementById('tab-btn-masonville').classList.replace('border-transparent', 'border-primary');
+            document.getElementById('right-tab-masonville').classList.remove('hidden');
+            document.getElementById('right-tab-masonville').classList.add('flex');
+            window.loadMasonvilleData(); 
+        }
+    };
+
+    window.loadMasonvilleData = async function() {
+        if (!currentRecordId) return;
+        
+        const loader = document.getElementById('masonville-loader');
+        const content = document.getElementById('masonville-content');
+        
+        loader.classList.remove('hidden'); loader.classList.add('flex');
+        content.classList.add('hidden');
+
+        const accNum = encodeURIComponent(currentRecordId);
+
+        try {
+            const fetchOpts = { method: 'GET', credentials: 'omit' };
+            const urls = [
+                `https://crmsrws.masonville.com/api/accounts?accountNumber=${accNum}&page=1&pageSize=10&sortDescending=false&sortType=6&customerNamePattern=0`,
+                `https://crmsrws.masonville.com/api/Opportunity/Accounts?accountNumbers=${accNum}`,
+                `https://crmsrws.masonville.com/api/CustomerData/MessageText?accountNumber=${accNum}`
+            ];
+
+            const reqs = await Promise.allSettled(urls.map(u => fetch(u, fetchOpts).then(r => r.text())));
+
+            const parseText = (res) => {
+                if (res.status === 'fulfilled') {
+                    try { return JSON.parse(res.value); } catch { return res.value || 'No Data'; }
+                }
+                return 'Fetch Failed';
+            };
+
+            const accData = parseText(reqs[0]);
+            const oppData = parseText(reqs[1]);
+            const msgData = parseText(reqs[2]);
+            
+            let html = '';
+
+            // 1. Account Details
+            html += `<div class="border rounded shadow-sm overflow-hidden mb-3" style="border-color: var(--border-color); background-color: var(--bg-card);">
+                <div class="bg-gray-100 p-2 border-b font-bold text-[10px] uppercase tracking-wider" style="background-color: var(--bg-header); border-color: var(--border-color); color: var(--primary);">
+                    <i class="fas fa-building mr-1"></i> Account Status Overview
+                </div>
+                <div class="p-3 text-xs leading-relaxed" style="color: var(--text-main);">`;
+            
+            if (Array.isArray(accData) && accData.length > 0) {
+                const a = accData[0];
+                html += `<div class="grid grid-cols-2 gap-y-2 gap-x-4 text-[11px]">
+                    <div><span class="font-bold text-muted">Status:</span> <span class="${a.inactive ? 'text-status-danger' : 'text-status-success'} font-bold">${a.inactive ? 'Inactive' : 'Active'}</span></div>
+                    <div><span class="font-bold text-muted">Accessible:</span> ${a.accessible ? 'Yes' : 'No'}</div>
+                    <div><span class="font-bold text-muted">Over 60 Days:</span> <span class="font-mono ${a.totalOver60 > 0 ? 'text-status-danger font-bold' : 'text-status-success'}">$${(a.totalOver60 || 0).toFixed(2)}</span></div>
+                    <div><span class="font-bold text-muted">Last Order:</span> ${a.lastOrderDate || 'N/A'}</div>
+                    <div class="col-span-2"><span class="font-bold text-muted">Address:</span> ${a.street || ''} ${a.city || ''}, ${a.state || ''} ${a.zipcode || ''}</div>
+                </div>`;
+            } else if (typeof accData === 'string' && accData !== 'Fetch Failed') {
+                html += `<div class="p-2 bg-gray-50 border rounded font-mono text-[10px] break-words">${window.escapeHTML(accData)}</div>`;
+            } else {
+                html += `<div class="italic text-muted">No account data returned.</div>`;
+            }
+            html += `</div></div>`;
+
+            // 2. Opportunities
+            html += `<div class="border rounded shadow-sm overflow-hidden mb-3" style="border-color: var(--border-color); background-color: var(--bg-card);">
+                <div class="bg-gray-100 p-2 border-b font-bold text-[10px] uppercase tracking-wider" style="background-color: var(--bg-header); border-color: var(--border-color); color: #8b5cf6;">
+                    <i class="fas fa-chart-line mr-1"></i> Opportunities
+                </div>
+                <div class="p-3 text-[11px]" style="color: var(--text-main);">`;
+            if (Array.isArray(oppData) && oppData.length > 0) {
+                html += `<ul class="list-disc pl-4 space-y-1">`;
+                oppData.forEach(o => { html += `<li>${typeof o === 'string' ? window.escapeHTML(o) : JSON.stringify(o)}</li>`; });
+                html += `</ul>`;
+            } else {
+                html += `<div class="text-muted italic">No active opportunities found.</div>`;
+                if(typeof oppData === 'string' && oppData !== 'No Data' && oppData !== 'Fetch Failed' && oppData !== '[]') {
+                    html += `<div class="mt-2 p-2 bg-gray-50 border rounded font-mono text-[10px] break-words">${window.escapeHTML(oppData)}</div>`;
+                }
+            }
+            html += `</div></div>`;
+
+            // 3. Message Text
+            html += `<div class="border rounded shadow-sm overflow-hidden" style="border-color: var(--border-color); background-color: var(--bg-card);">
+                <div class="bg-gray-100 p-2 border-b font-bold text-[10px] uppercase tracking-wider" style="background-color: var(--bg-header); border-color: var(--border-color); color: #10b981;">
+                    <i class="fas fa-comment-alt mr-1"></i> Customer Data Message
+                </div>
+                <div class="p-3 text-[11px]" style="color: var(--text-main);">`;
+            
+            let msgTextToDisplay = msgData;
+            if (typeof msgData === 'object' && !Array.isArray(msgData)) msgTextToDisplay = JSON.stringify(msgData, null, 2);
+            
+            if (msgTextToDisplay && msgTextToDisplay !== 'No Data' && msgTextToDisplay !== '[]' && msgTextToDisplay !== '""') {
+                let str = String(msgTextToDisplay).replace(/^"|"$/g, ''); // strip outer quotes
+                html += `<div class="whitespace-pre-wrap leading-relaxed">${window.escapeHTML(str)}</div>`;
+            } else {
+                html += `<div class="text-muted italic">No messages found.</div>`;
+            }
+            html += `</div></div>`;
+
+            content.innerHTML = html;
+
+        } catch (e) {
+            content.innerHTML = `<div class="p-3 bg-red-50 text-red-600 border border-red-200 rounded text-xs"><i class="fas fa-exclamation-triangle mr-2"></i> Error fetching Masonville data: ${e.message}<br><br><span class="text-[9px] text-red-400">Note: Ensure you are logged into Masonville or use an appropriate CORS proxy/extension.</span></div>`;
+        }
+
+        loader.classList.add('hidden'); loader.classList.remove('flex');
+        content.classList.remove('hidden');
+    };
+
+    // --- INJECTED LIVE SYNC FUNCTION ---
+    window.triggerDataFlow = async function(accountName, accountNumber) {
+        if (!accountNumber) return;
+        
+        document.getElementById('live-sales-content').classList.add('hidden');
+        document.getElementById('live-sales-loader').classList.remove('hidden');
+        document.getElementById('live-sales-loader').classList.add('flex');
+
+        try {
+            const response = await fetch(window.FLOW_API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ accountNumber: accountNumber })
+            });
+
+            if (!response.ok) throw new Error(`Status: ${response.status}`);
+            
+            const data = await response.json();
+
+            // Populate Address
+            const addr1 = data.address1_line1 || 'No Street Address';
+            const city = data.address1_city || '';
+            const state = data.address1_stateorprovince || '';
+            const zip = data.address1_postalcode || '';
+            document.getElementById('live-address-display').innerHTML = `<b>${addr1}</b><br>${city}, ${state} ${zip}`;
+
+            // Populate Sales
+            const salesBody = document.getElementById('live-sales-body');
+            salesBody.innerHTML = '';
+            
+            if(data.salesOrders && data.salesOrders.length > 0) {
+                data.salesOrders.forEach(order => {
+                    const dDate = new Date(order.createdon).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' });
+                    const amt = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(order.totalamount);
+                    salesBody.innerHTML += `
+                        <tr class="border-b hover:bg-black/5" style="border-color: var(--border-color);">
+                            <td class="p-1.5 font-mono text-status-info">${order.ordernumber}</td>
+                            <td class="p-1.5">${dDate}</td>
+                            <td class="p-1.5 text-right font-bold text-status-success">${amt}</td>
+                        </tr>
+                    `;
+                });
+            } else {
+                salesBody.innerHTML = `<tr><td colspan="3" class="text-center p-3 text-muted italic">No recent sales orders found.</td></tr>`;
+            }
+
+            document.getElementById('live-sales-loader').classList.remove('flex');
+            document.getElementById('live-sales-loader').classList.add('hidden');
+            document.getElementById('live-sales-content').classList.remove('hidden');
+
+        } catch (error) {
+            console.error("Live Sync Failed:", error);
+            document.getElementById('live-sales-loader').classList.remove('flex');
+            document.getElementById('live-sales-loader').classList.add('hidden');
+            document.getElementById('live-sales-content').classList.remove('hidden');
+            document.getElementById('live-sales-body').innerHTML = `<tr><td colspan="3" class="text-center p-3 text-status-danger">Failed to connect to flow. Check URL.</td></tr>`;
+        }
+    };
+
 
     // --- EMAIL ATTACHMENT FUNCTIONS ---
     window.handleAttachmentSelection = async function(event) {
@@ -374,8 +602,6 @@
         });
     };
 
-    // --- RESTORED MISSING FUNCTIONS ---
-
     window.insertTemplate = function() {
         const input = document.getElementById('qb-notes-input');
         if(input && !input.disabled) {
@@ -383,6 +609,12 @@
             window.markDirty();
             input.focus();
         }
+    };
+
+    window.saveManualExtension = function() {
+        const ext = document.getElementById('manual-extension-input').value.trim();
+        localStorage.setItem('daytona_user_extension', ext);
+        window.showToast('Extension saved!', 'success');
     };
 
     window.showUserProfileCard = function() {
@@ -400,6 +632,14 @@
                 <div class="grid grid-cols-2 gap-2 text-left p-3 rounded border w-full" style="background-color: var(--bg-input); border-color: var(--border-color);">
                     <div><span class="text-[10px] font-bold uppercase text-muted block">Phone/Ext</span><span class="text-sm font-semibold">${phone}</span></div>
                     <div><span class="text-[10px] font-bold uppercase text-muted block">Manager</span><span class="text-sm font-semibold">${mgr}</span></div>
+                </div>
+                <div class="mt-4 w-full text-left p-3 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
+                    <label class="text-[10px] font-bold uppercase text-muted block mb-1">My Extension (Override)</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="manual-extension-input" class="border rounded px-2 py-1 text-xs w-full" placeholder="e.g. 1234" value="${localStorage.getItem('daytona_user_extension') || ''}">
+                        <button onclick="window.saveManualExtension()" class="btn-primary text-xs px-3">Save</button>
+                    </div>
+                    <p class="text-[9px] text-muted mt-1 italic">Saved locally. Overrides MSAL auto-grab.</p>
                 </div>
             </div>
         `;
@@ -433,7 +673,6 @@
         const subject = encodeURIComponent(`Follow Up: ${currentSelectedRecord.cr714_company} (${currentRecordId})`);
         const body = encodeURIComponent(`Account: ${currentRecordId}\nCompany: ${currentSelectedRecord.cr714_company}\nContact: ${document.getElementById('contact-name-most').value}\nPhone: ${document.getElementById('contact-phone-primary').value}`);
         
-        // Deep link correctly requests Outlook Online event creation without background Graph scopes
         const url = `https://outlook.office.com/calendar/0/deeplink/compose?subject=${subject}&startdt=${dtStart.toISOString()}&enddt=${dtEnd.toISOString()}&body=${body}`;
         window.open(url, '_blank');
     };
@@ -469,7 +708,6 @@
         }
     };
 
-    // Auto Signature Logic (Strictly local storage to avoid auth prompts)
     window.loadOrFetchSignature = async function() {
         let sig = localStorage.getItem('daytona_signature');
         if (sig && sig.trim() !== '') return sig;
@@ -497,7 +735,6 @@
             const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
             const payload = { statecode: 1, statuscode: 2, cr714_actionmessage: `[CLOSED]: ${reason}` };
             
-            // Loop through all sources to ensure they are all closed out
             for (let src of currentSelectedRecord.sources) {
                 const res = await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, { 
                     method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) 
@@ -521,12 +758,13 @@
         }
     };
 
-    // --- NEW INTROS LOGIC ---
     window.processNewIntros = async function() {
         let knownIntros = [];
-        try { knownIntros = JSON.parse(localStorage.getItem('daytona_known_intros') || '[]'); } catch(e) {}
+        try { knownIntros = JSON.parse(localStorage.getItem('daytona_known_intros') || '[]'); } catch(e) { knownIntros = []; }
+        knownIntros = knownIntros.map(String); 
         
         let newIntros = [];
+        let anyChanges = false;
         
         allRecords.forEach(r => {
             let hasIntro = false;
@@ -542,22 +780,22 @@
                 if(!knownIntros.includes(String(r.cr714_id))) {
                     newIntros.push({ id: r.cr714_id, company: r.cr714_company });
                     knownIntros.push(String(r.cr714_id));
+                    anyChanges = true;
                 }
             }
         });
         
+        if (anyChanges) {
+            try { localStorage.setItem('daytona_known_intros', JSON.stringify(knownIntros)); } catch(e) {}
+        }
+        
         if (newIntros.length > 0) {
-            // Update local storage so we don't trigger the modal again for these
-            localStorage.setItem('daytona_known_intros', JSON.stringify(knownIntros));
-            
-            // Show Popup Modal
             const listHtml = newIntros.map(i => `<div class="p-2 border-b text-sm text-left"><span class="font-bold text-status-info">${i.id}</span> - ${window.escapeHTML(i.company)}</div>`).join('');
             document.getElementById('new-intros-list').innerHTML = listHtml;
             document.getElementById('new-intros-count').innerText = newIntros.length;
             document.getElementById('new-intros-modal').classList.remove('hidden');
             document.getElementById('new-intros-modal').style.display = 'flex';
             
-            // Send Silent Email
             try {
                 const token = await window.getToken("Mail.Send");
                 const repEmail = msalAccount ? msalAccount.username : "";
@@ -571,7 +809,7 @@
                             body: { contentType: "HTML", content: bodyContent },
                             toRecipients: [{ emailAddress: { address: repEmail } }]
                         },
-                        saveToSentItems: "false" // Crucial for making it silent
+                        saveToSentItems: "false" 
                     };
                     fetch(`${GRAPH_URL}/me/sendMail`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(mailBody) });
                 }
@@ -579,7 +817,6 @@
         }
     }
 
-    // --- TAB PRELOADS & KB DICTIONARY ---
     const CORE_TABS = [
         { id: 'summary', title: 'Summary', template: 'https://go.masonville.com/#/customer/' },
         { id: 'sales', title: 'Sales', template: 'https://go.masonville.com/#/report/{id}/Four%20Month%20Sales' },
@@ -590,12 +827,9 @@
         {n:"2026 Holiday Schedule",c:"Tools and Resources",d:"W.B. Mason Co. 2026 Holiday Schedule"},{n:"Account Close Request Checklist",c:"Account Maintenance",d:"Before sending an account closure request to Tier 2, you must complete the checklist in this article."},{n:"Account Name Changes & Migrating Pricing and Users",c:"Account Maintenance",d:"Explains how to change the name on an account and when a new account needs to be created. How to mirror pricing and migrate/move existing users to new accounts."},{n:"Adding a Credit Card to the User",c:"Account Maintenance",d:"How to add a personal credit card that only one user can view/use and how to fix the rejected by card issuer error."},{n:"Adding, Changing, and Deactivating a Delivery Address in AX",c:"Account Maintenance",d:"All about addresses! How to add a new address, deactivate or delete an old address, or change an existing address."},{n:"Address Formatting",c:"Account Maintenance",d:"Proper formatting for addresses."},{n:"Addressing an Incorrect or Duplicate PO",c:"Order Processing",d:"If a customer calls stating an invoice has an incorrect PO number or duplicate PO number."},{n:"ALB-NY Orders Sourced From PHI-PA, COL-MD, OR CEN-NJ",c:"Logistics",d:"Orders that drop to PHI-PA, COL-MD or CEN-NJ for ALB-NY Delivery Routes"},{n:"All About Contacts",c:"Account Maintenance",d:"Everything you need to know about the contacts window."},{n:"Alternative Item Status Check",c:"Quotes/Product Information",d:"The difference between a substitute and an alternative item, as well as the definitions of different item statuses."},{n:"Amazingly Low Prices for your NEW Customers!",c:"Tools and Resources",d:"Low prices for new customers!"},{n:"Applying Competitor Coupons",c:"Order Processing",d:"How to apply competitor coupons."},{n:"AR Cheat Sheet",c:"AR",d:"The do's and dont's of AR."},{n:"Archived Data",c:"Account Maintenance",d:"What the archived data indicator means in AX."},{n:"Assembly & Installation",c:"Furniture",d:"How to appropriately add assembly to a chair order."},{n:"Assigning an Account to Yourself",c:"Account Maintenance",d:"How to properly assign an account to yourself in AX."},{n:"Avaya Phone & Aux Codes",c:"Tools and Resources",d:"Avaya Phone and Aux codes definitions."},{n:"Avaya Touch Phone Home Screen Error",c:"Tools and Resources",d:"Enable Quick Touch Panel."},{n:"Awarded Bid Handoff Guide",c:"Quotes/Product Information",d:"Internal workflow for awarded bids."},{n:"Backorder Report and Call Scripts",c:"Order Processing",d:"How to run the backorder report and call scripts for when you reach out to the customer."},{n:"Basic Phone Procedures",c:"Tools and Resources",d:"Basic functions on the Avaya desk phone."},{n:"Beverage Rental Increases",c:"Beverage/Food Service",d:"Handling beverage rental increases."},{n:"Bids",c:"Quotes/Product Information",d:"Guide to next steps for bids."},{n:"Biggest Loser and Low Margin Emails",c:"Reports",d:"Handling biggest loser and low margin emails."},{n:"Billing Only Non-Adjusting VS. Billing Only",c:"AR",d:"Difference between BONA and BO orders."},{n:"Blanket Order (Bill Now Ship Later) Steps for Order Entry",c:"Order Processing",d:"How to create a blanket order."},{n:"Brother Sales Flyers and Agreement Forms",c:"Vendor Trainings and Promos",d:"Brother printers and pricing programs."},{n:"Bundles to Boxes - Updates to the Shipping & Packaging Category",c:"Pack & Ship / JanSan",d:"UOM of boxes updated."},{n:"C2159950 - NYC Department of Education",c:"Schools",d:"NY DOE account information."},{n:"Call Codes",c:"Tools and Resources",d:"Q-Gate Call Codes."},{n:"Call Script - Empathy",c:"Tools and Resources",d:"Empathy call scripts."},{n:"Caller Verification and Identifying Fraud",c:"Tools and Resources",d:"How to identify fraudulent calls and emails."},{n:"Calls Not Linking to Q Gate and CSW",c:"CSW",d:"Troubleshoot QGate linking issues."},{n:"Cancellation Codes",c:"Order Processing",d:"Breakdown of cancellation reason codes."},{n:"Cancelling an Order",c:"Order Processing",d:"How and when to cancel an order."},{n:"Coffee & Water Coolers - Service and Procedures",c:"Beverage/Food Service",d:"Service requests and procedures."},{n:"COI - Certificate of Insurance",c:"Forms & Documents",d:"Obtaining a COI."},{n:"Cold Call Flyer 2025",c:"Tools and Resources",d:"2025 Cold Call Flyer."},{n:"Common Tech Issues and How to Fix Them",c:"Tools and Resources",d:"Common tech issues and fixes."},{n:"Communication with Sales Representatives",c:"Tools and Resources",d:"When to reach out to sales reps."},{n:"Copy Machine Services",c:"Order Processing",d:"Copy machine service requests."},{n:"Corrugated Box Strength Explained",c:"Pack & Ship / JanSan",d:"Interpreting box strength."},{n:"Couriers",c:"Logistics",d:"Third-party couriers and tracking."},{n:"Creating a New Sister Account In AX",c:"Account Maintenance",d:"Creating sister accounts."},{n:"Creating Account Relationships",c:"Account Maintenance",d:"Link customer to multiple accounts."},{n:"Creating and Understanding Sales Orders in AX",c:"Order Processing",d:"Guide to order creation in AX."},{n:"Credit Auto-Apply Feature - Offsets for Credit and Re-orders Guide",c:"AR",d:"Using credit auto-apply."},{n:"Credit Card Authorization (Pay Bill, Open Credits & Price Changes)",c:"AR",d:"Credit card authorizations and holds."},{n:"Credit References",c:"AR",d:"Using WB Mason as credit reference."},{n:"Custom Center Stage or Home Page",c:"Account Maintenance",d:"Custom homepage requests."},{n:"Custom Print",c:"Custom Print",d:"Custom print forms and ETAs."},{n:"Customer Received More Than They Ordered",c:"Order Processing",d:"Handling over-shipments."},{n:"Customer Service Workspace (CSW) and Purchasing Cases",c:"CSW",d:"Navigating CSW and purchasing cases."},{n:"Customer Toolbox",c:"Account Maintenance",d:"Buttons in the customer toolbox."},{n:"Customers on Credit Hold",c:"AR",d:"Finding AR contact for credit holds."},{n:"Daily Driver Delivery Info",c:"Logistics",d:"Driver delivery information."},{n:"Daily Reports and What to Do With Them",c:"Reports",d:"Handling daily reports."},{n:"Daytona Beach Attendance Policy Guide",c:"Tools and Resources",d:"Attendance policy guide."},{n:"Daytona Branch Info",c:"Tools and Resources",d:"Branch information and contacts."},{n:"Daytona Phone Extensions, Fax Number, and Loops",c:"Tools and Resources",d:"Phone extensions and contacts."},{n:"Delivery Fees on Residential & Open Web Orders",c:"Logistics",d:"Delivery fees reference table."},{n:"Delivery Tracking & Carton Details - in the Sales Order Toolbox",c:"Logistics",d:"Delivery tracking in AX."},{n:"Direct Ship or SP Richards",c:"Logistics",d:"Identifying shipping origins."},{n:"Disaster Plans (Continued Service During an Emergency)",c:"Tools and Resources",d:"Handling disaster plans."},{n:"Donation Requests",c:"Tools and Resources",d:"Sending donation requests."},{n:"Driver's Handheld Scanners & Hard Stop Messages",c:"Logistics",d:"Scanners and hard stops."},{n:"Emailing a Warehouse",c:"Logistics",d:"Warehouse email templates."},{n:"Employee Dress Code",c:"Tools and Resources",d:"Employee dress code explained."},{n:"Entering a Return (Item Already Picked Up or Refused)",c:"Order Processing",d:"Processing credits for picked-up items."},{n:"Expired K-Cups",c:"Beverage/Food Service",d:"Handling expired K-cups."},{n:"Finding Credits",c:"Order Processing",d:"Finding returns and credits."},{n:"Food Service",c:"Beverage/Food Service",d:"Food service products and catalogs."},{n:"Forms, Email Templates, and Rebate Center!",c:"Forms & Documents",d:"Various forms and templates."},{n:"Furniture Procedure",c:"Furniture",d:"Furniture forms and direct orders."},{n:"Futureship",c:"Order Processing",d:"Setting future ship dates."},{n:"Getting to Know the Customer Service Workstation",c:"Order Processing",d:"Crash course in AX CSW."},{n:"Glossary of Terms",c:"Tools and Resources",d:"Commonly used terms and definitions."},{n:"GUI & MVGO Process",c:"Tools and Resources",d:"Linking GUI notes to MVGO."},{n:"HON EDI Order Alerts",c:"Furniture",d:"Addressing Hon EDI alerts."},{n:"How to Add a Credit Card to the Main Table Form",c:"Account Maintenance",d:"Adding CCs to main table form."},{n:"How to Add a Printer and Scan to Network Folder",c:"Tools and Resources",d:"Printer and scanner setup."},{n:"How To Assign A Cost Center To A User In AX",c:"Account Maintenance",d:"Assigning cost centers."},{n:"How To Assign A Delivery Address To A User",c:"Account Maintenance",d:"Assigning delivery addresses."},{n:"How to Disable Payment Reminders",c:"AR",d:"Disabling payment reminders."},{n:"How To Email An Invoice From The Collection Workstation",c:"AR",d:"Emailing invoices from CSW."},{n:"How to Find a Bin Location and Inventory Corrections",c:"Logistics",d:"Finding item bin locations."},{n:"How to Find the Customer Service Workstation",c:"Order Processing",d:"Locating AX in Microsoft Dynamics."},{n:"How to Link an Email to CSW",c:"CSW",d:"Linking emails to CSW."},{n:"How to Process a Return & New Order (Example)",c:"Order Processing",d:"Example of short and reorder."},{n:"How to Process a Return & New Order (Process)",c:"Order Processing",d:"Processing returns and new orders."},{n:"How to Process a Return in AX",c:"Order Processing",d:"Step-by-step return guide."},{n:"How to Process Miss-Sorts",c:"Order Processing",d:"Handling miss-sorted items."},{n:"How to Safeguard Your Computer Files",c:"Tools and Resources",d:"Saving files securely."},{n:"How to Save a Quote PDF In AX",c:"Quotes/Product Information",d:"Saving quotes as PDFs."},{n:"How to Use the Non-Buy List Filters in Excel",c:"Reports",d:"Navigating non-buy lists."},{n:"HP Printers and Toners",c:"Vendor Trainings and Promos",d:"HP printers and toners reference."},{n:"Hub and Spoke Warehouse Map",c:"Logistics",d:"Reading the warehouse map."},{n:"Inclusion & Exclusion Lists",c:"Account Maintenance",d:"Restricting and unrestricting accounts."},{n:"Incorrect Freight Charges",c:"Logistics",d:"Handling incorrect freight charges."},{n:"Inventory Button in the Sales Line Toolbox and How to Track ADOT",c:"Logistics",d:"Tracking ADOT information."},{n:"Invoice Account - Do Not Touch!",c:"Account Maintenance",d:"Invoice account settings."},{n:"Invoice Received Before Item(s)",c:"Order Processing",d:"Invoices received before items."},{n:"Item Details Explained",c:"Quotes/Product Information",d:"Explaining item details."},{n:"Item Substitutions & What to Tell Your Customer",c:"Quotes/Product Information",d:"Explaining item substitutions."},{n:"Item Visibility & Website Issues",c:"Account Maintenance",d:"Troubleshooting website issues."},{n:"Kimberly Clark Resources",c:"Quotes/Product Information",d:"KCP products and resources."},{n:"Knowing Your Competitor",c:"Quotes/Product Information",d:"Hidden costs of competitors."},{n:"Line Details - In the Line Toolbox",c:"Quotes/Product Information",d:"Options in line details."},{n:"Live Chat",c:"Tools and Resources",d:"Using the Live Chat feature."},{n:"Loading Orders on Hold - Key Accounts",c:"Order Processing",d:"Loading hold orders for key accounts."},{n:"Login Information Sheet",c:"Tools and Resources",d:"Tracking logins and passwords."},{n:"Logistics Process",c:"Logistics",d:"Handling order requests and issues."},{n:"Logistics Text-a-Driver Form",c:"Logistics",d:"Completing the Text-A-Driver form."},{n:"Masonville Go Icons, Account Risks, PPL Updates, and Bug Fixes",c:"Tools and Resources",d:"MVGO icons and bug fixes."},{n:"MDM Opps",c:"Tools and Resources",d:"MDM do's and don'ts."},{n:"Minority Women Owned Business Enterprises (MWBE) Accounts",c:"Account Maintenance",d:"MWBE accounts information."},{n:"Mixed Cartons, Container Count & Types, and Carton ID Report",c:"Logistics",d:"Container count and PO numbers."},{n:"Net 30 Terms",c:"Account Maintenance",d:"Setting up Net 30 terms."},{n:"New Account - Forwarding a Lead",c:"Account Maintenance",d:"Forwarding new account leads."},{n:"New Account Requests or Accounts in Planning Status",c:"Account Maintenance",d:"New account enrollment."},{n:"Objections and Rebuttals",c:"Tools and Resources",d:"Handling customer objections."},{n:"On Hold Report Codes",c:"Reports",d:"OnHold codes and descriptions."},{n:"Open Web Pricing",c:"Account Maintenance",d:"Fixing open web pricing issues."},{n:"Order Team - Louise Brown Accounts",c:"Tools and Resources",d:"Assisting Order Team accounts."},{n:"Orders Not Invoicing (ONI) Reports",c:"Reports",d:"Running and handling ONI reports."},{n:"Over Shipment Web Return Hold",c:"Order Processing",d:"Handling over-shipments and web returns."},{n:"Pack and Ship Collection",c:"Pack & Ship / JanSan",d:"Pack and ship resources."},{n:"Paper & Ice Melt Truckload Orders",c:"CSW",d:"Truckload orders process."},{n:"Paper 101",c:"Quotes/Product Information",d:"Information about paper properties."},{n:"Penny Dispenser Program",c:"Pack & Ship / JanSan",d:"Georgia Pacific Penny Program."},{n:"PO Qty ETA",c:"CSW",d:"Understanding PO delivery dates."},{n:"PPL Classifications",c:"Quotes/Product Information",d:"PPL classifications breakdown."},{n:"Pricing Contract",c:"Quotes/Product Information",d:"Managing PPLs in AX."},{n:"Printed Forms for Sales Orders Instructions",c:"Order Processing",d:"Accessing printed forms."},{n:"Proper Email Etiquette",c:"Tools and Resources",d:"Email etiquette tips."},{n:"Proper Voicemail Etiquette",c:"Tools and Resources",d:"Voicemail etiquette tips."},{n:"Punchout Accounts Overview",c:"Account Maintenance",d:"Punchout accounts overview."},{n:"Punchout Order Details Button in AX",c:"Order Processing",d:"Punchout order details."},{n:"Purchasing - Sub Exclusions",c:"CSW",d:"Requesting sub exclusions."},{n:"Quality Assurance",c:"Tools and Resources",d:"QA process and coaching."},{n:"Quote Definitions",c:"Quotes/Product Information",d:"Common quote terms."},{n:"Quote Follow Up Email Notification",c:"Quotes/Product Information",d:"Automated follow-up process for quotes."},{n:"Quotes - Templates",c:"Quotes/Product Information",d:"Quote comparison templates."},{n:"Quotes Help & FAQs",c:"Quotes/Product Information",d:"Submitting quotes and FAQs."},{n:"Reaching Out to an Outside Representative",c:"Tools and Resources",d:"Contacting outside reps."},{n:"Rebates",c:"Tools and Resources",d:"Handling rebate inquiries."},{n:"Release Orders on CC Hold OE",c:"Order Processing",d:"Handling CC Hold OE orders."},{n:"Release Review Orders",c:"Schools",d:"Handling school release review orders."},{n:"Rep Email Coverage Procedure",c:"Tools and Resources",d:"Email coverage procedures."},{n:"Replace Invalid Items Button",c:"Order Processing",d:"Using the Replace Invalid Items button."},{n:"Replacement Keys for Hon Desks and Drawers",c:"Furniture",d:"Requesting Hon replacement keys."},{n:"Resolving an Auto-Resolved Purchasing Case",c:"CSW",d:"Resolving purchasing cases."},{n:"Return Codes",c:"Order Processing",d:"Return codes and descriptions."},{n:"Return Policy",c:"Order Processing",d:"Return policy details."},{n:"Safety Data Sheets and Where To Find Them",c:"Quotes/Product Information",d:"Locating Safety Data Sheets."},{n:"Sales Flyers and Sell Sheets",c:"Vendor Trainings and Promos",d:"Sales flyers and promos."},{n:"Sales Order Header Information",c:"Order Processing",d:"Sales Order Header info breakdown."},{n:"Sales Order Toolbox",c:"Order Processing",d:"Sales Order Toolbox buttons."},{n:"Sales Tax Nexus",c:"Tools and Resources",d:"Sales tax nexus explained."},{n:"Saving Files in OneDrive",c:"Tools and Resources",d:"Saving files to OneDrive."},{n:"School Procedures",c:"Schools",d:"School Team resources and procedures."},{n:"Searching the KB and Saving Your Favorites",c:"Tools and Resources",d:"Bookmarking and searching the KB."},{n:"Short Ships and Proof of Delivery",c:"Logistics",d:"Tracking missing items."},{n:"SP Richards Order Tracking",c:"Tools and Resources",d:"Tracking SP Richards orders."},{n:"Stamps, Embossers, Name Plates, & Name Badges",c:"Custom Print",d:"Creating custom stamps and nameplates."},{n:"Starco(Diamond) Products",c:"Quotes/Product Information",d:"Starco Chemical product lineup."},{n:"State of NJ Voucher Accounts",c:"Schools",d:"Processing NJ Voucher orders."},{n:"Steps to Resolve Q-Gate Error from Change that Microsoft Made to Log In Process",c:"Tools and Resources",d:"Resolving Q-Gate login errors."},{n:"Subscription Orders",c:"Order Processing",d:"Subscription order details."},{n:"Summary Statements",c:"Account Maintenance",d:"Enabling summary billing."},{n:"Tax Exemption",c:"AR",d:"Handling tax exempt accounts."},{n:"Tech Team Help Form",c:"Quotes/Product Information",d:"Submitting tech help forms."},{n:"Tier 2 - Form & Function",c:"Account Maintenance",d:"Tier 2 responsibilities and guidelines."},{n:"Tracking an Order",c:"Logistics",d:"Tracking orders in AX."},{n:"Training Presentations and Vendor Presentations Collection",c:"Vendor Trainings and Promos",d:"Training and vendor presentations."},{n:"Understanding Substitutes in Creating a New Order",c:"Quotes/Product Information",d:"Item substitutions explained."},{n:"Unit Conversion in Item Quick View",c:"Quotes/Product Information",d:"UOM conversion in Item Quick View."},{n:"Units of Measure",c:"Order Processing",d:"UOM acronyms."},{n:"Unknown Returns (Order On Hold - Misc Credit Return)",c:"Order Processing",d:"Addressing unidentified item returns."},{n:"Up Sell Cross Sell (Increase Order Size and Profit)",c:"Order Processing",d:"Upselling and cross-selling strategies."},{n:"Updating an Invoice",c:"Account Maintenance",d:"Making changes to existing invoices."},{n:"Usage Reports and Itemized Lists",c:"Reports",d:"Acquiring usage reports."},{n:"Using the Categories Column in the Knowledge Base.aspx",c:"Tools and Resources",d:"Using KB categories."},{n:"W.B Mason's 7 Things",c:"Tools and Resources",d:"7 Things PDF."},{n:"W.B. Mason Knowledge Base (Daytona)",c:"Tools and Resources",d:"Knowledge Base main."},{n:"Warm Transfers and Conference Calls",c:"Tools and Resources",d:"Warm transfers and conference calls."},{n:"WB Email Signature",c:"Tools and Resources",d:"WB email signature format."},{n:"WhattaBargain Locations & Events",c:"Furniture",d:"WhattaBargain info."},{n:"Zip Exclusion (Items Excluded by Zip Code)",c:"Quotes/Product Information",d:"Zip Exclusions explained."}
     ];
 
-    // --- AUTHENTICATION ---
     const msalConfig = { auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: "https://WB-DT.github.io/daytona-utility/" }, cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false } };
     const msalInstance = new msal.PublicClientApplication(msalConfig);
-    let msalAccount = null;
 
-    // Graceful getToken function: Handles silent failovers and explicit interaction requests cleanly.
     window.getToken = async function(scopeStr, silentFallback = false) {
         const account = msalInstance.getAllAccounts()[0]; 
         const request = { scopes: scopeStr.split(" "), account: account };
@@ -611,7 +845,6 @@
         }
     }
 
-    // --- INITIALIZATION ---
     window.startClock = function() { setInterval(() => { const el = document.getElementById('clock-display'); if(el) el.innerText = new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(); }, 1000); }
 
     window.initializeApp = function() {
@@ -621,16 +854,10 @@
         const lastRunDate = localStorage.getItem('daytona_last_run_date');
         const todayStr = new Date().toLocaleDateString('en-CA');
         
-        // Ensure daytona_sent_history exists across days, but clear daytona_sent_records (the "Sent Today" queue)
-        if (!localStorage.getItem('daytona_sent_history')) {
-            localStorage.setItem('daytona_sent_history', '[]');
-        }
-        
+        if (!localStorage.getItem('daytona_sent_history')) localStorage.setItem('daytona_sent_history', '[]');
         if (lastRunDate !== todayStr) { 
             localStorage.setItem('daytona_sent_records', '[]'); 
             localStorage.setItem('daytona_last_run_date', todayStr); 
-            
-            // Clean up 7-day history to prevent infinite growth
             try {
                 let sentHistory = JSON.parse(localStorage.getItem('daytona_sent_history') || '[]');
                 const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
@@ -651,7 +878,6 @@
     }
 
     window.login = function() {
-        // Explicitly request basic User profile AND Mail.Send on login to ensure token can be fetched silently later. 
         msalInstance.loginPopup({ scopes: ["User.Read", "Mail.Send"] }).then(resp => {
             msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp();
         }).catch(e => { console.error(e); document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
@@ -668,7 +894,6 @@
         } catch(e) { console.warn("Graph fetch error", e); }
     }
 
-    // --- SIDEBAR TABS LOGIC ---
     window.initSidebarTabs = function() {
         const area = document.getElementById('sidebar-content-area');
         const strip = document.getElementById('sidebar-tab-strip');
@@ -731,7 +956,6 @@
         if(type === 'csw') { const appId = "9e06e7d4-8616-eb11-a817-000d3a8b6b20"; window.openSidebarTab('csw', 'CSW', `https://wbmasonco.crm.dynamics.com/main.aspx?appid=${appId}&pagetype=search&searchText=${encodeURIComponent(id)}`); }
     }
 
-    // --- FETCH DATA ---
     window.fetchLogisticsForAccount = async function(accountId) {
         try {
             const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation", true);
@@ -745,12 +969,7 @@
     window.fetchD365Account = async function(accountId) {
         try {
             let token;
-            try {
-                token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
-            } catch(tokenErr) {
-                console.warn("D365 wbmasonco token blocked by admin consent, skipping D365 overlay.", tokenErr);
-                return null;
-            }
+            try { token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true); } catch(tokenErr) { return null; }
             if(!token) return null;
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
             const cleanId = String(accountId).trim();
@@ -795,7 +1014,6 @@
             if(prosData.value) prosData.value.forEach(r => allRaw.push({ ...r, _dsType: 'Prospecting', _priority: 3 }));
             if(lbData.value) lbData.value.forEach(r => allRaw.push({ ...r, _dsType: 'LB', _priority: 4 }));
 
-            // Sort so we build recordsMap prioritizing AM -> Cadence -> Prospecting -> LB
             allRaw.sort((a,b) => a._priority - b._priority);
 
             let recordsMap = new Map();
@@ -813,7 +1031,7 @@
                 if(recordsMap.has(id)) {
                     let existing = recordsMap.get(id);
                     existing.sources.push(sourceObj);
-                    duplicateRecordIds.add(String(id)); // track duplicates intentionally for visual flagging
+                    duplicateRecordIds.add(String(id));
                 } else {
                     let mapped = {
                         cr714_id: id,
@@ -825,7 +1043,7 @@
                         cr714_primaryphone: window.formatPhone(r.cr714_phone || r.cr714_primaryphone),
                         cr714_emailmost: r.cr714_emailmost || r.cr714_emaillatest || r.cr714_email_latest,
                         cr714_lastorderdate: r.cr714_lastorderdate || '--',
-                        cr714_qbnotes: sourceObj.rawNotes, // Main raw block maintained for compatibility
+                        cr714_qbnotes: sourceObj.rawNotes,
                         cr714_managernotes: r.cr714_managernotes,
                         cr714_importantaccountinformation: r.cr714_importantaccountinformation || r.cr714_importantaccountinfo,
                         cr714_billingaddress: r.cr714_address || r.cr714_billingaddress,
@@ -847,7 +1065,6 @@
             
             window.updateStats(); window.populateActionFilter(); if(typeof window.loadGalleryPrefs === 'function') window.loadGalleryPrefs(); window.filterAndSortGallery(); 
             
-            // Execute intro check completely silently in background
             window.processNewIntros();
             
             document.getElementById('global-loader').style.opacity = '0'; setTimeout(()=>document.getElementById('global-loader').style.display='none', 300);
@@ -871,7 +1088,6 @@
         let note = autoNote ? autoNote : (document.getElementById('qb-notes-input').value || "").replace(QB_NOTES_TEMPLATE, '').trim();
         const timeStamp = new Date().toLocaleString(); const userStamp = currentUserRepName || "Unknown User";
         
-        // Detect if we need to silently clear the manager notes due to a rep pushing a new update
         const shouldClearManagerNote = !!(note && currentSelectedRecord && currentSelectedRecord.cr714_managernotes);
 
         let headerLabel = currentSelectedRecord ? currentSelectedRecord.primaryType : 'Unknown';
@@ -883,31 +1099,23 @@
         if (d) {
             try {
                 let dt = new Date(`${d}T${t || '00:00'}:00`);
-                if(!isNaN(dt.getTime())) {
-                    iso = dt.toISOString();
-                }
-            } catch(e) {
-                iso = t ? `${d}T${t}:00Z` : `${d}T00:00:00Z`; // Fallback
-            }
+                if(!isNaN(dt.getTime())) iso = dt.toISOString();
+            } catch(e) { iso = t ? `${d}T${t}:00Z` : `${d}T00:00:00Z`; }
         }
 
         try {
             const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
             
-            // Loop and save to all linked sources to ensure sync
             for (let i = 0; i < currentSelectedRecord.sources.length; i++) {
                 let src = currentSelectedRecord.sources[i];
                 let payload = {};
                 if (iso !== null) payload.cr714_followup = iso;
                 else payload.cr714_followup = null;
 
-                if (shouldClearManagerNote) {
-                    payload.cr714_managernotes = null;
-                }
+                if (shouldClearManagerNote) payload.cr714_managernotes = null;
 
                 if (i === 0) {
-                    // Only append note strictly to the primary source to prevent duplication in merged history
                     let rawEntries = (src.rawNotes || "").split(/-{20,}/);
                     let validEntries = rawEntries.filter(e => {
                         if (!e.trim()) return false;
@@ -934,9 +1142,8 @@
                         payload.cr714_namelatest = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_email_latest = get('contact-email-most'); payload.cr714_prospectingnotes = fullNote;
                     }
                     src.rawNotes = fullNote;
-                    currentSelectedRecord.cr714_qbnotes = fullNote; // Update runtime cache mapping
+                    currentSelectedRecord.cr714_qbnotes = fullNote;
                 } else {
-                    // Just update core contact info to keep it synced
                     if (src.table === 'cr714_accountmanagementdatasets') {
                         payload.cr714_namemost = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most');
                     } else if (src.table === 'cr714_cadencedatasets') {
@@ -957,7 +1164,11 @@
                 if (mgrAlert) mgrAlert.remove();
             }
 
-            if(!quiet) window.showToast("Saved!", "success");
+            if(!quiet) {
+                window.showToast("Saved!", "success");
+                const pushNotes = note ? note : "(Metadata Update)";
+                await window.pushToMasonvilleSilent(currentRecordId, pushNotes);
+            }
             
             window.saveToAuditLog('Save', `Note: ${note}`); 
             currentSelectedRecord.cr714_followup = iso; 
@@ -966,7 +1177,6 @@
             window.filterAndSortGallery(); 
             window.updateMiniCounter(); 
             
-            // Cleanly reset prompt flags to stop bleeding
             document.getElementById('qb-notes-input').value = '';
             document.getElementById('opp-type-select').value = '';
             window.hasUnsavedChanges = false; 
@@ -1026,254 +1236,29 @@
         }
     }
 
-    window.launchEmailLogic = async function() {
-        if(!currentSelectedRecord) return;
-        
-        // Reset attachments for new email
-        pendingAttachments = [];
-        if(window.renderAttachmentUI) window.renderAttachmentUI();
+    // --- INJECTED CLEAR FILTERS FUNCTION ---
+    window.clearAllFilters = function() {
+        const searchBar = document.getElementById('search-bar');
+        if (searchBar) searchBar.value = '';
 
-        const emailInput = document.getElementById('contact-email-most');
-        const email = emailInput ? emailInput.value : '';
-        const templateDropdown = document.getElementById('email-template-dropdown');
-        const template = templateDropdown ? templateDropdown.value : '';
-        
-        let body = ""; let subject = `WB Mason - Account ${currentSelectedRecord.cr714_id}`;
-        const contactInput = document.getElementById('contact-name-most');
-        const contactName = contactInput ? contactInput.value : "Customer"; 
-        const repName = currentUserRepName || "W.B. Mason Rep"; 
-        const repEmail = msalAccount ? msalAccount.username : "";
-        
-        let ext = "XXXX";
-        if (window.currentUserGraphPhone) { ext = window.currentUserGraphPhone.slice(-4); } 
-        else if (currentUserProfile?.cr714_extension) { ext = currentUserProfile.cr714_extension; } 
-        else if (currentUserProfile?.businessPhones?.[0]) { ext = currentUserProfile.businessPhones[0].slice(-4); }
-        let repPhone = `508-436-${ext}`;
-        
-        const catalogRequestUrl = "https://www.wbmason.com/LandingPage.aspx?LandingPageID=Catalog-Request&icid=JUL0124_HPBNR_CCTG_CATALOGREQUEST_CGAW_WDAC_AWR_BNR_CTA01_DM_NA_CR";
-        
-        let signature = await window.loadOrFetchSignature();
-        if (!signature || signature.trim() === '') {
-            signature = `<br><br><div style="font-family: 'Aptos', sans-serif;">Sincerely,<br>${repName} | W.B. MASON<br>${repPhone} | ${repEmail}<br><br><a href="${catalogRequestUrl}" target="_blank"><img src="${IMG_CATALOG}" alt="Request a Catalog" style="max-width:480px;max-height:640px"></a></div>`;
-        }
-        signature = signature.replace(/\[Rep Name\]/g, repName).replace(/\[Phone\]/g, repPhone).replace(/\[Email\]/g, repEmail);
-
-        const wrapperStart = `<div style="font-family: 'Aptos', 'Segoe UI', Arial, sans-serif; font-size: 11pt; line-height: 1.4; max-width: 600px;">`;
-        const wrapperEnd = `</div>`; const pStyle = `margin: 0 0 16px 0; padding: 0;`;
-        const benefitsList = `<div style="${pStyle}"><strong>Here are some things that you can always expect from us at WB Mason:</strong></div><ul style="margin: 0 0 16px 20px; padding: 0;"><li><strong>Customized pricing</strong> on the products your business actually uses</li><li><strong>Free delivery</strong>, with no order minimums</li><li><strong>Personalized support</strong> including a personal driver, customer service representative, and inside sales representative</li><li><strong>One-stop shopping</strong> for all your workplace products</li></ul>`;
-        const customNotesPlaceholder = `<div style="${pStyle} color:dodgerblue; font-size: 14px; font-weight: bold;"></div>`;
-
-        if (template === "Prospecting") {
-            subject = "Intro / W.B. Mason"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">My name is ${repName} and I'm your dedicated account representative at W.B. Mason. I wanted to briefly introduce myself and see if there are any immediate needs I can help you with today.</div><div style="${pStyle}">We offer a wide range of products beyond just office supplies, including breakroom essentials, janitorial supplies, and furniture.</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
-        } else if (template === "No Jan") { 
-            subject = "Checking in - W.B. Mason"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">I’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed and we all know how time can slip by and then you realize you’re out of something you meant to order.</div><div style="${pStyle}">I just received a coupon you can use through the end of the month when you checkout online. Let me know if I can help find any items for you or get an order placed. We even match/beat competitor prices if you’re finding a lower price elsewhere!</div><div style="${pStyle}">Where else are you having to shop, aside from WB Mason, that I can beat pricing on for you?</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
-        } else if (template === "No DEC/JAN") { 
-            subject = "Checking in - W.B. Mason"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">I’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed in December and I know with the holidays, time can slip by and then you realize you’re out of something you meant to order. <span style="background-color:yellow; color:black;">Are you finding lower prices elsewhere?</span></div><div style="${pStyle}">I just received a coupon you can use through the end of the month when you checkout online. Let me know if I can help find any items for you or get an order placed.</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
-        } else if (template === "FebruaryNonBuy ASAP") { 
-            subject = "Lucky for you, 10% off!"; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">I’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed in February and I know how time can slip by and then you realize you’re out of something you meant to order. <br><br><span style="background-color:yellow; color:black;">Are you finding lower prices elsewhere?</span></div><div style="${pStyle} text-align:center;"><img src="https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/10%20percent%20shamrock.jfif" alt="Lucky You 10% Off" style="max-width:100%; border-radius:8px;"></div><div style="${pStyle}">I just received a coupon you can use through the end of the month when you checkout online. Let me know if I can help find any items for you or get an order placed.</div>${benefitsList}${customNotesPlaceholder}${signature}${wrapperEnd}`;
-        } else if (template === "Chair Mat Contest") { 
-            subject = "A Promo That Matters"; body = `${wrapperStart}<div style="${pStyle}">Hi <span style="color:green;"><b>${currentSelectedRecord.cr714_company}</b></span>,</div><div style="${pStyle}">I wanted to reach out as it looks like you’ve purchased a chair with us recently. Are you in need of a chair mat for your office? Chair mats protect your floors from wear and tear, and gives your chair a smoother rolling surface, reducing joint and muscle pain, making them a great ergonomic choice for your office!</div><div style="${pStyle}">Please see attached link for both carpeted and hardwood options: <b><a href="https://www.wbmason.com/shop?q=everlife" target="_blank" style="color:#0b66c3;text-decoration:none;">Shop Chair Mats | W.B. Mason</a>.</b></div><div style="${pStyle}">I’m happy to help narrow down selections and help search for what will best fit your business needs. Let me know how I can assist!</div>${customNotesPlaceholder}<div style="${pStyle}; text-align:center;"><a href="https://www.wbmason.com/shop?q=everlife" target="_blank"><img src="${IMG_CHAIR}" style="max-width:100%;"></a></div>${signature}${wrapperEnd}`;
-        } else if (template === "Louise Brown 15% Off") { 
-            subject = `WB Mason - 15% Off - ${currentSelectedRecord.cr714_id}`; body = `${wrapperStart}<div style="${pStyle}">Hi <strong>${contactName}</strong>,</div><div style="${pStyle}">My name is ${repName} with W.B. Mason. I am reaching out about the open account your company has with W.B. It looks as though we lost your business. Was it due to price?</div>${benefitsList}<div style="${pStyle}">I have a coupon for 15% off &ndash; is there anything that I can order or price out for you today?</div><div style="${pStyle}">Let me know when you're ready to order and I can get the coupon code over to you or even help place the order for you.</div>${customNotesPlaceholder}${signature}${wrapperEnd}`;
-        } else {
-            body = `<div style="font-family:'Aptos',sans-serif;">Hi ${contactName},<br><br>Checking in on your account.<br><br></div>${signature}`;
-        }
-
-        const toInput = document.getElementById('email-modal-to');
-        if (toInput) toInput.value = email; 
-        
-        const ccInput = document.getElementById('email-modal-cc');
-        if (ccInput) ccInput.value = ""; 
-        
-        const subjInput = document.getElementById('email-modal-subject');
-        if (subjInput) subjInput.value = subject; 
-        
-        const bodyInput = document.getElementById('email-modal-body');
-        if (bodyInput) bodyInput.innerHTML = body; 
-        
-        document.getElementById('email-modal').classList.remove('hidden'); 
-        document.getElementById('email-modal').style.display = 'flex';
-    }
-
-    window.openOutlookWebDraft = function() {
-        const to = document.getElementById('email-modal-to').value;
-        const cc = document.getElementById('email-modal-cc').value;
-        const subject = encodeURIComponent(document.getElementById('email-modal-subject').value);
-        
-        // Outlook Web deep links only accept plain text body cleanly.
-        let tmp = document.createElement("DIV");
-        tmp.innerHTML = document.getElementById('email-modal-body').innerHTML;
-        const rawBody = tmp.innerText || tmp.textContent || "";
-        const body = encodeURIComponent(rawBody);
-
-        let url = `https://outlook.office.com/mail/deeplink/compose?to=${to}&subject=${subject}&body=${body}`;
-        if (cc) url += `&cc=${cc}`;
-
-        window.open(url, '_blank');
-
-        window.handleCustomSave(`[Email Drafted via Outlook Web]: ${document.getElementById('email-modal-subject').value}`, true);
-        
-        document.getElementById('large-attachment-modal').style.display = 'none';
-        document.getElementById('email-modal').style.display = 'none';
-        window.showToast("Opened in Outlook Web", "success");
-    }
-
-    window.removeLargeFilesAndSend = function() {
-        pendingAttachments = pendingAttachments.filter(f => f.size <= 3 * 1024 * 1024);
-        window.renderAttachmentUI();
-        document.getElementById('large-attachment-modal').style.display = 'none';
-        window.handleModalSend(); // Resume send with valid files only
-    }
-
-    window.handleModalSend = async function() {
-        if(!window.checkEmailRateLimit()) return;
-
-        // Verify if any files exceed 3MB limit
-        const hasLargeAttachments = pendingAttachments.some(f => f.size > 3 * 1024 * 1024);
-        if (hasLargeAttachments) {
-            document.getElementById('large-attachment-modal').classList.remove('hidden');
-            document.getElementById('large-attachment-modal').style.display = 'flex';
-            return; // Pause execution and await user decision
-        }
-
-        window.showToast("Sending...", "processing");
-
-        try {
-            const ccValue = document.getElementById('email-modal-cc').value.trim();
-            const ccRecipients = ccValue ? [{ emailAddress: { address: ccValue } }] : [];
-            const subject = document.getElementById('email-modal-subject').value;
-            const content = document.getElementById('email-modal-body').innerHTML;
-            const toRecipients = [{ emailAddress: { address: document.getElementById('email-modal-to').value } }];
-
-            const token = await window.getToken("Mail.Send");
-            
-            let base64Attachments = [];
-            for (let f of pendingAttachments) {
-                base64Attachments.push({
-                    "@odata.type": "#microsoft.graph.fileAttachment",
-                    "name": f.name,
-                    "contentType": f.type,
-                    "contentBytes": await window.fileToBase64(f)
-                });
-            }
-
-            const mailBody = { 
-                message: { subject, body: { contentType: "HTML", content }, toRecipients, ccRecipients }, 
-                saveToSentItems: "true" 
-            };
-            if (base64Attachments.length > 0) mailBody.message.attachments = base64Attachments;
-
-            const res = await fetch(`${GRAPH_URL}/me/sendMail`, { 
-                method: 'POST', 
-                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, 
-                body: JSON.stringify(mailBody) 
-            });
-            
-            if(!res.ok) throw new Error("Graph API Error on sendMail");
-
-            // Cleanup & Tracking
-            await window.handleCustomSave(`[Email Sent]: ${subject}`, true);
-            
-            // Log local 1-hour rolling timestamps for rate limiting UI
-            let timestamps = []; try { timestamps = JSON.parse(localStorage.getItem('daytona_email_timestamps') || '[]'); } catch(e) {}
-            timestamps.push(Date.now()); try { localStorage.setItem('daytona_email_timestamps', JSON.stringify(timestamps)); } catch(e) {} window.checkEmailRateLimit();
-            
-            // Log to Today's temporary queue
-            let sentRecs = []; try { sentRecs = JSON.parse(localStorage.getItem('daytona_sent_records') || '[]'); } catch(e) {}
-            if(!sentRecs.includes(currentRecordId)) { sentRecs.push(currentRecordId); try { localStorage.setItem('daytona_sent_records', JSON.stringify(sentRecs)); } catch(e) {} }
-            
-            // Log to historical 7-Day queue
-            let sentHistory = []; try { sentHistory = JSON.parse(localStorage.getItem('daytona_sent_history') || '[]'); } catch(e) {}
-            sentHistory.push({ id: currentRecordId, date: Date.now() });
-            localStorage.setItem('daytona_sent_history', JSON.stringify(sentHistory));
-
-            pendingAttachments = [];
-            window.renderAttachmentUI();
-
-            const sentBadge = document.getElementById('profile-sent-badge');
-            if (sentBadge) sentBadge.classList.remove('hidden'); 
-
-            document.getElementById('email-modal').classList.add('hidden'); 
-            document.getElementById('email-modal').style.display = 'none'; 
-            window.showToast("Email Sent!", "success");
-
-        } catch(e) { 
-            console.error("Mail Send Error:", e);
-            window.showToast(`Mail send failed: ${e.message}`, "error");
-        }
-    }
-
-    window.checkEmailRateLimit = function() {
-         const now = Date.now(); let timestamps = []; try { timestamps = JSON.parse(localStorage.getItem('daytona_email_timestamps') || '[]'); } catch(e) {}
-         timestamps = timestamps.filter(ts => (now - ts) < 3600000); try { localStorage.setItem('daytona_email_timestamps', JSON.stringify(timestamps)); } catch(e) {}
-         const display = document.getElementById('email-hourly-count'); const btn = document.getElementById('launch-email-button');
-         
-         let sentTodayCount = 0; const localTodayStr = new Date().toLocaleDateString('en-CA');
-         try {
-             let logs = JSON.parse(localStorage.getItem('daytona_audit_log') || '[]');
-             sentTodayCount = logs.filter(l => l.type.toLowerCase().includes('email') && l.timestamp.startsWith(localTodayStr)).length;
-         } catch(e) {}
-         const badgeToday = document.getElementById('stat-emails-today');
-         if(badgeToday) badgeToday.innerText = sentTodayCount;
-
-         if(display) display.innerText = `${timestamps.length}/100`;
-         if(timestamps.length >= EMAIL_LIMIT_PER_HOUR) { if(display) display.classList.add('text-status-danger'); if(btn) btn.disabled = true; } else { if(display) display.classList.remove('text-status-danger'); if(btn && currentSelectedRecord) btn.disabled = false; }
-         window.updateStats(); return timestamps.length < EMAIL_LIMIT_PER_HOUR;
-    }
-
-    // --- Custom Multi-Select Dropdowns UI logic ---
-    window.toggleCustomDropdown = function(id) {
-        const drop = document.getElementById(id);
-        const allDrops = document.querySelectorAll('.custom-dropdown-menu');
-        
-        allDrops.forEach(d => {
-            if (d.id !== id && !d.classList.contains('hidden')) {
-                d.classList.add('hidden');
-                d.classList.remove('flex');
-            }
+        const filterIds = [
+            'filter-multilist', 'filter-followup', 'filter-nonotes', 
+            'filter-norecent', 'filter-sent-only', 'filter-hidesent', 
+            'filter-emailed-7d', 'filter-has-intro', 'filter-florida', 
+            'filter-mgrnotes'
+        ];
+        filterIds.forEach(id => {
+            const chk = document.getElementById(id);
+            if (chk) chk.checked = false;
         });
-        
-        if (drop.classList.contains('hidden')) {
-            drop.classList.remove('hidden');
-            drop.classList.add('flex');
-        } else {
-            drop.classList.add('hidden');
-            drop.classList.remove('flex');
-        }
+
+        document.querySelectorAll('.filter-action-chk').forEach(chk => {
+            chk.checked = false;
+        });
+
+        window.filterAndSortGallery();
     };
-    
-    // --- UI/UX INTERACTIONS ---
-    window.toggleThemeMode = function() { const current = document.body.getAttribute('data-theme'); const newTheme = (current === 'midnight') ? 'modern' : 'midnight'; document.body.setAttribute('data-theme', newTheme); localStorage.setItem('daytona_user_theme', newTheme); }
-    window.toggleFontSize = function() { const html = document.documentElement; if(html.classList.contains('text-zoom-2')) { html.classList.remove('text-zoom-1', 'text-zoom-2'); localStorage.setItem('daytona_font_size', '0'); } else if(html.classList.contains('text-zoom-1')) { html.classList.remove('text-zoom-1'); html.classList.add('text-zoom-2'); localStorage.setItem('daytona_font_size', '2'); } else { html.classList.add('text-zoom-1'); localStorage.setItem('daytona_font_size', '1'); } }
-    window.loadFontSize = function() { const size = localStorage.getItem('daytona_font_size'); if(size === '1') document.documentElement.classList.add('text-zoom-1'); if(size === '2') document.documentElement.classList.add('text-zoom-2'); }
-    window.loadSavedTheme = function() { const saved = localStorage.getItem('daytona_user_theme'); document.body.setAttribute('data-theme', saved || 'modern'); }
-    
-    window.populateActionFilter = function() { 
-        const container = document.getElementById('action-menu'); 
-        if(!container) return; 
-        
-        // Preserve checked state if this runs again
-        const previouslyChecked = Array.from(document.querySelectorAll('.filter-action-chk:checked')).map(c => c.value);
-        
-        container.innerHTML = ''; 
-        const actions = new Set(); 
-        allRecords.forEach(r => { if(r.cr714_action) actions.add(r.cr714_action); }); 
-        
-        Array.from(actions).sort().forEach(act => { 
-            const isChecked = previouslyChecked.includes(act) ? 'checked' : '';
-            container.innerHTML += `
-                <label class="custom-dropdown-item p-3 border-b cursor-pointer flex justify-between items-center gap-3">
-                    <span class="font-bold text-xs">${window.escapeHTML(act)}</span>
-                    <input type="checkbox" value="${window.escapeHTML(act)}" class="filter-action-chk w-4 h-4" onchange="window.filterAndSortGallery()" ${isChecked}>
-                </label>
-            `;
-        }); 
-    }
-    
-    window.updateStats = function() { let log = []; try { log = JSON.parse(localStorage.getItem('daytona_audit_log') || '[]'); } catch(e) {} const localToday = new Date().toLocaleDateString('en-CA'); const todaysActivity = log.filter(entry => { if(!entry.timestamp) return false; return new Date(entry.timestamp).toLocaleDateString('en-CA') === localToday; }); const emailCount = todaysActivity.filter(x => x.type.toLowerCase().includes('email')).length; const uniqueContacts = new Set(todaysActivity.filter(x => x.recordId && x.recordId !== 'N/A').map(x => x.recordId)); const elEmail = document.getElementById('stat-emails'); const elContact = document.getElementById('stat-contacts'); if(elEmail) elEmail.textContent = emailCount; if(elContact) elContact.textContent = uniqueContacts.size; }
-    window.updateMiniCounter = function() { const totalEl = document.getElementById('mini-total-count'); const currentEl = document.getElementById('mini-current-index'); if (!window.currentFilteredList) window.currentFilteredList = []; const total = window.currentFilteredList.length; if (totalEl) totalEl.innerText = total; if (total === 0 || !currentRecordId) { if (currentEl) currentEl.innerText = '--'; return; } const idx = window.currentFilteredList.findIndex(r => String(r.cr714_id) === String(currentRecordId)); if (idx !== -1) { if (currentEl) currentEl.innerText = idx + 1; } else { if (currentEl) currentEl.innerText = '--'; } };
-    window.navigateMiniGallery = function(direction) { if (!window.currentFilteredList || window.currentFilteredList.length === 0) return; let idx = window.currentFilteredList.findIndex(r => String(r.cr714_id) === String(currentRecordId)); if (idx === -1) { idx = 0; } else { idx += direction; if (idx < 0) idx = window.currentFilteredList.length - 1; if (idx >= window.currentFilteredList.length) idx = 0; } window.selectRecord(window.currentFilteredList[idx].cr714_id); };
-    
+
     window.currentFilteredList = []; 
     window.filterAndSortGallery = function() {
         const search = window.getElementValue('search-bar')?.toLowerCase() || ''; 
@@ -1286,11 +1271,15 @@
         const emailedLast7DaysIds = sentHistory.filter(x => x.date >= sevenDaysAgo).map(x => x.id);
 
         let pref = {showId:true, showRep:true, showDate:true}; try { pref = JSON.parse(localStorage.getItem('daytona_gallery_prefs') || '{"showId":true,"showRep":true,"showDate":true}'); } catch(e){}
-        const isToday = (dateStr) => { if(!dateStr) return false; const d = new Date(dateStr); const today = new Date(); return d.getDate() === today.getDate() && d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear(); };
 
         const actionChecks = Array.from(document.querySelectorAll('.filter-action-chk:checked')).map(c => c.value);
         
-        // --- Setup Dynamic Legend Array ---
+        if (!window.isScrollingMore) {
+            galleryDisplayLimit = 50;
+            const listContainer = document.getElementById('record-gallery-list');
+            if(listContainer) listContainer.scrollTop = 0;
+        }
+
         let activeFilters = [];
 
         let filtered = allRecords.filter(r => {
@@ -1298,7 +1287,6 @@
             
             const isSentToday = sentRecs.includes(String(r.cr714_id));
             
-            // Single Checkbox Filter Execution
             if(document.getElementById('filter-sent-only').checked && !isSentToday) return false; 
             if(document.getElementById('filter-hidesent').checked && isSentToday) return false; 
             if(document.getElementById('filter-emailed-7d').checked && !emailedLast7DaysIds.includes(String(r.cr714_id))) return false;
@@ -1318,7 +1306,6 @@
                 if (!hasIntro) return false; 
             }
             
-            // Multiple Action Select Logic
             if(actionChecks.length > 0 && (!r.cr714_action || !actionChecks.includes(r.cr714_action))) return false; 
             
             if(document.getElementById('filter-followup').checked && !r.cr714_followup) return false; 
@@ -1335,7 +1322,6 @@
             if(sort.includes('rep')) return sort === 'rep-asc' ? get(a,'cr714_rep').localeCompare(get(b,'cr714_rep')) : get(b,'cr714_rep').localeCompare(get(a,'cr714_rep')); return 0;
         });
 
-        // --- Build Dynamic Legend ---
         if(search) activeFilters.push(`matching "${search}"`);
         if(actionChecks.length > 0) activeFilters.push(`in action(s): ${actionChecks.join(', ')}`);
         if(document.getElementById('filter-multilist').checked) activeFilters.push(`on multiple lists`);
@@ -1344,7 +1330,7 @@
         if(document.getElementById('filter-norecent').checked) activeFilters.push(`untouched for 30+ days`);
         if(document.getElementById('filter-sent-only').checked) activeFilters.push(`emailed today`);
         if(document.getElementById('filter-hidesent').checked) activeFilters.push(`NOT emailed today`);
-        if(document.getElementById('filter-emailed-7d').checked) activeFilters.push(`emailed in the last 7 days`);
+        if(document.getElementById('filter-emailed-7d').checked) activeFilters.push(`recent emails (7d)`);
         if(document.getElementById('filter-has-intro').checked) activeFilters.push(`with an intro`);
         if(document.getElementById('filter-florida').checked) activeFilters.push(`located in Florida`);
         if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) activeFilters.push(`with manager notes`);
@@ -1354,18 +1340,30 @@
 
         let legendContainer = document.getElementById('filter-legend-container');
         let legendText = document.getElementById('filter-legend-text');
+        const clearBtn = document.getElementById('clear-filters-btn');
         
         if (activeFilters.length > 0) {
             legendText.innerHTML = `Showing <b>${filtered.length}</b> account(s) sorted by <b>${sortText}</b>. Filtering to only show accounts <b>${activeFilters.join('</b> and <b>')}</b>.`;
             if(legendContainer) legendContainer.classList.remove('hidden');
+            if(clearBtn) { clearBtn.classList.remove('hidden'); clearBtn.classList.add('flex'); }
         } else {
             if(legendContainer) legendContainer.classList.add('hidden');
+            if(clearBtn) { clearBtn.classList.add('hidden'); clearBtn.classList.remove('flex'); }
         }
 
         window.currentFilteredList = filtered; document.getElementById('mini-total-count').innerText = filtered.length; window.updateMiniCounter();
+        
         const list = document.getElementById('record-gallery-list'); list.innerHTML = '';
         const statTotal = document.getElementById('stat-total'); if(statTotal) statTotal.textContent = allRecords.length;
-        const viewStat = document.getElementById('stat-filtered'); if(viewStat) viewStat.textContent = filtered.length;
+        
+        const totalFiltered = filtered.length;
+        const displayedCount = Math.min(galleryDisplayLimit, totalFiltered);
+        
+        const viewStat = document.getElementById('stat-filtered'); 
+        if(viewStat) viewStat.textContent = `${displayedCount} / ${totalFiltered}`;
+        
+        const visibleCountEl = document.getElementById('gallery-visible-count');
+        if (visibleCountEl) visibleCountEl.textContent = `(${displayedCount} of ${totalFiltered} visible)`;
         
         let mgrCount = allRecords.filter(r => r.cr714_managernotes && r.cr714_managernotes.trim() !== '').length;
         let bellContainer = document.getElementById('mgr-notes-bell-container');
@@ -1374,9 +1372,11 @@
             else { bellContainer.classList.add('hidden'); }
         }
 
-        if(filtered.length === 0) { list.innerHTML = '<div class="text-center p-4 text-xs italic">No records found.</div>'; return; }
+        if(totalFiltered === 0) { list.innerHTML = '<div class="text-center p-4 text-xs italic">No records found.</div>'; return; }
         
-        filtered.forEach(r => {
+        const itemsToDisplay = filtered.slice(0, galleryDisplayLimit);
+
+        itemsToDisplay.forEach(r => {
             const isSent = sentRecs.includes(String(r.cr714_id)); 
             const isDuplicate = duplicateRecordIds.has(String(r.cr714_id));
             const hasMgrNote = (r.cr714_managernotes && String(r.cr714_managernotes).trim() !== '');
@@ -1396,7 +1396,6 @@
                 displayIntroStr = (ci.toLowerCase() === 'yes' || ci.toLowerCase() === 'y') ? 'Intro' : ci;
             }
 
-            // DYNAMIC BORDER PULSE LOGIC
             let pulseClass = '';
             if (hasMgrNote) {
                 pulseClass = 'pulse-red';
@@ -1407,7 +1406,7 @@
             }
 
             const div = document.createElement('div'); 
-            div.className = `gallery-item ${currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${pulseClass}`; 
+            div.className = `gallery-item flex flex-col ${currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${pulseClass}`; 
             
             if(hasMgrNote && pulseClass === 'pulse-red') div.title = "Manager Note Present";
             else if(isDuplicate && pulseClass === 'pulse-yellow') div.title = "Account present in multiple lists";
@@ -1440,11 +1439,6 @@
                 } 
             }
             
-            let introHtml = '';
-            if (hasIntro) {
-                introHtml = `<div class="text-[9px] text-status-warning font-bold w-full truncate mt-1" title="Intro: ${window.escapeHTML(displayIntroStr)}"><i class="fas fa-handshake mr-1"></i>${window.escapeHTML(displayIntroStr)}</div>`;
-            }
-
             let sourcesHtml = r.sources.map(s => {
                 let abbr = s.type === 'AM' ? 'AM' : (s.type === 'Cadence' ? 'CAD' : (s.type === 'LB' ? 'LB' : 'PSP'));
                 let badgeClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : (s.type === 'LB' ? 'badge-lb' : 'badge-psp'));
@@ -1452,11 +1446,12 @@
             }).join('');
 
             div.innerHTML = `
-                <div class="flex justify-between items-center w-full mb-1">
-                    <div class="flex items-center gap-2">
-                        ${pref.showId ? `<span class="gallery-item-id">${r.cr714_id}</span>` : ''}
+                <div class="flex justify-between items-start w-full mb-1 gap-2">
+                    <div class="flex items-center gap-1 min-w-0">
+                        ${pref.showId ? `<span class="gallery-item-id truncate">${r.cr714_id}</span>` : ''}
+                        ${hasIntro ? `<i class="fas fa-handshake text-status-warning text-sm flex-shrink-0" title="Intro: ${window.escapeHTML(displayIntroStr)}"></i>` : ''}
                     </div>
-                    <div class="flex flex-col items-end text-[10px]">
+                    <div class="flex flex-col items-end text-[10px] flex-shrink-0 whitespace-nowrap">
                         ${followUpHtml}
                         ${emailHtml}
                     </div>
@@ -1464,21 +1459,29 @@
                 <div class="gallery-item-company truncate font-bold" title="${window.escapeHTML(r.cr714_company)}">
                     ${window.escapeHTML(r.cr714_company)}
                 </div>
-                ${introHtml}
-                <div class="flex justify-between items-end mt-1">
-                        <div class="text-[9px] text-muted truncate">
-                            ${pref.showRep ? window.escapeHTML(r.cr714_rep) : ''}
-                        </div>
-                        <div class="flex flex-col items-end gap-1 ml-auto">
-                            <div class="flex gap-1">
-                                ${sourcesHtml}
-                            </div>
-                            ${r.cr714_action ? `<div class="text-[9px] font-bold badge-action border px-1 rounded max-w-[120px] truncate" title="${window.escapeHTML(r.cr714_action)}">${window.escapeHTML(r.cr714_action)}</div>` : ''}
-                        </div>
+                <div class="flex justify-between items-end mt-1 gap-2">
+                    <div class="text-[9px] text-muted truncate">
+                        ${pref.showRep ? window.escapeHTML(r.cr714_rep) : ''}
                     </div>
+                    <div class="flex flex-col items-end gap-1 flex-shrink-0 max-w-[70%]">
+                        <div class="flex flex-wrap justify-end gap-1">
+                            ${sourcesHtml}
+                        </div>
+                        ${r.cr714_action ? `<div class="text-[9px] font-bold badge-action border px-1 rounded max-w-full truncate text-right" title="${window.escapeHTML(r.cr714_action)}">${window.escapeHTML(r.cr714_action)}</div>` : ''}
+                    </div>
+                </div>
             `;
             list.appendChild(div);
         });
+
+        if (galleryDisplayLimit < totalFiltered) {
+            const moreDiv = document.createElement('div');
+            moreDiv.className = "text-center p-4 text-[10px] text-muted animate-pulse mt-2 border-t border-dashed";
+            moreDiv.innerHTML = `<i class="fas fa-arrow-down mr-1"></i> Scroll for more (${totalFiltered - galleryDisplayLimit} remaining)`;
+            list.appendChild(moreDiv);
+        }
+        
+        window.isScrollingMore = false;
     }
 
     window.selectRecord = function(id) { 
@@ -1499,18 +1502,29 @@
         currentSelectedRecord = allRecords.find(r => String(r.cr714_id) === currentRecordId); 
         window.filterAndSortGallery(); window.updateMiniCounter();
         
+        const salesBody = document.getElementById('live-sales-body');
+        if(salesBody) salesBody.innerHTML = `<tr><td colspan="3" class="text-center p-3 text-muted italic">Click 'Fetch Live' to load recent orders.</td></tr>`;
+        const liveAddr = document.getElementById('live-address-display');
+        if(liveAddr) liveAddr.innerHTML = '--';
+
         if(currentSelectedRecord) { 
             window.populateForm(currentSelectedRecord); 
             window.takeSnapshot(currentSelectedRecord); 
             window.toggleEditMode(true); 
             
-            const historyCheck = document.getElementById('show-prev-note');
-            if(historyCheck) historyCheck.checked = true; 
-            window.updateNotesPreview();
+            if(window.currentRightTab === 'masonville') {
+                window.loadMasonvilleData();
+            } else {
+                const historyCheck = document.getElementById('show-prev-note');
+                if(historyCheck) historyCheck.checked = true; 
+                window.updateNotesPreview();
+            }
             
             const alertContainer = document.getElementById('in-form-alerts');
+            currentAccountGuid = null;
             const d365Acct = await window.fetchD365Account(id);
             if (d365Acct) {
+                currentAccountGuid = d365Acct.accountid;
                 const pc = d365Acct.primarycontactid || {};
                 const setVal = (elId, val) => { const el=document.getElementById(elId); if(el && val) el.value = val; };
                 
@@ -1524,7 +1538,7 @@
                 
                 let d365Addr = [d365Acct.address1_line1, d365Acct.address1_city, d365Acct.address1_stateorprovince].filter(Boolean).join(', ');
                 document.getElementById('d365-address-display').innerText = d365Addr || currentSelectedRecord.cr714_billingaddress || '--';
-                setVal('mvgo-address', d365Addr); // Propagate to MVGO
+                setVal('mvgo-address', d365Addr);
                 
                 const rawAccountMessage = d365Acct.mss_messagecenter || d365Acct.description || d365Acct.wbm_accountmessage || d365Acct.wbm_deliveryinstructions || "";
                 const accountMessage = window.stripHTML(String(rawAccountMessage));
@@ -1532,7 +1546,7 @@
                     alertContainer.innerHTML += `<div class="alert-box declining overflow-y-auto max-h-24 custom-scrollbar"><span class="alert-label"><i class="fas fa-exclamation-triangle mr-1"></i>D365 Account Note</span>${window.escapeHTML(accountMessage)}</div>`;
                 }
                 
-                if (d365Acct.statecode === 1) { // 1 corresponds to inactive in D365 statuscodes typically
+                if (d365Acct.statecode === 1) { 
                     let act = (currentSelectedRecord.cr714_action || '').toLowerCase();
                     if (!act.includes('cadence') && !localStorage.getItem('daytona_keep_inactive_' + id)) {
                         window.pendingInactiveId = id;
@@ -1560,10 +1574,9 @@
         setTimeout(() => { window.isPopulating = false; }, 50);
     }
 
-    // Stricter dirty check to ensure we aren't accidentally tripping it on empty notes
     window.isDirty = function() {
         if(!window.currentRecordSnapshot || window.isPopulating) return false;
-        if(window.hasUnsavedChanges) return true; // manual dirty flag
+        if(window.hasUnsavedChanges) return true; 
         
         const snap = window.currentRecordSnapshot; 
         const getCurrent = (id) => (document.getElementById(id)?.value || '').trim(); 
@@ -1640,7 +1653,6 @@
         const hasMgr = (rec.cr714_managernotes && rec.cr714_managernotes.trim().length > 0); 
         const hasImp = (rec.cr714_importantaccountinformation && rec.cr714_importantaccountinformation.trim().length > 0);
         
-        // Strip HTML from Manager/Important notes before displaying
         const mgrNoteClean = window.stripHTML(String(rec.cr714_managernotes || ''));
         const impNoteClean = window.stripHTML(String(rec.cr714_importantaccountinformation || ''));
 
@@ -1653,9 +1665,8 @@
         setVal('input-location', metaLoc); 
         setVal('input-dm', metaDm); 
         setVal('input-competitor', metaComp); 
-        setVal('opp-type-select', ''); // Opp Type deliberately not restored per user requirement
+        setVal('opp-type-select', '');
 
-        // Populate Intro as read-only display directly from the dataset row first, fallback to parsed note
         let combinedIntro = rec.cr714_intro;
         if (!combinedIntro) {
             for (let src of rec.sources) {
@@ -1674,13 +1685,15 @@
         if (introDisp) {
             introDisp.innerText = displayIntroStr;
             if (displayIntroStr !== '--') {
+                introContainerBox.classList.remove('hidden');
+                introContainerBox.classList.add('flex');
                 introContainerBox.classList.add('active-intro');
             } else {
-                introContainerBox.classList.remove('active-intro');
+                introContainerBox.classList.add('hidden');
+                introContainerBox.classList.remove('flex');
             }
         }
         
-        // Setup custom competitor dropdown state
         const parsedComp = metaComp.split(',').map(s => s.trim()).filter(Boolean);
         document.querySelectorAll('.comp-chk').forEach(chk => chk.checked = false);
         const otherChk = document.getElementById('comp-chk-other');
@@ -1715,17 +1728,14 @@
         const dd = document.getElementById('email-template-dropdown'); 
         dd.innerHTML = "";
         
-        // --- ACTION MAPPINGS LIST ---
         const actionMappings = {
             'febmarchnonbuy': 'louise brown 15% off',
             'aprilmaynonbuy': 'louise brown 15% off',
-            // Add other actions and their matching template names here
         };
 
         if (actionMappings[actionLower]) {
             actionLower = actionMappings[actionLower];
         }
-        // ----------------------------
         
         const cadenceTemplates = [ {val: "No Jan", txt: "No Jan"}, {val: "No DEC/JAN", txt: "No DEC/JAN"}, {val: "No NOV/DEC/JAN", txt: "No NOV/DEC/JAN"}, {val: "NONBUY", txt: "NONBUY"}, {val: "NOVNoSales", txt: "NOVNoSales"}, {val: "NONovDec", txt: "NONovDec"} ];
         const allTemplates = [ {val: "Prospecting", txt: "Prospecting"}, {val: "Chair Mat Contest", txt: "Chair Mat Contest"}, {val: "Print Opp!", txt: "Print Opp!"}, {val: "Print Nonbuy!", txt: "Print Nonbuy!"}, {val: "Green Category.msg", txt: "Green Category"}, {val: "Green Follow Up Email.msg", txt: "Green Follow Up"}, {val: "Green Non-Buy Email.msg", txt: "Green Non-Buy"}, {val: "Yellow Non-Buy Email.msg", txt: "Yellow Non-Buy"}, {val: "FebruaryNonBuy ASAP", txt: "FebruaryNonBuy ASAP"}, {val: "Louise Brown 15% Off", txt: "Louise Brown 15% Off"} ];
@@ -1750,6 +1760,13 @@
         if(rec.cr714_followup) { const rawIso = rec.cr714_followup; if(rawIso.length >= 10) { dEl.value = rawIso.substring(0, 10); const dt = new Date(rawIso); if(!isNaN(dt) && rawIso.includes('T') && !rawIso.includes('T00:00:00Z') && !rawIso.includes('T00:00:00')) { const hh = dt.getUTCHours().toString().padStart(2, '0'); const mm = dt.getUTCMinutes().toString().padStart(2, '0'); tEl.value = `${hh}:${mm}`; } else { tEl.value = ''; } } else { dEl.value=''; tEl.value=''; } } else { dEl.value=''; tEl.value=''; }
         window.updateNotesPreview(); 
         const ids = ['mvgo-button', 'close-button', 'launch-email-button', 'help-button']; ids.forEach(id => { const el = document.getElementById(id); if(el) el.disabled = false; });
+        
+        const fetchBtn = document.getElementById('btn-fetch-sales');
+        if(fetchBtn) fetchBtn.disabled = false;
+        const salesBody = document.getElementById('live-sales-body');
+        if(salesBody) salesBody.innerHTML = `<tr><td colspan="3" class="text-center p-3 text-muted italic">Click 'Fetch Live' to load recent orders.</td></tr>`;
+        const liveAddr = document.getElementById('live-address-display');
+        if(liveAddr) liveAddr.innerHTML = '--';
     }
 
     window.setLayout = function(mode) { const col = document.getElementById('profile-column'); if(currentSelectedRecord) window.toggleEditMode(true); }
@@ -1833,7 +1850,6 @@
         window.updateCompetitorValue();
     };
 
-    // Close dropdowns when clicking outside
     document.addEventListener('click', function(event) {
         const compContainer = document.getElementById('competitor-container');
         const compDrop = document.getElementById('competitor-dropdown');
@@ -1841,7 +1857,6 @@
             window.closeCompetitorDropdown();
         }
         
-        // Also close custom filter dropdowns if clicked outside
         if (!event.target.closest('.custom-dropdown')) {
             document.querySelectorAll('.custom-dropdown-menu').forEach(d => {
                 if (!d.classList.contains('hidden')) {
@@ -1861,10 +1876,8 @@
             p.innerHTML = '<div class="text-center italic mt-10 text-muted">Loading history...</div>';
             let history = [];
             
-            // Deduplicate notes by their pure text content
             let uniqueNotes = new Map();
             
-            // Loop through all sources to aggregate note history uniformly
             currentSelectedRecord.sources.forEach(src => {
                 let parsed = window.parseNotes(src.rawNotes || '');
                 parsed.forEach(n => {
@@ -1919,7 +1932,6 @@
         } else { p.innerHTML = '<div class="text-center italic mt-10 text-muted">History hidden</div>'; }
     }
 
-    // Modal Operations
     window.toggleModalFullscreen = function(id) {
         const modal = document.getElementById(id);
         if (modal) modal.classList.toggle('fullscreen');
@@ -1970,7 +1982,6 @@
         setVal('mvgo-phone', document.getElementById('contact-phone-primary')?.value); 
         setVal('mvgo-address', document.getElementById('d365-address-display')?.innerText !== '--' ? document.getElementById('d365-address-display')?.innerText : currentSelectedRecord.cr714_billingaddress); 
         
-        // Sync note box content directly to MVGO notes
         setVal('mvgo-notes', document.getElementById('qb-notes-input').value);
 
         document.getElementById('mvgo-modal').classList.remove('hidden'); 
@@ -1989,36 +2000,27 @@
         const phoneStr = document.getElementById('mvgo-phone')?.value || '';
         const addrStr = document.getElementById('mvgo-address')?.value || '';
 
-        // Clean trailing commas
         reqAction = reqAction.replace(/, $/, '');
         catOpp = catOpp.replace(/, $/, '');
         concern = concern.replace(/, $/, '');
 
-        // Build the multiline string and correctly encode the entire thing to ensure it passes into MVGO
         const details = `Action Plan --- Created On: ${today}\n\nRequested Action(s):\n${reqAction}\n\nCategory Opportunities:\n${catOpp}\n\nConcern(s):\n${concern}\nOther: \n\nContact Info:\nName: ${contactName}\nPhone Number: ${phoneStr}\nAddress:\n${addrStr}\n\nInside Sales Note: \n${userNotes}`;
-        const encodedDetails = encodeURIComponent(details);
         
-        const url = `https://go.masonville.com/#/activityleadcall?repCreditCode=&emptyOwner=TRUE&accountNumber=${encodeURIComponent(currentRecordId)}&salesCallTriggerID=&schedFutureDays=1&salesCallTrigger=ISReq&salesCallTriggerDetails=${encodedDetails}`;
+        window.showToast("Syncing with Masonville...", "processing");
+        await window.pushToMasonvilleSilent(currentRecordId, details);
         
-        // Launch in new tab
-        window.open(url, '_blank');
-        
-        // Compact note for history
-        const historyStamp = `[MVGO LINK SENT] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
+        const historyStamp = `[MVGO SYNCED] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
         const qbInput = document.getElementById('qb-notes-input');
         
-        // Push the MVGO note back into the main note box along with the MVGO tag and await save
         qbInput.value = historyStamp + (userNotes ? ` | Note: ${userNotes}` : '') + (qbInput.value ? '\n\n' + qbInput.value : '');
         
-        // AWAIT the save so it fully processes the note before wiping it
         await window.handleCustomSave(null, true); 
         
-        // Clear immediately after saving to reset UI correctly
         qbInput.value = "";
         window.markDirty();
         
         document.getElementById('mvgo-modal').style.display = 'none'; 
-        window.showToast("MVGO Opened & Note Saved", "success");
+        window.showToast("MVGO Synced & Note Saved", "success");
     }
 
     window.openCloseAccountModal = function() { if(currentRecordId) { document.getElementById('close-account-modal').classList.remove('hidden'); document.getElementById('close-account-modal').style.display='flex'; } }
@@ -2035,7 +2037,6 @@
     window.closeAllSidebarTabs = function() { window.closeUnifiedSidebar(); } 
 
     window.updateAndOpenScript = function(field, value, isInputClick = false) { 
-        // If clicking directly into the input to copy, don't pop the script up
         if(isInputClick) return;
         
         const rep = currentUserRepName || "your rep"; const val = value || "(Unknown)"; let scriptText = ""; 
@@ -2052,7 +2053,6 @@
         if (modal) { modal.classList.remove('hidden'); modal.style.display = 'flex'; }
     }
 
-    // INTERNAL NOTES / HELP REQUESTS & ADMIN EXTRAS
     window.toggleInternalNote = function() { document.getElementById('internal-note-wrapper').classList.toggle('hidden'); }
     window.sendHelpNote = async function() { 
         const v = document.getElementById('internal-note-input').value; 
@@ -2063,7 +2063,6 @@
         if (mgrName && msalAccount) {
             const mgrEmail = mgrName.trim().replace(/\s+/g, '.').toLowerCase() + '@wbmason.com';
             try {
-                // Ensure Mail.Send token is acquired ONLY when this specific action is triggered
                 const token = await window.getToken("Mail.Send");
                 const mailBody = { 
                     message: { 
@@ -2080,7 +2079,6 @@
         try {
             const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
-            // Loop through all data sources connected to this account to push the help status correctly so the manager dashboard picks it up
             for (let src of currentSelectedRecord.sources) {
                 await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, {
                     method: 'PATCH', headers: headers, body: JSON.stringify({ cr714_actionmessage: `[HELP REQUEST]: ${v}` })
@@ -2161,7 +2159,6 @@
             try {
                 const dvToken = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
                 
-                // Ensure Mail.Send token is acquired ONLY when this specific action is triggered
                 const mailToken = await window.getToken("Mail.Send");
 
                 const payload = {
@@ -2192,7 +2189,6 @@
                     };
                     await fetch(`${GRAPH_URL}/me/sendMail`, { method: 'POST', headers: { 'Authorization': `Bearer ${mailToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(mailBody) });
                     
-                    // SILENT TEAMS GRAPH POST TO GROUP CHAT
                     try {
                         const teamsToken = await window.getToken("ChatMessage.Send");
                         const chatId = "19:860e73b9453d474187ac58855e200bdb@thread.v2";
@@ -2236,6 +2232,21 @@
             const onMove = (clientX) => { if (!isResizing) return; const deltaX = startX - clientX; let newWidth = startWidth + deltaX; if (newWidth < 200) newWidth = 200; if (newWidth > 600) newWidth = 600; grid.style.setProperty('--history-width', `${newWidth}px`); };
             const onUp = () => { if (isResizing) { isResizing = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; resizer.classList.remove('bg-blue-500/20'); localStorage.setItem('daytona_history_width', getComputedStyle(grid).getPropertyValue('--history-width')); } };
             resizer.addEventListener('mousedown', (e) => onDown(e.clientX)); document.addEventListener('mousemove', (e) => onMove(e.clientX)); document.addEventListener('mouseup', onUp);
+        }
+        
+        const galleryList = document.getElementById('record-gallery-list');
+        if (galleryList) {
+            galleryList.addEventListener('scroll', () => {
+                if (galleryList.scrollTop + galleryList.clientHeight >= galleryList.scrollHeight - 50) {
+                    if (galleryDisplayLimit < window.currentFilteredList.length) {
+                        const currentPos = galleryList.scrollTop;
+                        galleryDisplayLimit += 50;
+                        window.isScrollingMore = true;
+                        window.filterAndSortGallery();
+                        galleryList.scrollTop = currentPos;
+                    }
+                }
+            });
         }
     });
 </script>
@@ -2304,11 +2315,9 @@
                     Action Target <i class="fas fa-chevron-down"></i>
                 </button>
                 <div id="action-menu" class="absolute top-full left-0 mt-1 w-64 shadow-xl border rounded hidden flex-col z-[9500] max-h-64 overflow-y-auto custom-dropdown-menu custom-scrollbar">
-                    <!-- Checkboxes populate dynamically here via populateActionFilter() -->
-                </div>
+                    </div>
             </div>
              
-            <!-- New Property Filter Pills instead of Dropdown -->
             <div class="flex flex-wrap items-center gap-2 ml-2 border-l pl-2" style="border-color: var(--border-color);">
                 <label class="filter-pill" title="Show accounts present in multiple action lists.">
                     <input type="checkbox" id="filter-multilist" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
@@ -2330,17 +2339,17 @@
                     <input type="checkbox" id="filter-sent-only" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
                     <span class="text-status-success"><i class="fas fa-check-double mr-1"></i> Emailed Today</span>
                 </label>
-                <label class="filter-pill" title="Hide any accounts that you have already emailed today.">
+                <label class="filter-pill" title="Hide any accounts that you have already emailed.">
                     <input type="checkbox" id="filter-hidesent" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
-                    <span class="text-status-danger"><i class="fas fa-eye-slash mr-1"></i> Hide Sent Today</span>
+                    <span class="text-status-danger"><i class="fas fa-eye-slash mr-1"></i> Hide Sent Emails</span>
                 </label>
                 <label class="filter-pill" title="Show accounts that were emailed anytime in the past week.">
                     <input type="checkbox" id="filter-emailed-7d" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
-                    <span class="text-status-info"><i class="fas fa-calendar-week mr-1"></i> Emailed (7d)</span>
+                    <span class="text-status-info"><i class="fas fa-calendar-week mr-1"></i> Recent Emails 7d</span>
                 </label>
                 <label class="filter-pill" title="Show accounts where an introduction has already been completed.">
                     <input type="checkbox" id="filter-has-intro" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
-                    <span><i class="fas fa-handshake text-muted mr-1"></i> Has Intro</span>
+                    <span><i class="fas fa-handshake text-muted mr-1"></i> Intro</span>
                 </label>
                 <label class="filter-pill" title="Show accounts physically located in Florida.">
                     <input type="checkbox" id="filter-florida" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
@@ -2350,6 +2359,10 @@
                     <input type="checkbox" id="filter-mgrnotes" class="cursor-pointer mt-0.5" onchange="window.filterAndSortGallery()">
                     <span>Has Manager Notes</span>
                 </label>
+                
+                <button onclick="window.clearAllFilters()" id="clear-filters-btn" class="hidden items-center gap-1 px-2 py-1 rounded border text-[10px] font-bold cursor-pointer transition-all hover:bg-red-50 text-red-600 border-red-200 bg-white ml-2 shadow-sm">
+                    <i class="fas fa-times"></i> Clear Filters
+                </button>
             </div>
              
              <div class="ml-auto flex items-center gap-2">
@@ -2372,10 +2385,10 @@
                      <div class="card-header flex-col items-start gap-2 flex-shrink-0 bg-gray-50 transition-all duration-200" id="gallery-header-container" style="background-color: var(--bg-input) !important;">
                          <div id="gallery-normal-content" class="w-full flex flex-col gap-2">
                              <div class="flex justify-between w-full items-center">
-                                 <span>Account List</span>
+                                 <span>Account List <span id="gallery-visible-count" class="text-xs text-muted font-normal ml-2"></span></span>
                                  <button onclick="window.toggleGallery()" class="text-xs text-muted hover:text-primary" title="Collapse"><i class="fas fa-compress-alt"></i></button>
                              </div>
-                             <input type="text" id="search-bar" name="search" oninput="window.filterAndSortGallery()" placeholder="Search... (/)" class="text-xs w-full h-10 border rounded px-2" />
+                             <input type="text" id="search-bar" name="search" oninput="window.filterAndSortGallery()" placeholder="Search... (/)" class="text-xs w-full h-10 border rounded px-2" style="border-color: var(--border-color);" />
                          </div>
                          <div id="gallery-mini-controls" class="hidden flex-col items-center gap-2 w-full pt-1">
                              <button onclick="window.toggleGallery()" class="text-xs text-status-info hover:text-blue-800 mb-1" title="Expand List"><i class="fas fa-expand-alt"></i></button>
@@ -2396,6 +2409,9 @@
                              <span id="acct-company" class="font-bold truncate text-sm">--</span>
                              <span class="text-muted text-xs">/</span>
                              <span id="acct-number-header" class="text-xs text-muted font-medium">--</span>
+                             <div id="intro-container-box" class="hidden items-center justify-center ml-2 px-2 py-0.5 rounded text-[10px] font-bold transition-colors" style="background-color: var(--intro-bg); border: 1px solid var(--intro-border);">
+                                 <span id="display-intro" style="color: var(--intro-text);">--</span>
+                             </div>
                              <span id="profile-sent-badge" class="hidden bg-green-100 text-status-success text-[9px] px-1 rounded-full font-bold border border-green-200 ml-2" style="background-color: var(--bg-input); border-color: var(--border-color);"><i class="fas fa-check"></i> Sent</span>
                         </div>
                     </div>
@@ -2434,7 +2450,7 @@
                                 <div class="flex items-center gap-2">
                                     <div id="save-controls" class="hidden items-center gap-1">
                                         <button onclick="window.confirmClearChanges()" class="bg-red-100 text-status-danger border px-2 py-0.5 rounded text-[9px] font-bold transition-colors" style="background-color: var(--bg-input); border-color: var(--border-color);">
-                                            <i class="fas fa-times mr-1"></i>CLR
+                                            <i class="fas fa-times mr-1"></i>X CLEAR
                                         </button>
                                         <button onclick="window.handleCustomSave()" class="btn-primary px-2 py-0.5 rounded text-[9px] font-bold shadow-sm transition-colors">
                                             <i class="fas fa-save mr-1"></i>SAVE
@@ -2454,7 +2470,7 @@
                                 <textarea id="qb-notes-input" name="generalNote" wrap="off" oninput="window.markDirty()" class="note-textarea w-full p-2 pr-20 text-sm font-mono rounded border h-full resize-none min-h-[200px] custom-scrollbar whitespace-pre-wrap break-words overflow-y-auto overflow-x-hidden" disabled placeholder="Enter note box here..."></textarea>
                             </div>
 
-                            <div class="grid grid-cols-5 gap-2 flex-shrink-0 p-2 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
+                            <div class="grid grid-cols-4 gap-2 flex-shrink-0 p-2 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
                                 <div class="flex flex-col items-center">
                                     <input type="text" id="input-location" oninput="window.markDirty()" placeholder="Locations" class="text-[10px] border rounded p-1 h-6 w-full text-center">
                                     <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Locations</label>
@@ -2463,8 +2479,7 @@
                                     <input type="text" id="input-dm" oninput="window.markDirty()" placeholder="Decision Maker" class="text-[10px] border rounded p-1 h-6 w-full text-center">
                                     <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Decision Maker</label>
                                 </div>
-                                
-                                <div class="flex flex-col items-start relative w-full custom-dropdown" id="competitor-container">
+<div class="flex flex-col items-start relative w-full custom-dropdown" id="competitor-container">
                                     <div id="competitor-display" onclick="window.toggleCompetitorDropdown()" class="text-[10px] border rounded p-1 h-6 w-full text-left px-2 overflow-hidden whitespace-nowrap cursor-pointer select-none editable-field" style="background-color: var(--bg-input); border-color: var(--border-color); color: var(--text-main); text-overflow: ellipsis;" disabled>Select...</div>
                                     <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider w-full text-center">Competitor</label>
                                     <input type="hidden" id="input-competitor">
@@ -2486,13 +2501,6 @@
                                             <button type="button" onclick="window.closeCompetitorDropdown()" class="btn-primary text-[10px] py-1 mt-1 w-full">Done</button>
                                         </div>
                                     </div>
-                                </div>
-
-                                <div class="flex flex-col items-center w-full">
-                                    <div class="flex flex-col items-center justify-center p-1 border rounded w-full h-6 overflow-hidden transition-colors" id="intro-container-box" style="background-color: var(--bg-input); border-color: var(--border-color);">
-                                        <span id="display-intro" class="text-[10px] font-bold truncate" style="color: var(--text-main);">--</span>
-                                    </div>
-                                    <label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Intro</label>
                                 </div>
                                 
                                 <div class="flex flex-col items-center">
@@ -2521,7 +2529,7 @@
                                     <div class="flex flex-col min-w-0 w-full">
                                         <div class="flex items-center gap-1 mb-1 pb-1 border-b border-orange-500/20 font-black" style="color: var(--text-main);">
                                             <span class="text-[8px] uppercase tracking-wider opacity-70">Current Action Strategy:</span>
-                                            <div id="form-action-value" class="flex flex-wrap gap-1 ml-auto">--</div>
+                                            <div id="form-action-value" class="flex flex-wrap gap-1">--</div>
                                         </div>
                                         <div class="form-wide-value whitespace-normal leading-tight" style="max-height: 5em; overflow-y: auto;">
                                             <span id="form-msg-value" class="text-[10px] font-bold italic" style="color: var(--text-main);">--</span>
@@ -2544,12 +2552,48 @@
                                     <button onclick="window.openCallScript()" id="btn-script" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate flex justify-center items-center gap-2 rounded-b-none border-b-0"><i class="fas fa-comment-dots text-pink-500"></i> Call Script</button>
                                 </div>
                             </div>
+
+                            <div class="flex flex-col border rounded flex-shrink-0 mt-3 relative overflow-hidden" style="background-color: var(--bg-card); border-color: var(--border-color);">
+                                <div class="bg-gray-50 border-b flex justify-between items-center p-2" style="background-color: var(--bg-header); border-color: var(--border-color);">
+                                    <div class="flex items-center gap-2">
+                                        <i class="fas fa-satellite-dish text-primary text-xs"></i>
+                                        <span class="text-[10px] font-bold uppercase text-muted tracking-wider">Live Sales Data</span>
+                                    </div>
+                                    <button id="btn-fetch-sales" onclick="window.triggerDataFlow(currentSelectedRecord?.cr714_company, currentSelectedRecord?.cr714_id)" class="btn-primary text-[9px] py-1 px-3 shadow-sm h-6 flex items-center" disabled>
+                                        <i class="fas fa-sync-alt mr-1"></i> Fetch Live
+                                    </button>
+                                </div>
+                                
+                                <div id="live-sales-loader" class="hidden flex-col items-center justify-center p-6 bg-white/80 absolute inset-0 z-10" style="background-color: var(--bg-card);">
+                                    <div class="spinner-border text-primary border-t-transparent border-2 border-primary rounded-full w-6 h-6 animate-spin mb-2"></div>
+                                    <span class="text-[9px] font-bold text-muted uppercase animate-pulse">Querying D365...</span>
+                                </div>
+
+                                <div id="live-sales-content" class="p-0 text-sm">
+                                    <div class="p-2 border-b bg-gray-50/30" style="border-color: var(--border-color);">
+                                        <div class="text-[9px] uppercase font-bold text-muted mb-1">Billing Address</div>
+                                        <div id="live-address-display" class="text-[11px] leading-tight">--</div>
+                                    </div>
+                                    <table class="w-full text-left text-[10px]">
+                                        <thead class="bg-gray-100 text-muted uppercase tracking-wider" style="background-color: var(--bg-input);">
+                                            <tr>
+                                                <th class="p-1.5 font-bold">Order #</th>
+                                                <th class="p-1.5 font-bold">Date</th>
+                                                <th class="p-1.5 font-bold text-right">Amount</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="live-sales-body" class="divide-y" style="border-color: var(--border-color);">
+                                            <tr><td colspan="3" class="text-center p-3 text-muted italic">Click 'Fetch Live' to load recent orders.</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
                             
                             <div class="flex flex-col gap-1 p-2 border rounded flex-shrink-0 mt-2" style="background-color: var(--bg-input); border-color: var(--border-color);">
                                 <label class="text-[10px] font-bold text-muted uppercase">Follow Up Scheduler</label>
                                 <div class="flex gap-1 w-full">
-                                    <input type="date" id="follow-up-date" onchange="window.markDirty()" class="text-xs flex-1 editable-field h-7" disabled>
-                                    <input type="time" id="follow-up-time" onchange="window.markDirty()" class="text-xs flex-1 editable-field h-7" disabled>
+                                    <input type="date" id="follow-up-date" onchange="window.markDirty()" class="text-xs flex-1 h-7" disabled>
+                                    <input type="time" id="follow-up-time" onchange="window.markDirty()" class="text-xs flex-1 h-7" disabled>
                                 </div>
                                 <button onclick="window.createCalendarEvent()" class="btn-primary text-xs w-full h-6 py-0 flex items-center justify-center mt-1">Create Event</button>
                             </div>
@@ -2579,15 +2623,30 @@
                 <div id="history-resizer" class="absolute top-0 bottom-0 -left-3 w-4 cursor-col-resize z-50 flex items-center justify-center group hover:bg-blue-500/10 rounded transition-colors" title="Drag to resize">
                     <div class="w-1 h-8 bg-gray-300 rounded group-hover:bg-blue-500 transition-colors shadow-sm"></div>
                 </div>
+                
                 <div class="card h-full flex flex-col overflow-hidden min-h-0">
-                    <div class="card-header p-3 border-b flex-shrink-0"><span class="text-xs font-bold text-muted uppercase">History Feed</span></div>
-                    <div class="notes-container flex flex-col h-full overflow-hidden" id="history-container">
+                    <div class="flex border-b flex-shrink-0" style="border-color: var(--border-color); background-color: var(--bg-header);">
+                        <button onclick="window.switchRightTab('history')" id="tab-btn-history" class="flex-1 py-3 text-xs font-bold uppercase transition-colors border-b-2 border-primary text-primary hover:bg-black/5">Notes History</button>
+                        <button onclick="window.switchRightTab('masonville')" id="tab-btn-masonville" class="flex-1 py-3 text-xs font-bold uppercase transition-colors border-b-2 border-transparent text-muted hover:bg-black/5">Masonville Data</button>
+                    </div>
+
+                    <div id="right-tab-history" class="notes-container flex-col h-full overflow-hidden flex">
                         <div class="flex justify-between items-center mb-1 flex-shrink-0 p-2 hidden">
                             <div class="flex gap-2 text-xs">
                                 <label class="cursor-pointer flex items-center gap-1 select-none"><input type="checkbox" id="show-prev-note" name="viewPrevNote" checked onchange="window.updateNotesPreview()"> Show History</label>
                             </div>
                         </div>
                         <div id="qb-notes-preview" class="flex-grow overflow-y-auto p-2 custom-scrollbar"><div class="text-center italic mt-10" style="color: var(--text-muted);">Select an account.</div></div>
+                    </div>
+                    
+                    <div id="right-tab-masonville" class="flex-col h-full overflow-hidden hidden bg-gray-50" style="background-color: var(--bg-input);">
+                        <div id="masonville-loader" class="hidden flex-col items-center justify-center h-full text-muted">
+                            <div class="spinner-border text-primary border-t-transparent border-2 border-primary rounded-full w-8 h-8 animate-spin mb-3"></div>
+                            <span class="text-xs font-bold uppercase tracking-widest animate-pulse">Fetching Data...</span>
+                        </div>
+                        <div id="masonville-content" class="flex-grow overflow-y-auto p-3 custom-scrollbar">
+                            <div class="text-center italic mt-10" style="color: var(--text-muted);">Select an account to view Masonville data.</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2624,7 +2683,7 @@
                 <button onclick="window.closeUnifiedSidebar()" class="text-lg hover:text-status-danger bg-transparent border-none">&times;</button>
             </div>
         </div>
-        <div id="sidebar-content-area" class="sidebar-content-area"></div>
+        <div id="sidebar-content-area"class="sidebar-content-area"></div>
     </div>
 
     <div id="unsaved-changes-modal" class="modal-overlay hidden" style="display:none; z-index: 9500;">
@@ -2717,10 +2776,10 @@
                 </div>
             </div>
             <div class="p-4 border-t flex justify-between items-center flex-shrink-0" style="background-color: var(--bg-header) !important; border-color: var(--border-color);">
-                <p class="text-xs font-semibold text-muted"><i class="fas fa-info-circle mr-1 text-status-info"></i> Clicking 'Launch' will generate the URL and open MVGO in a new tab.</p>
+                <p class="text-xs font-semibold text-muted"><i class="fas fa-info-circle mr-1 text-status-info"></i> Clicking 'Sync' will generate the details and execute a background sync to Masonville.</p>
                 <div class="flex gap-3">
                     <button onclick="document.getElementById('mvgo-modal').style.display = 'none';" class="btn-secondary px-6 shadow-sm h-8 flex items-center justify-center">Cancel</button>
-                    <button onclick="window.generateMVGOUrl()" class="btn-primary px-8 text-sm shadow-md h-8 flex items-center justify-center"><i class="fas fa-external-link-alt mr-2"></i>Launch & Save</button>
+                    <button onclick="window.generateMVGOUrl()" class="btn-primary px-8 text-sm shadow-md h-8 flex items-center justify-center"><i class="fas fa-sync mr-2"></i>Sync & Save</button>
                 </div>
             </div>
         </div>
@@ -2778,7 +2837,6 @@
                     <button class="outlook-tool-btn h-8 w-8 flex items-center justify-center" title="Attach File" onclick="document.getElementById('email-attachment-input').click()"><i class="fas fa-paperclip"></i></button>
                 </div>
                 <div id="email-attachments-container" class="flex flex-wrap gap-2 px-4 pb-2 empty:hidden" style="background-color: var(--bg-card);"></div>
-                
                 <div id="email-modal-body" class="outlook-editor" contenteditable="true"></div>
             </div>
         </div>
