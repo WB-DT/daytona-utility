@@ -220,6 +220,13 @@
     // --- PAGINATION / SCROLL STATE ---
     let galleryDisplayLimit = 50;
     window.isScrollingMore = false;
+    window.isRenderingGallery = false;
+
+    // --- LOCK STATE (Debouncing multi-clicks) ---
+    window._isSaving = false;
+    window._isSending = false;
+    window._isClosing = false;
+    window._isSyncingMVGO = false;
 
     // --- EMAIL ATTACHMENTS STATE ---
     let pendingAttachments = [];
@@ -334,14 +341,14 @@
             }
             const companyName = currentSelectedRecord ? currentSelectedRecord.cr714_company : "";
             // 2. Build the payload including the newly fetched Owner GUID
-const payload = {
-    accountId: accountId,
-    notesPayload: notesPayload,
-    subject: `${companyName}/${accountId}`,
-    activityType: type, // New dedicated property
-    regardingGuid: currentAccountGuid || "",
-    repOwnerGuid: repOwnerGuid
-};
+            const payload = {
+                accountId: accountId,
+                notesPayload: notesPayload,
+                subject: `${companyName}/${accountId}`,
+                activityType: type, // New dedicated property
+                regardingGuid: currentAccountGuid || "",
+                repOwnerGuid: repOwnerGuid
+            };
 
             // 3. Push to Power Automate
             const response = await fetch(flowUrl, {
@@ -565,9 +572,11 @@ const payload = {
 
     window.confirmCloseAccount = async function() {
         if(!currentSelectedRecord) return;
+        if(window._isClosing) return; // Prevent double-clicks
         const reason = document.getElementById('close-reason-input').value;
         if(!reason) { window.showToast("Reason required", "error"); return; }
         
+        window._isClosing = true;
         window.showToast("Closing Account...", "processing");
         try {
             const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
@@ -583,7 +592,7 @@ const payload = {
             
             window.saveToAuditLog("Close Account", reason);
             allRecords = allRecords.filter(r => String(r.cr714_id) !== String(currentRecordId));
-            window.filterAndSortGallery();
+            window.filterAndSortGallery(true); // True to preserve scroll so we don't jump to the top!
             document.getElementById('close-account-modal').style.display = 'none';
             document.getElementById('close-reason-input').value = '';
             
@@ -594,6 +603,8 @@ const payload = {
             window.showToast("Account Closed Successfully", "success");
         } catch(e) { 
             window.addToFailedQueue("Close Account", () => window.confirmCloseAccount()); 
+        } finally {
+            window._isClosing = false;
         }
     };
 
@@ -940,39 +951,47 @@ const payload = {
 
     window.markDirty = function() { window.hasUnsavedChanges = true; }
 
+    // Ensures preferences logic doesn't fail if called elsewhere
+    window.loadGalleryPrefs = function() {
+        // Preference stub to safely allow future feature expansion without throwing undefined function errors.
+    }
+
     window.handleCustomSave = async function(autoNote = null, quiet = false) {
-        const get = (id) => document.getElementById(id).value || '';
-        const loc = get('input-location'), dm = get('input-dm'), comp = get('input-competitor'), oppType = get('opp-type-select');
-        const intro = document.getElementById('display-intro').innerText === '--' ? '' : document.getElementById('display-intro').innerText;
+        if (window._isSaving) return; // Prevent double-clicks / multi-saves
+        window._isSaving = true;
         
-        if(!quiet) { if(!oppType) { window.showToast("Opp Type is Required", "error"); document.getElementById('opp-type-select').classList.add('empty-field-warning'); return; } }
-        if(!quiet) window.showToast("Saving...", "processing");
-        
-        const metaString = `{{METADATA: Loc=${loc}|DM=${dm}|Comp=${comp}|Opp=${oppType}|Intro=${intro}}}`;
-        let note = autoNote ? autoNote : (document.getElementById('qb-notes-input').value || "").replace(QB_NOTES_TEMPLATE, '').trim();
-        const timeStamp = new Date().toLocaleString(); const userStamp = currentUserRepName || "Unknown User";
-        
-        // Detect if we need to silently clear the manager notes due to a rep pushing a new update
-        const shouldClearManagerNote = !!(note && currentSelectedRecord && currentSelectedRecord.cr714_managernotes);
-
-        let headerLabel = currentSelectedRecord ? currentSelectedRecord.primaryType : 'Unknown';
-        const newNoteEntry = note ? `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId}]\n${metaString}\n${note}\n\n------------------------------\n` : `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId}]\n${metaString}\n(Metadata Update)\n\n------------------------------\n`;
-        
-        let d = document.getElementById('follow-up-date').value;
-        let t = document.getElementById('follow-up-time').value;
-        let iso = null;
-        if (d) {
-            try {
-                let dt = new Date(`${d}T${t || '00:00'}:00`);
-                if(!isNaN(dt.getTime())) {
-                    iso = dt.toISOString();
-                }
-            } catch(e) {
-                iso = t ? `${d}T${t}:00Z` : `${d}T00:00:00Z`; // Fallback
-            }
-        }
-
         try {
+            const get = (id) => document.getElementById(id).value || '';
+            const loc = get('input-location'), dm = get('input-dm'), comp = get('input-competitor'), oppType = get('opp-type-select');
+            const intro = document.getElementById('display-intro').innerText === '--' ? '' : document.getElementById('display-intro').innerText;
+            
+            if(!quiet) { if(!oppType) { window.showToast("Opp Type is Required", "error"); document.getElementById('opp-type-select').classList.add('empty-field-warning'); return; } }
+            if(!quiet) window.showToast("Saving...", "processing");
+            
+            const metaString = `{{METADATA: Loc=${loc}|DM=${dm}|Comp=${comp}|Opp=${oppType}|Intro=${intro}}}`;
+            let note = autoNote ? autoNote : (document.getElementById('qb-notes-input').value || "").replace(QB_NOTES_TEMPLATE, '').trim();
+            const timeStamp = new Date().toLocaleString(); const userStamp = currentUserRepName || "Unknown User";
+            
+            // Detect if we need to silently clear the manager notes due to a rep pushing a new update
+            const shouldClearManagerNote = !!(note && currentSelectedRecord && currentSelectedRecord.cr714_managernotes);
+
+            let headerLabel = currentSelectedRecord ? currentSelectedRecord.primaryType : 'Unknown';
+            const newNoteEntry = note ? `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId}]\n${metaString}\n${note}\n\n------------------------------\n` : `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId}]\n${metaString}\n(Metadata Update)\n\n------------------------------\n`;
+            
+            let d = document.getElementById('follow-up-date').value;
+            let t = document.getElementById('follow-up-time').value;
+            let iso = null;
+            if (d) {
+                try {
+                    let dt = new Date(`${d}T${t || '00:00'}:00`);
+                    if(!isNaN(dt.getTime())) {
+                        iso = dt.toISOString();
+                    }
+                } catch(e) {
+                    iso = t ? `${d}T${t}:00Z` : `${d}T00:00:00Z`; // Fallback
+                }
+            }
+
             const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
             const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
             
@@ -1030,16 +1049,16 @@ const payload = {
                 }
 
                 const response = await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, { 
-    method: 'PATCH', 
-    headers: headers, 
-    body: JSON.stringify(payload) 
-});
+                    method: 'PATCH', 
+                    headers: headers, 
+                    body: JSON.stringify(payload) 
+                });
 
-if (!response.ok) {
-    const errorData = await response.json();
-    console.error(`Dataverse Error on ${src.table}:`, errorData);
-    throw new Error(`Dataverse rejected the save: ${errorData.error?.message || response.statusText}`);
-}
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    console.error(`Dataverse Error on ${src.table}:`, errorData);
+                    throw new Error(`Dataverse rejected the save: ${errorData.error?.message || response.statusText}`);
+                }
             }
 
             if (shouldClearManagerNote) {
@@ -1060,7 +1079,7 @@ if (!response.ok) {
             currentSelectedRecord.cr714_followup = iso; 
             document.querySelectorAll('.empty-field-warning').forEach(el => el.classList.remove('empty-field-warning')); 
             window.updateNotesPreview(); 
-            window.filterAndSortGallery(); 
+            window.filterAndSortGallery(true); // <--- True: Preserves scroll after save!
             window.updateMiniCounter(); 
             
             // Cleanly reset prompt flags to stop bleeding
@@ -1069,7 +1088,11 @@ if (!response.ok) {
             window.hasUnsavedChanges = false; 
             window.takeSnapshot(currentSelectedRecord);
             
-        } catch(e) { window.addToFailedQueue("Save Record", () => window.handleCustomSave(autoNote, quiet)); }
+        } catch(e) { 
+            window.addToFailedQueue("Save Record", () => window.handleCustomSave(autoNote, quiet)); 
+        } finally {
+            window._isSaving = false;
+        }
     }
 
     window.confirmClearChanges = function() {
@@ -1080,7 +1103,10 @@ if (!response.ok) {
 
     window.moveAccountToMaster = async function(actionType = 'FULL_MOVE') {
         if(!currentSelectedRecord) return;
+        if(window._isMoving) return; // double-click protection
         if(actionType === 'FULL_MOVE' && !confirm(`Are you sure you want to move Account ${currentSelectedRecord.cr714_id} to the Master Tracker?`)) return;
+        
+        window._isMoving = true;
         if(actionType === 'FULL_MOVE') window.showToast("Moving to Master Table...", "processing");
         
         try {
@@ -1106,11 +1132,15 @@ if (!response.ok) {
                     if(!deactivateRes.ok) throw new Error("Failed to deactivate origin record.");
                 }
                 allRecords = allRecords.filter(r => r.cr714_id !== currentSelectedRecord.cr714_id); 
-                window.filterAndSortGallery();
+                window.filterAndSortGallery(true); // Preserve scroll
             }
 
             if(actionType === 'FULL_MOVE') window.showToast("Account successfully moved!", "success"); 
-        } catch(e) { window.showToast(`Error moving record: ${e.message}`, "error"); }
+        } catch(e) { 
+            window.showToast(`Error moving record: ${e.message}`, "error"); 
+        } finally {
+            window._isMoving = false;
+        }
     }
 
     window.resolveInactivePrompt = function(move) {
@@ -1225,13 +1255,20 @@ if (!response.ok) {
     }
 
     window.handleModalSend = async function() {
-        if(!window.checkEmailRateLimit()) return;
+        if (window._isSending) return; // Prevent double sends
+        window._isSending = true;
+
+        if(!window.checkEmailRateLimit()) {
+            window._isSending = false;
+            return;
+        }
 
         // Verify if any files exceed 3MB limit
         const hasLargeAttachments = pendingAttachments.some(f => f.size > 3 * 1024 * 1024);
         if (hasLargeAttachments) {
             document.getElementById('large-attachment-modal').classList.remove('hidden');
             document.getElementById('large-attachment-modal').style.display = 'flex';
+            window._isSending = false;
             return; // Pause execution and await user decision
         }
 
@@ -1299,6 +1336,8 @@ if (!response.ok) {
         } catch(e) { 
             console.error("Mail Send Error:", e);
             window.showToast(`Mail send failed: ${e.message}`, "error");
+        } finally {
+            window._isSending = false;
         }
     }
 
@@ -1374,232 +1413,252 @@ if (!response.ok) {
     window.navigateMiniGallery = function(direction) { if (!window.currentFilteredList || window.currentFilteredList.length === 0) return; let idx = window.currentFilteredList.findIndex(r => String(r.cr714_id) === String(currentRecordId)); if (idx === -1) { idx = 0; } else { idx += direction; if (idx < 0) idx = window.currentFilteredList.length - 1; if (idx >= window.currentFilteredList.length) idx = 0; } window.selectRecord(window.currentFilteredList[idx].cr714_id); };
     
     window.currentFilteredList = []; 
-window.filterAndSortGallery = function() {
-        const search = window.getElementValue('search-bar')?.toLowerCase() || ''; 
-        const sort = window.getElementValue('sort-dropdown') || 'company-asc'; 
+    window.filterAndSortGallery = function(preserveScroll = false) {
+        if (window.isRenderingGallery) return;
+        window.isRenderingGallery = true;
         
-        let sentRecs = []; try { sentRecs = JSON.parse(localStorage.getItem('daytona_sent_records') || '[]'); } catch(e) { } 
-        
-        let sentHistory = []; try { sentHistory = JSON.parse(localStorage.getItem('daytona_sent_history') || '[]'); } catch(e) {}
-        const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-        const emailedLast7DaysIds = sentHistory.filter(x => x.date >= sevenDaysAgo).map(x => x.id);
-
-        let pref = {showId:true, showRep:true, showDate:true}; try { pref = JSON.parse(localStorage.getItem('daytona_gallery_prefs') || '{"showId":true,"showRep":true,"showDate":true}'); } catch(e){}
-        const isToday = (dateStr) => { if(!dateStr) return false; const d = new Date(dateStr); const today = new Date(); return d.getDate() === today.getDate() && d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear(); };
-
-        const actionChecks = Array.from(document.querySelectorAll('.filter-action-chk:checked')).map(c => c.value);
-        
-        if (!window.isScrollingMore) {
-            galleryDisplayLimit = 50;
+        try {
             const listContainer = document.getElementById('record-gallery-list');
-            if(listContainer) listContainer.scrollTop = 0;
-        }
+            let currentScroll = listContainer ? listContainer.scrollTop : 0;
+            
+            const search = window.getElementValue('search-bar')?.toLowerCase() || ''; 
+            const sort = window.getElementValue('sort-dropdown') || 'company-asc'; 
+            
+            let sentRecs = []; try { sentRecs = JSON.parse(localStorage.getItem('daytona_sent_records') || '[]'); } catch(e) { } 
+            
+            let sentHistory = []; try { sentHistory = JSON.parse(localStorage.getItem('daytona_sent_history') || '[]'); } catch(e) {}
+            const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+            const emailedLast7DaysIds = sentHistory.filter(x => x.date >= sevenDaysAgo).map(x => x.id);
 
-        let activeFilters = [];
+            let pref = {showId:true, showRep:true, showDate:true}; try { pref = JSON.parse(localStorage.getItem('daytona_gallery_prefs') || '{"showId":true,"showRep":true,"showDate":true}'); } catch(e){}
+            const isToday = (dateStr) => { if(!dateStr) return false; const d = new Date(dateStr); const today = new Date(); return d.getDate() === today.getDate() && d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear(); };
 
-        let filtered = allRecords.filter(r => {
-            if (!r.cr714_id) return false; 
+            const actionChecks = Array.from(document.querySelectorAll('.filter-action-chk:checked')).map(c => c.value);
             
-            const isSentToday = sentRecs.includes(String(r.cr714_id));
-            
-            if(document.getElementById('filter-sent-only').checked && !isSentToday) return false; 
-            if(document.getElementById('filter-hidesent').checked && isSentToday) return false; 
-            if(document.getElementById('filter-emailed-7d').checked && !emailedLast7DaysIds.includes(String(r.cr714_id))) return false;
-            if(document.getElementById('filter-multilist') && document.getElementById('filter-multilist').checked && !duplicateRecordIds.has(String(r.cr714_id))) return false;
-            if(document.getElementById('filter-florida').checked) { const fAddr = r.cr714_billingaddress || ''; if(!/\b(fl|florida)\b/i.test(fAddr)) return false; }
-            if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) { if (!r.cr714_managernotes || r.cr714_managernotes.trim() === '') return false; }
-            
-            if(document.getElementById('filter-has-intro').checked) { 
-                let hasIntro = false;
-                if (r.cr714_intro && String(r.cr714_intro).trim() !== '') hasIntro = true;
-                if (!hasIntro) {
-                    for (let src of r.sources) {
-                        let parsedNotes = window.parseNotes(src.rawNotes || '');
-                        if (parsedNotes.length > 0 && parsedNotes[0].metaIntro && String(parsedNotes[0].metaIntro).trim() !== '') { hasIntro = true; break; }
+            // Core Bug Fix: Conditionally protect display limit and scroll resets based on flag
+            if (!preserveScroll && !window.isScrollingMore) {
+                galleryDisplayLimit = 50;
+                currentScroll = 0;
+            }
+
+            let activeFilters = [];
+
+            let filtered = allRecords.filter(r => {
+                if (!r.cr714_id) return false; 
+                
+                const isSentToday = sentRecs.includes(String(r.cr714_id));
+                
+                if(document.getElementById('filter-sent-only').checked && !isSentToday) return false; 
+                if(document.getElementById('filter-hidesent').checked && isSentToday) return false; 
+                if(document.getElementById('filter-emailed-7d').checked && !emailedLast7DaysIds.includes(String(r.cr714_id))) return false;
+                if(document.getElementById('filter-multilist') && document.getElementById('filter-multilist').checked && !duplicateRecordIds.has(String(r.cr714_id))) return false;
+                if(document.getElementById('filter-florida').checked) { const fAddr = r.cr714_billingaddress || ''; if(!/\b(fl|florida)\b/i.test(fAddr)) return false; }
+                if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) { if (!r.cr714_managernotes || r.cr714_managernotes.trim() === '') return false; }
+                
+                if(document.getElementById('filter-has-intro').checked) { 
+                    let hasIntro = false;
+                    if (r.cr714_intro && String(r.cr714_intro).trim() !== '') hasIntro = true;
+                    if (!hasIntro) {
+                        for (let src of r.sources) {
+                            let parsedNotes = window.parseNotes(src.rawNotes || '');
+                            if (parsedNotes.length > 0 && parsedNotes[0].metaIntro && String(parsedNotes[0].metaIntro).trim() !== '') { hasIntro = true; break; }
+                        }
                     }
+                    if (!hasIntro) return false; 
                 }
-                if (!hasIntro) return false; 
-            }
+                
+                if(actionChecks.length > 0 && (!r.cr714_action || !actionChecks.includes(r.cr714_action))) return false; 
+                
+                if(document.getElementById('filter-followup').checked && !r.cr714_followup) return false; 
+                if(document.getElementById('filter-nonotes').checked && (r.cr714_qbnotes || '').trim() !== '') return false;
+                if(document.getElementById('filter-norecent').checked) { const notes = window.parseNotes(r.cr714_qbnotes || ''); if (notes.length > 0) { const lastDate = new Date(notes[0].date); if (!isNaN(lastDate) && Math.ceil(Math.abs(new Date() - lastDate)/(1000*60*60*24)) < 30) return false; } }
+                if(search) { const values = Object.values(r).join(' ').toLowerCase(); if(!values.includes(search)) return false; }
+                return true;
+            });
             
-            if(actionChecks.length > 0 && (!r.cr714_action || !actionChecks.includes(r.cr714_action))) return false; 
+            filtered.sort((a, b) => {
+                const get = (item, key) => (item[key] || '').toString().toLowerCase();
+                if(sort.includes('company')) return sort === 'company-asc' ? get(a,'cr714_company').localeCompare(get(b,'cr714_company')) : get(b,'cr714_company').localeCompare(get(a,'cr714_company'));
+                if(sort.includes('followup')) { const da = a.cr714_followup ? new Date(a.cr714_followup) : new Date(sort === 'followup-asc' ? 8640000000000000 : -8640000000000000); const db = b.cr714_followup ? new Date(b.cr714_followup) : new Date(sort === 'followup-asc' ? 8640000000000000 : -8640000000000000); if(isNaN(da)) return sort === 'followup-asc' ? 1 : -1; if(isNaN(db)) return sort === 'followup-asc' ? -1 : 1; return sort === 'followup-asc' ? da - db : db - da; }
+                if(sort.includes('rep')) return sort === 'rep-asc' ? get(a,'cr714_rep').localeCompare(get(b,'cr714_rep')) : get(b,'cr714_rep').localeCompare(get(a,'cr714_rep')); return 0;
+            });
+
+            if(search) activeFilters.push(`matching "${search}"`);
+            if(actionChecks.length > 0) activeFilters.push(`in action(s): ${actionChecks.join(', ')}`);
+            if(document.getElementById('filter-multilist').checked) activeFilters.push(`on multiple lists`);
+            if(document.getElementById('filter-followup').checked) activeFilters.push(`with scheduled follow-ups`);
+            if(document.getElementById('filter-nonotes').checked) activeFilters.push(`with empty notes`);
+            if(document.getElementById('filter-norecent').checked) activeFilters.push(`untouched for 30+ days`);
+            if(document.getElementById('filter-sent-only').checked) activeFilters.push(`emailed today`);
+            if(document.getElementById('filter-hidesent').checked) activeFilters.push(`NOT emailed today`);
+            if(document.getElementById('filter-emailed-7d').checked) activeFilters.push(`recent emails (7d)`);
+            if(document.getElementById('filter-has-intro').checked) activeFilters.push(`with an intro`);
+            if(document.getElementById('filter-florida').checked) activeFilters.push(`located in Florida`);
+            if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) activeFilters.push(`with manager notes`);
+
+            const sortMap = { 'company-asc': 'Company (A-Z)', 'company-desc': 'Company (Z-A)', 'followup-asc': 'Follow Up (Oldest)', 'followup-desc': 'Follow Up (Newest)', 'rep-asc': 'Rep (A-Z)' };
+            let sortText = sortMap[sort] || 'Company (A-Z)';
+
+            let legendContainer = document.getElementById('filter-legend-container');
+            let legendText = document.getElementById('filter-legend-text');
+            const clearBtn = document.getElementById('clear-filters-btn');
             
-            if(document.getElementById('filter-followup').checked && !r.cr714_followup) return false; 
-            if(document.getElementById('filter-nonotes').checked && (r.cr714_qbnotes || '').trim() !== '') return false;
-            if(document.getElementById('filter-norecent').checked) { const notes = window.parseNotes(r.cr714_qbnotes || ''); if (notes.length > 0) { const lastDate = new Date(notes[0].date); if (!isNaN(lastDate) && Math.ceil(Math.abs(new Date() - lastDate)/(1000*60*60*24)) < 30) return false; } }
-            if(search) { const values = Object.values(r).join(' ').toLowerCase(); if(!values.includes(search)) return false; }
-            return true;
-        });
-        
-        filtered.sort((a, b) => {
-            const get = (item, key) => (item[key] || '').toString().toLowerCase();
-            if(sort.includes('company')) return sort === 'company-asc' ? get(a,'cr714_company').localeCompare(get(b,'cr714_company')) : get(b,'cr714_company').localeCompare(get(a,'cr714_company'));
-            if(sort.includes('followup')) { const da = a.cr714_followup ? new Date(a.cr714_followup) : new Date(sort === 'followup-asc' ? 8640000000000000 : -8640000000000000); const db = b.cr714_followup ? new Date(b.cr714_followup) : new Date(sort === 'followup-asc' ? 8640000000000000 : -8640000000000000); if(isNaN(da)) return sort === 'followup-asc' ? 1 : -1; if(isNaN(db)) return sort === 'followup-asc' ? -1 : 1; return sort === 'followup-asc' ? da - db : db - da; }
-            if(sort.includes('rep')) return sort === 'rep-asc' ? get(a,'cr714_rep').localeCompare(get(b,'cr714_rep')) : get(b,'cr714_rep').localeCompare(get(a,'cr714_rep')); return 0;
-        });
-
-        if(search) activeFilters.push(`matching "${search}"`);
-        if(actionChecks.length > 0) activeFilters.push(`in action(s): ${actionChecks.join(', ')}`);
-        if(document.getElementById('filter-multilist').checked) activeFilters.push(`on multiple lists`);
-        if(document.getElementById('filter-followup').checked) activeFilters.push(`with scheduled follow-ups`);
-        if(document.getElementById('filter-nonotes').checked) activeFilters.push(`with empty notes`);
-        if(document.getElementById('filter-norecent').checked) activeFilters.push(`untouched for 30+ days`);
-        if(document.getElementById('filter-sent-only').checked) activeFilters.push(`emailed today`);
-        if(document.getElementById('filter-hidesent').checked) activeFilters.push(`NOT emailed today`);
-        if(document.getElementById('filter-emailed-7d').checked) activeFilters.push(`recent emails (7d)`);
-        if(document.getElementById('filter-has-intro').checked) activeFilters.push(`with an intro`);
-        if(document.getElementById('filter-florida').checked) activeFilters.push(`located in Florida`);
-        if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) activeFilters.push(`with manager notes`);
-
-        const sortMap = { 'company-asc': 'Company (A-Z)', 'company-desc': 'Company (Z-A)', 'followup-asc': 'Follow Up (Oldest)', 'followup-desc': 'Follow Up (Newest)', 'rep-asc': 'Rep (A-Z)' };
-        let sortText = sortMap[sort] || 'Company (A-Z)';
-
-        let legendContainer = document.getElementById('filter-legend-container');
-        let legendText = document.getElementById('filter-legend-text');
-        
-const clearBtn = document.getElementById('clear-filters-btn');
-        
-        if (activeFilters.length > 0) {
-            legendText.innerHTML = `Showing <b>${filtered.length}</b> account(s) sorted by <b>${sortText}</b>. Filtering to only show accounts <b>${activeFilters.join('</b> and <b>')}</b>.`;
-            if(legendContainer) legendContainer.classList.remove('hidden');
-            if(clearBtn) { clearBtn.classList.remove('hidden'); clearBtn.classList.add('flex'); }
-        } else {
-            if(legendContainer) legendContainer.classList.add('hidden');
-            if(clearBtn) { clearBtn.classList.add('hidden'); clearBtn.classList.remove('flex'); }
-        }
-
-        window.currentFilteredList = filtered; document.getElementById('mini-total-count').innerText = filtered.length; window.updateMiniCounter();
-        
-        const list = document.getElementById('record-gallery-list'); list.innerHTML = '';
-        const statTotal = document.getElementById('stat-total'); if(statTotal) statTotal.textContent = allRecords.length;
-        
-        const totalFiltered = filtered.length;
-        const displayedCount = Math.min(galleryDisplayLimit, totalFiltered);
-        
-        const viewStat = document.getElementById('stat-filtered'); 
-        if(viewStat) viewStat.textContent = `${totalFiltered}`;
-        
-        const visibleCountEl = document.getElementById('gallery-visible-count');
-        if (visibleCountEl) visibleCountEl.textContent = `(${displayedCount} of ${totalFiltered} visible)`;
-        
-        let mgrCount = allRecords.filter(r => r.cr714_managernotes && r.cr714_managernotes.trim() !== '').length;
-        let bellContainer = document.getElementById('mgr-notes-bell-container');
-        if (bellContainer) {
-            if (mgrCount > 0) { bellContainer.classList.remove('hidden'); document.getElementById('mgr-notes-count').innerText = mgrCount; } 
-            else { bellContainer.classList.add('hidden'); }
-        }
-
-        if(totalFiltered === 0) { list.innerHTML = '<div class="text-center p-4 text-xs italic">No records found.</div>'; return; }
-        
-        const itemsToDisplay = filtered.slice(0, galleryDisplayLimit);
-
-        itemsToDisplay.forEach(r => {
-            const isSent = sentRecs.includes(String(r.cr714_id)); 
-            const isDuplicate = duplicateRecordIds.has(String(r.cr714_id));
-            const hasMgrNote = (r.cr714_managernotes && String(r.cr714_managernotes).trim() !== '');
-
-            let hasIntro = false;
-            let combinedIntro = r.cr714_intro;
-            if (!combinedIntro) {
-                for (let src of r.sources) {
-                    let p = window.parseNotes(src.rawNotes || '');
-                    if(p.length > 0 && p[0].metaIntro) { combinedIntro = p[0].metaIntro; break; }
-                }
-            }
-            let displayIntroStr = '';
-            if (combinedIntro && String(combinedIntro).trim() !== '') {
-                hasIntro = true;
-                let ci = String(combinedIntro).trim();
-                displayIntroStr = (ci.toLowerCase() === 'yes' || ci.toLowerCase() === 'y') ? 'Intro' : ci;
+            if (activeFilters.length > 0) {
+                legendText.innerHTML = `Showing <b>${filtered.length}</b> account(s) sorted by <b>${sortText}</b>. Filtering to only show accounts <b>${activeFilters.join('</b> and <b>')}</b>.`;
+                if(legendContainer) legendContainer.classList.remove('hidden');
+                if(clearBtn) { clearBtn.classList.remove('hidden'); clearBtn.classList.add('flex'); }
+            } else {
+                if(legendContainer) legendContainer.classList.add('hidden');
+                if(clearBtn) { clearBtn.classList.add('hidden'); clearBtn.classList.remove('flex'); }
             }
 
-            let pulseClass = '';
-            if (hasMgrNote) {
-                pulseClass = 'pulse-red';
-            } else if (isDuplicate) {
-                pulseClass = 'pulse-yellow';
-            } else if (hasIntro) {
-                pulseClass = 'pulse-green';
-            }
-
-            const div = document.createElement('div'); 
-            div.className = `gallery-item flex flex-col ${currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${pulseClass}`; 
+            window.currentFilteredList = filtered; document.getElementById('mini-total-count').innerText = filtered.length; window.updateMiniCounter();
             
-            if(hasMgrNote && pulseClass === 'pulse-red') div.title = "Manager Note Present";
-            else if(isDuplicate && pulseClass === 'pulse-yellow') div.title = "Account present in multiple lists";
-            else if(hasIntro && pulseClass === 'pulse-green') div.title = "Intro Account";
-
-            div.onclick = () => window.selectRecord(r.cr714_id);
+            const list = document.getElementById('record-gallery-list'); list.innerHTML = '';
+            const statTotal = document.getElementById('stat-total'); if(statTotal) statTotal.textContent = allRecords.length;
             
-            let emailHtml = '';
-            let emailDate = r.cr714_actionemailsent || r.cr714_emailsenttimestamp; 
-            if (isSent) {
-                emailHtml = `<span class="text-[9px] text-status-success font-bold">Email Date: Today</span>`;
-            } else if (emailDate) {
-                let eDate = new Date(emailDate);
-                let daysOld = (new Date() - eDate) / (1000*60*60*24);
-                let eDateStr = eDate.toLocaleDateString(undefined, {month:'short', day:'numeric'});
-                if (daysOld <= 30) {
-                    emailHtml = `<span class="text-[9px] text-status-success font-bold">Email Date: ${eDateStr}</span>`;
-                } else {
-                    emailHtml = `<span class="text-[9px] text-status-danger font-bold">Email Date: ${eDateStr}</span>`;
-                }
+            const totalFiltered = filtered.length;
+            const displayedCount = Math.min(galleryDisplayLimit, totalFiltered);
+            
+            const viewStat = document.getElementById('stat-filtered'); 
+            if(viewStat) viewStat.textContent = `${totalFiltered}`;
+            
+            const visibleCountEl = document.getElementById('gallery-visible-count');
+            if (visibleCountEl) visibleCountEl.textContent = `(${displayedCount} of ${totalFiltered} visible)`;
+            
+            let mgrCount = allRecords.filter(r => r.cr714_managernotes && r.cr714_managernotes.trim() !== '').length;
+            let bellContainer = document.getElementById('mgr-notes-bell-container');
+            if (bellContainer) {
+                if (mgrCount > 0) { bellContainer.classList.remove('hidden'); document.getElementById('mgr-notes-count').innerText = mgrCount; } 
+                else { bellContainer.classList.add('hidden'); }
             }
 
-            let followUpHtml = '';
-            if(pref.showDate && r.cr714_followup) { 
-                const parts = r.cr714_followup.substring(0, 10).split('-'); 
-                if(parts.length === 3) { 
-                    const d = new Date(parts[0], parts[1]-1, parts[2]); 
-                    let dStr = d.toLocaleDateString(undefined, {month:'short', day:'numeric'});
-                    followUpHtml = `<span class="text-[9px] text-status-info font-bold">Follow Up Date: ${dStr}</span>`; 
-                } 
-            }
-            
-            let sourcesHtml = r.sources.map(s => {
-                let abbr = s.type === 'AM' ? 'AM' : (s.type === 'Cadence' ? 'CAD' : (s.type === 'LB' ? 'LB' : 'PSP'));
-                let badgeClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : (s.type === 'LB' ? 'badge-lb' : 'badge-psp'));
-                return `<span class="px-1.5 py-0.5 rounded border text-[9px] font-bold ${badgeClass}">${abbr}</span>`;
-            }).join('');
+            if(totalFiltered === 0) { list.innerHTML = '<div class="text-center p-4 text-xs italic">No records found.</div>'; }
+            else {
+                const itemsToDisplay = filtered.slice(0, galleryDisplayLimit);
 
-            // Added safe layout classes to prevent vertical blowout (min-w-0, truncate, flex-shrink-0)
-            div.innerHTML = `
-                <div class="flex justify-between items-start w-full mb-1 gap-2">
-                    <div class="flex items-center gap-1 min-w-0">
-                        ${pref.showId ? `<span class="gallery-item-id truncate">${r.cr714_id}</span>` : ''}
-                        ${hasIntro ? `<i class="fas fa-handshake text-status-warning text-sm flex-shrink-0" title="Intro: ${window.escapeHTML(displayIntroStr)}"></i>` : ''}
-                    </div>
-                    <div class="flex flex-col items-end text-[10px] flex-shrink-0 whitespace-nowrap">
-                        ${followUpHtml}
-                        ${emailHtml}
-                    </div>
-                </div>
-                <div class="gallery-item-company truncate font-bold" title="${window.escapeHTML(r.cr714_company)}">
-                    ${window.escapeHTML(r.cr714_company)}
-                </div>
-                <div class="flex justify-between items-end mt-1 gap-2">
-                    <div class="text-[9px] text-muted truncate">
-                        ${pref.showRep ? window.escapeHTML(r.cr714_rep) : ''}
-                    </div>
-                    <div class="flex flex-col items-end gap-1 flex-shrink-0 max-w-[70%]">
-                        <div class="flex flex-wrap justify-end gap-1">
-                            ${sourcesHtml}
+                itemsToDisplay.forEach(r => {
+                    const isSent = sentRecs.includes(String(r.cr714_id)); 
+                    const isDuplicate = duplicateRecordIds.has(String(r.cr714_id));
+                    const hasMgrNote = (r.cr714_managernotes && String(r.cr714_managernotes).trim() !== '');
+
+                    let hasIntro = false;
+                    let combinedIntro = r.cr714_intro;
+                    if (!combinedIntro) {
+                        for (let src of r.sources) {
+                            let p = window.parseNotes(src.rawNotes || '');
+                            if(p.length > 0 && p[0].metaIntro) { combinedIntro = p[0].metaIntro; break; }
+                        }
+                    }
+                    let displayIntroStr = '';
+                    if (combinedIntro && String(combinedIntro).trim() !== '') {
+                        hasIntro = true;
+                        let ci = String(combinedIntro).trim();
+                        displayIntroStr = (ci.toLowerCase() === 'yes' || ci.toLowerCase() === 'y') ? 'Intro' : ci;
+                    }
+
+                    let pulseClass = '';
+                    if (hasMgrNote) {
+                        pulseClass = 'pulse-red';
+                    } else if (isDuplicate) {
+                        pulseClass = 'pulse-yellow';
+                    } else if (hasIntro) {
+                        pulseClass = 'pulse-green';
+                    }
+
+                    const div = document.createElement('div'); 
+                    div.className = `gallery-item flex flex-col ${currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${pulseClass}`; 
+                    
+                    if(hasMgrNote && pulseClass === 'pulse-red') div.title = "Manager Note Present";
+                    else if(isDuplicate && pulseClass === 'pulse-yellow') div.title = "Account present in multiple lists";
+                    else if(hasIntro && pulseClass === 'pulse-green') div.title = "Intro Account";
+
+                    div.onclick = () => window.selectRecord(r.cr714_id);
+                    
+                    let emailHtml = '';
+                    let emailDate = r.cr714_actionemailsent || r.cr714_emailsenttimestamp; 
+                    if (isSent) {
+                        emailHtml = `<span class="text-[9px] text-status-success font-bold">Email Date: Today</span>`;
+                    } else if (emailDate) {
+                        let eDate = new Date(emailDate);
+                        let daysOld = (new Date() - eDate) / (1000*60*60*24);
+                        let eDateStr = eDate.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+                        if (daysOld <= 30) {
+                            emailHtml = `<span class="text-[9px] text-status-success font-bold">Email Date: ${eDateStr}</span>`;
+                        } else {
+                            emailHtml = `<span class="text-[9px] text-status-danger font-bold">Email Date: ${eDateStr}</span>`;
+                        }
+                    }
+
+                    let followUpHtml = '';
+                    if(pref.showDate && r.cr714_followup) { 
+                        const parts = r.cr714_followup.substring(0, 10).split('-'); 
+                        if(parts.length === 3) { 
+                            const d = new Date(parts[0], parts[1]-1, parts[2]); 
+                            let dStr = d.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+                            followUpHtml = `<span class="text-[9px] text-status-info font-bold">Follow Up Date: ${dStr}</span>`; 
+                        } 
+                    }
+                    
+                    let sourcesHtml = r.sources.map(s => {
+                        let abbr = s.type === 'AM' ? 'AM' : (s.type === 'Cadence' ? 'CAD' : (s.type === 'LB' ? 'LB' : 'PSP'));
+                        let badgeClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : (s.type === 'LB' ? 'badge-lb' : 'badge-psp'));
+                        return `<span class="px-1.5 py-0.5 rounded border text-[9px] font-bold ${badgeClass}">${abbr}</span>`;
+                    }).join('');
+
+                    div.innerHTML = `
+                        <div class="flex justify-between items-start w-full mb-1 gap-2">
+                            <div class="flex items-center gap-1 min-w-0">
+                                ${pref.showId ? `<span class="gallery-item-id truncate">${r.cr714_id}</span>` : ''}
+                                ${hasIntro ? `<i class="fas fa-handshake text-status-warning text-sm flex-shrink-0" title="Intro: ${window.escapeHTML(displayIntroStr)}"></i>` : ''}
+                            </div>
+                            <div class="flex flex-col items-end text-[10px] flex-shrink-0 whitespace-nowrap">
+                                ${followUpHtml}
+                                ${emailHtml}
+                            </div>
                         </div>
-                        ${r.cr714_action ? `<div class="text-[9px] font-bold badge-action border px-1 rounded max-w-full truncate text-right" title="${window.escapeHTML(r.cr714_action)}">${window.escapeHTML(r.cr714_action)}</div>` : ''}
-                    </div>
-                </div>
-            `;
-            list.appendChild(div);
-        });
+                        <div class="gallery-item-company truncate font-bold" title="${window.escapeHTML(r.cr714_company)}">
+                            ${window.escapeHTML(r.cr714_company)}
+                        </div>
+                        <div class="flex justify-between items-end mt-1 gap-2">
+                            <div class="text-[9px] text-muted truncate">
+                                ${pref.showRep ? window.escapeHTML(r.cr714_rep) : ''}
+                            </div>
+                            <div class="flex flex-col items-end gap-1 flex-shrink-0 max-w-[70%]">
+                                <div class="flex flex-wrap justify-end gap-1">
+                                    ${sourcesHtml}
+                                </div>
+                                ${r.cr714_action ? `<div class="text-[9px] font-bold badge-action border px-1 rounded max-w-full truncate text-right" title="${window.escapeHTML(r.cr714_action)}">${window.escapeHTML(r.cr714_action)}</div>` : ''}
+                            </div>
+                        </div>
+                    `;
+                    list.appendChild(div);
+                });
 
-        // Add "Show More" indicator if there are more records
-        if (galleryDisplayLimit < totalFiltered) {
-            const moreDiv = document.createElement('div');
-            moreDiv.className = "text-center p-4 text-[10px] text-muted animate-pulse mt-2 border-t border-dashed";
-            moreDiv.innerHTML = `<i class="fas fa-arrow-down mr-1"></i> Scroll for more (${totalFiltered - galleryDisplayLimit} remaining)`;
-            list.appendChild(moreDiv);
+                // Add "Show More" indicator if there are more records
+                if (galleryDisplayLimit < totalFiltered) {
+                    const moreDiv = document.createElement('div');
+                    moreDiv.className = "text-center p-4 text-[10px] text-muted animate-pulse mt-2 border-t border-dashed";
+                    moreDiv.innerHTML = `<i class="fas fa-arrow-down mr-1"></i> Scroll for more (${totalFiltered - galleryDisplayLimit} remaining)`;
+                    list.appendChild(moreDiv);
+                }
+            }
+
+            // Core Bug Fix: Safely apply the scrollbar state post-render
+            if (preserveScroll || window.isScrollingMore) {
+                if (listContainer) {
+                    requestAnimationFrame(() => {
+                        listContainer.scrollTop = currentScroll;
+                    });
+                }
+            } else {
+                if (listContainer) listContainer.scrollTop = 0;
+            }
+
+        } finally {
+            window.isScrollingMore = false;
+            window.isRenderingGallery = false;
         }
-        
-        window.isScrollingMore = false;
     }
 
     window.selectRecord = function(id) { 
@@ -1618,7 +1677,10 @@ const clearBtn = document.getElementById('clear-filters-btn');
         window.hasUnsavedChanges = false;
         currentRecordId = String(id); 
         currentSelectedRecord = allRecords.find(r => String(r.cr714_id) === currentRecordId); 
-        window.filterAndSortGallery(); window.updateMiniCounter();
+        
+        // Preserve scroll directly when selecting items so we don't snap back to top
+        window.filterAndSortGallery(true); 
+        window.updateMiniCounter();
         
         if(currentSelectedRecord) { 
             window.populateForm(currentSelectedRecord); 
@@ -2104,45 +2166,52 @@ const clearBtn = document.getElementById('clear-filters-btn');
     }
 
     window.generateMVGOUrl = async function() {
-        const check = (id, text) => document.getElementById(id).checked ? (text + ", ") : "";
-        let reqAction = check('mvgo-check-save', "Save/Trouble") + check('mvgo-check-loss', "Loss/Winback") + check('mvgo-check-new', "New Buyer") + check('mvgo-check-buying', "Buying");
-        let catOpp = check('mvgo-cat-water', "Water") + check('mvgo-cat-jan', "Janitorial") + check('mvgo-cat-hosp', "Hospitality") + check('mvgo-cat-food', "Food") + check('mvgo-cat-break', "Breakroom") + check('mvgo-cat-ship', "Shipping") + check('mvgo-cat-furn', "Furniture") + check('mvgo-cat-office', "Office") + check('mvgo-cat-auto', "Auto") + check('mvgo-cat-print', "Print");
-        let concern = check('mvgo-con-pricing', "Pricing") + check('mvgo-con-service', "Service") + check('mvgo-con-dm', "DM");
-        
-        const userNotes = document.getElementById('mvgo-notes').value || '';
-        const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
-        const contactName = document.getElementById('mvgo-contact')?.value || '';
-        const phoneStr = document.getElementById('mvgo-phone')?.value || '';
-        const addrStr = document.getElementById('mvgo-address')?.value || '';
+        if (window._isSyncingMVGO) return; // Prevent double-clicks
+        window._isSyncingMVGO = true;
 
-        // Clean trailing commas
-        reqAction = reqAction.replace(/, $/, '');
-        catOpp = catOpp.replace(/, $/, '');
-        concern = concern.replace(/, $/, '');
+        try {
+            const check = (id, text) => document.getElementById(id).checked ? (text + ", ") : "";
+            let reqAction = check('mvgo-check-save', "Save/Trouble") + check('mvgo-check-loss', "Loss/Winback") + check('mvgo-check-new', "New Buyer") + check('mvgo-check-buying', "Buying");
+            let catOpp = check('mvgo-cat-water', "Water") + check('mvgo-cat-jan', "Janitorial") + check('mvgo-cat-hosp', "Hospitality") + check('mvgo-cat-food', "Food") + check('mvgo-cat-break', "Breakroom") + check('mvgo-cat-ship', "Shipping") + check('mvgo-cat-furn', "Furniture") + check('mvgo-cat-office', "Office") + check('mvgo-cat-auto', "Auto") + check('mvgo-cat-print', "Print");
+            let concern = check('mvgo-con-pricing', "Pricing") + check('mvgo-con-service', "Service") + check('mvgo-con-dm', "DM");
+            
+            const userNotes = document.getElementById('mvgo-notes').value || '';
+            const today = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+            const contactName = document.getElementById('mvgo-contact')?.value || '';
+            const phoneStr = document.getElementById('mvgo-phone')?.value || '';
+            const addrStr = document.getElementById('mvgo-address')?.value || '';
 
-        // Build the multiline string and correctly encode the entire thing to ensure it passes into MVGO
-        const details = `Action Plan --- Created On: ${today}\n\nRequested Action(s):\n${reqAction}\n\nCategory Opportunities:\n${catOpp}\n\nConcern(s):\n${concern}\nOther: \n\nContact Info:\nName: ${contactName}\nPhone Number: ${phoneStr}\nAddress:\n${addrStr}\n\nInside Sales Note: \n${userNotes}`;
-        
-        // SILENT PUSH TO MASONVILLE
-        window.showToast("Syncing with Masonville...", "processing");
-        await window.pushToMasonvilleSilent(currentRecordId, details, "ISReq");
-        
-        // Compact note for history
-        const historyStamp = `[MVGO SYNCED] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
-        const qbInput = document.getElementById('qb-notes-input');
-        
-        // Push the MVGO note back into the main note box along with the MVGO tag and await save
-        qbInput.value = historyStamp + (userNotes ? ` | Note: ${userNotes}` : '') + (qbInput.value ? '\n\n' + qbInput.value : '');
-        
-        // AWAIT the save so it fully processes the note before wiping it
-        await window.handleCustomSave(null, true); 
-        
-        // Clear immediately after saving to reset UI correctly
-        qbInput.value = "";
-        window.markDirty();
-        
-        document.getElementById('mvgo-modal').style.display = 'none'; 
-        window.showToast("MVGO Synced & Note Saved", "success");
+            // Clean trailing commas
+            reqAction = reqAction.replace(/, $/, '');
+            catOpp = catOpp.replace(/, $/, '');
+            concern = concern.replace(/, $/, '');
+
+            // Build the multiline string and correctly encode the entire thing to ensure it passes into MVGO
+            const details = `Action Plan --- Created On: ${today}\n\nRequested Action(s):\n${reqAction}\n\nCategory Opportunities:\n${catOpp}\n\nConcern(s):\n${concern}\nOther: \n\nContact Info:\nName: ${contactName}\nPhone Number: ${phoneStr}\nAddress:\n${addrStr}\n\nInside Sales Note: \n${userNotes}`;
+            
+            // SILENT PUSH TO MASONVILLE
+            window.showToast("Syncing with Masonville...", "processing");
+            await window.pushToMasonvilleSilent(currentRecordId, details, "ISReq");
+            
+            // Compact note for history
+            const historyStamp = `[MVGO SYNCED] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
+            const qbInput = document.getElementById('qb-notes-input');
+            
+            // Push the MVGO note back into the main note box along with the MVGO tag and await save
+            qbInput.value = historyStamp + (userNotes ? ` | Note: ${userNotes}` : '') + (qbInput.value ? '\n\n' + qbInput.value : '');
+            
+            // AWAIT the save so it fully processes the note before wiping it
+            await window.handleCustomSave(null, true); 
+            
+            // Clear immediately after saving to reset UI correctly
+            qbInput.value = "";
+            window.markDirty();
+            
+            document.getElementById('mvgo-modal').style.display = 'none'; 
+            window.showToast("MVGO Synced & Note Saved", "success");
+        } finally {
+            window._isSyncingMVGO = false;
+        }
     }
 
     window.openCloseAccountModal = function() { if(currentRecordId) { document.getElementById('close-account-modal').classList.remove('hidden'); document.getElementById('close-account-modal').style.display='flex'; } }
@@ -2362,17 +2431,17 @@ const clearBtn = document.getElementById('clear-filters-btn');
             resizer.addEventListener('mousedown', (e) => onDown(e.clientX)); document.addEventListener('mousemove', (e) => onMove(e.clientX)); document.addEventListener('mouseup', onUp);
         }
         
-        // SCROLL LISTENER FOR PAGINATION
+        // SCROLL LISTENER FOR PAGINATION - FIXED (Debounce included)
         const galleryList = document.getElementById('record-gallery-list');
         if (galleryList) {
             galleryList.addEventListener('scroll', () => {
+                if (window.isRenderingGallery) return; // Wait until current rendering finishes to prevent interference
                 if (galleryList.scrollTop + galleryList.clientHeight >= galleryList.scrollHeight - 50) {
                     if (galleryDisplayLimit < window.currentFilteredList.length) {
-                        const currentPos = galleryList.scrollTop;
-                        galleryDisplayLimit += 50;
+                        if (window.isScrollingMore) return; // Prevent double trigger
                         window.isScrollingMore = true;
-                        window.filterAndSortGallery();
-                        galleryList.scrollTop = currentPos;
+                        galleryDisplayLimit += 50;
+                        window.filterAndSortGallery(true); // Preserve scroll via flag
                     }
                 }
             });
@@ -2380,30 +2449,30 @@ const clearBtn = document.getElementById('clear-filters-btn');
     });
 
     window.clearAllFilters = function() {
-    // 1. Clear the search bar
-    const searchBar = document.getElementById('search-bar');
-    if (searchBar) searchBar.value = '';
+        // 1. Clear the search bar
+        const searchBar = document.getElementById('search-bar');
+        if (searchBar) searchBar.value = '';
 
-    // 2. Uncheck all standard filter pills
-    const filterIds = [
-        'filter-multilist', 'filter-followup', 'filter-nonotes', 
-        'filter-norecent', 'filter-sent-only', 'filter-hidesent', 
-        'filter-emailed-7d', 'filter-has-intro', 'filter-florida', 
-        'filter-mgrnotes'
-    ];
-    filterIds.forEach(id => {
-        const chk = document.getElementById(id);
-        if (chk) chk.checked = false;
-    });
+        // 2. Uncheck all standard filter pills
+        const filterIds = [
+            'filter-multilist', 'filter-followup', 'filter-nonotes', 
+            'filter-norecent', 'filter-sent-only', 'filter-hidesent', 
+            'filter-emailed-7d', 'filter-has-intro', 'filter-florida', 
+            'filter-mgrnotes'
+        ];
+        filterIds.forEach(id => {
+            const chk = document.getElementById(id);
+            if (chk) chk.checked = false;
+        });
 
-    // 3. Uncheck all dynamic Action Target dropdown items
-    document.querySelectorAll('.filter-action-chk').forEach(chk => {
-        chk.checked = false;
-    });
+        // 3. Uncheck all dynamic Action Target dropdown items
+        document.querySelectorAll('.filter-action-chk').forEach(chk => {
+            chk.checked = false;
+        });
 
-    // 4. Run the filter function to reset the view
-    window.filterAndSortGallery();
-};
+        // 4. Run the filter function to reset the view
+        window.filterAndSortGallery();
+    };
     
 </script>
 </head>
@@ -2528,13 +2597,13 @@ const clearBtn = document.getElementById('clear-filters-btn');
             
         </div>
         
-<div id="filter-legend-container" class="w-full flex items-center text-[11px] text-muted px-4 py-1.5 border-t bg-black/5 hidden" style="border-color: var(--border-color);">
-    <button onclick="window.clearAllFilters()" id="clear-filters-btn" class="hidden items-center gap-1 px-2 py-1 rounded border text-[10px] font-bold cursor-pointer transition-all hover:bg-red-50 text-red-600 border-red-200 bg-white mr-3 shadow-sm">
-        <i class="fas fa-times"></i> Clear Filters
-    </button> 
-    <i class="fas fa-info-circle mr-1 text-primary"></i> 
-    <span id="filter-legend-text"></span>
-</div>
+        <div id="filter-legend-container" class="w-full flex items-center text-[11px] text-muted px-4 py-1.5 border-t bg-black/5 hidden" style="border-color: var(--border-color);">
+            <button onclick="window.clearAllFilters()" id="clear-filters-btn" class="hidden items-center gap-1 px-2 py-1 rounded border text-[10px] font-bold cursor-pointer transition-all hover:bg-red-50 text-red-600 border-red-200 bg-white mr-3 shadow-sm">
+                <i class="fas fa-times"></i> Clear Filters
+            </button> 
+            <i class="fas fa-info-circle mr-1 text-primary"></i> 
+            <span id="filter-legend-text"></span>
+        </div>
 
         <div class="app-grid mt-2">
             <div class="col-left" id="gallery-column">
@@ -2559,7 +2628,7 @@ const clearBtn = document.getElementById('clear-filters-btn');
             </div> 
 
             <div class="col-middle min-h-0" id="profile-column">
-                <div class="card p-2 flex flex-col flex-shrink-0 mb-2 relative" id="contact-sticky-header">
+<div class="card p-2 flex flex-col flex-shrink-0 mb-2 relative" id="contact-sticky-header">
                      <div id="header-loader-overlay" class="absolute inset-0 z-20 hidden flex items-center justify-center backdrop-blur-[1px] rounded" style="background-color: var(--bg-app); opacity: 0.7;"></div>
                     <div class="card-header mt-0 pt-0 px-0 pb-1 mb-1 flex-shrink-0 flex items-center justify-between bg-transparent border-b-0" id="profile-card-header">
                         <div class="flex items-center gap-2 overflow-hidden flex-shrink-0">
