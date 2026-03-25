@@ -902,10 +902,33 @@
 
                 let sourceObj = { type: type, table: sTable, id: sId, action: r.cr714_action, rawNotes: qbNotes, message: r.cr714_actionmessage };
 
+                // 1. Ignore Dataverse columns completely. Parse the raw note string to find email dates.
+                let newestEmailDate = null;
+                let parsedHistory = window.parseNotes(qbNotes || '');
+                for (let noteObj of parsedHistory) {
+                    // Check if the parsed block is an email record
+                    if (noteObj.text && (noteObj.text.includes('[Email Sent]') || noteObj.text.includes('[Email Drafted'))) {
+                        let parsedDate = new Date(noteObj.date).getTime();
+                        if (!isNaN(parsedDate)) {
+                            // Ensure we only save the newest date we find in the history
+                            if (!newestEmailDate || parsedDate > new Date(newestEmailDate).getTime()) {
+                                newestEmailDate = new Date(parsedDate).toISOString();
+                            }
+                        }
+                    }
+                }
+
                 if(recordsMap.has(id)) {
                     let existing = recordsMap.get(id);
                     existing.sources.push(sourceObj);
-                    duplicateRecordIds.add(String(id)); // track duplicates intentionally for visual flagging
+                    duplicateRecordIds.add(String(id)); 
+                    
+                    // 2. If this duplicate list has an even newer email note, overwrite the old one
+                    if (newestEmailDate) {
+                        if (!existing.cr714_actionemailsent || new Date(newestEmailDate).getTime() > new Date(existing.cr714_actionemailsent).getTime()) {
+                            existing.cr714_actionemailsent = newestEmailDate;
+                        }
+                    }
                 } else {
                     let mapped = {
                         cr714_id: id,
@@ -917,12 +940,12 @@
                         cr714_primaryphone: window.formatPhone(r.cr714_phone || r.cr714_primaryphone),
                         cr714_emailmost: r.cr714_emailmost || r.cr714_emaillatest || r.cr714_email_latest,
                         cr714_lastorderdate: r.cr714_lastorderdate || '--',
-                        cr714_qbnotes: sourceObj.rawNotes, // Main raw block maintained for compatibility
+                        cr714_qbnotes: sourceObj.rawNotes, 
                         cr714_managernotes: r.cr714_managernotes,
                         cr714_importantaccountinformation: r.cr714_importantaccountinformation || r.cr714_importantaccountinfo,
                         cr714_billingaddress: r.cr714_address || r.cr714_billingaddress,
                         cr714_followup: r.cr714_followup || r.cr714_followupdate,
-                        cr714_actionemailsent: r.cr714_actionemailsent || r.cr714_emailsenttimestamp || null,
+                        cr714_actionemailsent: newestEmailDate, // 3. Push the mined date into the gallery card
                         cr714_intro: r.cr714_intro || '',
                         sources: [sourceObj],
                         primaryType: type,
@@ -1454,7 +1477,18 @@ if(document.getElementById('filter-sent-only').checked && !isSentToday) return f
 
 // Filter: Hide Sent Emails (Checks both Today AND historical records)
 if(document.getElementById('filter-hidesent').checked && (isSentToday || hasHistoricalEmail)) return false;
-                if(document.getElementById('filter-emailed-7d').checked && !emailedLast7DaysIds.includes(String(r.cr714_id))) return false;
+                // Filter: Recent Emails 7d (Checks local queue + mined Dataverse dates)
+                if (document.getElementById('filter-emailed-7d').checked) {
+                    let emailedInLast7Days = isSentToday;
+                    if (!emailedInLast7Days && r.cr714_actionemailsent) {
+                        let eDate = new Date(r.cr714_actionemailsent).getTime();
+                        // Check if the date is valid and less than or equal to 7 days old
+                        if (!isNaN(eDate) && ((Date.now() - eDate) / (1000 * 60 * 60 * 24)) <= 7) {
+                            emailedInLast7Days = true;
+                        }
+                    }
+                    if (!emailedInLast7Days) return false;
+                }
                 if(document.getElementById('filter-multilist') && document.getElementById('filter-multilist').checked && !duplicateRecordIds.has(String(r.cr714_id))) return false;
                 if(document.getElementById('filter-florida').checked) { const fAddr = r.cr714_billingaddress || ''; if(!/\b(fl|florida)\b/i.test(fAddr)) return false; }
                 if(document.getElementById('filter-mgrnotes') && document.getElementById('filter-mgrnotes').checked) { if (!r.cr714_managernotes || r.cr714_managernotes.trim() === '') return false; }
@@ -1542,10 +1576,13 @@ if(document.getElementById('filter-hidesent').checked && (isSentToday || hasHist
                 const itemsToDisplay = filtered.slice(0, galleryDisplayLimit);
 
                 itemsToDisplay.forEach(r => {
-                    const isSent = sentRecs.includes(String(r.cr714_id)); 
+                    // RE-FETCH sentRecs inside the loop or ensure it's robustly available
+                    const sentRecs = JSON.parse(localStorage.getItem('daytona_sent_records') || '[]');
+                    const isSentToday = sentRecs.includes(String(r.cr714_id));
                     const isDuplicate = duplicateRecordIds.has(String(r.cr714_id));
                     const hasMgrNote = (r.cr714_managernotes && String(r.cr714_managernotes).trim() !== '');
 
+                    // Check for Intro presence
                     let hasIntro = false;
                     let combinedIntro = r.cr714_intro;
                     if (!combinedIntro) {
@@ -1554,67 +1591,52 @@ if(document.getElementById('filter-hidesent').checked && (isSentToday || hasHist
                             if(p.length > 0 && p[0].metaIntro) { combinedIntro = p[0].metaIntro; break; }
                         }
                     }
-                    let displayIntroStr = '';
-                    if (combinedIntro && String(combinedIntro).trim() !== '') {
-                        hasIntro = true;
-                        let ci = String(combinedIntro).trim();
-                        displayIntroStr = (ci.toLowerCase() === 'yes' || ci.toLowerCase() === 'y') ? 'Intro' : ci;
-                    }
+                    let displayIntroStr = (combinedIntro && String(combinedIntro).trim() !== '') ? combinedIntro : '';
 
-                    let pulseClass = '';
-                    if (hasMgrNote) {
-                        pulseClass = 'pulse-red';
-                    } else if (isDuplicate) {
-                        pulseClass = 'pulse-yellow';
-                    } else if (hasIntro) {
-                        pulseClass = 'pulse-green';
-                    }
+                    // Pulse/Visual priority logic
+                    let pulseClass = hasMgrNote ? 'pulse-red' : (isDuplicate ? 'pulse-yellow' : (displayIntroStr ? 'pulse-green' : ''));
 
                     const div = document.createElement('div'); 
                     div.className = `gallery-item flex flex-col ${currentRecordId === String(r.cr714_id) ? 'is-selected' : ''} ${pulseClass}`; 
-                    
-                    if(hasMgrNote && pulseClass === 'pulse-red') div.title = "Manager Note Present";
-                    else if(isDuplicate && pulseClass === 'pulse-yellow') div.title = "Account present in multiple lists";
-                    else if(hasIntro && pulseClass === 'pulse-green') div.title = "Intro Account";
-
                     div.onclick = () => window.selectRecord(r.cr714_id);
                     
+                    // --- CORRECTED EMAIL DISPLAY LOGIC ---
                     let emailHtml = '';
-                    let emailDate = r.cr714_actionemailsent || r.cr714_emailsenttimestamp; 
-                    if (isSent) {
+                    const emailDate = r.cr714_actionemailsent || r.cr714_emailsenttimestamp; 
+
+                    if (isSentToday) {
                         emailHtml = `<span class="text-[9px] text-status-success font-bold">Email Date: Today</span>`;
                     } else if (emailDate) {
                         let eDate = new Date(emailDate);
                         let daysOld = (new Date() - eDate) / (1000*60*60*24);
                         let eDateStr = eDate.toLocaleDateString(undefined, {month:'short', day:'numeric'});
-                        if (daysOld <= 30) {
-                            emailHtml = `<span class="text-[9px] text-status-success font-bold">Email Date: ${eDateStr}</span>`;
-                        } else {
-                            emailHtml = `<span class="text-[9px] text-status-danger font-bold">Email Date: ${eDateStr}</span>`;
-                        }
+                        
+                        // Green if within 30 days, Red if older
+                        let colorClass = (daysOld <= 30) ? 'text-status-success' : 'text-status-danger';
+                        emailHtml = `<span class="text-[9px] ${colorClass} font-bold">Email Date: ${eDateStr}</span>`;
                     }
+                    // --------------------------------------
 
                     let followUpHtml = '';
                     if(pref.showDate && r.cr714_followup) { 
                         const parts = r.cr714_followup.substring(0, 10).split('-'); 
                         if(parts.length === 3) { 
                             const d = new Date(parts[0], parts[1]-1, parts[2]); 
-                            let dStr = d.toLocaleDateString(undefined, {month:'short', day:'numeric'});
-                            followUpHtml = `<span class="text-[9px] text-status-info font-bold">Follow Up Date: ${dStr}</span>`; 
+                            followUpHtml = `<span class="text-[9px] text-status-info font-bold">Follow Up: ${d.toLocaleDateString(undefined, {month:'short', day:'numeric'})}</span>`; 
                         } 
                     }
                     
                     let sourcesHtml = r.sources.map(s => {
                         let abbr = s.type === 'AM' ? 'AM' : (s.type === 'Cadence' ? 'CAD' : (s.type === 'LB' ? 'LB' : 'PSP'));
                         let badgeClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : (s.type === 'LB' ? 'badge-lb' : 'badge-psp'));
-                        return `<span class="px-1.5 py-0.5 rounded border text-[9px] font-bold ${badgeClass}">${abbr}</span>`;
+                        return `<span class="px-1.5 py-0.5 rounded border text-[8px] font-bold ${badgeClass}">${abbr}</span>`;
                     }).join('');
 
                     div.innerHTML = `
                         <div class="flex justify-between items-start w-full mb-1 gap-2">
                             <div class="flex items-center gap-1 min-w-0">
                                 ${pref.showId ? `<span class="gallery-item-id truncate">${r.cr714_id}</span>` : ''}
-                                ${hasIntro ? `<i class="fas fa-handshake text-status-warning text-sm flex-shrink-0" title="Intro: ${window.escapeHTML(displayIntroStr)}"></i>` : ''}
+                                ${displayIntroStr ? `<i class="fas fa-handshake text-status-warning text-sm flex-shrink-0" title="Intro: ${window.escapeHTML(displayIntroStr)}"></i>` : ''}
                             </div>
                             <div class="flex flex-col items-end text-[10px] flex-shrink-0 whitespace-nowrap">
                                 ${followUpHtml}
@@ -1629,10 +1651,8 @@ if(document.getElementById('filter-hidesent').checked && (isSentToday || hasHist
                                 ${pref.showRep ? window.escapeHTML(r.cr714_rep) : ''}
                             </div>
                             <div class="flex flex-col items-end gap-1 flex-shrink-0 max-w-[70%]">
-                                <div class="flex flex-wrap justify-end gap-1">
-                                    ${sourcesHtml}
-                                </div>
-                                ${r.cr714_action ? `<div class="text-[9px] font-bold badge-action border px-1 rounded max-w-full truncate text-right" title="${window.escapeHTML(r.cr714_action)}">${window.escapeHTML(r.cr714_action)}</div>` : ''}
+                                <div class="flex flex-wrap justify-end gap-1">${sourcesHtml}</div>
+                                ${r.cr714_action ? `<div class="text-[9px] font-bold badge-action border px-1 rounded max-w-full truncate text-right">${window.escapeHTML(r.cr714_action)}</div>` : ''}
                             </div>
                         </div>
                     `;
@@ -2357,8 +2377,6 @@ if(document.getElementById('filter-hidesent').checked && (isSentToday || hasHist
             window.showToast("Reporting...", "processing");
             try {
                 const dvToken = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
-                
-                // Ensure Mail.Send token is acquired ONLY when this specific action is triggered
                 const mailToken = await window.getToken("Mail.Send");
 
                 const payload = {
@@ -2379,38 +2397,15 @@ if(document.getElementById('filter-hidesent').checked && (isSentToday || hasHist
                             subject: `🚨 ACT BUG REPORT: ${currentUserRepName}`,
                             body: { contentType: "HTML", content: `<div style="font-family: Arial, sans-serif; color: #333;"><h2 style="color: #ef4444;">New Bug Reported</h2><p><strong>Reported By:</strong> ${currentUserRepName}</p><p><strong>Description:</strong> ${issue}</p><hr style="border: 0; border-top: 1px solid #eee;"><p style="font-size: 11px; color: #666;">Time: ${new Date().toLocaleString()}<br>Browser: ${navigator.userAgent}</p></div>` },
                             toRecipients: [
-                                { emailAddress: { address: "anslee.erickson@wbmason.com" } },
-                                { emailAddress: { address: "matt.bleakley@wbmason.com" } },
-                                { emailAddress: { address: "taylor.whitaker@wbmason.com" } },
-                                { emailAddress: { address: "vanessa.mclellan@wbmason.com" } }
+                                { emailAddress: { address: "Anslee.Erickson@wbmason.com" } },
+                                { emailAddress: { address: "Matt.Bleakley@wbmason.com" } },
+                                { emailAddress: { address: "Taylor.Whitaker@wbmason.com" } },
+                                { emailAddress: { address: "Vanessa.McLellan@wbmason.com" } }
                             ]
                         },
                         saveToSentItems: "false"
                     };
                     await fetch(`${GRAPH_URL}/me/sendMail`, { method: 'POST', headers: { 'Authorization': `Bearer ${mailToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(mailBody) });
-                    
-                    // SILENT TEAMS GRAPH POST TO GROUP CHAT
-                    try {
-                        const teamsToken = await window.getToken("ChatMessage.Send");
-                        const chatId = "19:860e73b9453d474187ac58855e200bdb@thread.v2";
-                        const teamsPayload = {
-                            body: {
-                                contentType: "html",
-                                content: `<div><span style="color: #ef4444; font-weight: bold; font-size: 16px;">🚨 New ACT Bug Reported</span><br><br><b>Reported By:</b> ${currentUserRepName || "Unknown User"}<br><b>Time:</b> ${new Date().toLocaleString()}<br><br><b>Description:</b><br>${window.escapeHTML(issue)}</div>`
-                            }
-                        };
-                        
-                        await fetch(`${GRAPH_URL}/chats/${chatId}/messages`, {
-                            method: 'POST',
-                            headers: { 
-                                'Authorization': `Bearer ${teamsToken}`,
-                                'Content-Type': 'application/json' 
-                            },
-                            body: JSON.stringify(teamsPayload)
-                        });
-                    } catch (teamsErr) {
-                        console.error("Failed to post to Teams Chat via Graph", teamsErr);
-                    }
 
                     window.showToast("Issue Reported & Devs Notified", "success");
                     window.saveToAuditLog('Issue Report', issue);
