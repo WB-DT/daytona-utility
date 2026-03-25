@@ -897,40 +897,39 @@
                 if(!id) return;
 
                 let qbNotes = type === 'AM' ? r.cr714_accountmanagementnotes : (type === 'Cadence' ? r.cr714_qbnotes : (type === 'LB' ? r.cr714_notesfr : r.cr714_prospectingnotes));
-                
-                let newestEmailFromNotes = null;
-                if (qbNotes) {
-                    const entries = qbNotes.split(/-{20,}/);
-                    for (let entry of entries) {
-                        if (entry.includes('[Email Sent]')) {
-                            const dateMatch = entry.match(/Modified On:\s*(.*)/i);
-                            if (dateMatch && dateMatch[1]) {
-                                const foundDate = new Date(dateMatch[1].trim());
-                                if (!isNaN(foundDate) && (!newestEmailFromNotes || foundDate > new Date(newestEmailFromNotes))) {
-                                    newestEmailFromNotes = foundDate.toISOString();
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let sTable = type === 'AM' ? 'cr714_accountmanagementdatasets' : (type === 'Cadence' ? 'cr714_cadencedatasets' : (type === 'LB' ? 'cr714_louisebrowndatasets' : 'cr714_prospectingdatasets'));
+                let sTable = type === 'AM' ? 'cr714_accountmanagementdatasets' : (type === 'Cadence' ? 'cr714_cadencedatasets' : (type === 'LB' ? 'cr714_louisebrowndatasets' : 'cr714_prospectingdatasets'));
                 let sId = r.cr714_accountmanagementdatasetid || r.cr714_cadencedatasetid || r.cr714_prospectingdatasetid || r.cr714_louisebrowndatasetid;
 
                 let sourceObj = { type: type, table: sTable, id: sId, action: r.cr714_action, rawNotes: qbNotes, message: r.cr714_actionmessage };
 
+                // 1. Ignore Dataverse columns completely. Parse the raw note string to find email dates.
+                let newestEmailDate = null;
+                let parsedHistory = window.parseNotes(qbNotes || '');
+                for (let noteObj of parsedHistory) {
+                    // Check if the parsed block is an email record
+                    if (noteObj.text && (noteObj.text.includes('[Email Sent]') || noteObj.text.includes('[Email Drafted'))) {
+                        let parsedDate = new Date(noteObj.date).getTime();
+                        if (!isNaN(parsedDate)) {
+                            // Ensure we only save the newest date we find in the history
+                            if (!newestEmailDate || parsedDate > new Date(newestEmailDate).getTime()) {
+                                newestEmailDate = new Date(parsedDate).toISOString();
+                            }
+                        }
+                    }
+                }
+
                 if(recordsMap.has(id)) {
-                    let existing = recordsMap.get(id);
-                    existing.sources.push(sourceObj);
-                    duplicateRecordIds.add(String(id)); // track duplicates intentionally for visual flagging
-                    
-                    let checkDate = r.cr714_actionemailsent || r.cr714_emailsenttimestamp || newestEmailFromNotes;
-                    if (checkDate) {
-                        if (!existing.cr714_actionemailsent || new Date(checkDate) > new Date(existing.cr714_actionemailsent)) {
-                            existing.cr714_actionemailsent = checkDate;
-                        }
-                    }
-                } else {
+                    let existing = recordsMap.get(id);
+                    existing.sources.push(sourceObj);
+                    duplicateRecordIds.add(String(id)); 
+                    
+                    // 2. If this duplicate list has an even newer email note, overwrite the old one
+                    if (newestEmailDate) {
+                        if (!existing.cr714_actionemailsent || new Date(newestEmailDate).getTime() > new Date(existing.cr714_actionemailsent).getTime()) {
+                            existing.cr714_actionemailsent = newestEmailDate;
+                        }
+                    }
+                } else {
                     let mapped = {
                         cr714_id: id,
                         cr714_company: r.cr714_accountname || r.cr714_company || r.cr714_acctname,
@@ -941,12 +940,12 @@
                         cr714_primaryphone: window.formatPhone(r.cr714_phone || r.cr714_primaryphone),
                         cr714_emailmost: r.cr714_emailmost || r.cr714_emaillatest || r.cr714_email_latest,
                         cr714_lastorderdate: r.cr714_lastorderdate || '--',
-                        cr714_qbnotes: sourceObj.rawNotes, // Main raw block maintained for compatibility
+                        cr714_qbnotes: sourceObj.rawNotes, 
                         cr714_managernotes: r.cr714_managernotes,
                         cr714_importantaccountinformation: r.cr714_importantaccountinformation || r.cr714_importantaccountinfo,
                         cr714_billingaddress: r.cr714_address || r.cr714_billingaddress,
                         cr714_followup: r.cr714_followup || r.cr714_followupdate,
-                        cr714_actionemailsent: r.cr714_actionemailsent || r.cr714_emailsenttimestamp || newestEmailFromNotes || null,
+                        cr714_actionemailsent: newestEmailDate, // 3. Push the mined date into the gallery card
                         cr714_intro: r.cr714_intro || '',
                         sources: [sourceObj],
                         primaryType: type,
