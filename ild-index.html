@@ -69,14 +69,8 @@
         input, select, textarea { background-color: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main); border-radius: 0.375rem; padding: 0.5rem; width: 100%; font-size: 0.875rem; outline: none; transition: border-color 0.15s; color-scheme: light dark; }
         input:focus, select:focus, textarea:focus { border-color: var(--primary); }
 
-        input[type="range"]::-webkit-slider-thumb {
-            pointer-events: auto; -webkit-appearance: none; width: 16px; height: 16px; background: var(--primary);
-            border: 2px solid white; border-radius: 50%; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.4); margin-top: -6px;
-        }
-        input[type="range"]::-moz-range-thumb {
-            pointer-events: auto; width: 16px; height: 16px; background: var(--primary); border: 2px solid white;
-            border-radius: 50%; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.4);
-        }
+        input[type="range"]::-webkit-slider-thumb { pointer-events: auto; -webkit-appearance: none; width: 16px; height: 16px; background: var(--primary); border: 2px solid white; border-radius: 50%; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.4); margin-top: -6px; }
+        input[type="range"]::-moz-range-thumb { pointer-events: auto; width: 16px; height: 16px; background: var(--primary); border: 2px solid white; border-radius: 50%; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
         input[type="range"]::-webkit-slider-runnable-track { -webkit-appearance: none; height: 4px; background: transparent; }
         input[type="range"]::-moz-range-track { height: 4px; background: transparent; }
 
@@ -209,7 +203,6 @@
     <div id="toast-container" class="toast-container"></div>
 
     <div id="global-loader">
-        <!-- New Animated SVG Loader -->
         <div class="w-full max-w-md mb-2">
             <svg viewBox="0 0 800 500" xmlns="http://www.w3.org/2000/svg" class="w-full h-auto drop-shadow-lg">
                 <defs>
@@ -1776,48 +1769,42 @@
         if(!rawNotesStr || String(rawNotesStr).trim() === '') return [];
         let sourceText = String(rawNotesStr);
         let parsedRecords = [];
+        let dedupeSet = new Set();
 
         // A. JSON PARSING LOGIC
-        let startJson = sourceText.indexOf('[{');
-        let endJson = sourceText.lastIndexOf('}]');
-        let jsonString = (startJson >= 0 && endJson > startJson) ? sourceText.substring(startJson, endJson + 2) : null;
+        let jsonRegex = /\[\s*\{[\s\S]*?\}\s*\]/g;
+        let matches = sourceText.match(jsonRegex);
+        
+        if (matches) {
+            matches.forEach(jsonString => {
+                try {
+                    let parsedJson = JSON.parse(jsonString);
+                    parsedJson.forEach(item => {
+                        let noteText = item.text || '';
+                        if(noteText.toLowerCase().includes('email information:')) {
+                            let rawDate = item.date || '';
+                            let subjectMatch = noteText.match(/Subject:\s*([^\n\r]+)/i);
+                            let extractedSubject = subjectMatch ? subjectMatch[1].trim() : null;
+                            let actionMatch = noteText.match(/Action:\s*([^\n\r]+)/i);
+                            let extractedAction = actionMatch ? actionMatch[1].trim() : null;
 
-        if (jsonString) {
-            try {
-                let parsedJson = JSON.parse(jsonString);
-                let jsonFiltered = parsedJson.filter(item => {
-                    let noteText = item.text || '';
-                    return noteText.toLowerCase().includes('email information:');
-                });
-
-                jsonFiltered.forEach(item => {
-                    let rawDate = item.date || '';
-                    let emailTextRaw = item.text || '';
-                    
-                    let subjectMatch = emailTextRaw.match(/Subject:\s*([^\n\r]+)/i);
-                    let extractedSubject = subjectMatch ? subjectMatch[1].trim() : null;
-
-                    let actionMatch = emailTextRaw.match(/Action:\s*([^\n\r]+)/i);
-                    let extractedAction = actionMatch ? actionMatch[1].trim() : null;
-
-                    parsedRecords.push({
-                        date: rawDate,
-                        author: item.author || 'Unknown',
-                        text: emailTextRaw,
-                        src: sourceLabel,
-                        historicalAction: extractedAction,
-                        emailSubject: extractedSubject,
-                        touchType: 'Email',
-                        extractedLink: null,
-                        tags: ['Email Dispatched'],
-                        metaLoc:'', metaDm:'', metaComp:'', metaOpp:'', metaIntro:''
+                            let sig = rawDate + '|' + (item.author||'') + '|' + noteText.substring(0,25);
+                            if(!dedupeSet.has(sig)) {
+                                dedupeSet.add(sig);
+                                parsedRecords.push({
+                                    date: rawDate, author: item.author || 'Unknown', text: noteText, src: sourceLabel,
+                                    historicalAction: extractedAction, emailSubject: extractedSubject, touchType: 'Email',
+                                    extractedLink: null, tags: ['Email Dispatched'], metaLoc:'', metaDm:'', metaComp:'', metaOpp:'', metaIntro:''
+                                });
+                            }
+                        }
                     });
-                });
-            } catch(e) {}
+                } catch(e) {}
+            });
         }
 
         // B. LEGACY TEXT PARSING LOGIC (Split by dashes)
-        let legacyText = jsonString ? sourceText.replace(jsonString, '') : sourceText;
+        let legacyText = sourceText.replace(jsonRegex, '').trim();
         let rawBlocks = legacyText.split(/-{20,}/);
 
         let lastAuthor = "System / Unknown";
@@ -1887,7 +1874,7 @@
                 if (t.startsWith("action message:")) return false;
                 if (t.startsWith("masonville link")) return false;
                 if (t.startsWith("<a href=")) return false;
-                if (t.startsWith("account management notes:")) return false;
+                if (t.includes("notes:") || t.startsWith("account management notes:") || t.startsWith("cadence notes:") || t.startsWith("prospecting notes:")) return false;
                 if (t.startsWith("email information:")) return false;
                 if (t.startsWith("subject:")) return false;
                 
@@ -1915,6 +1902,8 @@
 
             let finalNote = filteredLines.join('\n').trim();
 
+            if(finalNote === '' && !extractedLink && !extractedSubject && !extractedAction) return;
+
             // Determine Touch Type
             let touchType = 'Note';
             let combinedText = trimBlock.toLowerCase();
@@ -1927,18 +1916,22 @@
                 touchType = 'Masonville';
             }
 
-            parsedRecords.push({
-                date: date,
-                author: author,
-                text: finalNote,
-                src: sourceLabel,
-                tags: tags,
-                metaLoc: metaLoc, metaDm: metaDm, metaComp: metaComp, metaOpp: metaOpp, metaIntro: metaIntro,
-                historicalAction: extractedAction,
-                emailSubject: extractedSubject,
-                touchType: touchType,
-                extractedLink: extractedLink
-            });
+            let sig = date + '|' + author + '|' + finalNote.substring(0,25);
+            if(!dedupeSet.has(sig)) {
+                dedupeSet.add(sig);
+                parsedRecords.push({
+                    date: date,
+                    author: author,
+                    text: finalNote,
+                    src: sourceLabel,
+                    tags: tags,
+                    metaLoc: metaLoc, metaDm: metaDm, metaComp: metaComp, metaOpp: metaOpp, metaIntro: metaIntro,
+                    historicalAction: extractedAction,
+                    emailSubject: extractedSubject,
+                    touchType: touchType,
+                    extractedLink: extractedLink
+                });
+            }
         });
 
         return parsedRecords;
@@ -3190,588 +3183,598 @@
 
             engagementBody.innerHTML += `
                 <tr class="transition-colors">
-                    <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}')">${safeRep}
-let allMonths = Array.from(allMonthsSet).sort().reverse();
-    let monthlyHeaderHtml = `<th><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', 0)"><span>Rep Name</span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`;
-    allMonths.forEach((m, idx) => {
-        monthlyHeaderHtml += `<th class="text-center"><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', ${idx+1})"><span>${m}<br/><span class="text-[9px] font-normal text-muted">Accounts Touched / Total Touches / Emails</span></span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`;
-    });
-    document.getElementById('monthly-table').querySelector('thead tr').innerHTML = monthlyHeaderHtml;
+                    <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
+                    <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsRep}', 'notes')">${stats.notes}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsRep}', 'masonville')">${stats.masonville}</td>
+                    <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
+                </tr>`;
+        });
 
-    sortedReps.forEach(([rep, stats]) => {
-        let safeRep = window.escapeHTML(rep);
-        let jsRep = window.escapeJS(rep);
-        let rowHtml = `<td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>`;
-        allMonths.forEach(m => {
-            let recordsTouched = monthlyData[rep] && monthlyData[rep][m] && monthlyData[rep][m].records ? monthlyData[rep][m].records.size : 0;
-            let touched = monthlyData[rep] && monthlyData[rep][m] ? monthlyData[rep][m].touches : 0;
-            let emails = monthlyData[rep] && monthlyData[rep][m] ? monthlyData[rep][m].emails : 0;
-            rowHtml += `<td class="text-center">
-                <span class="font-black text-[11px]" style="color: var(--primary);" title="Unique Accounts Touched">${recordsTouched}</span> 
-                <span class="text-muted mx-1">|</span> 
-                <span class="font-bold" style="color: var(--accent-success);" title="Total Activities">${touched}</span> 
-                <span class="text-muted mx-1">/</span> 
-                <span class="font-bold" style="color: var(--chart-email);" title="Total Emails Sent">${emails}</span>
-            </td>`;
+        let allMonths = Array.from(allMonthsSet).sort().reverse();
+        let monthlyHeaderHtml = `<th><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', 0)"><span>Rep Name</span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`;
+        allMonths.forEach((m, idx) => {
+            monthlyHeaderHtml += `<th class="text-center"><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', ${idx+1})"><span>${m}<br/><span class="text-[9px] font-normal text-muted">Accounts Touched / Total Activities / Emails</span></span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`;
+        });
+        document.getElementById('monthly-table').querySelector('thead tr').innerHTML = monthlyHeaderHtml;
+
+        sortedReps.forEach(([rep, stats]) => {
+            let safeRep = window.escapeHTML(rep);
+            let jsRep = window.escapeJS(rep);
+            let rowHtml = `<td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>`;
+            allMonths.forEach(m => {
+                let recordsTouched = monthlyData[rep] && monthlyData[rep][m] && monthlyData[rep][m].records ? monthlyData[rep][m].records.size : 0;
+                let touched = monthlyData[rep] && monthlyData[rep][m] ? monthlyData[rep][m].touches : 0;
+                let emails = monthlyData[rep] && monthlyData[rep][m] ? monthlyData[rep][m].emails : 0;
+                rowHtml += `<td class="text-center">
+                    <span class="font-black text-[11px]" style="color: var(--primary);" title="Unique Accounts Touched">${recordsTouched}</span> 
+                    <span class="text-muted mx-1">|</span> 
+                    <span class="font-bold" style="color: var(--accent-success);" title="Total Activities">${touched}</span> 
+                    <span class="text-muted mx-1">/</span> 
+                    <span class="font-bold" style="color: var(--chart-email);" title="Total Emails Sent">${emails}</span>
+                </td>`;
+            });
+            monthlyBody.innerHTML += `<tr class="transition-colors">${rowHtml}</tr>`;
         });
-        monthlyBody.innerHTML += `<tr class="transition-colors">${rowHtml}</tr>`;
-    });
 
-    document.getElementById('rep-tot-accts').innerText = tAccts;
-    document.getElementById('rep-tot-req').innerText = tReq;
-    document.getElementById('rep-tot-stale').innerText = tStale;
-    document.getElementById('rep-tot-email').innerText = tEmails;
-    document.getElementById('rep-tot-intro').innerText = totalIntros;
-    document.getElementById('act-tot-actions').innerText = totalActionable;
-    document.getElementById('act-action-rate').innerText = tAccts > 0 ? Math.round((totalActionable / tAccts) * 100) + '%' : '0%';
+        document.getElementById('rep-tot-accts').innerText = tAccts;
+        document.getElementById('rep-tot-req').innerText = tReq;
+        document.getElementById('rep-tot-stale').innerText = tStale;
+        document.getElementById('rep-tot-email').innerText = tEmails;
+        document.getElementById('rep-tot-intro').innerText = totalIntros;
+        document.getElementById('act-tot-actions').innerText = totalActionable;
+        document.getElementById('act-action-rate').innerText = tAccts > 0 ? Math.round((totalActionable / tAccts) * 100) + '%' : '0%';
 
-    window.renderCharts(sortedReps, sortedActions, monthlyData, allMonths);
+        window.renderCharts(sortedReps, sortedActions, monthlyData, allMonths);
 
-    const reportingTables = ['scorecard-table', 'actions-table', 'engagement-table', 'monthly-table'];
-    reportingTables.forEach(tableId => {
-        window.calculateTableTotals(tableId);
-    });
+        const reportingTables = ['scorecard-table', 'actions-table', 'engagement-table', 'monthly-table'];
+        reportingTables.forEach(tableId => {
+            window.calculateTableTotals(tableId);
+        });
 
-    window.reportsDirty = false; 
-};
-
-window.renderCharts = function(sortedReps, sortedActions, monthlyData, allMonths) {
-    const top5Reps = sortedReps.slice(0, 5);
-    const top5Actions = sortedActions.slice(0, 8);
-    const labels = top5Reps.map(r => r[0]);
-    
-    const isDark = document.body.getAttribute('data-theme') === 'dark';
-    const gridColor = isDark ? '#334155' : '#e2e8f0';
-    const textColor = isDark ? '#94a3b8' : '#64748b';
-    Chart.defaults.color = textColor;
-
-    const commonOptions = {
-        responsive: true, maintainAspectRatio: false,
-        scales: {
-            x: { grid: { color: gridColor } },
-            y: { grid: { color: gridColor } }
-        }
+        window.reportsDirty = false; 
     };
 
-    const getCSSVar = (varName) => getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
-    const primaryCol = getCSSVar('--primary') || '#0f766e';
-    const emailCol = getCSSVar('--chart-email') || '#3b82f6';
-    const noteCol = getCSSVar('--chart-note') || '#a855f7';
-    const masonCol = getCSSVar('--chart-masonville') || '#f97316';
-    const successCol = getCSSVar('--accent-success') || '#22c55e';
-
-    if(window.chartDist) window.chartDist.destroy();
-    window.chartDist = new Chart(document.getElementById('chart-distribution').getContext('2d'), { type: 'doughnut', data: { labels, datasets: [{ data: top5Reps.map(r => r[1].totalRecords), backgroundColor: [primaryCol, '#14b8a6', '#2dd4bf', '#5eead4', '#ccfbf1'], borderColor: isDark ? '#1e293b' : '#ffffff', borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } } });
-    
-    if(window.chartAct) window.chartAct.destroy();
-    window.chartAct = new Chart(document.getElementById('chart-activity').getContext('2d'), { type: 'bar', data: { labels, datasets: [{ label: 'Total Activities', data: top5Reps.map(r => r[1].touches), backgroundColor: successCol }] }, options: commonOptions });
-    
-    if(window.chartActionsPie) window.chartActionsPie.destroy();
-    const aLabs = top5Actions.map(a => a[0]);
-    const aTouches = top5Actions.map(a => a[1].touches);
-    window.chartActionsPie = new Chart(document.getElementById('chart-actions-pie').getContext('2d'), { type: 'pie', data: { labels: aLabs, datasets: [{ data: aTouches, backgroundColor: aLabs.map((_, i) => `hsl(${(i * 360 / aLabs.length)}, 70%, 50%)`), borderColor: isDark ? '#1e293b' : '#ffffff', borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { boxWidth: 10 } } } } });
-    
-    if(window.chartActionsBar) window.chartActionsBar.destroy();
-    const aEmails = top5Actions.map(a => a[1].emails);
-    const aNotes = top5Actions.map(a => a[1].notes);
-    const aMason = top5Actions.map(a => a[1].masonville);
-    window.chartActionsBar = new Chart(document.getElementById('chart-actions-bar').getContext('2d'), { type: 'bar', data: { labels: aLabs, datasets: [{ label: 'Emails', data: aEmails, backgroundColor: emailCol }, { label: 'Manual Notes', data: aNotes, backgroundColor: noteCol }, { label: 'Masonville', data: aMason, backgroundColor: masonCol }] }, options: { ...commonOptions, scales: { x: { stacked: true, grid:{color:gridColor} }, y: { stacked: true, grid:{color:gridColor} } } } });
-
-    if(window.chartEngagement) window.chartEngagement.destroy();
-    window.chartEngagement = new Chart(document.getElementById('chart-engagement').getContext('2d'), { type: 'bar', data: { labels, datasets: [{ label: 'Emails', data: top5Reps.map(r => r[1].emails), backgroundColor: emailCol }, { label: 'Manual Notes', data: top5Reps.map(r => r[1].notes), backgroundColor: noteCol }, { label: 'Masonville', data: top5Reps.map(r => r[1].masonville), backgroundColor: masonCol }] }, options: { ...commonOptions, scales: { x: { stacked: true, grid:{color:gridColor} }, y: { stacked: true, grid:{color:gridColor} } } } });
-
-    if(window.chartMonthly) window.chartMonthly.destroy();
-    let mLabels = allMonths.slice(0, 6).reverse(); 
-    let mDatasets = top5Reps.map((r, i) => {
-        let data = mLabels.map(m => monthlyData[r[0]] && monthlyData[r[0]][m] ? monthlyData[r[0]][m].touches : 0);
-        let color = `hsl(${(i * 360 / 5)}, 70%, 50%)`;
-        return { label: r[0], data: data, backgroundColor: color, borderColor: color, tension: 0.3 };
-    });
-    window.chartMonthly = new Chart(document.getElementById('chart-monthly').getContext('2d'), { type: 'line', data: { labels: mLabels, datasets: mDatasets }, options: commonOptions });
-};
-
-window.previewReassignment = function() {
-    const targetRep = document.getElementById('reassign-target-rep').value.trim();
-    const limitStr = document.getElementById('reassign-limit').value;
-    const limit = parseInt(limitStr) > 0 ? parseInt(limitStr) : 10000;
-    const noteFilter = document.getElementById('reassign-note-filter').value;
-    const startDate = document.getElementById('reassign-date-start').value;
-    const endDate = document.getElementById('reassign-date-end').value;
-    
-    const chkAm = document.getElementById('chk-reassign-am').checked;
-    const chkCad = document.getElementById('chk-reassign-cad').checked;
-    const chkPro = document.getElementById('chk-reassign-pro').checked;
-    const chkLb = document.getElementById('chk-reassign-lb').checked;
-    
-    if(!targetRep) { window.showToast("Please select a New Representative to generate a preview.", "error"); return; }
-    if(!chkAm && !chkCad && !chkPro && !chkLb) { window.showToast("You must select at least one dataset to target.", "error"); return; }
-    
-    let sDate = startDate ? new Date(startDate + 'T00:00:00') : null;
-    let eDate = endDate ? new Date(endDate + 'T23:59:59') : null;
-
-    const previewBody = document.getElementById('reassign-preview-body');
-    let html = '';
-    let totalRecordsChanging = 0;
-    let accountsProcessed = 0;
-
-    for (let i = 0; i < window.teamFilteredAccounts.length; i++) {
-        if (accountsProcessed >= limit) break; 
+    window.renderCharts = function(sortedReps, sortedActions, monthlyData, allMonths) {
+        const top5Reps = sortedReps.slice(0, 5);
+        const top5Actions = sortedActions.slice(0, 8);
+        const labels = top5Reps.map(r => r[0]);
         
-        let a = window.teamFilteredAccounts[i];
-        
-        let passesDate = true;
-        if(sDate || eDate) {
-            let modDate = a.modifiedon ? new Date(a.modifiedon) : null;
-            if(sDate && (!modDate || modDate < sDate)) passesDate = false;
-            if(eDate && (!modDate || modDate > eDate)) passesDate = false;
-        }
-        if(!passesDate) continue;
+        const isDark = document.body.getAttribute('data-theme') === 'dark';
+        const gridColor = isDark ? '#334155' : '#e2e8f0';
+        const textColor = isDark ? '#94a3b8' : '#64748b';
+        Chart.defaults.color = textColor;
 
-        let hasNotes = false;
-        a.sources.forEach(src => {
-            let hist = window.parseNoteHistory(src.rawNotes, src.type, a.modifiedon);
-            hist.forEach(h => {
-                if (h.date === 'Permanent' || h.date === 'Unknown Date') {
-                    hasNotes = true;
-                    return;
-                }
-                const d = new Date(h.date);
-                if (!isNaN(d.getTime())) {
-                    if ((!sDate || d >= sDate) && (!eDate || d <= eDate)) {
+        const commonOptions = {
+            responsive: true, maintainAspectRatio: false,
+            scales: {
+                x: { grid: { color: gridColor } },
+                y: { grid: { color: gridColor } }
+            }
+        };
+
+        const getCSSVar = (varName) => getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+        const primaryCol = getCSSVar('--primary') || '#0f766e';
+        const emailCol = getCSSVar('--chart-email') || '#3b82f6';
+        const noteCol = getCSSVar('--chart-note') || '#a855f7';
+        const masonCol = getCSSVar('--chart-masonville') || '#f97316';
+        const successCol = getCSSVar('--accent-success') || '#22c55e';
+
+        if(window.chartDist) window.chartDist.destroy();
+        window.chartDist = new Chart(document.getElementById('chart-distribution').getContext('2d'), { type: 'doughnut', data: { labels, datasets: [{ data: top5Reps.map(r => r[1].totalRecords), backgroundColor: [primaryCol, '#14b8a6', '#2dd4bf', '#5eead4', '#ccfbf1'], borderColor: isDark ? '#1e293b' : '#ffffff', borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } } });
+        
+        if(window.chartAct) window.chartAct.destroy();
+        window.chartAct = new Chart(document.getElementById('chart-activity').getContext('2d'), { type: 'bar', data: { labels, datasets: [{ label: 'Total Activities', data: top5Reps.map(r => r[1].touches), backgroundColor: successCol }] }, options: commonOptions });
+        
+        if(window.chartActionsPie) window.chartActionsPie.destroy();
+        const aLabs = top5Actions.map(a => a[0]);
+        const aTouches = top5Actions.map(a => a[1].touches);
+        window.chartActionsPie = new Chart(document.getElementById('chart-actions-pie').getContext('2d'), { type: 'pie', data: { labels: aLabs, datasets: [{ data: aTouches, backgroundColor: aLabs.map((_, i) => `hsl(${(i * 360 / aLabs.length)}, 70%, 50%)`), borderColor: isDark ? '#1e293b' : '#ffffff', borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { boxWidth: 10 } } } } });
+        
+        if(window.chartActionsBar) window.chartActionsBar.destroy();
+        const aEmails = top5Actions.map(a => a[1].emails);
+        const aNotes = top5Actions.map(a => a[1].notes);
+        const aMason = top5Actions.map(a => a[1].masonville);
+        window.chartActionsBar = new Chart(document.getElementById('chart-actions-bar').getContext('2d'), { type: 'bar', data: { labels: aLabs, datasets: [{ label: 'Emails', data: aEmails, backgroundColor: emailCol }, { label: 'Manual Notes', data: aNotes, backgroundColor: noteCol }, { label: 'Masonville', data: aMason, backgroundColor: masonCol }] }, options: { ...commonOptions, scales: { x: { stacked: true, grid:{color:gridColor} }, y: { stacked: true, grid:{color:gridColor} } } } });
+
+        if(window.chartEngagement) window.chartEngagement.destroy();
+        window.chartEngagement = new Chart(document.getElementById('chart-engagement').getContext('2d'), { type: 'bar', data: { labels, datasets: [{ label: 'Emails', data: top5Reps.map(r => r[1].emails), backgroundColor: emailCol }, { label: 'Manual Notes', data: top5Reps.map(r => r[1].notes), backgroundColor: noteCol }, { label: 'Masonville', data: top5Reps.map(r => r[1].masonville), backgroundColor: masonCol }] }, options: { ...commonOptions, scales: { x: { stacked: true, grid:{color:gridColor} }, y: { stacked: true, grid:{color:gridColor} } } } });
+
+        if(window.chartMonthly) window.chartMonthly.destroy();
+        let mLabels = allMonths.slice(0, 6).reverse(); 
+        let mDatasets = top5Reps.map((r, i) => {
+            let data = mLabels.map(m => monthlyData[r[0]] && monthlyData[r[0]][m] ? monthlyData[r[0]][m].touches : 0);
+            let color = `hsl(${(i * 360 / 5)}, 70%, 50%)`;
+            return { label: r[0], data: data, backgroundColor: color, borderColor: color, tension: 0.3 };
+        });
+        window.chartMonthly = new Chart(document.getElementById('chart-monthly').getContext('2d'), { type: 'line', data: { labels: mLabels, datasets: mDatasets }, options: commonOptions });
+    };
+
+    window.previewReassignment = function() {
+        const targetRep = document.getElementById('reassign-target-rep').value.trim();
+        const limitStr = document.getElementById('reassign-limit').value;
+        const limit = parseInt(limitStr) > 0 ? parseInt(limitStr) : 10000;
+        const noteFilter = document.getElementById('reassign-note-filter').value;
+        const startDate = document.getElementById('reassign-date-start').value;
+        const endDate = document.getElementById('reassign-date-end').value;
+        
+        const chkAm = document.getElementById('chk-reassign-am').checked;
+        const chkCad = document.getElementById('chk-reassign-cad').checked;
+        const chkPro = document.getElementById('chk-reassign-pro').checked;
+        const chkLb = document.getElementById('chk-reassign-lb').checked;
+        
+        if(!targetRep) { window.showToast("Please select a New Representative to generate a preview.", "error"); return; }
+        if(!chkAm && !chkCad && !chkPro && !chkLb) { window.showToast("You must select at least one dataset to target.", "error"); return; }
+        
+        let sDate = startDate ? new Date(startDate + 'T00:00:00') : null;
+        let eDate = endDate ? new Date(endDate + 'T23:59:59') : null;
+
+        const previewBody = document.getElementById('reassign-preview-body');
+        let html = '';
+        let totalRecordsChanging = 0;
+        let accountsProcessed = 0;
+
+        for (let i = 0; i < window.teamFilteredAccounts.length; i++) {
+            if (accountsProcessed >= limit) break; 
+            
+            let a = window.teamFilteredAccounts[i];
+            
+            let passesDate = true;
+            if(sDate || eDate) {
+                let modDate = a.modifiedon ? new Date(a.modifiedon) : null;
+                if(sDate && (!modDate || modDate < sDate)) passesDate = false;
+                if(eDate && (!modDate || modDate > eDate)) passesDate = false;
+            }
+            if(!passesDate) continue;
+
+            let hasNotes = false;
+            a.sources.forEach(src => {
+                let hist = window.parseNoteHistory(src.rawNotes, src.type, a.modifiedon);
+                hist.forEach(h => {
+                    if (h.date === 'Permanent' || h.date === 'Unknown Date') {
                         hasNotes = true;
+                        return;
+                    }
+                    const d = new Date(h.date);
+                    if (!isNaN(d.getTime())) {
+                        if ((!sDate || d >= sDate) && (!eDate || d <= eDate)) {
+                            hasNotes = true;
+                        }
+                    }
+                });
+            });
+            
+            if (noteFilter === 'has_notes' && !hasNotes) continue;
+            if (noteFilter === 'no_notes' && hasNotes) continue;
+
+            let accountWillChange = false;
+            let tempHtml = '';
+
+            a.sources.forEach(src => {
+                if ((src.type === 'AM' && chkAm) || (src.type === 'Cadence' && chkCad) || (src.type === 'Prospecting' && chkPro) || (src.type === 'Louise Brown' && chkLb)) {
+                    if (src.rep !== targetRep) {
+                        accountWillChange = true;
+                        tempHtml += `<tr class="border-b transition-colors hover:bg-gray-100" style="border-color: var(--border-color);">
+                                    <td class="py-2 px-3 text-center"><input type="checkbox" class="reassign-row-cb cursor-pointer w-4 h-4" style="accent-color: var(--primary);" data-id="${a.cr714_id}" data-type="${src.type}" checked></td>
+                                    <td class="py-2 px-3 font-mono font-bold">${a.cr714_id}</td>
+                                    <td class="py-2 px-3 font-bold">${src.type}</td>
+                                    <td class="py-2 px-3 font-bold line-through" style="color: var(--accent-danger);">${window.escapeHTML(src.rep)}</td>
+                                    <td class="py-2 px-3 font-bold" style="color: var(--accent-success);">${window.escapeHTML(targetRep)}</td>
+                                 </tr>`;
+                        totalRecordsChanging++;
                     }
                 }
             });
-        });
+
+            if (accountWillChange) {
+                html += tempHtml;
+                accountsProcessed++;
+            }
+        }
+
+        if(totalRecordsChanging === 0) html = `<tr><td colspan="5" class="text-center py-16 text-muted italic font-bold">No records found matching these exact parameters that require reassignment.</td></tr>`;
+
+        previewBody.innerHTML = html;
+        document.getElementById('preview-count').innerText = `${totalRecordsChanging} Records`;
         
-        if (noteFilter === 'has_notes' && !hasNotes) continue;
-        if (noteFilter === 'no_notes' && hasNotes) continue;
-
-        let accountWillChange = false;
-        let tempHtml = '';
-
-        a.sources.forEach(src => {
-            if ((src.type === 'AM' && chkAm) || (src.type === 'Cadence' && chkCad) || (src.type === 'Prospecting' && chkPro) || (src.type === 'Louise Brown' && chkLb)) {
-                if (src.rep !== targetRep) {
-                    accountWillChange = true;
-                    tempHtml += `<tr class="border-b transition-colors hover:bg-gray-100" style="border-color: var(--border-color);">
-                                <td class="py-2 px-3 text-center"><input type="checkbox" class="reassign-row-cb cursor-pointer w-4 h-4" style="accent-color: var(--primary);" data-id="${a.cr714_id}" data-type="${src.type}" checked></td>
-                                <td class="py-2 px-3 font-mono font-bold">${a.cr714_id}</td>
-                                <td class="py-2 px-3 font-bold">${src.type}</td>
-                                <td class="py-2 px-3 font-bold line-through" style="color: var(--accent-danger);">${window.escapeHTML(src.rep)}</td>
-                                <td class="py-2 px-3 font-bold" style="color: var(--accent-success);">${window.escapeHTML(targetRep)}</td>
-                             </tr>`;
-                    totalRecordsChanging++;
-                }
-            }
-        });
-
-        if (accountWillChange) {
-            html += tempHtml;
-            accountsProcessed++;
-        }
-    }
-
-    if(totalRecordsChanging === 0) html = `<tr><td colspan="5" class="text-center py-16 text-muted italic font-bold">No records found matching these exact parameters that require reassignment.</td></tr>`;
-
-    previewBody.innerHTML = html;
-    document.getElementById('preview-count').innerText = `${totalRecordsChanging} Records`;
-    
-    const execBtn = document.getElementById('btn-execute-reassign');
-    const warnIcon = document.getElementById('btn-execute-warn');
-    if (totalRecordsChanging > 0) {
-        execBtn.disabled = false;
-        execBtn.classList.add('pulse-multi');
-        warnIcon.classList.remove('hidden-force');
-    } else {
-        execBtn.disabled = true;
-        execBtn.classList.remove('pulse-multi');
-        warnIcon.classList.add('hidden-force');
-    }
-};
-
-window.toggleAllReassign = function(checkbox) {
-    document.querySelectorAll('.reassign-row-cb').forEach(cb => cb.checked = checkbox.checked);
-};
-
-window.executeBulkReassign = async function() {
-    const execBtn = document.getElementById('btn-execute-reassign');
-    execBtn.disabled = true;
-    execBtn.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-2"></i> Executing Patch...';
-    
-    const targetRep = document.getElementById('reassign-target-rep').value;
-    const checkboxes = document.querySelectorAll('.reassign-row-cb:checked');
-    
-    if (checkboxes.length === 0) {
-        window.showToast("No records selected for reassignment.", "error");
-        execBtn.disabled = false;
-        execBtn.innerHTML = 'Commit Batch Reassignment';
-        return;
-    }
-
-    try {
-        const token = await window.getToken();
-        const headers = {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=representation'
-        };
-
-        let successCount = 0;
-        let failCount = 0;
-
-        for (let i = 0; i < checkboxes.length; i++) {
-            const cb = checkboxes[i];
-            const accountId = cb.dataset.id;
-            const datasetType = cb.dataset.type;
-            
-            const account = window.teamFilteredAccounts.find(a => a.cr714_id === accountId);
-            if (!account) continue;
-
-            const src = account.sources.find(s => s.type === datasetType);
-            if (!src || !src.id) continue;
-
-            let payload = {};
-            if (datasetType === 'AM') payload.cr714_rep = targetRep;
-            else if (datasetType === 'Cadence') payload.cr714_retentionrep = targetRep;
-            else if (datasetType === 'Prospecting') payload.cr714_repassigned = targetRep;
-            else if (datasetType === 'Louise Brown') payload.cr714_assignedrep = targetRep;
-
-            const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, {
-                method: 'PATCH',
-                headers: headers,
-                body: JSON.stringify(payload)
-            });
-
-            if (res.ok) {
-                successCount++;
-                src.rep = targetRep;
-            } else {
-                failCount++;
-            }
-        }
-
-        if (successCount > 0) {
-            window.showToast(`Successfully reassigned ${successCount} records.`, "success");
-            window.forceRefreshData(); 
-        }
-        if (failCount > 0) {
-            window.showToast(`Failed to reassign ${failCount} records.`, "error");
-        }
-
-    } catch (e) {
-        console.error("Reassign Error:", e);
-        window.showToast("An error occurred during reassignment.", "error");
-    } finally {
-        execBtn.innerHTML = 'Commit Batch Reassignment';
-        execBtn.classList.remove('pulse-multi');
-        document.getElementById('reassign-preview-body').innerHTML = '<tr><td colspan="5" class="text-center py-16 text-muted italic font-bold">Configure parameters and click "Generate Preview" to verify the exact scope of the impact before executing.</td></tr>';
-        document.getElementById('preview-count').innerText = '0 Records';
-    }
-};
-
-window.saveManagerNote = async function() {
-    if(!window.activeAccountId) return;
-    const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId);
-    if(!account) return;
-
-    const noteInput = document.getElementById('fv-manager-note').value.trim();
-    const markResolved = document.getElementById('fv-mark-resolved').checked;
-    const doEmail = document.getElementById('fv-notify-email').checked;
-    const statusVal = document.getElementById('fv-help-select').value;
-    const actionVal = document.getElementById('fv-action-select').value;
-    
-    if(!noteInput && !markResolved && !statusVal && actionVal === account.action) {
-        window.showToast("No changes detected to push.", "warning");
-        return;
-    }
-
-    const btn = document.getElementById('btn-push-note');
-    const ogText = btn.innerHTML;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-    btn.disabled = true;
-
-    try {
-        const token = await window.getToken();
-        const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' };
-
-        let patchSuccess = false;
-        for (let src of account.sources) {
-            let payload = {};
-            let currentRaw = src.rawNotes || "";
-            let finalStatus = statusVal;
-            
-            if(markResolved) finalStatus = "Resolved";
-            
-            let newNoteBlock = `Modified On: ${new Date().toLocaleString()}\nModified By: ${window.currentUserName}\n\n`;
-            if (markResolved) newNoteBlock += `[RESOLVED] `;
-            newNoteBlock += `${noteInput}\n------------------------------\n`;
-            
-            if (noteInput || markResolved) {
-                if (src.table === 'cr714_accountmanagementdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
-                else if (src.table === 'cr714_prospectingdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
-                else if (src.table === 'cr714_cadencedatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
-                else if (src.table === 'cr714_louisebrowndatasets') payload.cr714_notesfr = newNoteBlock + currentRaw;
-            }
-
-            if (finalStatus !== '') {
-                if (src.table === 'cr714_accountmanagementdatasets' || src.table === 'cr714_prospectingdatasets' || src.table === 'cr714_louisebrowndatasets') {
-                    payload.cr714_help = finalStatus === 'Clear' ? null : finalStatus;
-                } else if (src.table === 'cr714_cadencedatasets') {
-                    payload.cr714_recordstatus = finalStatus === 'Clear' ? null : finalStatus;
-                }
-            }
-
-            if (actionVal !== account.action && actionVal !== '') {
-                payload.cr714_action = actionVal === 'Clear' ? null : actionVal;
-            }
-
-            if (Object.keys(payload).length > 0) {
-                const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
-                if(res.ok) patchSuccess = true;
-            }
-        }
-
-        if (patchSuccess) {
-            window.showToast("Updates pushed successfully.", "success");
-            if (doEmail) {
-                const emailBody = `
-                    <h2 style="color: #0f766e;">A.C.T. Manager Update</h2>
-                    <p><strong>Account:</strong> ${window.escapeHTML(account.company)} (${account.cr714_id})</p>
-                    <p><strong>Manager:</strong> ${window.currentUserName}</p>
-                    <p><strong>Status:</strong> ${markResolved ? 'RESOLVED' : (statusVal || 'Updated')}</p>
-                    <hr/>
-                    <p><strong>Notes:</strong><br/>${window.escapeHTML(noteInput).replace(/\n/g, '<br/>')}</p>
-                `;
-                await window.sendSilentEmail(account.rep, `ACT Manager Update: ${account.company}`, emailBody);
-            }
-            setTimeout(() => window.forceRefreshData(), 1000);
+        const execBtn = document.getElementById('btn-execute-reassign');
+        const warnIcon = document.getElementById('btn-execute-warn');
+        if (totalRecordsChanging > 0) {
+            execBtn.disabled = false;
+            execBtn.classList.add('pulse-multi');
+            warnIcon.classList.remove('hidden-force');
         } else {
-            window.showToast("Failed to push updates.", "error");
+            execBtn.disabled = true;
+            execBtn.classList.remove('pulse-multi');
+            warnIcon.classList.add('hidden-force');
         }
-    } catch(e) {
-        console.error(e);
-        window.showToast("Network error during update.", "error");
-    } finally {
-        btn.innerHTML = ogText;
-        btn.disabled = false;
-    }
-};
+    };
 
-window.quickResolve = async function() {
-    document.getElementById('fv-mark-resolved').checked = true;
-    document.getElementById('fv-help-select').value = "Resolved";
-    await window.saveManagerNote();
-};
+    window.toggleAllReassign = function(checkbox) {
+        document.querySelectorAll('.reassign-row-cb').forEach(cb => cb.checked = checkbox.checked);
+    };
 
-window.executeBulkNote = async function() {
-    const btn = document.getElementById('btn-execute-bulk');
-    const ogText = btn.innerHTML;
-    btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Executing Batch...';
-    btn.disabled = true;
+    window.executeBulkReassign = async function() {
+        const execBtn = document.getElementById('btn-execute-reassign');
+        execBtn.disabled = true;
+        execBtn.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-2"></i> Executing Patch...';
+        
+        const targetRep = document.getElementById('reassign-target-rep').value;
+        const checkboxes = document.querySelectorAll('.reassign-row-cb:checked');
+        
+        if (checkboxes.length === 0) {
+            window.showToast("No records selected for reassignment.", "error");
+            execBtn.disabled = false;
+            execBtn.innerHTML = 'Commit Batch Reassignment';
+            return;
+        }
 
-    const noteInput = document.getElementById('bulk-manager-note').value.trim();
-    const markResolved = document.getElementById('bulk-mark-resolved').checked;
-    const doEmail = document.getElementById('bulk-notify-email').checked;
+        try {
+            const token = await window.getToken();
+            const headers = {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'Prefer': 'return=representation'
+            };
 
-    if(!noteInput && !markResolved) {
-        window.showToast("Please enter a note or check resolve.", "warning");
-        btn.innerHTML = ogText; btn.disabled = false; return;
-    }
+            let successCount = 0;
+            let failCount = 0;
 
-    try {
-        const token = await window.getToken();
-        const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' };
+            for (let i = 0; i < checkboxes.length; i++) {
+                const cb = checkboxes[i];
+                const accountId = cb.dataset.id;
+                const datasetType = cb.dataset.type;
+                
+                const account = window.teamFilteredAccounts.find(a => a.cr714_id === accountId);
+                if (!account) continue;
 
-        let successCount = 0;
-        const repEmailsToPush = {};
+                const src = account.sources.find(s => s.type === datasetType);
+                if (!src || !src.id) continue;
 
-        for (let id of window.bulkSelectedIds) {
-            const account = window.teamFilteredAccounts.find(a => a.cr714_id === id);
-            if(!account) continue;
+                let payload = {};
+                if (datasetType === 'AM') payload.cr714_rep = targetRep;
+                else if (datasetType === 'Cadence') payload.cr714_retentionrep = targetRep;
+                else if (datasetType === 'Prospecting') payload.cr714_repassigned = targetRep;
+                else if (datasetType === 'Louise Brown') payload.cr714_assignedrep = targetRep;
 
-            let accountSuccess = false;
+                const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, {
+                    method: 'PATCH',
+                    headers: headers,
+                    body: JSON.stringify(payload)
+                });
+
+                if (res.ok) {
+                    successCount++;
+                    src.rep = targetRep;
+                } else {
+                    failCount++;
+                }
+            }
+
+            if (successCount > 0) {
+                window.showToast(`Successfully reassigned ${successCount} records.`, "success");
+                window.forceRefreshData(); 
+            }
+            if (failCount > 0) {
+                window.showToast(`Failed to reassign ${failCount} records.`, "error");
+            }
+
+        } catch (e) {
+            console.error("Reassign Error:", e);
+            window.showToast("An error occurred during reassignment.", "error");
+        } finally {
+            execBtn.innerHTML = 'Commit Batch Reassignment';
+            execBtn.classList.remove('pulse-multi');
+            document.getElementById('reassign-preview-body').innerHTML = '<tr><td colspan="5" class="text-center py-16 text-muted italic font-bold">Configure parameters and click "Generate Preview" to verify the exact scope of the impact before executing.</td></tr>';
+            document.getElementById('preview-count').innerText = '0 Records';
+        }
+    };
+
+    window.saveManagerNote = async function() {
+        if(!window.activeAccountId) return;
+        const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId);
+        if(!account) return;
+
+        const noteInput = document.getElementById('fv-manager-note').value.trim();
+        const markResolved = document.getElementById('fv-mark-resolved').checked;
+        const doEmail = document.getElementById('fv-notify-email').checked;
+        const statusVal = document.getElementById('fv-help-select').value;
+        const actionVal = document.getElementById('fv-action-select').value;
+        
+        if(!noteInput && !markResolved && !statusVal && actionVal === account.action) {
+            window.showToast("No changes detected to push.", "warning");
+            return;
+        }
+
+        const btn = document.getElementById('btn-push-note');
+        const ogText = btn.innerHTML;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+        btn.disabled = true;
+
+        try {
+            const token = await window.getToken();
+            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' };
+
+            let patchSuccess = false;
             for (let src of account.sources) {
                 let payload = {};
                 let currentRaw = src.rawNotes || "";
+                let finalStatus = statusVal;
+                
+                if(markResolved) finalStatus = "Resolved";
                 
                 let newNoteBlock = `Modified On: ${new Date().toLocaleString()}\nModified By: ${window.currentUserName}\n\n`;
                 if (markResolved) newNoteBlock += `[RESOLVED] `;
                 newNoteBlock += `${noteInput}\n------------------------------\n`;
                 
-                if (src.table === 'cr714_accountmanagementdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
-                else if (src.table === 'cr714_prospectingdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
-                else if (src.table === 'cr714_cadencedatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
-                else if (src.table === 'cr714_louisebrowndatasets') payload.cr714_notesfr = newNoteBlock + currentRaw;
-
-                if (markResolved) {
-                    if (src.table === 'cr714_accountmanagementdatasets' || src.table === 'cr714_prospectingdatasets' || src.table === 'cr714_louisebrowndatasets') payload.cr714_help = "Resolved";
-                    else if (src.table === 'cr714_cadencedatasets') payload.cr714_recordstatus = "Resolved";
+                if (noteInput || markResolved) {
+                    if (src.table === 'cr714_accountmanagementdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
+                    else if (src.table === 'cr714_prospectingdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
+                    else if (src.table === 'cr714_cadencedatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
+                    else if (src.table === 'cr714_louisebrowndatasets') payload.cr714_notesfr = newNoteBlock + currentRaw;
                 }
 
-                const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
-                if(res.ok) accountSuccess = true;
+                if (finalStatus !== '') {
+                    if (src.table === 'cr714_accountmanagementdatasets' || src.table === 'cr714_prospectingdatasets' || src.table === 'cr714_louisebrowndatasets') {
+                        payload.cr714_help = finalStatus === 'Clear' ? null : finalStatus;
+                    } else if (src.table === 'cr714_cadencedatasets') {
+                        payload.cr714_recordstatus = finalStatus === 'Clear' ? null : finalStatus;
+                    }
+                }
+
+                if (actionVal !== account.action && actionVal !== '') {
+                    payload.cr714_action = actionVal === 'Clear' ? null : actionVal;
+                }
+
+                if (Object.keys(payload).length > 0) {
+                    const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
+                    if(res.ok) patchSuccess = true;
+                }
             }
 
-            if (accountSuccess) {
-                successCount++;
+            if (patchSuccess) {
+                window.showToast("Updates pushed successfully.", "success");
                 if (doEmail) {
-                    if(!repEmailsToPush[account.rep]) repEmailsToPush[account.rep] = [];
-                    repEmailsToPush[account.rep].push(`<li><strong>${account.company}</strong> (${account.cr714_id}) - ${markResolved ? 'RESOLVED' : 'UPDATED'}</li>`);
-                }
-            }
-        }
-
-        if (successCount > 0) {
-            window.showToast(`Batch processed ${successCount} accounts.`, "success");
-            document.getElementById('bulk-modal').classList.add('hidden-force');
-            document.getElementById('bulk-modal').classList.remove('flex');
-            window.clearBulkSelection();
-            
-            if (doEmail) {
-                for(let rep in repEmailsToPush) {
                     const emailBody = `
-                        <h2 style="color: #0f766e;">A.C.T. Batch Manager Update</h2>
+                        <h2 style="color: #0f766e;">A.C.T. Manager Update</h2>
+                        <p><strong>Account:</strong> ${window.escapeHTML(account.company)} (${account.cr714_id})</p>
                         <p><strong>Manager:</strong> ${window.currentUserName}</p>
-                        <p><strong>Bulk Note:</strong><br/>${window.escapeHTML(noteInput).replace(/\n/g, '<br/>')}</p>
+                        <p><strong>Status:</strong> ${markResolved ? 'RESOLVED' : (statusVal || 'Updated')}</p>
                         <hr/>
-                        <h3>Impacted Accounts:</h3>
-                        <ul>${repEmailsToPush[rep].join('')}</ul>
+                        <p><strong>Notes:</strong><br/>${window.escapeHTML(noteInput).replace(/\n/g, '<br/>')}</p>
                     `;
-                    await window.sendSilentEmail(rep, `ACT Bulk Update from ${window.currentUserName}`, emailBody);
+                    await window.sendSilentEmail(account.rep, `ACT Manager Update: ${account.company}`, emailBody);
                 }
+                setTimeout(() => window.forceRefreshData(), 1000);
+            } else {
+                window.showToast("Failed to push updates.", "error");
             }
-            setTimeout(() => window.forceRefreshData(), 1000);
-        } else {
-            window.showToast("Batch processing failed.", "error");
+        } catch(e) {
+            console.error(e);
+            window.showToast("Network error during update.", "error");
+        } finally {
+            btn.innerHTML = ogText;
+            btn.disabled = false;
         }
-    } catch(e) {
-        console.error(e);
-        window.showToast("Network error during batch update.", "error");
-    } finally {
-        btn.innerHTML = ogText; btn.disabled = false;
-    }
-};
+    };
 
-window.executeBulkResolve = function() {
-    document.getElementById('bulk-modal-count').innerText = window.bulkSelectedIds.size; 
-    document.getElementById('bulk-manager-note').value = 'Batch marked as resolved by manager.'; 
-    document.getElementById('bulk-mark-resolved').checked = true; 
-    document.getElementById('bulk-notify-email').checked = false;
-    document.getElementById('bulk-modal').classList.remove('hidden-force'); 
-    document.getElementById('bulk-modal').classList.add('flex'); 
-};
+    window.quickResolve = async function() {
+        document.getElementById('fv-mark-resolved').checked = true;
+        document.getElementById('fv-help-select').value = "Resolved";
+        await window.saveManagerNote();
+    };
 
-window.pushIntroEmail = async function() {
-    if(!window.activeAccountId) return;
-    const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId);
-    if(!account) return;
+    window.executeBulkNote = async function() {
+        const btn = document.getElementById('btn-execute-bulk');
+        const ogText = btn.innerHTML;
+        btn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Executing Batch...';
+        btn.disabled = true;
 
-    const btn = document.getElementById('fv-push-email-btn');
-    const ogText = btn.innerHTML;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
-    btn.disabled = true;
+        const noteInput = document.getElementById('bulk-manager-note').value.trim();
+        const markResolved = document.getElementById('bulk-mark-resolved').checked;
+        const doEmail = document.getElementById('bulk-notify-email').checked;
 
-    const emailBody = `
-        <h2 style="color: #22c55e;">A.C.T. Intro Priority Target</h2>
-        <p><strong>Account:</strong> ${window.escapeHTML(account.company)} (${account.cr714_id})</p>
-        <p>This account has been flagged as a priority introduction. Please review the account history in A.C.T. and follow up immediately.</p>
-    `;
+        if(!noteInput && !markResolved) {
+            window.showToast("Please enter a note or check resolve.", "warning");
+            btn.innerHTML = ogText; btn.disabled = false; return;
+        }
 
-    const success = await window.sendSilentEmail(account.rep, `ACTION REQUIRED: Priority Intro - ${account.company}`, emailBody);
-    
-    btn.innerHTML = ogText;
-    btn.disabled = false;
-    if(success) {
         try {
             const token = await window.getToken();
-            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
-            let newNoteBlock = `Modified On: ${new Date().toLocaleString()}\nModified By: ${window.currentUserName}\n\n[Intro Email Dispatched to Rep]\n------------------------------\n`;
-            for (let src of account.sources) {
-                let payload = {};
-                let currentRaw = src.rawNotes || "";
-                if (src.table === 'cr714_accountmanagementdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
-                else if (src.table === 'cr714_prospectingdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
-                else if (src.table === 'cr714_cadencedatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
-                else if (src.table === 'cr714_louisebrowndatasets') payload.cr714_notesfr = newNoteBlock + currentRaw;
-                
-                if(Object.keys(payload).length > 0) fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
+            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' };
+
+            let successCount = 0;
+            const repEmailsToPush = {};
+
+            for (let id of window.bulkSelectedIds) {
+                const account = window.teamFilteredAccounts.find(a => a.cr714_id === id);
+                if(!account) continue;
+
+                let accountSuccess = false;
+                for (let src of account.sources) {
+                    let payload = {};
+                    let currentRaw = src.rawNotes || "";
+                    
+                    let newNoteBlock = `Modified On: ${new Date().toLocaleString()}\nModified By: ${window.currentUserName}\n\n`;
+                    if (markResolved) newNoteBlock += `[RESOLVED] `;
+                    newNoteBlock += `${noteInput}\n------------------------------\n`;
+                    
+                    if (src.table === 'cr714_accountmanagementdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
+                    else if (src.table === 'cr714_prospectingdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
+                    else if (src.table === 'cr714_cadencedatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
+                    else if (src.table === 'cr714_louisebrowndatasets') payload.cr714_notesfr = newNoteBlock + currentRaw;
+
+                    if (markResolved) {
+                        if (src.table === 'cr714_accountmanagementdatasets' || src.table === 'cr714_prospectingdatasets' || src.table === 'cr714_louisebrowndatasets') payload.cr714_help = "Resolved";
+                        else if (src.table === 'cr714_cadencedatasets') payload.cr714_recordstatus = "Resolved";
+                    }
+
+                    const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
+                    if(res.ok) accountSuccess = true;
+                }
+
+                if (accountSuccess) {
+                    successCount++;
+                    if (doEmail) {
+                        if(!repEmailsToPush[account.rep]) repEmailsToPush[account.rep] = [];
+                        repEmailsToPush[account.rep].push(`<li><strong>${account.company}</strong> (${account.cr714_id}) - ${markResolved ? 'RESOLVED' : 'UPDATED'}</li>`);
+                    }
+                }
             }
-        } catch(e) {}
-    }
-};
 
-window.copyHistory = function() {
-    if(!window.currentModalHistory || window.currentModalHistory.length === 0) {
-        window.showToast("No history to copy.", "warning");
-        return;
-    }
-    let text = window.currentModalHistory.map(h => `[${h.src}] ${h.date} - ${h.author}\n${h.text}\n`).join('\n-----------------------\n');
-    navigator.clipboard.writeText(text).then(() => {
-        window.showToast("History copied to clipboard.", "success");
-    });
-};
+            if (successCount > 0) {
+                window.showToast(`Batch processed ${successCount} accounts.`, "success");
+                document.getElementById('bulk-modal').classList.add('hidden-force');
+                document.getElementById('bulk-modal').classList.remove('flex');
+                window.clearBulkSelection();
+                
+                if (doEmail) {
+                    for(let rep in repEmailsToPush) {
+                        const emailBody = `
+                            <h2 style="color: #0f766e;">A.C.T. Batch Manager Update</h2>
+                            <p><strong>Manager:</strong> ${window.currentUserName}</p>
+                            <p><strong>Bulk Note:</strong><br/>${window.escapeHTML(noteInput).replace(/\n/g, '<br/>')}</p>
+                            <hr/>
+                            <h3>Impacted Accounts:</h3>
+                            <ul>${repEmailsToPush[rep].join('')}</ul>
+                        `;
+                        await window.sendSilentEmail(rep, `ACT Bulk Update from ${window.currentUserName}`, emailBody);
+                    }
+                }
+                setTimeout(() => window.forceRefreshData(), 1000);
+            } else {
+                window.showToast("Batch processing failed.", "error");
+            }
+        } catch(e) {
+            console.error(e);
+            window.showToast("Network error during batch update.", "error");
+        } finally {
+            btn.innerHTML = ogText; btn.disabled = false;
+        }
+    };
 
-window.exportHistory = function() {
-    if(!window.currentModalHistory || window.currentModalHistory.length === 0) {
-        window.showToast("No history to export.", "warning");
-        return;
-    }
-    let csv = ["Source,Date,Author,TouchType,Tags,Text,ExtractedLink"];
-    window.currentModalHistory.forEach(h => {
-        let tags = h.tags ? h.tags.join(';') : '';
-        let text = String(h.text || '').replace(/\r?\n|\r/g, ' - ').replace(/"/g, '""');
-        csv.push(`"${h.src}","${h.date}","${h.author}","${h.touchType}","${tags}","${text}","${h.extractedLink||''}"`);
-    });
-    let b = new Blob([csv.join('\n')], {type:'text/csv'});
-    let u = URL.createObjectURL(b);
-    let a = document.createElement('a'); a.href=u; a.download=`History_${window.activeAccountId}.csv`; a.click();
-};
+    window.executeBulkResolve = function() {
+        document.getElementById('bulk-modal-count').innerText = window.bulkSelectedIds.size; 
+        document.getElementById('bulk-manager-note').value = 'Batch marked as resolved by manager.'; 
+        document.getElementById('bulk-mark-resolved').checked = true; 
+        document.getElementById('bulk-notify-email').checked = false;
+        document.getElementById('bulk-modal').classList.remove('hidden-force'); 
+        document.getElementById('bulk-modal').classList.add('flex'); 
+    };
 
-window.exportDrilldownCSV = function() {
-    if(!window.currentDrilldownData || window.currentDrilldownData.length === 0) return;
-    let csv = ["Account ID,Company,Rep,Action,Last Update"];
-    window.currentDrilldownData.forEach(a => {
-        let dateStr = a.modifiedon ? new Date(a.modifiedon).toLocaleDateString() : '';
-        csv.push(`"${a.cr714_id}","${window.escapeHTML(a.company)}","${window.escapeHTML(a.rep)}","${window.escapeHTML(a.action||'')}","${dateStr}"`);
-    });
-    let b = new Blob([csv.join('\n')], {type:'text/csv'});
-    let u = URL.createObjectURL(b);
-    let a = document.createElement('a'); a.href=u; a.download=`Drilldown_${window.drilldownRepContext}_${window._lastDrilldownMetric}.csv`; a.click();
-};
+    window.pushIntroEmail = async function() {
+        if(!window.activeAccountId) return;
+        const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId);
+        if(!account) return;
 
-window.launchRepImpersonation = function() {
-    const rep = document.getElementById('fv-rep').innerText;
-    if(!rep || rep === '--') return;
-    window.showToast(`Impersonation of ${rep} requested. (Requires ACT Rep UI URL)`, "info");
-};
+        const btn = document.getElementById('fv-push-email-btn');
+        const ogText = btn.innerHTML;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
+        btn.disabled = true;
 
-// Bootstrap MSAL
-window.msalInstance.handleRedirectPromise().then(resp => {
-    if (resp && resp.account) { 
-        window.msalAccount = resp.account; 
-        window.currentUserName = window.msalAccount.name; 
-        window.initApp(); 
-    } else { 
-        const accts = window.msalInstance.getAllAccounts(); 
-        if(accts.length > 0) { 
-            window.msalAccount = accts[0]; 
+        const emailBody = `
+            <h2 style="color: #22c55e;">A.C.T. Intro Priority Target</h2>
+            <p><strong>Account:</strong> ${window.escapeHTML(account.company)} (${account.cr714_id})</p>
+            <p>This account has been flagged as a priority introduction. Please review the account history in A.C.T. and follow up immediately.</p>
+        `;
+
+        const success = await window.sendSilentEmail(account.rep, `ACTION REQUIRED: Priority Intro - ${account.company}`, emailBody);
+        
+        btn.innerHTML = ogText;
+        btn.disabled = false;
+        if(success) {
+            try {
+                const token = await window.getToken();
+                const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+                let newNoteBlock = `Modified On: ${new Date().toLocaleString()}\nModified By: ${window.currentUserName}\n\n[Intro Email Dispatched to Rep]\n------------------------------\n`;
+                for (let src of account.sources) {
+                    let payload = {};
+                    let currentRaw = src.rawNotes || "";
+                    if (src.table === 'cr714_accountmanagementdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
+                    else if (src.table === 'cr714_prospectingdatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
+                    else if (src.table === 'cr714_cadencedatasets') payload.cr714_managernotes = newNoteBlock + currentRaw;
+                    else if (src.table === 'cr714_louisebrowndatasets') payload.cr714_notesfr = newNoteBlock + currentRaw;
+                    
+                    if(Object.keys(payload).length > 0) fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
+                }
+            } catch(e) {}
+        }
+    };
+
+    window.copyHistory = function() {
+        if(!window.currentModalHistory || window.currentModalHistory.length === 0) {
+            window.showToast("No history to copy.", "warning");
+            return;
+        }
+        let text = window.currentModalHistory.map(h => `[${h.src}] ${h.date} - ${h.author}\n${h.text}\n`).join('\n-----------------------\n');
+        navigator.clipboard.writeText(text).then(() => {
+            window.showToast("History copied to clipboard.", "success");
+        });
+    };
+
+    window.exportHistory = function() {
+        if(!window.currentModalHistory || window.currentModalHistory.length === 0) {
+            window.showToast("No history to export.", "warning");
+            return;
+        }
+        let csv = ["Source,Date,Author,TouchType,Tags,Text,ExtractedLink"];
+        window.currentModalHistory.forEach(h => {
+            let tags = h.tags ? h.tags.join(';') : '';
+            let text = String(h.text || '').replace(/\r?\n|\r/g, ' - ').replace(/"/g, '""');
+            csv.push(`"${h.src}","${h.date}","${h.author}","${h.touchType}","${tags}","${text}","${h.extractedLink||''}"`);
+        });
+        let b = new Blob([csv.join('\n')], {type:'text/csv'});
+        let u = URL.createObjectURL(b);
+        let a = document.createElement('a'); a.href=u; a.download=`History_${window.activeAccountId}.csv`; a.click();
+    };
+
+    window.exportDrilldownCSV = function() {
+        if(!window.currentDrilldownData || window.currentDrilldownData.length === 0) return;
+        let csv = ["Account ID,Company,Rep,Action,Last Update"];
+        window.currentDrilldownData.forEach(a => {
+            let dateStr = a.modifiedon ? new Date(a.modifiedon).toLocaleDateString() : '';
+            csv.push(`"${a.cr714_id}","${window.escapeHTML(a.company)}","${window.escapeHTML(a.rep)}","${window.escapeHTML(a.action||'')}","${dateStr}"`);
+        });
+        let b = new Blob([csv.join('\n')], {type:'text/csv'});
+        let u = URL.createObjectURL(b);
+        let a = document.createElement('a'); a.href=u; a.download=`Drilldown_${window.drilldownRepContext}_${window._lastDrilldownMetric}.csv`; a.click();
+    };
+
+    window.launchRepImpersonation = function() {
+        const rep = document.getElementById('fv-rep').innerText;
+        if(!rep || rep === '--') return;
+        window.showToast(`Impersonation of ${rep} requested. (Requires ACT Rep UI URL)`, "info");
+    };
+
+    // Bootstrap MSAL
+    window.msalInstance.handleRedirectPromise().then(resp => {
+        if (resp && resp.account) { 
+            window.msalAccount = resp.account; 
             window.currentUserName = window.msalAccount.name; 
             window.initApp(); 
-        } else {
-            document.getElementById('login-container').classList.remove('hidden-force');
-            document.getElementById('login-container').classList.add('flex');
-            document.getElementById('global-loader').style.display = 'none';
+        } else { 
+            const accts = window.msalInstance.getAllAccounts(); 
+            if(accts.length > 0) { 
+                window.msalAccount = accts[0]; 
+                window.currentUserName = window.msalAccount.name; 
+                window.initApp(); 
+            } else {
+                document.getElementById('login-container').classList.remove('hidden-force');
+                document.getElementById('login-container').classList.add('flex');
+                document.getElementById('global-loader').style.display = 'none';
+            }
         }
-    }
-}).catch(err => {
-    console.error(err);
-    document.getElementById('login-error').innerText = "Authentication error occurred.";
-    document.getElementById('login-error').classList.remove('hidden-force');
-    document.getElementById('login-container').classList.remove('hidden-force');
-    document.getElementById('login-container').classList.add('flex');
-    document.getElementById('global-loader').style.display = 'none';
-});
+    }).catch(err => {
+        console.error(err);
+        document.getElementById('login-error').innerText = "Authentication error occurred.";
+        document.getElementById('login-error').classList.remove('hidden-force');
+        document.getElementById('login-container').classList.remove('hidden-force');
+        document.getElementById('login-container').classList.add('flex');
+        document.getElementById('global-loader').style.display = 'none';
+    });
+
 </script>
 </body>
 </html>
