@@ -1803,9 +1803,21 @@ window.parseNoteHistory = function(rawNotesStr, sourceLabel, modifiedOn) {
 
         let jsonRegex = /\[\s*\{[\s\S]*?\}\s*\]/g;
         let matches = sourceText.match(jsonRegex);
+const extractDetails = (textBlock, fallbackAuthor, fallbackDate) => {
+            // Pre-process the glued data by injecting structural line breaks 
+            let spacedBlock = textBlock
+                .replace(/(Modified By:|Created By:)/ig, '\n$1')
+                .replace(/(Modified On:|Created On:)/ig, '\n$1')
+                .replace(/(Action:)/ig, '\n$1')
+                .replace(/(Action Message:)/ig, '\n$1')
+                .replace(/(Subject:)/ig, '\n$1')
+                .replace(/(Email Information:)/ig, '\n$1')
+                .replace(/(<a href=)/ig, '\n$1')
+                .replace(/(Open Link)/ig, '\n$1\n')
+                // Completely strip notes headers so they don't consume the actual note on the same line
+                .replace(/(Account Management Notes:|Cadence Notes:|Prospecting Notes:|Louise Brown Notes:|AM Notes:|Notes:)/ig, '\n');
 
-        const extractDetails = (textBlock, fallbackAuthor, fallbackDate) => {
-            let trimBlock = textBlock.trim();
+            let trimBlock = spacedBlock.trim();
             if (trimBlock === '') return null;
 
             let author = fallbackAuthor; 
@@ -1817,13 +1829,13 @@ window.parseNoteHistory = function(rawNotesStr, sourceLabel, modifiedOn) {
             let tags = [];
             let metaLoc='', metaDm='', metaComp='', metaOpp='', metaIntro='';
 
-            let modByMatch = trimBlock.match(/(?:Modified By|Created By):\s*([^\n\r]+)/i);
+            let modByMatch = trimBlock.match(/(?:Modified By|Created By):\s*([^\n\[\{]*)/i);
             if (modByMatch) {
                 let aLine = modByMatch[1].trim();
-                author = aLine.split(/(Account Management|Prospecting|Cadence|Update)/i)[0].trim() || "Unknown";
+                author = aLine.split(/(Action:|Account Management|Prospecting|Cadence|Update)/i)[0].trim() || "Unknown";
             }
 
-            let modOnMatch = trimBlock.match(/(?:Modified On|Created On):\s*([^\n\r]+)/i);
+            let modOnMatch = trimBlock.match(/(?:Modified On|Created On):\s*([^\n\[\{]*)/i);
             if (modOnMatch) {
                 date = modOnMatch[1].trim();
             } else if (trimBlock.match(/^(\d{1,2}\/\d{1,2}\/\d{2,4})/)) {
@@ -1856,11 +1868,14 @@ window.parseNoteHistory = function(rawNotesStr, sourceLabel, modifiedOn) {
                 if (t.startsWith("modified on:") || t.startsWith("created on:")) return false;
                 if (t.startsWith("action:")) return false;
                 if (t.startsWith("action message:")) return false;
-                if (t.startsWith("masonville link")) return false;
+                if (t.startsWith("masonville link") || t.startsWith("masonvillelink")) return false;
+                if (t.startsWith("open link")) return false;
                 if (t.startsWith("<a href=")) return false;
-                if (t.includes("notes:") || t.startsWith("account management notes:") || t.startsWith("cadence notes:") || t.startsWith("prospecting notes:")) return false;
                 if (t.startsWith("email information:")) return false;
                 if (t.startsWith("subject:")) return false;
+                
+                // Erase lingering pure date/timestamp artifacts
+                if (t.match(/^\d{1,2}\/\d{1,2}\/\d{2,4}(\s+\d{1,2}:\d{2}(:\d{2})?\s*(am|pm)?)?$/i)) return false;
                 
                 if (t.startsWith("[list:") || t.startsWith("[play:") || t.startsWith("[email:") || t.startsWith("[manager")) {
                     tags.push(line.trim().replace(/[\[\]]/g, ''));
@@ -1885,6 +1900,10 @@ window.parseNoteHistory = function(rawNotesStr, sourceLabel, modifiedOn) {
             });
 
             let finalNote = filteredLines.join('\n').trim();
+            
+            // Clean up legacy Date prefixes from manual note entries (e.g. "3/16/26 9:45 AM --- ")
+            finalNote = finalNote.replace(/^(?:\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}:\d{2}\s*(?:AM|PM)?\s*---\s*)/i, '');
+            
             if(finalNote === '' && !extractedLink && !extractedSubject && !extractedAction) return null;
 
             let touchType = 'Note';
@@ -1898,7 +1917,6 @@ window.parseNoteHistory = function(rawNotesStr, sourceLabel, modifiedOn) {
                 touchType = 'Masonville';
             }
 
-            // DEDUPLICATION CHECK
             let cleanText = finalNote.replace(/[^a-zA-Z0-9]/g, '').substring(0, 50);
             if(cleanText && dedupeSet.has(cleanText)) return null; 
             if(cleanText) dedupeSet.add(cleanText);
