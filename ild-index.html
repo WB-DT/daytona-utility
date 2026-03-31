@@ -1795,7 +1795,7 @@ window.getToken = async function(scopeUrl = "https://org23279050.crm.dynamics.co
         } catch(e) {}
     };
 
-    window.parseNoteHistory = function(rawNotesStr, sourceLabel, modifiedOn) {
+window.parseNoteHistory = function(rawNotesStr, sourceLabel, modifiedOn) {
         if(!rawNotesStr || String(rawNotesStr).trim() === '') return [];
         let sourceText = String(rawNotesStr);
         let parsedRecords = [];
@@ -1803,47 +1803,13 @@ window.getToken = async function(scopeUrl = "https://org23279050.crm.dynamics.co
 
         let jsonRegex = /\[\s*\{[\s\S]*?\}\s*\]/g;
         let matches = sourceText.match(jsonRegex);
-        
-        if (matches) {
-            matches.forEach(jsonString => {
-                try {
-                    let parsedJson = JSON.parse(jsonString);
-                    parsedJson.forEach(item => {
-                        let noteText = item.text || '';
-                        if(noteText.toLowerCase().includes('email information:')) {
-                            let rawDate = item.date || '';
-                            let subjectMatch = noteText.match(/Subject:\s*([^\n\r]+)/i);
-                            let extractedSubject = subjectMatch ? subjectMatch[1].trim() : null;
-                            let actionMatch = noteText.match(/Action:\s*([^\n\r]+)/i);
-                            let extractedAction = actionMatch ? actionMatch[1].trim() : null;
 
-                            let cleanText = noteText.replace(/[^a-zA-Z0-9]/g, '').substring(0, 50);
-                            if(cleanText && !dedupeSet.has(cleanText)) {
-                                dedupeSet.add(cleanText);
-                                parsedRecords.push({
-                                    date: rawDate, author: item.author || 'System', text: noteText, src: sourceLabel,
-                                    historicalAction: extractedAction, emailSubject: extractedSubject, touchType: 'Email',
-                                    extractedLink: null, tags: ['Email Dispatched'], metaLoc:'', metaDm:'', metaComp:'', metaOpp:'', metaIntro:''
-                                });
-                            }
-                        }
-                    });
-                } catch(e) {}
-            });
-        }
+        const extractDetails = (textBlock, fallbackAuthor, fallbackDate) => {
+            let trimBlock = textBlock.trim();
+            if (trimBlock === '') return null;
 
-        let legacyText = sourceText.replace(jsonRegex, '').trim();
-        let rawBlocks = legacyText.split(/-{20,}/);
-
-        let lastAuthor = "System / Unknown";
-        let lastDate = modifiedOn ? new Date(modifiedOn).toLocaleDateString() : "Unknown Date";
-
-        rawBlocks.forEach(block => {
-            let trimBlock = block.trim();
-            if (trimBlock === '') return;
-
-            let author = lastAuthor; 
-            let date = lastDate;
+            let author = fallbackAuthor; 
+            let date = fallbackDate;
             let extractedAction = null;
             let extractedSubject = null;
             let extractedLink = null;
@@ -1855,16 +1821,13 @@ window.getToken = async function(scopeUrl = "https://org23279050.crm.dynamics.co
             if (modByMatch) {
                 let aLine = modByMatch[1].trim();
                 author = aLine.split(/(Account Management|Prospecting|Cadence|Update)/i)[0].trim() || "Unknown";
-                lastAuthor = author; 
             }
 
             let modOnMatch = trimBlock.match(/(?:Modified On|Created On):\s*([^\n\r]+)/i);
             if (modOnMatch) {
                 date = modOnMatch[1].trim();
-                lastDate = date;
             } else if (trimBlock.match(/^(\d{1,2}\/\d{1,2}\/\d{2,4})/)) {
                 date = trimBlock.match(/^(\d{1,2}\/\d{1,2}\/\d{2,4})/)[1];
-                lastDate = date;
             }
 
             if (trimBlock.toLowerCase().includes("email information:") || trimBlock.toLowerCase().includes("subject:")) {
@@ -1879,10 +1842,10 @@ window.getToken = async function(scopeUrl = "https://org23279050.crm.dynamics.co
             let linkMatch = trimBlock.match(/<a href=['"]([^'"]+)['"][^>]*>/i);
             if (linkMatch) {
                 let url = linkMatch[1];
-                if (url.startsWith("http")) extractedLink = url;
+                if (url.startsWith("http")) extractedLink = url.replace(/activitysalescall/ig, "activityleadcall");
             } else {
                 let plainLinkMatch = trimBlock.match(/https?:\/\/[^\s]+/i);
-                if (plainLinkMatch) extractedLink = plainLinkMatch[0].trim();
+                if (plainLinkMatch) extractedLink = plainLinkMatch[0].trim().replace(/activitysalescall/ig, "activityleadcall");
             }
 
             let lines = trimBlock.split(/\r?\n/);
@@ -1922,7 +1885,7 @@ window.getToken = async function(scopeUrl = "https://org23279050.crm.dynamics.co
             });
 
             let finalNote = filteredLines.join('\n').trim();
-            if(finalNote === '' && !extractedLink && !extractedSubject && !extractedAction) return;
+            if(finalNote === '' && !extractedLink && !extractedSubject && !extractedAction) return null;
 
             let touchType = 'Note';
             let combinedText = trimBlock.toLowerCase();
@@ -1937,22 +1900,51 @@ window.getToken = async function(scopeUrl = "https://org23279050.crm.dynamics.co
 
             // DEDUPLICATION CHECK
             let cleanText = finalNote.replace(/[^a-zA-Z0-9]/g, '').substring(0, 50);
-            if(cleanText && dedupeSet.has(cleanText)) return; // Skip if we already logged this note
+            if(cleanText && dedupeSet.has(cleanText)) return null; 
             if(cleanText) dedupeSet.add(cleanText);
 
-            parsedRecords.push({
-                date: date,
-                author: author,
-                text: finalNote,
-                src: sourceLabel,
-                tags: tags,
+            return {
+                date: date, author: author, text: finalNote, src: sourceLabel, tags: tags,
                 metaLoc: metaLoc, metaDm: metaDm, metaComp: metaComp, metaOpp: metaOpp, metaIntro: metaIntro,
-                historicalAction: extractedAction,
-                emailSubject: extractedSubject,
-                touchType: touchType,
-                extractedLink: extractedLink
+                historicalAction: extractedAction, emailSubject: extractedSubject, touchType: touchType, extractedLink: extractedLink
+            };
+        };
+
+        if (matches) {
+            matches.forEach(jsonString => {
+                try {
+                    let parsedJson = JSON.parse(jsonString);
+                    parsedJson.forEach(item => {
+                        let noteText = item.text || '';
+                        let rawDate = item.date || (modifiedOn ? new Date(modifiedOn).toLocaleDateString() : 'Unknown Date');
+                        let author = item.author || 'System';
+                        
+                        let record = extractDetails(noteText, author, rawDate);
+                        if (record) {
+                            if (item.date && !noteText.toLowerCase().includes('modified on')) record.date = item.date;
+                            if (item.author && !noteText.toLowerCase().includes('modified by')) record.author = item.author;
+                            parsedRecords.push(record);
+                        }
+                    });
+                } catch(e) {}
             });
+        }
+
+        let legacyText = sourceText.replace(jsonRegex, '').trim();
+        let rawBlocks = legacyText.split(/-{5,}/);
+
+        let lastAuthor = "System / Unknown";
+        let lastDate = modifiedOn ? new Date(modifiedOn).toLocaleDateString() : "Unknown Date";
+
+        rawBlocks.forEach(block => {
+            let record = extractDetails(block, lastAuthor, lastDate);
+            if (record) {
+                lastAuthor = record.author;
+                lastDate = record.date;
+                parsedRecords.push(record);
+            }
         });
+        
         return parsedRecords;
     };
 
@@ -2324,113 +2316,54 @@ window.populateDynamicActionSet = function() {
         window.searchTimeout = setTimeout(() => window.renderAccountList(true, false), 250);
     };
 
-    window.renderAccountList = function(fullRefresh = true, appendMode = false) {
-        const container = document.getElementById('account-list-container');
-        
-        if (fullRefresh) {
-            const term = document.getElementById('list-search').value.toLowerCase();
-            const sortType = document.getElementById('list-sort').value;
-            window.listDisplayAccounts = window.teamFilteredAccounts;
+window.renderAccountList = function(fullRefresh = true, appendMode = false) {
+            const container = document.getElementById('account-list-container');
             
-            if(window.drilldownActive && window.drilldownFilteredIds) {
-                window.listDisplayAccounts = window.listDisplayAccounts.filter(a => window.drilldownFilteredIds.has(a.cr714_id));
-            }
+            if (fullRefresh) {
+                const term = document.getElementById('list-search').value.toLowerCase();
+                const sortType = document.getElementById('list-sort').value;
+                window.listDisplayAccounts = window.teamFilteredAccounts;
+                
+                if(window.drilldownActive && window.drilldownFilteredIds) {
+                    window.listDisplayAccounts = window.listDisplayAccounts.filter(a => window.drilldownFilteredIds.has(a.cr714_id));
+                }
 
-            if(window.activeQuickFilter === 'help') {
-                window.listDisplayAccounts = window.listDisplayAccounts.filter(a => {
-                    const hs = String(a.helpStatus || '').toUpperCase();
-                    return (a.isHelp || a.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') && !String(a.managerNotes||'').toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR';
+                if(window.activeQuickFilter === 'help') {
+                    window.listDisplayAccounts = window.listDisplayAccounts.filter(a => {
+                        const hs = String(a.helpStatus || '').toUpperCase();
+                        return (a.isHelp || a.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') && !String(a.managerNotes||'').toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR';
+                    });
+                }
+                else if(window.activeQuickFilter === 'stale') window.listDisplayAccounts = window.listDisplayAccounts.filter(a => !a.modifiedon || (new Date() - new Date(a.modifiedon)) / (1000*60*60*24) > 30);
+                else if(window.activeQuickFilter === 'intro') window.listDisplayAccounts = window.listDisplayAccounts.filter(a => a.intro);
+                
+                if(term) window.listDisplayAccounts = window.listDisplayAccounts.filter(a => (a.cr714_id||'').toLowerCase().includes(term) || (a.company||'').toLowerCase().includes(term) || (a.rep||'').toLowerCase().includes(term));
+                
+                window.listDisplayAccounts.sort((a, b) => {
+                    const getHelpWeight = (acct) => {
+                        const hs = String(acct.helpStatus || '').toUpperCase();
+                        const isHelp = (acct.isHelp || acct.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') && !String(acct.managerNotes||'').toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR';
+                        return isHelp ? 1 : 0;
+                    };
+                    let aHelp = getHelpWeight(a);
+                    let bHelp = getHelpWeight(b);
+                    if (aHelp !== bHelp) return bHelp - aHelp;
+
+                    if(sortType === 'date-desc') return new Date(b.modifiedon || 0) - new Date(a.modifiedon || 0);
+                    if(sortType === 'company-asc') return (a.company || '').localeCompare(b.company || '');
+                    if(sortType === 'rep-asc') return (a.rep || '').localeCompare(b.rep || '');
+                    return 0;
                 });
+                
+                if (!appendMode) {
+                    window.loadedCount = 100;
+                    if(container) container.scrollTop = 0;
+                } else {
+                    // CRITICAL FIX: If fullRefresh is true, we must replace the container contents, not append,
+                    // even if we are preserving the page state/scroll position.
+                    appendMode = false;
+                }
             }
-            else if(window.activeQuickFilter === 'stale') window.listDisplayAccounts = window.listDisplayAccounts.filter(a => !a.modifiedon || (new Date() - new Date(a.modifiedon)) / (1000*60*60*24) > 30);
-            else if(window.activeQuickFilter === 'intro') window.listDisplayAccounts = window.listDisplayAccounts.filter(a => a.intro);
-            
-            if(term) window.listDisplayAccounts = window.listDisplayAccounts.filter(a => (a.cr714_id||'').toLowerCase().includes(term) || (a.company||'').toLowerCase().includes(term) || (a.rep||'').toLowerCase().includes(term));
-            
-            window.listDisplayAccounts.sort((a, b) => {
-                const getHelpWeight = (acct) => {
-                    const hs = String(acct.helpStatus || '').toUpperCase();
-                    const isHelp = (acct.isHelp || acct.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') && !String(acct.managerNotes||'').toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR';
-                    return isHelp ? 1 : 0;
-                };
-                let aHelp = getHelpWeight(a);
-                let bHelp = getHelpWeight(b);
-                if (aHelp !== bHelp) return bHelp - aHelp;
-
-                if(sortType === 'date-desc') return new Date(b.modifiedon || 0) - new Date(a.modifiedon || 0);
-                if(sortType === 'company-asc') return (a.company || '').localeCompare(b.company || '');
-                if(sortType === 'rep-asc') return (a.rep || '').localeCompare(b.rep || '');
-                return 0;
-            });
-            
-            window.loadedCount = 100;
-            container.scrollTop = 0;
-        }
-
-        const toLoad = window.listDisplayAccounts.slice(appendMode ? window.loadedCount - 100 : 0, window.loadedCount);
-        const total = window.listDisplayAccounts.length;
-        const showing = Math.min(window.loadedCount, total);
-
-        document.getElementById('list-count-text').innerText = `${total} Pool`;
-        const scrollInfo = document.getElementById('grid-page-text');
-        if (scrollInfo) {
-            if (showing < total) {
-                scrollInfo.innerHTML = `Showing ${showing} of ${total} <span class="opacity-50 lowercase ml-1">(scroll for more)</span>`;
-            } else {
-                scrollInfo.innerHTML = `Showing all ${total}`;
-            }
-        }
-        
-        if (total === 0 && !appendMode) {
-            container.innerHTML = `<div class="h-full flex flex-col items-center justify-center text-muted opacity-50">
-                                      <i class="fas fa-search text-3xl mb-3"></i>
-                                      <p class="text-xs uppercase font-black tracking-widest text-center">No accounts match<br/>your filters</p>
-                                   </div>`;
-            return;
-        }
-
-        let html = toLoad.map(a => {
-            const hs = String(a.helpStatus || '').toUpperCase();
-            const isHelp = (a.isHelp || a.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') && !String(a.managerNotes||'').toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR';
-            const activeClass = a.cr714_id === window.activeAccountId ? 'active' : '';
-            
-            let pulseClass = '';
-            if (isHelp) pulseClass = 'pulse-help';
-            else if (a.intro) pulseClass = 'pulse-intro';
-            else if (a.sources.length > 1) pulseClass = 'pulse-multi';
-
-            let dsBadges = a.sources.map(s => {
-                let bClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : (s.type === 'Prospecting' ? 'badge-pro' : 'badge-lb'));
-                return `<span class="badge-ds ${bClass}">${s.type}</span>`;
-            }).join('');
-
-            return `
-                <div class="list-item ${pulseClass} ${activeClass} ${window.bulkSelectedIds.has(a.cr714_id)?'bulk-selected':''}" id="card-${a.cr714_id}" onclick="window.selectAccount('${a.cr714_id}')">
-                    <div class="absolute top-2 left-2 z-10" onclick="event.stopPropagation()"><input type="checkbox" class="page-bulk-cb w-4 h-4 cursor-pointer" style="accent-color: var(--primary);" data-id="${a.cr714_id}" ${window.bulkSelectedIds.has(a.cr714_id)?'checked':''} onchange="window.toggleBulkSelection('${a.cr714_id}', event)"></div>
-                    <div class="flex justify-between items-start mb-1 pl-6">
-                        <div class="font-black text-[12px] truncate mr-2 leading-tight">${isHelp?'<i class="fas fa-exclamation-circle mr-1" style="color: var(--accent-danger);"></i>':''}${a.intro?'<i class="fas fa-star mr-1" style="color: var(--accent-success);" title="New Intro"></i>':''}${window.escapeHTML(a.company)}</div>
-                        <div class="text-[9px] text-muted whitespace-nowrap uppercase font-black">${window.timeAgo(a.modifiedon)}</div>
-                    </div>
-                    <div class="flex justify-between items-center mb-1.5 pl-6 gap-1 flex-wrap">
-                        <span class="font-mono text-[10px] text-muted"><i class="fas fa-hashtag mr-1 opacity-50"></i>${a.cr714_id}</span>
-                        <div class="flex gap-1">${dsBadges}</div>
-                    </div>
-                    <div class="flex justify-between items-center pl-6">
-                        <span class="truncate max-w-[120px] font-bold text-[10px] uppercase" style="color: var(--primary);"><i class="fas fa-user-circle mr-1 opacity-50"></i>${window.escapeHTML(a.rep)}</span>
-                        <div class="text-[9px] font-black uppercase px-2 py-0.5 border rounded text-muted inline-block" style="border-color: var(--border-color);">${window.escapeHTML(a.action || 'Idle')}</div>
-                    </div>
-                </div>`;
-        }).join('');
-
-        if (appendMode) {
-            container.insertAdjacentHTML('beforeend', html);
-        } else {
-            container.innerHTML = html;
-        }
-
-        let currentlyVisibleIds = window.listDisplayAccounts.slice(0, window.loadedCount).map(a => a.cr714_id);
-        document.getElementById('selectAllPage').checked = currentlyVisibleIds.length > 0 && currentlyVisibleIds.every(id => window.bulkSelectedIds.has(id));
-    };
 
     window.clearSelection = function() {
         if(window.activeAccountId) { let old = document.getElementById(`card-${window.activeAccountId}`); if(old) old.classList.remove('active'); }
