@@ -3886,157 +3886,853 @@ let successCount = 0;
 <script>
 (function(){
     // =========================================================
-    // SESSION CACHE + SILENT DELTA REFRESH LAYER
+    // FINAL UNIFIED + CACHE + DELTA + SILENT UX PATCH
     // =========================================================
 
-    // Session-scoped cache (clears on tab close)
-    const CACHE_KEY = 'act_mgr_session_cache_v1';
-    const META_KEY  = 'act_mgr_session_meta_v1';
+    // ---------- Session cache keys ----------
+    const CACHE_KEY = 'act_mgr_session_cache_v3';
+    const META_KEY  = 'act_mgr_session_meta_v3';
 
+    // ---------- Session helpers ----------
+    function _safe(v){ return v === null || v === undefined ? '' : String(v); }
+    function safeTrim(v){ return _safe(v).trim(); }
+    function choose(){ for (const v of arguments) { if (v !== null && v !== undefined && String(v).trim() !== '') return v; } return ''; }
+    function normalizeText(text){ return text === null || text === undefined ? '' : String(text).replace(/\r\n/g,'\n').replace(/\r/g,'\n'); }
     function nowIso(){ return new Date().toISOString(); }
 
-    function getCache(){
-        try { return JSON.parse(sessionStorage.getItem(CACHE_KEY)) || null; }
-        catch(e){ return null; }
-    }
+    function getCache(){ try { return JSON.parse(sessionStorage.getItem(CACHE_KEY)) || null; } catch(e){ return null; } }
+    function setCache(obj){ sessionStorage.setItem(CACHE_KEY, JSON.stringify(obj)); }
+    function clearCache(){ sessionStorage.removeItem(CACHE_KEY); sessionStorage.removeItem(META_KEY); }
+    function getMeta(){ try { return JSON.parse(sessionStorage.getItem(META_KEY)) || {}; } catch(e){ return {}; } }
+    function setMeta(obj){ sessionStorage.setItem(META_KEY, JSON.stringify(obj)); }
 
-    function setCache(obj){
-        sessionStorage.setItem(CACHE_KEY, JSON.stringify(obj));
-    }
-
-    function getMeta(){
-        try { return JSON.parse(sessionStorage.getItem(META_KEY)) || {}; }
-        catch(e){ return {}; }
-    }
-
-    function setMeta(obj){
-        sessionStorage.setItem(META_KEY, JSON.stringify(obj));
-    }
-
-    // Soft, non-blocking status indicator
-    function softStatus(msg){
+    // ---------- Soft tasteful sync indicator ----------
+    function softStatus(msg, tone='neutral'){
         let el = document.getElementById('soft-sync-indicator');
         if(!el){
             el = document.createElement('div');
             el.id = 'soft-sync-indicator';
-            el.style.cssText = 'position:fixed;bottom:12px;right:16px;padding:6px 10px;font-size:11px;border-radius:6px;background:rgba(0,0,0,0.55);color:#fff;z-index:9999;opacity:0;transition:opacity .4s';
+            el.style.cssText = 'position:fixed;bottom:12px;right:16px;padding:6px 10px;font-size:11px;border-radius:7px;background:rgba(15,23,42,0.72);color:#fff;z-index:9999;opacity:0;transition:opacity .35s ease, transform .35s ease;transform:translateY(6px);pointer-events:none;backdrop-filter:blur(4px);box-shadow:0 4px 12px rgba(0,0,0,.18)';
             document.body.appendChild(el);
         }
+        const colors = {
+            neutral: 'rgba(15,23,42,0.72)',
+            good: 'rgba(15,118,110,0.78)',
+            warn: 'rgba(120,53,15,0.80)'
+        };
+        el.style.background = colors[tone] || colors.neutral;
         el.textContent = msg;
         el.style.opacity = '1';
+        el.style.transform = 'translateY(0px)';
         clearTimeout(el._t);
-        el._t = setTimeout(()=> el.style.opacity='0', 2200);
+        el._t = setTimeout(() => {
+            el.style.opacity = '0';
+            el.style.transform = 'translateY(6px)';
+        }, 2200);
     }
 
-    // ---------------------------------------------------------
-    // BOOTSTRAP FROM CACHE (INSTANT PAINT)
-    // ---------------------------------------------------------
-    window.bootstrapFromCache = function(){
-        const cached = getCache();
-        if(!cached) return false;
-        try{
-            window.rawUnifiedSourceRows = cached.rawUnifiedSourceRows || [];
-            window.unifiedEventRows     = cached.unifiedEventRows || [];
-            window.mergedAccounts       = cached.mergedAccounts || [];
-            window.populateDynamicActionSet && window.populateDynamicActionSet();
-            window.buildFilters && window.buildFilters();
-            window.applyFilters && window.applyFilters();
-            softStatus('Loaded from session cache');
-            return true;
-        }catch(e){ return false; }
+    // ---------- Date helpers ----------
+    function parseMDate(raw) {
+        if (!raw) return null;
+        const direct = new Date(raw);
+        if (!isNaN(direct.getTime())) return direct;
+        const cleaned = String(raw).replace(/,/g, '').trim();
+        const m = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?$/i);
+        if (!m) return null;
+        let month = parseInt(m[1],10)-1;
+        let day = parseInt(m[2],10);
+        let year = parseInt(m[3],10);
+        if (year < 100) year += 2000;
+        let hour = parseInt(m[4] || '0',10);
+        const minute = parseInt(m[5] || '0',10);
+        const second = parseInt(m[6] || '0',10);
+        const ampm = (m[7] || '').toUpperCase();
+        if (ampm === 'PM' && hour < 12) hour += 12;
+        if (ampm === 'AM' && hour === 12) hour = 0;
+        const dt = new Date(year, month, day, hour, minute, second);
+        return isNaN(dt.getTime()) ? null : dt;
+    }
+    function toIsoOrNull(dt){ return dt instanceof Date && !isNaN(dt.getTime()) ? dt.toISOString() : null; }
+    function toDateOnly(dt){ return dt instanceof Date && !isNaN(dt.getTime()) ? dt.toISOString().split('T')[0] : null; }
+    function currentDateOnly(){ const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+    function withinLastDays(dateObj, days){
+        if (!(dateObj instanceof Date) || isNaN(dateObj.getTime())) return false;
+        const today = currentDateOnly();
+        const dt = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate());
+        const min = new Date(today.getTime());
+        min.setDate(min.getDate() - days);
+        return dt >= min && dt <= today;
+    }
+    function withinLastMonths(dateObj, months){
+        if (!(dateObj instanceof Date) || isNaN(dateObj.getTime())) return false;
+        const today = currentDateOnly();
+        const dt = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate());
+        const min = new Date(today.getFullYear(), today.getMonth() - months, today.getDate());
+        return dt >= min && dt <= today;
+    }
+
+    // ---------- Unified note parser ----------
+    function stripDatasetNoise(line) {
+        const t = safeTrim(String(line).replace(/\r/g, ''));
+        if (!t) return true;
+        return (
+            /^Modified By:/i.test(t) || /^Modified On:/i.test(t) || /^Created By:/i.test(t) || /^Created On:/i.test(t) ||
+            /^Action:/i.test(t) || /^Email was generated/i.test(t) || /^Please contact/i.test(t) ||
+            /^Account Management Update/i.test(t) || /^Account Management Note/i.test(t) || /^Cadence Update/i.test(t) ||
+            /^Cadence Note/i.test(t) || /^Prospecting Update/i.test(t) || /^Prospecting Note/i.test(t) ||
+            /^Louise Brown Update/i.test(t) || /^Louise Brown Note/i.test(t) || /^Logistics Update/i.test(t) ||
+            /^Logistics Note/i.test(t) || /^Notes:/i.test(t) || /^\[List:/i.test(t) || /^\{\{METADATA:/i.test(t) ||
+            /^Action Message:/i.test(t) || /^Masonville Link/i.test(t) || /^<a href=/i.test(t) || /^Subject:/i.test(t) ||
+            /^\[Email Sent\]:/i.test(t)
+        );
+    }
+    function extractSubject(text){
+        if (!text) return null;
+        let m = text.match(/Subject:\s*([^\n\r]+)/i);
+        if (m && m[1]) return safeTrim(m[1].replace(/#\(cr\)/g, '')) || null;
+        m = text.match(/\[Email Sent\]:\s*([^\n\r]+)/i);
+        if (m && m[1]) return safeTrim(m[1].replace(/#\(cr\)/g, '')) || null;
+        return null;
+    }
+    function extractAction(text){ if(!text) return null; const m = text.match(/Action:\s*([^\n\r]+)/i); return m && m[1] ? safeTrim(m[1].replace(/#\(cr\)/g,'')) || null : null; }
+    function extractLink(text){
+        if (!text) return null;
+        let m = text.match(/<a href=['\"]([^'\"]+)['\"]/i);
+        if (m && m[1] && /^http/i.test(m[1])) return m[1];
+        m = text.match(/https?:\/\/[^\s'\"]+/i);
+        return m && m[0] ? m[0] : null;
+    }
+    function buildNoteBody(noteTextRaw, isEmail){
+        if (!noteTextRaw) return null;
+        let working = normalizeText(noteTextRaw);
+        const emailInfoPos = working.toLowerCase().indexOf('email information:');
+        if (isEmail && emailInfoPos >= 0) working = working.slice(0, emailInfoPos);
+        const lines = working.split('\n');
+        const filtered = lines.filter(line => !stripDatasetNoise(line)).map(line => String(line).replace(/#\(cr\)/g,'').trim());
+        const finalText = filtered.join('\n').replace(/------------------------/g,'').replace(/--------------------/g,'').replace(/\n\n+/g,'\n').trim();
+        return finalText || null;
+    }
+    function extractLegacyRep(block){
+        const modByIdx = block.search(/Modified By:/i);
+        if (modByIdx < 0) return 'Unknown';
+        const slice = block.slice(modByIdx).split('\n')[0];
+        let rep = slice.replace(/Modified By:/i,'').trim();
+        rep = rep.split(/Account Management|Prospecting|Cadence|Louise Brown|Logistics/i)[0].trim();
+        return rep ? rep.slice(0,40) : 'Unknown';
+    }
+    function parseBlockToEvent(block, fallbackAuthor, fallbackDate){
+        const trimmed = safeTrim(block);
+        if (!trimmed) return null;
+        const isEmail = /Email information:|Subject:|\[Email Sent\]:/i.test(trimmed);
+        const subject = extractSubject(trimmed);
+        const action = extractAction(trimmed);
+        const link = extractLink(trimmed);
+        const noteSegment = buildNoteBody(trimmed, isEmail);
+        let eventRep = fallbackAuthor || 'Unknown';
+        let parsedDate = fallbackDate || null;
+        if (/Modified By:/i.test(trimmed)) eventRep = extractLegacyRep(trimmed);
+        const dateLine = trimmed.match(/Modified On:\s*([^\n\r]+)/i);
+        if (dateLine && dateLine[1]) parsedDate = parseMDate(dateLine[1]);
+        if (!parsedDate) return null;
+        if (!noteSegment && !subject && !link && !action) return null;
+        return {
+            eventDateText: parsedDate,
+            eventRep: eventRep || 'Unknown',
+            historicalAction: action || null,
+            noteSegment: noteSegment || null,
+            emailSubject: subject || null,
+            emailSegment: isEmail ? trimmed : null,
+            extractedLink: link || null
+        };
+    }
+    function parseRawNotesM(rawNotes){
+        const sourceText = normalizeText(rawNotes);
+        if (!safeTrim(sourceText)) return [];
+        let norm = sourceText.replace(/-{30}/g,'||SPLIT||').replace(/-{24}/g,'||SPLIT||').replace(/-{20}/g,'||SPLIT||');
+        const results = [];
+        const startJson = norm.indexOf('[{');
+        const endJson = norm.lastIndexOf('}]');
+        let jsonString = null;
+        if (startJson >= 0 && endJson > startJson) jsonString = norm.slice(startJson, endJson + 2);
+        if (jsonString) {
+            try {
+                const parsedJson = JSON.parse(jsonString);
+                parsedJson.forEach(item => {
+                    const noteTextRaw = normalizeText(item && item.text ? item.text : '');
+                    const isEmail = /Email information:|Subject:|\[Email Sent\]:/i.test(noteTextRaw);
+                    const subject = extractSubject(noteTextRaw);
+                    const action = extractAction(noteTextRaw);
+                    const link = extractLink(noteTextRaw);
+                    const noteSegment = buildNoteBody(noteTextRaw, isEmail);
+                    const parsedDate = parseMDate(item && item.date ? item.date : '');
+                    if (!parsedDate) return;
+                    if (!noteSegment && !subject && !link && !action) return;
+                    results.push({
+                        eventDateText: parsedDate,
+                        eventRep: choose(item && item.author, 'Unknown'),
+                        historicalAction: action || null,
+                        noteSegment: noteSegment || null,
+                        emailSubject: subject || null,
+                        emailSegment: isEmail ? noteTextRaw : null,
+                        extractedLink: link || null
+                    });
+                });
+            } catch(e) { }
+            norm = norm.replace(jsonString, '');
+        }
+        norm.split('||SPLIT||').forEach(block => { const ev = parseBlockToEvent(block, 'Unknown', null); if (ev) results.push(ev); });
+        results.sort((a,b) => new Date(a.eventDateText) - new Date(b.eventDateText));
+        return results;
+    }
+
+    // ---------- HTML note card ----------
+    function buildHtmlNoteCard(eventRow){
+        const noteDate = eventRow['Note Date'] ? new Date(eventRow['Note Date']) : null;
+        const safeDate = noteDate && !isNaN(noteDate.getTime())
+            ? noteDate.toLocaleString([], {month:'2-digit', day:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'})
+            : 'Unknown Date';
+        const safeRep = safeTrim(eventRow.EventRep) || 'Unknown Rep';
+        const safeNote = eventRow.NoteSegment ? window.escapeHTML(eventRow.NoteSegment).replace(/\n/g, '<br>') : '<i>No note text provided.</i>';
+        const actionText = safeTrim(eventRow['Action at time of Note']);
+        const safeAction = actionText ? `<strong>Action:</strong> ${window.escapeHTML(actionText)}<br><br>` : '';
+        const link = safeTrim(eventRow['Masonville Link']);
+        const linkBtn = link ? `<br><a href='${window.escapeHTML(link)}' target='_blank' style='display:inline-block; margin-top:10px; padding:6px 12px; background-color:#118DFF; color:white; text-decoration:none; border-radius:4px; font-weight:bold;'>Open in Masonville</a>` : '';
+        return `<div style='font-family:"Segoe UI", sans-serif; font-size:14px; color:#333; padding:15px; border:1px solid #EAEAEA; border-radius:8px; background-color:#FAFAFA; box-shadow: 0 2px 4px rgba(0,0,0,0.05);'><div style='margin-bottom:10px; border-bottom:1px solid #ddd; padding-bottom:8px;'><span style='font-weight:600; font-size:16px; color:#118DFF;'>${window.escapeHTML(safeRep)}</span><span style='float:right; color:#777; font-size:12px;'>${window.escapeHTML(safeDate)}</span></div>${safeAction}<div style='margin-top:8px; line-height:1.5;'>${safeNote}</div>${linkBtn}</div>`;
+    }
+
+    // ---------- Dataset config + metadata resolution ----------
+    const DATASET_SOURCE_META = {
+        'Account Management': { short:'AM', badge:'badge-am' },
+        'Cadence': { short:'Cadence', badge:'badge-cad' },
+        'Prospecting': { short:'Prospecting', badge:'badge-pro' },
+        'Louise Brown': { short:'Louise Brown', badge:'badge-lb' },
+        'Logistics': { short:'Logistics', badge:'badge-pro' }
     };
 
-    // ---------------------------------------------------------
-    // FULL LOAD (ONLY IF CACHE MISSING)
-    // ---------------------------------------------------------
-    const _origFetchAll = window.fetchAllData;
-    window.fetchAllData = async function(options={}){
-        const { silent=false } = options;
-        if(!silent){
-            document.getElementById('global-loader').style.display='flex';
+    const datasetConfigs = [
+        {
+            sourceDataset: 'Account Management',
+            logicalName: 'cr714_accountmanagementdataset',
+            idField: 'cr714_accountmanagementdatasetid',
+            select: 'cr714_accountmanagementdatasetid,cr714_accountnum,cr714_accountmanagementnotes,cr714_managernotes,cr714_accountname,cr714_rep,cr714_action,cr714_help,cr714_actionmessage,cr714_actionemailsent,modifiedon,createdon,cr714_address,cr714_namemost,cr714_phone,cr714_emailmost,cr714_importantaccountinformation',
+            rawNotes: r => choose(r.cr714_accountmanagementnotes, r.cr714_managernotes, '')
+        },
+        {
+            sourceDataset: 'Cadence',
+            logicalName: 'cr714_cadencedataset',
+            idField: 'cr714_cadencedatasetid',
+            select: 'cr714_cadencedatasetid,cr714_accountnum,cr714_qbnotes,cr714_managernotes,cr714_company,cr714_retentionrep,cr714_action,cr714_recordstatus,cr714_recordstatusname,cr714_actionmessage,cr714_introname,cr714_intro,cr714_actionemailsent,modifiedon,createdon,cr714_billingaddress,cr714_namemost,cr714_primaryphone,cr714_emailmost',
+            rawNotes: r => choose(r.cr714_qbnotes, r.cr714_managernotes, '')
+        },
+        {
+            sourceDataset: 'Prospecting',
+            logicalName: 'cr714_prospectingdataset',
+            idField: 'cr714_prospectingdatasetid',
+            select: 'cr714_prospectingdatasetid,cr714_accountnum,cr714_prospectingnotes,cr714_managernotes,cr714_acctname,cr714_repassigned,cr714_action,cr714_help,cr714_actionmessage,cr714_introname,cr714_intro,cr714_emailsenttimestamp,modifiedon,createdon,cr714_address,cr714_namelatest,cr714_phone,cr714_email_latest,cr714_importantaccountinfo',
+            rawNotes: r => choose(r.cr714_prospectingnotes, r.cr714_managernotes, '')
+        },
+        {
+            sourceDataset: 'Louise Brown',
+            logicalName: 'cr714_louisebrowndataset',
+            idField: 'cr714_louisebrowndatasetid',
+            select: 'cr714_louisebrowndatasetid,cr714_accountnum,cr714_notesfr,cr714_managernotes,cr714_accountname,cr714_company,cr714_assignedrep,cr714_action,cr714_help,cr714_actionmessage,cr714_introname,cr714_intro,cr714_actionemailsent,modifiedon,createdon,cr714_address,cr714_namemost,cr714_phone,cr714_emaillatest',
+            rawNotes: r => choose(r.cr714_notesfr, r.cr714_managernotes, '')
+        },
+        {
+            sourceDataset: 'Logistics',
+            logicalName: 'cr714_logisticslog_2',
+            idField: 'cr714_logisticslog_2id',
+            select: 'cr714_logisticslog_2id,cr714_accountnumber,cr714_logisticsnotes,cr714_companyordeliveryname,cr714_rep,cr714_action,cr714_actionmessage,modifiedon,createdon',
+            rawNotes: r => choose(r.cr714_logisticsnotes, '')
         }
-        try{
-            await _origFetchAll();
+    ];
+
+    async function resolveEntitySetNames(token){
+        const meta = getMeta();
+        if (meta.entitySetMap && Object.keys(meta.entitySetMap).length) return meta.entitySetMap;
+        const filter = datasetConfigs.map(c => `LogicalName eq '${c.logicalName}'`).join(' or ');
+        const url = `${window.DATAVERSE_URL}/EntityDefinitions?$select=LogicalName,EntitySetName&$filter=${encodeURIComponent(filter)}`;
+        const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+        const res = await fetch(url, { headers });
+        if (!res.ok) throw new Error('Failed to resolve entity set names');
+        const data = await res.json();
+        const map = {};
+        (data.value || []).forEach(row => { if (row.LogicalName && row.EntitySetName) map[row.LogicalName] = row.EntitySetName; });
+        setMeta({ ...meta, entitySetMap: map });
+        return map;
+    }
+
+    function normalizeDatasetRows(rows, config){
+        return rows.map(r => {
+            const accountNum = choose(r.cr714_accountnum, r.cr714_accountnumber, r.accountnumber).toString().trim();
+            const accountName = choose(r.cr714_accountname, r.cr714_company, r.cr714_acctname, r.cr714_companyordeliveryname, 'Unknown Company');
+            const rep = choose(r.cr714_rep, r.cr714_retentionrep, r.cr714_repassigned, r.cr714_assignedrep, 'Unassigned');
+            const introRaw = choose(r.cr714_introname, r['cr714_intro@OData.Community.Display.V1.FormattedValue'], r.cr714_intro, '');
+            const isIntro = String(introRaw).toLowerCase() === 'yes' || introRaw === true || introRaw == 1;
+            const helpStatus = choose(r.cr714_helpname, r['cr714_help@OData.Community.Display.V1.FormattedValue'], r.cr714_help, r.cr714_recordstatusname, r['cr714_recordstatus@OData.Community.Display.V1.FormattedValue'], r.cr714_recordstatus, '');
+            const rawNotes = config.rawNotes(r);
+            const modifiedOn = choose(r.modifiedon, r.createdon, '');
+            const currentAction = choose(r.cr714_action, '');
+            const actionMessage = choose(r.cr714_actionmessage, '');
+            const recordId = choose(r[config.idField], '');
+            const emailSent = choose(r.cr714_actionemailsent, r.cr714_emailsenttimestamp, '');
+            return {
+                cr714_accountnum: accountNum,
+                cr714_accountname: accountName,
+                cr714_rep: rep,
+                cr714_action: currentAction,
+                HelpStatus: helpStatus || null,
+                IsIntro: !!isIntro,
+                LastModified: modifiedOn || null,
+                SourceDataset: config.sourceDataset,
+                RawNotes: normalizeText(rawNotes),
+                ActionMessage: normalizeText(actionMessage),
+                RecordId: recordId,
+                EntitySetName: config.entitySetResolved,
+                idField: config.idField,
+                cr714_actionemailsent: emailSent || null,
+                contact: choose(r.cr714_namemost, r.cr714_namelatest, '--'),
+                phone: choose(r.cr714_phone, r.cr714_primaryphone, '--'),
+                email: choose(r.cr714_emailmost, r.cr714_email_latest, r.cr714_emaillatest, '--'),
+                address: choose(r.cr714_address, r.cr714_billingaddress, '--'),
+                importantInfo: choose(r.cr714_importantaccountinformation, r.cr714_importantaccountinfo, ''),
+                message: normalizeText(actionMessage),
+                intro: !!isIntro
+            };
+        });
+    }
+
+    async function fetchDataverseEntity(config, token, modifiedSince){
+        const headers = { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.maxpagesize=5000, odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
+        let url = `${window.DATAVERSE_URL}/${config.entitySetResolved}?$select=${config.select}`;
+        if (modifiedSince) url += `&$filter=${encodeURIComponent(`modifiedon gt ${modifiedSince}`)}`;
+        let rows = [];
+        while(url){
+            const res = await fetch(url, { headers });
+            if (!res.ok) throw new Error(`${config.entitySetResolved}: ${res.status}`);
+            const data = await res.json();
+            rows = rows.concat(data.value || []);
+            if (!modifiedSince) {
+                window.totalLoadedRecords = (window.totalLoadedRecords || 0) + (data.value || []).length;
+                if (window.updateLoader) window.updateLoader(null, null, window.totalLoadedRecords);
+            }
+            url = data['@odata.nextLink'] || null;
+        }
+        return normalizeDatasetRows(rows, config);
+    }
+
+    function buildUnifiedEventsFromSourceRows(sourceRows){
+        const events = [];
+        sourceRows.forEach(row => {
+            const combinedNotes = normalizeText(row.RawNotes || '').replace(/Modified By: /g, ' Modified By: ');
+            parseRawNotesM(combinedNotes).forEach(ev => {
+                const noteDate = ev.eventDateText instanceof Date ? ev.eventDateText : parseMDate(ev.eventDateText);
+                const emailDate = noteDate ? new Date(noteDate.getFullYear(), noteDate.getMonth(), noteDate.getDate()) : null;
+                const eventRow = {
+                    'Note Date': toIsoOrNull(noteDate),
+                    cr714_accountnum: row.cr714_accountnum,
+                    cr714_accountname: row.cr714_accountname,
+                    cr714_rep: row.cr714_rep,
+                    cr714_action: row.cr714_action,
+                    HelpStatus: row.HelpStatus,
+                    IsIntro: row.IsIntro === null || row.IsIntro === undefined ? true : !!row.IsIntro,
+                    LastModified: row.LastModified,
+                    SourceDataset: row.SourceDataset,
+                    EventRep: ev.eventRep,
+                    'Action at time of Note': safeTrim((ev.historicalAction || '').replace(/\]/g, '')) || null,
+                    NoteSegment: ev.noteSegment ? ev.noteSegment.replace(/------------------------/g,'').replace(/--------------------/g,'').replace(/\n\n+/g,'\n').trim() : null,
+                    EmailSubject: ev.emailSubject || null,
+                    EmailSegment: ev.emailSegment || null,
+                    'Masonville Link': ev.extractedLink || null,
+                    EmailDate: toDateOnly(emailDate),
+                    'Last 5 Days': withinLastDays(emailDate, 5),
+                    'Last 7 Days': withinLastDays(emailDate, 7),
+                    'Last 14 Days': withinLastDays(emailDate, 14),
+                    'Last 30 Days': withinLastDays(emailDate, 30),
+                    'Last 60 Days': withinLastDays(emailDate, 60),
+                    'Last 90 Days': withinLastDays(emailDate, 90),
+                    'Last 6 Months': withinLastMonths(emailDate, 6),
+                    Count: 1,
+                    _recordRef: row.RecordId,
+                    _entitySet: row.EntitySetName,
+                    _rawSource: row,
+                    _touchType: ev.emailSubject || ev.emailSegment ? 'Email' : (ev.extractedLink ? 'Masonville' : 'Note')
+                };
+                eventRow['HTML Note Card'] = buildHtmlNoteCard(eventRow);
+                events.push(eventRow);
+            });
+        });
+        events.sort((a,b) => { const acctCompare = String(a.cr714_accountnum || '').localeCompare(String(b.cr714_accountnum || '')); if (acctCompare !== 0) return acctCompare; return new Date(b['Note Date'] || 0) - new Date(a['Note Date'] || 0); });
+        return events;
+    }
+
+    function summariseAccounts(sourceRows, eventRows){
+        const eventMap = new Map();
+        eventRows.forEach(ev => { const key = ev.cr714_accountnum || ''; if(!eventMap.has(key)) eventMap.set(key, []); eventMap.get(key).push(ev); });
+        window._accountEventMap = eventMap;
+        const map = new Map();
+        sourceRows.forEach(row => {
+            if (!row.cr714_accountnum) return;
+            if (!map.has(row.cr714_accountnum)) {
+                map.set(row.cr714_accountnum, {
+                    cr714_id: row.cr714_accountnum,
+                    company: row.cr714_accountname,
+                    rep: row.cr714_rep || 'Unassigned',
+                    _latestRepDate: new Date(row.LastModified || 0),
+                    action: row.cr714_action || '',
+                    message: row.message || '',
+                    managerNotes: row.RawNotes || '',
+                    modifiedon: row.LastModified || null,
+                    emailDate: row.cr714_actionemailsent || null,
+                    contact: row.contact || '--',
+                    phone: window.formatPhone ? window.formatPhone(row.phone || '--') : (row.phone || '--'),
+                    email: row.email || '--',
+                    address: row.address || '--',
+                    sources: [],
+                    isHelp: false,
+                    isClose: false,
+                    intro: !!row.IsIntro,
+                    helpStatus: row.HelpStatus || '',
+                    statecode: 'Active',
+                    importantInfo: row.importantInfo || '',
+                    _historyLoaded: true,
+                    _d365Loaded: false,
+                    _introAcknowledged: false
+                });
+            }
+            const acct = map.get(row.cr714_accountnum);
+            const modifiedDate = new Date(row.LastModified || 0);
+            if (modifiedDate > acct._latestRepDate) {
+                acct._latestRepDate = modifiedDate;
+                acct.rep = row.cr714_rep || acct.rep;
+                acct.action = row.cr714_action || acct.action;
+                acct.company = row.cr714_accountname || acct.company;
+                acct.helpStatus = row.HelpStatus || acct.helpStatus;
+                acct.message = row.message || acct.message;
+                acct.modifiedon = row.LastModified || acct.modifiedon;
+            }
+            acct.sources.push({
+                type: (DATASET_SOURCE_META[row.SourceDataset] || {}).short || row.SourceDataset,
+                table: row.EntitySetName,
+                id: row.RecordId,
+                rawNotes: row.RawNotes || '',
+                message: row.message || '',
+                rep: row.cr714_rep || acct.rep,
+                sourceDataset: row.SourceDataset
+            });
+            if (row.contact && row.contact !== '--' && acct.contact === '--') acct.contact = row.contact;
+            if (row.phone && row.phone !== '--' && acct.phone === '--') acct.phone = row.phone;
+            if (row.email && row.email !== '--' && acct.email === '--') acct.email = row.email;
+            if (row.address && row.address !== '--' && acct.address === '--') acct.address = row.address;
+            if (row.importantInfo && !acct.importantInfo) acct.importantInfo = row.importantInfo;
+            acct.intro = acct.intro || !!row.IsIntro;
+            const hs = safeTrim(row.HelpStatus).toUpperCase();
+            const msg = safeTrim(row.message).toUpperCase();
+            if ((hs === 'HELP REQUESTED' || msg.includes('[HELP REQUEST]')) && hs !== 'RESOLVED' && hs !== 'CLEAR') acct.isHelp = true;
+            if ((hs === 'CLOSE REQUESTED' || msg.includes('[CLOSED]')) && hs !== 'RESOLVED' && hs !== 'CLEAR') acct.isClose = true;
+        });
+        for (const [acctId, acct] of map.entries()) {
+            const events = eventMap.get(acctId) || [];
+            let latestEmail = acct.emailDate ? new Date(acct.emailDate) : null;
+            events.forEach(ev => { if ((ev.EmailSubject || ev.EmailSegment) && ev['Note Date']) { const d = new Date(ev['Note Date']); if (!latestEmail || d > latestEmail) latestEmail = d; } });
+            acct.emailDate = latestEmail && !isNaN(latestEmail.getTime()) ? latestEmail.toISOString() : acct.emailDate;
+        }
+        return Array.from(map.values());
+    }
+
+    // expose helpers for completeness + delta rebuild
+    window.parseRawNotesM = parseRawNotesM;
+    window.buildUnifiedEventsFromSourceRows = buildUnifiedEventsFromSourceRows;
+    window.summariseAccounts = summariseAccounts;
+    window.__datasetConfigs = datasetConfigs;
+    window.__normalizeRow = normalizeDatasetRows;
+
+    // ---------- Cache bootstrap ----------
+    window.bootstrapFromCache = function(){
+        const cached = getCache();
+        if (!cached) return false;
+        try {
+            window.employeesData = cached.employeesData || window.employeesData || [];
+            window.rawUnifiedSourceRows = cached.rawUnifiedSourceRows || [];
+            window.unifiedEventRows = cached.unifiedEventRows || [];
+            window.mergedAccounts = cached.mergedAccounts || [];
+            window.populateDynamicActionSet && window.populateDynamicActionSet();
+            return true;
+        } catch(e){ return false; }
+    };
+
+    // ---------- Full unified load ----------
+    async function unifiedFullLoad(options={}){
+        const { silent=false } = options;
+        if (!silent && document.getElementById('global-loader')) {
+            document.getElementById('global-loader').style.display = 'flex';
+            window.updateLoader && window.updateLoader(20, 'Establishing Unified Event Stream...', 0);
+        }
+        window.totalLoadedRecords = 0;
+        const token = await window.getToken();
+        const entitySetMap = await resolveEntitySetNames(token);
+        datasetConfigs.forEach(cfg => { cfg.entitySetResolved = entitySetMap[cfg.logicalName] || cfg.entitySetResolved || cfg.logicalName; });
+        const sourceRowGroups = await Promise.all(datasetConfigs.map(cfg => fetchDataverseEntity(cfg, token, null)));
+        let sourceRows = sourceRowGroups.flat().filter(r => safeTrim(r.cr714_accountnum) !== '');
+        window.rawUnifiedSourceRows = sourceRows;
+        window.unifiedEventRows = buildUnifiedEventsFromSourceRows(sourceRows);
+        window.mergedAccounts = summariseAccounts(sourceRows, window.unifiedEventRows);
+        setCache({
+            employeesData: window.employeesData || [],
+            rawUnifiedSourceRows: window.rawUnifiedSourceRows,
+            unifiedEventRows: window.unifiedEventRows,
+            mergedAccounts: window.mergedAccounts
+        });
+        setMeta({ ...getMeta(), lastFullSync: nowIso(), lastDeltaSync: nowIso(), entitySetMap });
+        softStatus(`Data synced • ${window.unifiedEventRows.length.toLocaleString()} events`, 'good');
+        if (!silent && document.getElementById('global-loader')) {
+            window.updateLoader && window.updateLoader(100, 'Unified Activity Synced.', window.totalLoadedRecords || 0);
+            setTimeout(() => { const gl = document.getElementById('global-loader'); if (gl) gl.style.display = 'none'; }, 250);
+        }
+    }
+
+    // ---------- Delta refresh ----------
+    let _deltaInFlight = false;
+    window.deltaRefresh = async function(){
+        if (_deltaInFlight) return;
+        const meta = getMeta();
+        if (!meta.lastDeltaSync) return;
+        _deltaInFlight = true;
+        try {
+            const token = await window.getToken();
+            const entitySetMap = meta.entitySetMap && Object.keys(meta.entitySetMap).length ? meta.entitySetMap : await resolveEntitySetNames(token);
+            datasetConfigs.forEach(cfg => { cfg.entitySetResolved = entitySetMap[cfg.logicalName] || cfg.entitySetResolved || cfg.logicalName; });
+            const rowGroups = await Promise.all(datasetConfigs.map(cfg => fetchDataverseEntity(cfg, token, meta.lastDeltaSync).catch(() => [])));
+            const updatedRows = rowGroups.flat().filter(r => safeTrim(r.cr714_accountnum) !== '');
+            if (!updatedRows.length) { setMeta({ ...getMeta(), lastDeltaSync: nowIso(), entitySetMap }); _deltaInFlight = false; return; }
+            const byKey = new Map();
+            (window.rawUnifiedSourceRows || []).forEach(r => byKey.set(r.RecordId || `${r.SourceDataset}|${r.cr714_accountnum}|${r.LastModified}`, r));
+            updatedRows.forEach(r => byKey.set(r.RecordId || `${r.SourceDataset}|${r.cr714_accountnum}|${r.LastModified}`, r));
+            window.rawUnifiedSourceRows = Array.from(byKey.values());
+            window.unifiedEventRows = buildUnifiedEventsFromSourceRows(window.rawUnifiedSourceRows);
+            window.mergedAccounts = summariseAccounts(window.rawUnifiedSourceRows, window.unifiedEventRows);
             setCache({
+                employeesData: window.employeesData || [],
                 rawUnifiedSourceRows: window.rawUnifiedSourceRows,
                 unifiedEventRows: window.unifiedEventRows,
                 mergedAccounts: window.mergedAccounts
             });
-            setMeta({ lastFullSync: nowIso(), lastDeltaSync: nowIso() });
-            softStatus('Data synced');
-        }finally{
-            if(!silent){
-                document.getElementById('global-loader').style.display='none';
-            }
-        }
-    };
-
-    // ---------------------------------------------------------
-    // DELTA REFRESH (MODIFIEDON WATERMARK)
-    // ---------------------------------------------------------
-    window.deltaRefresh = async function(){
-        const meta = getMeta();
-        if(!meta.lastDeltaSync) return;
-
-        try{
-            const token = await window.getToken();
-            const headers = {
-                'Authorization': `Bearer ${token}`,
-                'Prefer': 'odata.maxpagesize=5000, odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
-            };
-
-            const since = meta.lastDeltaSync;
-            let updatedRows = [];
-
-            // Reuse same dataset list, but filtered by modifiedon
-            for(const cfg of window.__datasetConfigs || []){
-                let url = `${window.DATAVERSE_URL}/${cfg.entitySetResolved || cfg.entitySetCandidates[0]}?$select=${cfg.select}&$filter=modifiedon gt ${since}`;
-                while(url){
-                    const res = await fetch(url,{headers});
-                    if(!res.ok) break;
-                    const data = await res.json();
-                    const rows = (data.value||[]).map(r => window.__normalizeRow(r,cfg));
-                    updatedRows.push(...rows);
-                    url = data['@odata.nextLink'] || null;
+            setMeta({ ...getMeta(), lastDeltaSync: nowIso(), entitySetMap });
+            const activeId = window.activeAccountId;
+            const listContainer = document.getElementById('account-list-container');
+            const prevScroll = listContainer ? listContainer.scrollTop : 0;
+            if (window.applyFilters) window.applyFilters(true);
+            if (listContainer) listContainer.scrollTop = prevScroll;
+            if (activeId) {
+                const stillExists = (window.teamFilteredAccounts || []).find(a => a.cr714_id === activeId);
+                if (stillExists && window.selectAccount) {
+                    const prevSmooth = document.documentElement.style.scrollBehavior;
+                    document.documentElement.style.scrollBehavior = 'auto';
+                    await window.selectAccount(activeId);
+                    document.documentElement.style.scrollBehavior = prevSmooth;
                 }
             }
-
-            if(updatedRows.length){
-                // merge by accountnum + record id
-                const byKey = new Map();
-                window.rawUnifiedSourceRows.forEach(r=> byKey.set(r.RecordId, r));
-                updatedRows.forEach(r=> byKey.set(r.RecordId, r));
-                window.rawUnifiedSourceRows = Array.from(byKey.values());
-
-                // rebuild events + accounts incrementally (safe path = rebuild events)
-                window.unifiedEventRows = window.buildUnifiedEventsFromSourceRows(window.rawUnifiedSourceRows);
-                window.mergedAccounts   = window.summariseAccounts(window.rawUnifiedSourceRows, window.unifiedEventRows);
-
-                setCache({
-                    rawUnifiedSourceRows: window.rawUnifiedSourceRows,
-                    unifiedEventRows: window.unifiedEventRows,
-                    mergedAccounts: window.mergedAccounts
-                });
-                setMeta({ ...meta, lastDeltaSync: nowIso() });
-                window.applyFilters && window.applyFilters(true);
-                softStatus(`Updated ${updatedRows.length} records`);
-            }
-        }catch(e){ console.warn('Delta refresh skipped', e); }
-    };
-
-    // ---------------------------------------------------------
-    // INIT OVERRIDE: CACHE FIRST, LOAD SILENTLY
-    // ---------------------------------------------------------
-    const _origInit = window.initApp;
-    window.initApp = async function(){
-        const booted = window.bootstrapFromCache();
-        if(!booted){
-            await window.fetchAllData({silent:false});
+            softStatus(`Updated ${updatedRows.length} changed records`, 'neutral');
+        } catch(e){
+            console.warn('Delta refresh skipped', e);
+        } finally {
+            _deltaInFlight = false;
         }
-        // background delta polling, no loader, no toast
-        setInterval(window.deltaRefresh, 60000);
-        softStatus('Live sync active');
     };
+
+    // ---------- Override fetchEmployees/fetchAllData for parallel startup ----------
+    const _origFetchEmployees = window.fetchEmployees ? window.fetchEmployees.bind(window) : async function(){};
+    const _origBuildFilters = window.buildFilters ? window.buildFilters.bind(window) : function(){};
+    const _origApplyFilters = window.applyFilters ? window.applyFilters.bind(window) : function(){};
+    const _origCheckNewIntros = window.checkNewIntros ? window.checkNewIntros.bind(window) : function(){};
+
+    let _employeePromise = null;
+    let _dataPromise = null;
+    let _initialDataStarted = false;
+    let _cacheBooted = false;
+
+    async function cachedEmployeesLoad(){
+        if (_employeePromise) return _employeePromise;
+        _employeePromise = (async () => {
+            const cached = getCache();
+            if (cached && Array.isArray(cached.employeesData) && cached.employeesData.length) {
+                window.employeesData = cached.employeesData;
+                _cacheBooted = true;
+                softStatus('Loaded from session cache', 'good');
+                // refresh employees in background, do not block startup
+                _origFetchEmployees().then(() => {
+                    const c = getCache() || {};
+                    c.employeesData = window.employeesData || [];
+                    setCache(c);
+                }).catch(()=>{});
+                return;
+            }
+            await _origFetchEmployees();
+            const c = getCache() || {};
+            c.employeesData = window.employeesData || [];
+            setCache(c);
+        })();
+        return _employeePromise;
+    }
+
+    window.fetchEmployees = cachedEmployeesLoad;
+
+    window.fetchAllData = async function(options={}){
+        const { silent=false } = options;
+        if (_dataPromise) return _dataPromise;
+        _dataPromise = (async () => {
+            if (!_cacheBooted) {
+                const booted = window.bootstrapFromCache();
+                _cacheBooted = booted;
+                if (booted) {
+                    // build UI immediately; delta/full sync can continue in background
+                    _origBuildFilters();
+                    _origApplyFilters();
+                    _origCheckNewIntros(window.mergedAccounts || [], true);
+                    softStatus('Loaded from session cache', 'good');
+                    // refresh silently in background
+                    unifiedFullLoad({ silent:true }).catch(()=>{}).finally(()=>{ _dataPromise = null; });
+                    return;
+                }
+            }
+            await unifiedFullLoad({ silent });
+            _dataPromise = null;
+        })();
+        return _dataPromise;
+    };
+
+    // Kick off data in parallel as soon as employees start.
+    const _wrappedFetchEmployees = window.fetchEmployees;
+    window.fetchEmployees = async function(){
+        if (!_initialDataStarted) {
+            _initialDataStarted = true;
+            // Start data load immediately in background while employee fetch is awaited.
+            window.fetchAllData({ silent:false }).catch(() => {});
+        }
+        return _wrappedFetchEmployees();
+    };
+
+    // ---------- Replace noisy polling with silent delta ----------
+    window.pollLiveUpdates = async function(){
+        await window.deltaRefresh();
+        const syncDisplay = document.getElementById('sync-time-display');
+        if (syncDisplay) syncDisplay.innerText = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    };
+
+    // ---------- Unified history render ----------
+    function _getUnifiedEventsForAccount(accountId){
+        return (window.unifiedEventRows || []).filter(ev => ev.cr714_accountnum === accountId).sort((a,b) => new Date(b['Note Date'] || 0) - new Date(a['Note Date'] || 0));
+    }
+    function _sourceBadgeHtml(sourceDataset){
+        const ds = _safe(sourceDataset);
+        let cls = 'badge-pro';
+        if (ds === 'Account Management') cls = 'badge-am';
+        else if (ds === 'Cadence') cls = 'badge-cad';
+        else if (ds === 'Louise Brown') cls = 'badge-lb';
+        return `<span class="badge-ds ${cls}">${window.escapeHTML(ds || 'Unknown')}</span>`;
+    }
+    function _touchTypeHtml(ev){
+        const touchType = ev._touchType || ((ev.EmailSubject || ev.EmailSegment) ? 'Email' : (ev['Masonville Link'] ? 'Masonville' : 'Note'));
+        const label = window.escapeHTML(touchType);
+        let color = 'var(--chart-note)';
+        let icon = 'fa-comment-alt';
+        if (touchType === 'Email') { color = 'var(--chart-email)'; icon = 'fa-envelope'; }
+        else if (touchType === 'Masonville') { color = 'var(--chart-masonville)'; icon = 'fa-link'; }
+        return `<span class="text-[10px] font-black uppercase tracking-wider" style="color:${color};"><i class="fas ${icon} mr-1"></i>${label}</span>`;
+    }
+    function _renderUnifiedHistory(accountId){
+        const container = document.getElementById('fv-history');
+        if (!container) return;
+        const events = _getUnifiedEventsForAccount(accountId);
+        if (!events.length) {
+            container.innerHTML = `<div class="h-full flex flex-col items-center justify-center text-muted opacity-30"><i class="fas fa-clock-rotate-left text-5xl mb-4"></i><p class="text-xs uppercase font-black tracking-widest">History Log Empty</p></div>`;
+            return;
+        }
+        container.innerHTML = events.map(ev => {
+            const noteDate = ev['Note Date'] ? new Date(ev['Note Date']) : null;
+            const headerDate = noteDate && !isNaN(noteDate.getTime()) ? noteDate.toLocaleString() : 'Unknown Date';
+            const rep = ev.EventRep || 'Unknown';
+            const actionAtTime = ev['Action at time of Note'];
+            const actionHtml = actionAtTime ? `<div class="text-[10px] font-bold mb-2" style="color: var(--primary);"><i class="fas fa-tasks mr-1"></i>Action: ${window.escapeHTML(actionAtTime)}</div>` : '';
+            const subjectHtml = ev.EmailSubject ? `<div class="text-[10px] font-bold mb-2" style="color: var(--accent-info);"><i class="fas fa-envelope-open-text mr-1"></i>Subject: ${window.escapeHTML(ev.EmailSubject)}</div>` : '';
+            const sourceBadge = _sourceBadgeHtml(ev.SourceDataset);
+            const touchHtml = _touchTypeHtml(ev);
+            const cardHtml = ev['HTML Note Card'] ? ev['HTML Note Card'] : `<div style="font-family:'Segoe UI',sans-serif;font-size:14px;color:#333;padding:15px;border:1px solid #EAEAEA;border-radius:8px;background-color:#FAFAFA;box-shadow:0 2px 4px rgba(0,0,0,0.05);">${actionHtml}${subjectHtml}<div>${window.escapeHTML(ev.NoteSegment || '').replace(/\n/g,'<br>')}</div></div>`;
+            return `<div class="note-card border" style="border-color: var(--border-color);"><div class="p-2 flex justify-between items-center border-b" style="background-color: var(--bg-hover); border-color: var(--border-color);"><span class="flex items-center gap-2 font-bold text-[11px]" style="color: var(--text-muted);">${sourceBadge}${touchHtml}<span>${window.escapeHTML(headerDate)}</span></span><span class="font-black text-[11px] uppercase tracking-wider" style="color: var(--primary);">${window.escapeHTML(rep)}</span></div><div class="p-3 text-sm" style="color: var(--text-main);">${actionHtml}${subjectHtml}${cardHtml}</div></div>`;
+        }).join('');
+    }
+    if (window.selectAccount) {
+        const _originalSelectAccount = window.selectAccount.bind(window);
+        window.selectAccount = async function(id){
+            await _originalSelectAccount(id);
+            try { if (window.unifiedEventRows && window.unifiedEventRows.length) _renderUnifiedHistory(id); } catch(e){}
+        };
+    }
+
+    // ---------- Unified history copy/export ----------
+    function _buildExportRowsFromUnified(accountId){
+        return _getUnifiedEventsForAccount(accountId).map(ev => ({
+            Source: ev.SourceDataset || '',
+            Date: ev['Note Date'] ? new Date(ev['Note Date']).toLocaleString() : '',
+            Author: ev.EventRep || '',
+            TouchType: ev._touchType || ((ev.EmailSubject || ev.EmailSegment) ? 'Email' : (ev['Masonville Link'] ? 'Masonville' : 'Note')),
+            Tags: '',
+            Text: ev.NoteSegment || '',
+            ExtractedLink: ev['Masonville Link'] || ''
+        }));
+    }
+    window.copyHistory = function(){
+        if (!window.activeAccountId) return;
+        const rows = _buildExportRowsFromUnified(window.activeAccountId);
+        if (!rows.length) { window.showToast('No unified history available to copy.', 'warning'); return; }
+        const text = rows.map(r => `Source: ${r.Source}\nDate: ${r.Date}\nAuthor: ${r.Author}\nTouchType: ${r.TouchType}\nText: ${r.Text}\nLink: ${r.ExtractedLink}\n`).join('\n------------------------------\n');
+        navigator.clipboard.writeText(text).then(() => window.showToast('Unified history copied to clipboard.', 'success')).catch(() => window.showToast('Clipboard copy failed.', 'error'));
+    };
+    window.exportHistory = function(){
+        if (!window.activeAccountId) return;
+        const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId);
+        const rows = _buildExportRowsFromUnified(window.activeAccountId);
+        if (!rows.length) { window.showToast('No unified history available to export.', 'warning'); return; }
+        const csv = ['Source,Date,Author,TouchType,Tags,Text,ExtractedLink', ...rows.map(r => `"${window.escapeHTML(r.Source)}","${window.escapeHTML(r.Date)}","${window.escapeHTML(r.Author)}","${window.escapeHTML(r.TouchType)}","${window.escapeHTML(r.Tags)}","${window.escapeHTML(r.Text).replace(/"/g,'""')}","${window.escapeHTML(r.ExtractedLink)}"`)];
+        const blob = new Blob([csv.join('\n')], { type:'text/csv' });
+        const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `${(account ? account.cr714_id : 'Account')}_UnifiedHistory.csv`; a.click(); URL.revokeObjectURL(url);
+    };
+
+    // ---------- Writeback overrides ----------
+    function _datasetKey(src){
+        const t = _safe(src && src.table).toLowerCase();
+        const ds = _safe(src && src.sourceDataset).toLowerCase();
+        if (t.includes('accountmanagement') || ds.includes('account management')) return 'am';
+        if (t.includes('cadence') || ds.includes('cadence')) return 'cad';
+        if (t.includes('prospecting') || ds.includes('prospecting')) return 'pro';
+        if (t.includes('louisebrown') || t.includes('louise_brown') || ds.includes('louise brown')) return 'lb';
+        if (t.includes('logistics') || ds.includes('logistics')) return 'log';
+        return 'unknown';
+    }
+    function _getPatchConfig(src){
+        const key = _datasetKey(src);
+        switch(key){
+            case 'am': return { noteField:'cr714_managernotes', statusField:'cr714_help', actionField:'cr714_action', supportsStatus:true };
+            case 'cad': return { noteField:'cr714_managernotes', statusField:'cr714_recordstatus', actionField:'cr714_action', supportsStatus:true };
+            case 'pro': return { noteField:'cr714_managernotes', statusField:'cr714_help', actionField:'cr714_action', supportsStatus:true };
+            case 'lb': return { noteField:'cr714_notesfr', statusField:'cr714_help', actionField:'cr714_action', supportsStatus:true };
+            case 'log': return { noteField:'cr714_logisticsnotes', statusField:null, actionField:'cr714_action', supportsStatus:false };
+            default: return { noteField:'cr714_managernotes', statusField:null, actionField:'cr714_action', supportsStatus:false };
+        }
+    }
+    function _buildManagerNoteBlock(noteInput, markResolved, extraPrefix=''){
+        let block = `Modified On: ${new Date().toLocaleString()}\nModified By: ${window.currentUserName}\n\n`;
+        if (extraPrefix) block += `${extraPrefix}\n`;
+        if (markResolved) block += `[RESOLVED] `;
+        block += `${_safe(noteInput).trim()}\n------------------------------\n`;
+        return block;
+    }
+    function _prependNote(existingRaw, newBlock){ return `${newBlock}${_safe(existingRaw)}`; }
+    async function _patchSourceRecord(src, payload, token){
+        if (!src || !src.table || !src.id || !payload || Object.keys(payload).length === 0) return false;
+        const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type':'application/json', 'Prefer':'return=representation' };
+        try {
+            const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, { method:'PATCH', headers, body: JSON.stringify(payload) });
+            return res.ok;
+        } catch(e){ return false; }
+    }
+    function _buildEmailBody(account, noteInput, statusLabel){
+        return `<h2 style="color:#0f766e;">A.C.T. Manager Update</h2><p><strong>Account:</strong> ${window.escapeHTML(account.company)} (${account.cr714_id})</p><p><strong>Manager:</strong> ${window.escapeHTML(window.currentUserName)}</p><p><strong>Status:</strong> ${window.escapeHTML(statusLabel || 'Updated')}</p><hr/><p><strong>Notes:</strong><br/>${window.escapeHTML(_safe(noteInput)).replace(/\n/g,'<br/>')}</p>`;
+    }
+    window.saveManagerNote = async function(){
+        if(!window.activeAccountId) return;
+        const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId);
+        if(!account) return;
+        const noteInput = document.getElementById('fv-manager-note').value.trim();
+        const markResolved = document.getElementById('fv-mark-resolved').checked;
+        const doEmail = document.getElementById('fv-notify-email').checked;
+        const statusVal = document.getElementById('fv-help-select').value;
+        const actionVal = document.getElementById('fv-action-select').value;
+        if(!noteInput && !markResolved && !statusVal && actionVal === account.action){ window.showToast('No changes detected to push.', 'warning'); return; }
+        const btn = document.getElementById('btn-push-note'); const originalText = btn.innerHTML; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; btn.disabled = true;
+        try {
+            const token = await window.getToken(); let patchSuccess = false;
+            for(const src of (account.sources || [])){
+                const cfg = _getPatchConfig(src); const payload = {}; const currentRaw = src.rawNotes || '';
+                let finalStatus = statusVal; if(markResolved) finalStatus = 'Resolved';
+                if(noteInput || markResolved){ const block = _buildManagerNoteBlock(noteInput, markResolved); payload[cfg.noteField] = _prependNote(currentRaw, block); }
+                if(cfg.supportsStatus && finalStatus !== '') payload[cfg.statusField] = finalStatus === 'Clear' ? null : finalStatus;
+                if(actionVal !== '' && actionVal !== account.action) payload[cfg.actionField] = actionVal === 'Clear' ? null : actionVal;
+                if(Object.keys(payload).length){ const ok = await _patchSourceRecord(src, payload, token); if(ok) patchSuccess = true; }
+            }
+            if(!patchSuccess){ window.showToast('No records were updated.', 'warning'); return; }
+            window.showToast('Updates pushed successfully.', 'success');
+            if(doEmail){ const statusLabel = markResolved ? 'Resolved' : (statusVal || 'Updated'); await window.sendSilentEmail(account.rep, `A.C.T. Manager Update - ${account.company} (${account.cr714_id})`, _buildEmailBody(account, noteInput, statusLabel)); }
+            await unifiedFullLoad({ silent:true }); _origApplyFilters(true); if(window.activeAccountId) await window.selectAccount(window.activeAccountId);
+        } catch(e){ window.showToast('Failed to push manager note.', 'error'); }
+        finally { btn.innerHTML = originalText; btn.disabled = false; }
+    };
+    window.quickResolve = async function(){
+        if(!window.activeAccountId) return;
+        const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId); if(!account) return;
+        try {
+            const token = await window.getToken(); let success = false;
+            for(const src of (account.sources || [])){
+                const cfg = _getPatchConfig(src); const payload = {};
+                if(cfg.supportsStatus) payload[cfg.statusField] = 'Resolved';
+                payload[cfg.noteField] = _prependNote(src.rawNotes || '', _buildManagerNoteBlock('Resolved by manager quick action.', true));
+                const ok = await _patchSourceRecord(src, payload, token); if(ok) success = true;
+            }
+            if(success){ window.showToast('Help resolved.', 'success'); await unifiedFullLoad({ silent:true }); _origApplyFilters(true); if(window.activeAccountId) await window.selectAccount(window.activeAccountId); }
+            else window.showToast('Unable to resolve this account.', 'error');
+        } catch(e){ window.showToast('Quick resolve failed.', 'error'); }
+    };
+    window.executeBulkNote = async function(){
+        if(!window.bulkSelectedIds || window.bulkSelectedIds.size===0){ window.showToast('No accounts selected.', 'warning'); return; }
+        const noteInput = document.getElementById('bulk-manager-note').value.trim();
+        const markResolved = document.getElementById('bulk-mark-resolved').checked;
+        const doEmail = document.getElementById('bulk-notify-email').checked;
+        if(!noteInput && !markResolved){ window.showToast('Enter a note or mark resolved.', 'warning'); return; }
+        const btn = document.getElementById('btn-execute-bulk'); const originalText = btn.innerHTML; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>'; btn.disabled = true;
+        try {
+            const token = await window.getToken(); let updatedCount = 0;
+            const targets = (window.teamFilteredAccounts || []).filter(a => window.bulkSelectedIds.has(a.cr714_id));
+            for(const account of targets){
+                let accountUpdated = false;
+                for(const src of (account.sources || [])){
+                    const cfg = _getPatchConfig(src); const payload = {}; const currentRaw = src.rawNotes || '';
+                    payload[cfg.noteField] = _prependNote(currentRaw, _buildManagerNoteBlock(noteInput, markResolved));
+                    if(markResolved && cfg.supportsStatus) payload[cfg.statusField] = 'Resolved';
+                    const ok = await _patchSourceRecord(src, payload, token); if(ok) accountUpdated = true;
+                }
+                if(accountUpdated){
+                    updatedCount += 1;
+                    if(doEmail){ const statusLabel = markResolved ? 'Resolved' : 'Updated'; await window.sendSilentEmail(account.rep, `A.C.T. Manager Batch Update - ${account.company} (${account.cr714_id})`, _buildEmailBody(account, noteInput, statusLabel)); }
+                }
+            }
+            if(updatedCount > 0){ window.showToast(`Batch patch complete. ${updatedCount} accounts updated.`, 'success'); document.getElementById('bulk-modal').classList.add('hidden-force'); document.getElementById('bulk-modal').style.display = 'none'; window.clearBulkSelection(); await unifiedFullLoad({ silent:true }); _origApplyFilters(true); }
+            else window.showToast('Batch patch made no changes.', 'warning');
+        } catch(e){ window.showToast('Batch patch failed.', 'error'); }
+        finally { btn.innerHTML = originalText; btn.disabled = false; }
+    };
+    window.executeBulkResolve = async function(){
+        document.getElementById('bulk-manager-note').value = 'Resolved by manager bulk action.';
+        document.getElementById('bulk-mark-resolved').checked = true;
+        const bulkModal = document.getElementById('bulk-modal'); if (bulkModal){ bulkModal.classList.add('hidden-force'); bulkModal.style.display='none'; }
+        await window.executeBulkNote();
+    };
+    window.pushIntroEmail = async function(){
+        if(!window.activeAccountId) return;
+        const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId); if(!account) return;
+        try {
+            const subject = `Intro Follow-Up Required - ${account.company} (${account.cr714_id})`;
+            const body = `<h2 style="color:#0f766e;">New Intro Detected</h2><p><strong>Account:</strong> ${window.escapeHTML(account.company)} (${account.cr714_id})</p><p><strong>Rep:</strong> ${window.escapeHTML(account.rep)}</p><p>Please review and follow up on this intro.</p>`;
+            const emailOk = await window.sendSilentEmail(account.rep, subject, body); if(!emailOk) return;
+            const token = await window.getToken(); let logSuccess = false;
+            for(const src of (account.sources || [])){
+                const cfg = _getPatchConfig(src); const payload = {}; payload[cfg.noteField] = _prependNote(src.rawNotes || '', _buildManagerNoteBlock('Push Intro Email to Rep', false, '[Intro Email Dispatched to Rep]'));
+                const ok = await _patchSourceRecord(src, payload, token); if(ok) logSuccess = true;
+            }
+            if(logSuccess){ window.showToast('Intro email pushed and logged.', 'success'); await unifiedFullLoad({ silent:true }); _origApplyFilters(true); if(window.activeAccountId) await window.selectAccount(window.activeAccountId); }
+            else window.showToast('Email sent, but intro log note failed.', 'warning');
+        } catch(e){ window.showToast('Failed to push intro email.', 'error'); }
+    };
+
 })();
 </script>
 
