@@ -1041,225 +1041,249 @@
         // Preference stub to safely allow future feature expansion without throwing undefined function errors.
     }
 
-    window.handleCustomSave = async function(autoNote = null, quiet = false) {
-        if (window._isSaving) return; // Prevent double-clicks / multi-saves
-        window._isSaving = true;
-        
-        try {
-            const get = (id) => document.getElementById(id).value || '';
-            const loc = get('input-location'), dm = get('input-dm'), comp = get('input-competitor');
-            let oppType = get('opp-type-select');
-            const intro = document.getElementById('display-intro').innerText === '--' ? '' : document.getElementById('display-intro').innerText;
-            
-            // Intelligently default OppType for automated system notes to ensure accurate reporting
-            if (autoNote) {
-                const lowerNote = autoNote.toLowerCase();
-                if (lowerNote.includes('[email sent]') || lowerNote.includes('[email drafted]')) {
-                    oppType = "Email";
-                } else if (lowerNote.includes('[help request]')) {
-                    oppType = "General Note";
-                }
-            }
-            
-            if(!quiet) { if(!oppType) { window.showToast("Opp Type is Required", "error"); document.getElementById('opp-type-select').classList.add('empty-field-warning'); return; } }
-            if(!quiet) window.showToast("Saving...", "processing");
-            
-            // Grab what the UI is currently showing for Intro
-const introDisplay = document.getElementById('display-intro')?.innerText || '--';
+    window.handleCustomSave = async function (autoNote = null, quiet = false) {
+  if (window._isSaving) return;
+  window._isSaving = true;
 
-let typedNote = (document.getElementById('qb-notes-input').value || "")
-  .replace(QB_NOTES_TEMPLATE, '')
-  .trim();
-
-let note = autoNote
-  ? (typedNote ? autoNote + "\n" + typedNote : autoNote)
-  : typedNote;
-
-// Rep entered an actual note (not just metadata)
-const repEnteredNote = typedNote.trim().length > 0;
-
-// Decide if Intro is currently "on" based on what the UI shows OR the record value
-const introVal = currentSelectedRecord?.cr714_intro;
-const introIsOn =
-  (introDisplay && introDisplay !== '--' && introDisplay.toLowerCase() === 'intro') ||
-  ["yes", "y", "true", "intro"].includes(String(introVal || '').trim().toLowerCase());
-
-// If rep entered a note AND intro is on, we will turn it off
-const shouldToggleIntroOff = repEnteredNote && introIsOn;
-
-// IMPORTANT: Your Dataverse column is Edm.String (text), so "no" must be a string
-const INTRO_OFF_VALUE = "no";
-
-// If we are toggling off, DO NOT stamp Intro into the newest note metadata
-const introForMeta = shouldToggleIntroOff ? "" : (introDisplay === '--' ? "" : introDisplay);
-
-// Build metadata AFTER deciding what Intro should be in the metadata
-const metaString = `{{METADATA: Loc=${loc}|DM=${dm}|Comp=${comp}|Opp=${oppType}|Intro=${introForMeta}}}`;
-``
-            const timeStamp = new Date().toLocaleString(); const userStamp = currentUserRepName || "Unknown User";
-            
-            // Detect if we need to silently clear the manager notes due to a rep pushing a new update
-            const shouldClearManagerNote = !!(note && currentSelectedRecord && currentSelectedRecord.cr714_managernotes);
-
-            let headerLabel = currentSelectedRecord ? currentSelectedRecord.primaryType : 'Unknown';
-            let currentAction = currentSelectedRecord ? (currentSelectedRecord.cr714_action || 'None') : 'None';
-            
-            // Added Action property to the List header for deeper reporting traceability
-            const newNoteEntry = note ? `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId} | Action: ${currentAction}]\n${metaString}\n${note}\n\n------------------------------\n` : `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId} | Action: ${currentAction}]\n${metaString}\n(Metadata Update)\n\n------------------------------\n`;
-            
-            let d = document.getElementById('follow-up-date').value;
-            let t = document.getElementById('follow-up-time').value;
-            let iso = null;
-            if (d) {
-                try {
-                    let dt = new Date(`${d}T${t || '00:00'}:00`);
-                    if(!isNaN(dt.getTime())) {
-                        iso = dt.toISOString();
-                    }
-                } catch(e) {
-                    iso = t ? `${d}T${t}:00Z` : `${d}T00:00:00Z`; // Fallback
-                }
-            }
-
-            const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
-            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
-            
-            // Loop and save to all linked sources to ensure sync
-for (let i = 0; i < currentSelectedRecord.sources.length; i++) {
-                let src = currentSelectedRecord.sources[i];
-                let payload = {};
-                if (iso !== null) payload.cr714_followup = iso;
-                else payload.cr714_followup = null;
-
-                if (shouldClearManagerNote) {
-                    payload.cr714_managernotes = null;
-                }
-
-                // Ensure the Dataverse payload receives the email date stamp
-                if (currentSelectedRecord.cr714_actionemailsent) {
-                    payload.cr714_actionemailsent = currentSelectedRecord.cr714_actionemailsent;
-                }
-
-                if (i === 0) {
-                    // Only append note strictly to the primary source to prevent duplication in merged history
-                    let rawEntries = (src.rawNotes || "").split(/-{20,}/);
-                    let validEntries = rawEntries.filter(e => {
-                        if (!e.trim()) return false;
-                        let match = e.match(/(?:Modified By:|by:)\s*([^\n\[\{]*)/i);
-                        let author = match ? match[1].trim() : "";
-                        if (author === "Unknown User" || author === "Unknown") return false;
-                        
-                        // Robust regex stripping mirroring the parseNotes logic
-                        let textOnly = e
-                            .replace(/Modified On:\s*([^\n\[\{]*)/i, '')
-                            .replace(/(?:Modified By:|by:)\s*([^\n\[\{]*)/i, '')
-                            .replace(/{{METADATA:.*?}}/i, '')
-                            .replace(/\[List:.*?\]/i, '')
-                            .trim();
-                            
-                        if(!textOnly) return false;
-                        return true;
-                    });
-                    
-                    let rebuiltNotes = validEntries.map(e => e.trim()).join('\n\n------------------------------\n');
-                    if (rebuiltNotes) rebuiltNotes = '\n\n' + rebuiltNotes + '\n\n------------------------------\n';
-                    
-                    const fullNote = newNoteEntry + rebuiltNotes;
-
-                    if (src.table === 'cr714_accountmanagementdatasets') {
-                        payload.cr714_namemost = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most'); payload.cr714_accountmanagementnotes = fullNote;
-                    } else if (src.table === 'cr714_cadencedatasets') {
-                        payload.cr714_namemost = get('contact-name-most'); payload.cr714_primaryphone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most'); payload.cr714_qbnotes = fullNote;
-                    } else if (src.table === 'cr714_louisebrowndatasets') {
-                        payload.cr714_namemost = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most'); payload.cr714_notesfr = fullNote;
-                    } else if (src.table === 'cr714_prospectingdatasets') {
-                        payload.cr714_namelatest = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_email_latest = get('contact-email-most'); payload.cr714_prospectingnotes = fullNote;
-                    }
-                    src.rawNotes = fullNote;
-                    currentSelectedRecord.cr714_qbnotes = fullNote; // Update runtime cache mapping
-                } else {
-                    // Just update core contact info to keep it synced
-                    if (src.table === 'cr714_accountmanagementdatasets') {
-                        payload.cr714_namemost = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most');
-                    } else if (src.table === 'cr714_cadencedatasets') {
-                        payload.cr714_namemost = get('contact-name-most'); payload.cr714_primaryphone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most');
-                    } else if (src.table === 'cr714_louisebrowndatasets') {
-                        payload.cr714_namemost = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_emailmost = get('contact-email-most');
-                    } else if (src.table === 'cr714_prospectingdatasets') {
-                        payload.cr714_namelatest = get('contact-name-most'); payload.cr714_phone = get('contact-phone-primary'); payload.cr714_email_latest = get('contact-email-most');
-                    }
-                }
-
-                // --- NEW: toggle Intro off in Dataverse when rep entered a note ---
-if (repEnteredNote && introIsYes) {
-    payload.cr714_intro = INTRO_OFF_VALUE;
-}
-
-// --- NEW: toggle Intro off in Dataverse when rep entered a note ---
-if (shouldToggleIntroOff) {
-  currentSelectedRecord.cr714_intro = INTRO_OFF_VALUE;
-
-  // Hide the Intro pill immediately so user sees it worked
-  const introBox = document.getElementById('intro-container-box');
-  const introDisp = document.getElementById('display-intro');
-  if (introDisp) introDisp.innerText = '--';
-  if (introBox) {
-    introBox.classList.add('hidden');
-    introBox.classList.remove('flex');
-    introBox.classList.remove('active-intro');
-  }
-}
-
-const response = await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, { 
-    method: 'PATCH', 
-    headers: headers, 
-    body: JSON.stringify(payload) 
-});
-
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    console.error(`Dataverse Error on ${src.table}:`, errorData);
-                    throw new Error(`Dataverse rejected the save: ${errorData.error?.message || response.statusText}`);
-                }
-            }
-
-            if (shouldClearManagerNote) {
-                currentSelectedRecord.cr714_managernotes = null;
-                const mgrAlert = document.querySelector('.alert-box.mgr');
-                if (mgrAlert) mgrAlert.remove();
-            }
-
-            if(!quiet) {
-                window.showToast("Saved!", "success");
-                
-                // SILENT PUSH TO MASONVILLE
-                // Map OppType to Masonville Activity Type for accurate Power Automate routing
-                let masonvilleType = "ISCall";
-                if (oppType === "Email") masonvilleType = "ISEmail";
-                
-                const pushNotes = note ? note : "(Metadata Update)";
-                await window.pushToMasonvilleSilent(currentRecordId, pushNotes, masonvilleType);
-            }
-            
-            window.saveToAuditLog('Save', `Note: ${note}`); 
-            currentSelectedRecord.cr714_followup = iso; 
-            document.querySelectorAll('.empty-field-warning').forEach(el => el.classList.remove('empty-field-warning')); 
-            window.updateNotesPreview(); 
-            window.filterAndSortGallery(true); // <--- True: Preserves scroll after save!
-            window.updateMiniCounter(); 
-            
-            // Cleanly reset prompt flags to stop bleeding
-            document.getElementById('qb-notes-input').value = '';
-            document.getElementById('opp-type-select').value = '';
-            window.hasUnsavedChanges = false; 
-            window.takeSnapshot(currentSelectedRecord);
-            
-        } catch(e) { 
-            window.addToFailedQueue("Save Record", () => window.handleCustomSave(autoNote, quiet)); 
-        } finally {
-            window._isSaving = false;
-        }
+  try {
+    if (!currentSelectedRecord || !currentSelectedRecord.sources || currentSelectedRecord.sources.length === 0) {
+      if (!quiet) window.showToast("Select an account first", "error");
+      return;
     }
+
+    const val = (id) => (document.getElementById(id)?.value || "").trim();
+
+    const loc = val("input-location");
+    const dm = val("input-dm");
+    const comp = val("input-competitor");
+    let oppType = val("opp-type-select");
+
+    // What the UI is currently showing for Intro
+    const introDisplayRaw = document.getElementById("display-intro")?.innerText || "--";
+    const introDisplay = (introDisplayRaw === "--") ? "" : introDisplayRaw;
+
+    // Default Opp Type for system-generated notes
+    if (autoNote) {
+      const lower = autoNote.toLowerCase();
+      if (lower.includes("[email sent]") || lower.includes("[email drafted]")) oppType = "Email";
+      else if (lower.includes("[help request]")) oppType = "General Note";
+    }
+
+    if (!quiet && !oppType) {
+      window.showToast("Opp Type is Required", "error");
+      document.getElementById("opp-type-select")?.classList.add("empty-field-warning");
+      return;
+    }
+
+    if (!quiet) window.showToast("Saving...", "processing");
+
+    // Note text
+    let typedNote = (document.getElementById("qb-notes-input")?.value || "")
+      .replace(QB_NOTES_TEMPLATE, "")
+      .trim();
+
+    let note = autoNote
+      ? (typedNote ? autoNote + "\n" + typedNote : autoNote)
+      : typedNote;
+
+    const repEnteredNote = typedNote.length > 0;
+
+    // Intro should turn off when rep enters a note AND Intro is currently present
+    const shouldToggleIntroOff = repEnteredNote && introDisplay !== "";
+
+    // Clear Intro in the newest note metadata so the handshake icon disappears
+    const introForMeta = shouldToggleIntroOff ? "" : introDisplay;
+
+    // IMPORTANT: parseNotes() splits metadata using "|" so we keep "|" here. [1](https://gist.github.com/thehakcer959/f715199a0c52d9deb86cba94922f2180)
+    const metaString = `{{METADATA: Loc=${loc}|DM=${dm}|Comp=${comp}|Opp=${oppType}|Intro=${introForMeta}}}`;
+
+    const timeStamp = new Date().toLocaleString();
+    const userStamp = currentUserRepName || "Unknown User";
+
+    // Clear manager note if rep is saving an actual note and manager note exists
+    const shouldClearManagerNote = !!(note && currentSelectedRecord.cr714_managernotes);
+
+    const headerLabel = currentSelectedRecord.primaryType || "Unknown";
+    const currentAction = currentSelectedRecord.cr714_action || "None";
+
+    const newNoteEntry = note
+      ? `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId} | Action: ${currentAction}]\n${metaString}\n${note}\n\n------------------------------\n`
+      : `Modified By: ${userStamp}\nModified On: ${timeStamp}\n\n[List: ${headerLabel} | Account: ${currentRecordId} | Action: ${currentAction}]\n${metaString}\n(Metadata Update)\n\n------------------------------\n`;
+
+    // Follow-up date/time -> ISO
+    const d = document.getElementById("follow-up-date")?.value;
+    const t = document.getElementById("follow-up-time")?.value;
+    let iso = null;
+
+    if (d) {
+      try {
+        const dt = new Date(`${d}T${t || "00:00"}:00`);
+        if (!isNaN(dt.getTime())) iso = dt.toISOString();
+      } catch (e) {
+        iso = t ? `${d}T${t}:00Z` : `${d}T00:00:00Z`;
+      }
+    }
+
+    const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
+    const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+
+    // Save to all sources
+    for (let i = 0; i < currentSelectedRecord.sources.length; i++) {
+      const src = currentSelectedRecord.sources[i];
+
+      const payload = {
+        cr714_followup: iso !== null ? iso : null
+      };
+
+      if (shouldClearManagerNote) payload.cr714_managernotes = null;
+
+      if (currentSelectedRecord.cr714_actionemailsent) {
+        payload.cr714_actionemailsent = currentSelectedRecord.cr714_actionemailsent;
+      }
+
+      // Toggle Intro off ONLY on the primary source record
+      if (shouldToggleIntroOff && i === 0) {
+        payload.cr714_intro = ""; // string field, so blank string
+      }
+
+      const nameMost = val("contact-name-most");
+      const phone = val("contact-phone-primary");
+      const emailMost = val("contact-email-most");
+
+      if (i === 0) {
+        // Rebuild note history (keep only valid previous entries)
+        const rawEntries = (src.rawNotes || "").split(/-{20,}/);
+        const validEntries = rawEntries.filter((e) => {
+          if (!e.trim()) return false;
+
+          const match = e.match(/(?:Modified By:|by:)\s*([^\n\[\{]*)/i);
+          const author = match ? match[1].trim() : "";
+          if (author === "Unknown User" || author === "Unknown") return false;
+
+          const textOnly = e
+            .replace(/Modified On:\s*([^\n\[\{]*)/i, "")
+            .replace(/(?:Modified By:|by:)\s*([^\n\[\{]*)/i, "")
+            .replace(/{{METADATA:.*?}}/i, "")
+            .replace(/\[List:.*?\]/i, "")
+            .trim();
+
+          return !!textOnly;
+        });
+
+        let rebuiltNotes = validEntries.map((e) => e.trim()).join("\n\n------------------------------\n");
+        if (rebuiltNotes) rebuiltNotes = "\n\n" + rebuiltNotes + "\n\n------------------------------\n";
+
+        const fullNote = newNoteEntry + rebuiltNotes;
+
+        if (src.table === "cr714_accountmanagementdatasets") {
+          payload.cr714_namemost = nameMost;
+          payload.cr714_phone = phone;
+          payload.cr714_emailmost = emailMost;
+          payload.cr714_accountmanagementnotes = fullNote;
+        } else if (src.table === "cr714_cadencedatasets") {
+          payload.cr714_namemost = nameMost;
+          payload.cr714_primaryphone = phone;
+          payload.cr714_emailmost = emailMost;
+          payload.cr714_qbnotes = fullNote;
+        } else if (src.table === "cr714_louisebrowndatasets") {
+          payload.cr714_namemost = nameMost;
+          payload.cr714_phone = phone;
+          payload.cr714_emailmost = emailMost;
+          payload.cr714_notesfr = fullNote;
+        } else if (src.table === "cr714_prospectingdatasets") {
+          payload.cr714_namelatest = nameMost;
+          payload.cr714_phone = phone;
+          payload.cr714_email_latest = emailMost;
+          payload.cr714_prospectingnotes = fullNote;
+        }
+
+        src.rawNotes = fullNote;
+        currentSelectedRecord.cr714_qbnotes = fullNote;
+      } else {
+        // Keep contact info synced across sources
+        if (src.table === "cr714_accountmanagementdatasets") {
+          payload.cr714_namemost = nameMost;
+          payload.cr714_phone = phone;
+          payload.cr714_emailmost = emailMost;
+        } else if (src.table === "cr714_cadencedatasets") {
+          payload.cr714_namemost = nameMost;
+          payload.cr714_primaryphone = phone;
+          payload.cr714_emailmost = emailMost;
+        } else if (src.table === "cr714_louisebrowndatasets") {
+          payload.cr714_namemost = nameMost;
+          payload.cr714_phone = phone;
+          payload.cr714_emailmost = emailMost;
+        } else if (src.table === "cr714_prospectingdatasets") {
+          payload.cr714_namelatest = nameMost;
+          payload.cr714_phone = phone;
+          payload.cr714_email_latest = emailMost;
+        }
+      }
+
+      const response = await fetch(`${DATAVERSE_URL}/${src.table}(${src.id})`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        let errorData = null;
+        try { errorData = await response.json(); } catch (e) {}
+        console.error(`Dataverse Error on ${src.table}:`, errorData || response.statusText);
+        throw new Error(`Dataverse rejected the save: ${errorData?.error?.message || response.statusText}`);
+      }
+    }
+
+    // Update UI + in-memory record after successful save
+    if (shouldToggleIntroOff) {
+      currentSelectedRecord.cr714_intro = "";
+      const introDispEl = document.getElementById("display-intro");
+      const introBox = document.getElementById("intro-container-box");
+      if (introDispEl) introDispEl.innerText = "--";
+      if (introBox) {
+        introBox.classList.add("hidden");
+        introBox.classList.remove("flex");
+        introBox.classList.remove("active-intro");
+      }
+    }
+
+    if (shouldClearManagerNote) {
+      currentSelectedRecord.cr714_managernotes = null;
+      const mgrAlert = document.querySelector(".alert-box.mgr");
+      if (mgrAlert) mgrAlert.remove();
+    }
+
+    if (!quiet) {
+      window.showToast("Saved!", "success");
+
+      let masonvilleType = "ISCall";
+      if (oppType === "Email") masonvilleType = "ISEmail";
+
+      const pushNotes = note ? note : "(Metadata Update)";
+      await window.pushToMasonvilleSilent(currentRecordId, pushNotes, masonvilleType);
+    }
+
+    window.saveToAuditLog("Save", `Note: ${note}`);
+    currentSelectedRecord.cr714_followup = iso;
+
+    document.querySelectorAll(".empty-field-warning").forEach((el) => el.classList.remove("empty-field-warning"));
+
+    window.updateNotesPreview();
+    window.filterAndSortGallery(true);
+    window.updateMiniCounter();
+
+    document.getElementById("qb-notes-input").value = "";
+    document.getElementById("opp-type-select").value = "";
+    window.hasUnsavedChanges = false;
+    window.takeSnapshot(currentSelectedRecord);
+
+  } catch (e) {
+    window.addToFailedQueue("Save Record", () => window.handleCustomSave(autoNote, quiet));
+  } finally {
+    window._isSaving = false;
+  }
+};
+``
 
     window.confirmClearChanges = function() {
         if(confirm("Clear current form changes?")) {
