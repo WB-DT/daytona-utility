@@ -1644,9 +1644,9 @@ window.chartDist = null; window.chartAct = null; window.chartActionsPie = null; 
         try {
             const token = await window.getToken();
             const tables = [
-                { t: 'cr714_accountmanagementdataset', select: 'cr714_accountnum,cr714_accountname,cr714_rep,cr714_action,cr714_actionmessage,cr714_help,modifiedon' },
-                { t: 'cr714_cadencedataset', select: 'cr714_accountnum,cr714_company,cr714_retentionrep,cr714_action,cr714_actionmessage,cr714_recordstatus,modifiedon,cr714_intro' },
-                { t: 'cr714_louisebrowndataset', select: 'cr714_accountnum,cr714_accountname,cr714_assignedrep,cr714_action,cr714_actionmessage,cr714_help,modifiedon,cr714_intro' }
+                { t: 'cr714_accountmanagementdatasets', select: 'cr714_accountnum,cr714_accountname,cr714_rep,cr714_action,cr714_actionmessage,cr714_help,modifiedon' },
+                { t: 'cr714_cadencedatasets', select: 'cr714_accountnum,cr714_company,cr714_retentionrep,cr714_action,cr714_actionmessage,cr714_recordstatus,modifiedon,cr714_intro' },
+                { t: 'cr714_louisebrowndatasets', select: 'cr714_accountnum,cr714_accountname,cr714_assignedrep,cr714_action,cr714_actionmessage,cr714_help,modifiedon,cr714_intro' }
             ];
             let foundUpdates = false; let newLastPoll = new Date().toISOString();
             let newMaxDateFound = false;
@@ -2065,10 +2065,10 @@ let cleanActionMsg = window.stripJson(r.cr714_actionmessage);
 
             const globalAccountMap = new Map();
             await Promise.all([
-                window.fetchPaginatedData('cr714_accountmanagementdataset', amSelect, token, globalAccountMap, 'AM'),
-                window.fetchPaginatedData('cr714_cadencedataset', cadSelect, token, globalAccountMap, 'Cadence'),
+                window.fetchPaginatedData('cr714_accountmanagementdatasets', amSelect, token, globalAccountMap, 'AM'),
+                window.fetchPaginatedData('cr714_cadencedatasets', cadSelect, token, globalAccountMap, 'Cadence'),
                 //window.fetchPaginatedData('cr714_prospectingdatasets', proSelect, token, globalAccountMap, 'Prospecting'),
-                window.fetchPaginatedData('cr714_louisebrowndataset', lbSelect, token, globalAccountMap, 'Louise Brown')
+                window.fetchPaginatedData('cr714_louisebrowndatasets', lbSelect, token, globalAccountMap, 'Louise Brown')
             ]);
             window.mergedAccounts = Array.from(globalAccountMap.values());
             window.populateDynamicActionSet();
@@ -2521,10 +2521,10 @@ let fvOpts = '<option value="">-- Leave Action Unchanged --</option>' + window.d
                 
                 for (let src of account.sources) {
                     let fields = "";
-                    if (src.table === 'cr714_accountmanagementdataset') fields = "cr714_accountmanagementnotes,cr714_importantaccountinformation";
-                    else if (src.table === 'cr714_cadencedataset') fields = "cr714_qbnotes";
-                    else if (src.table === 'cr714_prospectingdataset') fields = "cr714_prospectingnotes,cr714_importantaccountinfo";
-                    else if (src.table === 'cr714_louisebrowndataset') fields = "cr714_notesfr";
+                    if (src.table === 'cr714_accountmanagementdatasets') fields = "cr714_accountmanagementnotes,cr714_importantaccountinformation";
+                    else if (src.table === 'cr714_cadencedatasets') fields = "cr714_qbnotes";
+                    else if (src.table === 'cr714_prospectingdatasets') fields = "cr714_prospectingnotes,cr714_importantaccountinfo";
+                    else if (src.table === 'cr714_louisebrowndatasets') fields = "cr714_notesfr";
                     
                     const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})?$select=${fields}`, { headers });
                     if (res.ok) {
@@ -3885,1670 +3885,157 @@ let successCount = 0;
 
 <script>
 (function(){
-    const DATASET_SOURCE_META = {
-        'Account Management': { short:'AM', badge:'badge-am' },
-        'Cadence': { short:'Cadence', badge:'badge-cad' },
-        'Prospecting': { short:'Prospecting', badge:'badge-pro' },
-        'Louise Brown': { short:'Louise Brown', badge:'badge-lb' },
-        'Logistics': { short:'Logistics', badge:'badge-pro' }
+    // =========================================================
+    // SESSION CACHE + SILENT DELTA REFRESH LAYER
+    // =========================================================
+
+    // Session-scoped cache (clears on tab close)
+    const CACHE_KEY = 'act_mgr_session_cache_v1';
+    const META_KEY  = 'act_mgr_session_meta_v1';
+
+    function nowIso(){ return new Date().toISOString(); }
+
+    function getCache(){
+        try { return JSON.parse(sessionStorage.getItem(CACHE_KEY)) || null; }
+        catch(e){ return null; }
+    }
+
+    function setCache(obj){
+        sessionStorage.setItem(CACHE_KEY, JSON.stringify(obj));
+    }
+
+    function getMeta(){
+        try { return JSON.parse(sessionStorage.getItem(META_KEY)) || {}; }
+        catch(e){ return {}; }
+    }
+
+    function setMeta(obj){
+        sessionStorage.setItem(META_KEY, JSON.stringify(obj));
+    }
+
+    // Soft, non-blocking status indicator
+    function softStatus(msg){
+        let el = document.getElementById('soft-sync-indicator');
+        if(!el){
+            el = document.createElement('div');
+            el.id = 'soft-sync-indicator';
+            el.style.cssText = 'position:fixed;bottom:12px;right:16px;padding:6px 10px;font-size:11px;border-radius:6px;background:rgba(0,0,0,0.55);color:#fff;z-index:9999;opacity:0;transition:opacity .4s';
+            document.body.appendChild(el);
+        }
+        el.textContent = msg;
+        el.style.opacity = '1';
+        clearTimeout(el._t);
+        el._t = setTimeout(()=> el.style.opacity='0', 2200);
+    }
+
+    // ---------------------------------------------------------
+    // BOOTSTRAP FROM CACHE (INSTANT PAINT)
+    // ---------------------------------------------------------
+    window.bootstrapFromCache = function(){
+        const cached = getCache();
+        if(!cached) return false;
+        try{
+            window.rawUnifiedSourceRows = cached.rawUnifiedSourceRows || [];
+            window.unifiedEventRows     = cached.unifiedEventRows || [];
+            window.mergedAccounts       = cached.mergedAccounts || [];
+            window.populateDynamicActionSet && window.populateDynamicActionSet();
+            window.buildFilters && window.buildFilters();
+            window.applyFilters && window.applyFilters();
+            softStatus('Loaded from session cache');
+            return true;
+        }catch(e){ return false; }
     };
 
-    window.unifiedEventRows = [];
-    window.rawUnifiedSourceRows = [];
-    window._accountEventMap = new Map();
-
-    function safeTrim(value) { return value === null || value === undefined ? '' : String(value).trim(); }
-    function choose(...vals) {
-        for (const v of vals) {
-            if (v !== null && v !== undefined && String(v).trim() !== '') return v;
+    // ---------------------------------------------------------
+    // FULL LOAD (ONLY IF CACHE MISSING)
+    // ---------------------------------------------------------
+    const _origFetchAll = window.fetchAllData;
+    window.fetchAllData = async function(options={}){
+        const { silent=false } = options;
+        if(!silent){
+            document.getElementById('global-loader').style.display='flex';
         }
-        return '';
-    }
-    function normalizeText(text) {
-        return text === null || text === undefined ? '' : String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    }
-
-    function parseMDate(raw) {
-        if (!raw) return null;
-        const direct = new Date(raw);
-        if (!isNaN(direct.getTime())) return direct;
-
-        const cleaned = String(raw).replace(/,/g, '').trim();
-        const m = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?$/i);
-        if (!m) return null;
-
-        let month = parseInt(m[1], 10) - 1;
-        let day = parseInt(m[2], 10);
-        let year = parseInt(m[3], 10);
-        if (year < 100) year += 2000;
-        let hour = parseInt(m[4] || '0', 10);
-        const minute = parseInt(m[5] || '0', 10);
-        const second = parseInt(m[6] || '0', 10);
-        const ampm = (m[7] || '').toUpperCase();
-
-        if (ampm === 'PM' && hour < 12) hour += 12;
-        if (ampm === 'AM' && hour === 12) hour = 0;
-
-        const dt = new Date(year, month, day, hour, minute, second);
-        return isNaN(dt.getTime()) ? null : dt;
-    }
-
-    function toIsoOrNull(dt) {
-        return dt instanceof Date && !isNaN(dt.getTime()) ? dt.toISOString() : null;
-    }
-
-    function toDateOnly(dt) {
-        return dt instanceof Date && !isNaN(dt.getTime()) ? dt.toISOString().split('T')[0] : null;
-    }
-
-    function currentDateOnly() {
-        const d = new Date();
-        return new Date(d.getFullYear(), d.getMonth(), d.getDate());
-    }
-
-    function withinLastDays(dateObj, days) {
-        if (!(dateObj instanceof Date) || isNaN(dateObj.getTime())) return false;
-        const today = currentDateOnly();
-        const dt = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate());
-        const min = new Date(today.getTime());
-        min.setDate(min.getDate() - days);
-        return dt >= min && dt <= today;
-    }
-
-    function withinLastMonths(dateObj, months) {
-        if (!(dateObj instanceof Date) || isNaN(dateObj.getTime())) return false;
-        const today = currentDateOnly();
-        const dt = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate());
-        const min = new Date(today.getFullYear(), today.getMonth() - months, today.getDate());
-        return dt >= min && dt <= today;
-    }
-
-    function stripDatasetNoise(line) {
-        const t = safeTrim(String(line).replace(/\r/g, ''));
-        if (!t) return true;
-        return (
-            /^Modified By:/i.test(t) ||
-            /^Modified On:/i.test(t) ||
-            /^Created By:/i.test(t) ||
-            /^Created On:/i.test(t) ||
-            /^Action:/i.test(t) ||
-            /^Email was generated/i.test(t) ||
-            /^Please contact/i.test(t) ||
-            /^Account Management Update/i.test(t) ||
-            /^Account Management Note/i.test(t) ||
-            /^Cadence Update/i.test(t) ||
-            /^Cadence Note/i.test(t) ||
-            /^Prospecting Update/i.test(t) ||
-            /^Prospecting Note/i.test(t) ||
-            /^Louise Brown Update/i.test(t) ||
-            /^Louise Brown Note/i.test(t) ||
-            /^Logistics Update/i.test(t) ||
-            /^Logistics Note/i.test(t) ||
-            /^Notes:/i.test(t) ||
-            /^\[List:/i.test(t) ||
-            /^\{\{METADATA:/i.test(t) ||
-            /^Action Message:/i.test(t) ||
-            /^Masonville Link/i.test(t) ||
-            /^<a href=/i.test(t) ||
-            /^Subject:/i.test(t) ||
-            /^\[Email Sent\]:/i.test(t)
-        );
-    }
-
-    function extractSubject(text) {
-        if (!text) return null;
-        let m = text.match(/Subject:\s*([^\n\r]+)/i);
-        if (m && m[1]) return safeTrim(m[1].replace(/#\(cr\)/g, '')) || null;
-        m = text.match(/\[Email Sent\]:\s*([^\n\r]+)/i);
-        if (m && m[1]) return safeTrim(m[1].replace(/#\(cr\)/g, '')) || null;
-        return null;
-    }
-
-    function extractAction(text) {
-        if (!text) return null;
-        const m = text.match(/Action:\s*([^\n\r]+)/i);
-        return m && m[1] ? safeTrim(m[1].replace(/#\(cr\)/g, '')) || null : null;
-    }
-
-    function extractLink(text) {
-        if (!text) return null;
-        let m = text.match(/<a href=['\"]([^'\"]+)['\"]/i);
-        if (m && m[1] && /^http/i.test(m[1])) return m[1];
-        m = text.match(/https?:\/\/[^\s'\"]+/i);
-        return m && m[0] ? m[0] : null;
-    }
-
-    function buildNoteBody(noteTextRaw, isEmail) {
-        if (!noteTextRaw) return null;
-        let working = normalizeText(noteTextRaw);
-        const emailInfoPos = working.toLowerCase().indexOf('email information:');
-        if (isEmail && emailInfoPos >= 0) working = working.slice(0, emailInfoPos);
-
-        const lines = working.split('\n');
-        const filtered = lines
-            .filter(line => !stripDatasetNoise(line))
-            .map(line => String(line).replace(/#\(cr\)/g, '').trim());
-
-        const finalText = filtered.join('\n')
-            .replace(/------------------------/g, '')
-            .replace(/--------------------/g, '')
-            .replace(/\n\n+/g, '\n')
-            .trim();
-
-        return finalText || null;
-    }
-
-    function extractLegacyRep(block) {
-        const modByIdx = block.search(/Modified By:/i);
-        if (modByIdx < 0) return 'Unknown';
-        const slice = block.slice(modByIdx).split('\n')[0];
-        let rep = slice.replace(/Modified By:/i, '').trim();
-        rep = rep.split(/Account Management|Prospecting|Cadence|Louise Brown|Logistics/i)[0].trim();
-        return rep ? rep.slice(0, 40) : 'Unknown';
-    }
-
-    function parseBlockToEvent(block, fallbackAuthor, fallbackDate) {
-        const trimmed = safeTrim(block);
-        if (!trimmed) return null;
-
-        const isEmail = /Email information:|Subject:|\[Email Sent\]:/i.test(trimmed);
-        const subject = extractSubject(trimmed);
-        const action = extractAction(trimmed);
-        const link = extractLink(trimmed);
-        const noteSegment = buildNoteBody(trimmed, isEmail);
-
-        let eventRep = fallbackAuthor || 'Unknown';
-        let parsedDate = fallbackDate || null;
-
-        if (/Modified By:/i.test(trimmed)) eventRep = extractLegacyRep(trimmed);
-
-        const dateLine = trimmed.match(/Modified On:\s*([^\n\r]+)/i);
-        if (dateLine && dateLine[1]) parsedDate = parseMDate(dateLine[1]);
-
-        if (!parsedDate) return null;
-        if (!noteSegment && !subject && !link && !action) return null;
-
-        return {
-            eventDateText: parsedDate,
-            eventRep: eventRep || 'Unknown',
-            historicalAction: action || null,
-            noteSegment: noteSegment || null,
-            emailSubject: subject || null,
-            emailSegment: isEmail ? trimmed : null,
-            extractedLink: link || null
-        };
-    }
-
-    function parseRawNotesM(rawNotes) {
-        const sourceText = normalizeText(rawNotes);
-        if (!safeTrim(sourceText)) return [];
-
-        let norm = sourceText
-            .replace(/-{30}/g, '||SPLIT||')
-            .replace(/-{24}/g, '||SPLIT||')
-            .replace(/-{20}/g, '||SPLIT||');
-
-        const results = [];
-
-        const startJson = norm.indexOf('[{');
-        const endJson = norm.lastIndexOf('}]');
-        let jsonString = null;
-        if (startJson >= 0 && endJson > startJson) {
-            jsonString = norm.slice(startJson, endJson + 2);
-        }
-
-        if (jsonString) {
-            try {
-                const parsedJson = JSON.parse(jsonString);
-                parsedJson.forEach(item => {
-                    const noteTextRaw = normalizeText(item && item.text ? item.text : '');
-                    const isEmail = /Email information:|Subject:|\[Email Sent\]:/i.test(noteTextRaw);
-                    const subject = extractSubject(noteTextRaw);
-                    const action = extractAction(noteTextRaw);
-                    const link = extractLink(noteTextRaw);
-                    const noteSegment = buildNoteBody(noteTextRaw, isEmail);
-                    const parsedDate = parseMDate(item && item.date ? item.date : '');
-
-                    if (!parsedDate) return;
-                    if (!noteSegment && !subject && !link && !action) return;
-
-                    results.push({
-                        eventDateText: parsedDate,
-                        eventRep: choose(item && item.author, 'Unknown'),
-                        historicalAction: action || null,
-                        noteSegment: noteSegment || null,
-                        emailSubject: subject || null,
-                        emailSegment: isEmail ? noteTextRaw : null,
-                        extractedLink: link || null
-                    });
-                });
-            } catch (e) {
-                console.warn('JSON note parsing skipped', e);
-            }
-            norm = norm.replace(jsonString, '');
-        }
-
-        norm.split('||SPLIT||').forEach(block => {
-            const ev = parseBlockToEvent(block, 'Unknown', null);
-            if (ev) results.push(ev);
-        });
-
-        results.sort((a, b) => new Date(a.eventDateText) - new Date(b.eventDateText));
-        return results;
-    }
-
-    function buildHtmlNoteCard(eventRow) {
-        const noteDate = eventRow['Note Date'] ? new Date(eventRow['Note Date']) : null;
-        const safeDate = noteDate && !isNaN(noteDate.getTime())
-            ? noteDate.toLocaleString([], {
-                month:'2-digit',
-                day:'2-digit',
-                year:'numeric',
-                hour:'2-digit',
-                minute:'2-digit'
-            })
-            : 'Unknown Date';
-
-        const safeRep = safeTrim(eventRow.EventRep) || 'Unknown Rep';
-        const safeNote = eventRow.NoteSegment
-            ? window.escapeHTML(eventRow.NoteSegment).replace(/\n/g, '<br>')
-            : '<i>No note text provided.</i>';
-
-        const actionText = safeTrim(eventRow['Action at time of Note']);
-        const safeAction = actionText
-            ? `<strong>Action:</strong> ${window.escapeHTML(actionText)}<br><br>`
-            : '';
-
-        const link = safeTrim(eventRow['Masonville Link']);
-        const linkBtn = link
-            ? `<br><a href='${window.escapeHTML(link)}' target='_blank' style='display:inline-block; margin-top:10px; padding:6px 12px; background-color:#118DFF; color:white; text-decoration:none; border-radius:4px; font-weight:bold;'>Open in Masonville</a>`
-            : '';
-
-        return `<div style='font-family:"Segoe UI", sans-serif; font-size:14px; color:#333; padding:15px; border:1px solid #EAEAEA; border-radius:8px; background-color:#FAFAFA; box-shadow: 0 2px 4px rgba(0,0,0,0.05);'>
-            <div style='margin-bottom:10px; border-bottom:1px solid #ddd; padding-bottom:8px;'>
-                <span style='font-weight:600; font-size:16px; color:#118DFF;'>${window.escapeHTML(safeRep)}</span>
-                <span style='float:right; color:#777; font-size:12px;'>${window.escapeHTML(safeDate)}</span>
-            </div>
-            ${safeAction}
-            <div style='margin-top:8px; line-height:1.5;'>${safeNote}</div>
-            ${linkBtn}
-        </div>`;
-    }
-
-    function normalizeDatasetRows(rows, config) {
-        return rows.map(r => {
-            const accountNum = choose(r.cr714_accountnum, r.cr714_accountnumber, r.accountnumber).toString().trim();
-            const accountName = choose(
-                r.cr714_accountname,
-                r.cr714_company,
-                r.cr714_acctname,
-                r.cr714_companyordeliveryname,
-                'Unknown Company'
-            );
-            const rep = choose(
-                r.cr714_rep,
-                r.cr714_retentionrep,
-                r.cr714_repassigned,
-                r.cr714_assignedrep,
-                'Unassigned'
-            );
-
-            const introRaw = choose(
-                r.cr714_introname,
-                r['cr714_intro@OData.Community.Display.V1.FormattedValue'],
-                r.cr714_intro,
-                ''
-            );
-
-            const isIntro =
-                String(introRaw).toLowerCase() === 'yes' ||
-                introRaw === true ||
-                introRaw == 1;
-
-            const helpStatus = choose(
-                r.cr714_helpname,
-                r['cr714_help@OData.Community.Display.V1.FormattedValue'],
-                r.cr714_help,
-                r.cr714_recordstatusname,
-                r['cr714_recordstatus@OData.Community.Display.V1.FormattedValue'],
-                r.cr714_recordstatus,
-                ''
-            );
-
-            const rawNotes = config.rawNotes(r);
-            const modifiedOn = choose(r.modifiedon, r.createdon, '');
-            const sourceDataset = config.sourceDataset;
-            const currentAction = choose(r.cr714_action, '');
-            const actionMessage = choose(r.cr714_actionmessage, '');
-            const recordId = choose(r[config.idField], '');
-            const emailSent = choose(r.cr714_actionemailsent, r.cr714_emailsenttimestamp, '');
-
-            return {
-                cr714_accountnum: accountNum,
-                cr714_accountname: accountName,
-                cr714_rep: rep,
-                cr714_action: currentAction,
-                HelpStatus: helpStatus || null,
-                IsIntro: !!isIntro,
-                LastModified: modifiedOn || null,
-                SourceDataset: sourceDataset,
-                RawNotes: normalizeText(rawNotes),
-                ActionMessage: normalizeText(actionMessage),
-                RecordId: recordId,
-                EntitySetName: config.entitySetResolved || config.entitySetCandidates[0],
-                idField: config.idField,
-                cr714_actionemailsent: emailSent || null,
-                contact: choose(r.cr714_namemost, r.cr714_namelatest, '--'),
-                phone: choose(r.cr714_phone, r.cr714_primaryphone, '--'),
-                email: choose(r.cr714_emailmost, r.cr714_email_latest, r.cr714_emaillatest, '--'),
-                address: choose(r.cr714_address, r.cr714_billingaddress, '--'),
-                importantInfo: choose(r.cr714_importantaccountinformation, r.cr714_importantaccountinfo, ''),
-                message: normalizeText(actionMessage),
-                intro: !!isIntro
-            };
-        });
-    }
-
-    function buildUnifiedEventsFromSourceRows(sourceRows) {
-        const events = [];
-
-        sourceRows.forEach(row => {
-            const combinedNotes = normalizeText(row.RawNotes || '').replace(/Modified By: /g, ' Modified By: ');
-
-            parseRawNotesM(combinedNotes).forEach(ev => {
-                const noteDate = ev.eventDateText instanceof Date ? ev.eventDateText : parseMDate(ev.eventDateText);
-                const emailDate = noteDate ? new Date(noteDate.getFullYear(), noteDate.getMonth(), noteDate.getDate()) : null;
-
-                const eventRow = {
-                    'Note Date': toIsoOrNull(noteDate),
-                    cr714_accountnum: row.cr714_accountnum,
-                    cr714_accountname: row.cr714_accountname,
-                    cr714_rep: row.cr714_rep,
-                    cr714_action: row.cr714_action,
-                    HelpStatus: row.HelpStatus,
-                    IsIntro: row.IsIntro === null || row.IsIntro === undefined ? true : !!row.IsIntro,
-                    LastModified: row.LastModified,
-                    SourceDataset: row.SourceDataset,
-                    EventRep: ev.eventRep,
-                    'Action at time of Note': safeTrim((ev.historicalAction || '').replace(/\]/g, '')) || null,
-                    NoteSegment: ev.noteSegment
-                        ? ev.noteSegment
-                            .replace(/------------------------/g, '')
-                            .replace(/--------------------/g, '')
-                            .replace(/\n\n+/g, '\n')
-                            .trim()
-                        : null,
-                    EmailSubject: ev.emailSubject || null,
-                    EmailSegment: ev.emailSegment || null,
-                    'Masonville Link': ev.extractedLink || null,
-                    EmailDate: toDateOnly(emailDate),
-                    'Last 5 Days': withinLastDays(emailDate, 5),
-                    'Last 7 Days': withinLastDays(emailDate, 7),
-                    'Last 14 Days': withinLastDays(emailDate, 14),
-                    'Last 30 Days': withinLastDays(emailDate, 30),
-                    'Last 60 Days': withinLastDays(emailDate, 60),
-                    'Last 90 Days': withinLastDays(emailDate, 90),
-                    'Last 6 Months': withinLastMonths(emailDate, 6),
-                    Count: 1,
-                    _recordRef: row.RecordId,
-                    _entitySet: row.EntitySetName,
-                    _rawSource: row,
-                    _touchType: ev.emailSubject || ev.emailSegment ? 'Email' : (ev.extractedLink ? 'Masonville' : 'Note')
-                };
-
-                eventRow['HTML Note Card'] = buildHtmlNoteCard(eventRow);
-                events.push(eventRow);
+        try{
+            await _origFetchAll();
+            setCache({
+                rawUnifiedSourceRows: window.rawUnifiedSourceRows,
+                unifiedEventRows: window.unifiedEventRows,
+                mergedAccounts: window.mergedAccounts
             });
-        });
-
-        events.sort((a, b) => {
-            const acctCompare = String(a.cr714_accountnum || '').localeCompare(String(b.cr714_accountnum || ''));
-            if (acctCompare !== 0) return acctCompare;
-            return new Date(b['Note Date'] || 0) - new Date(a['Note Date'] || 0);
-        });
-
-        return events;
-    }
-
-    function summariseAccounts(sourceRows, eventRows) {
-        const eventMap = new Map();
-        eventRows.forEach(ev => {
-            const key = ev.cr714_accountnum || '';
-            if (!eventMap.has(key)) eventMap.set(key, []);
-            eventMap.get(key).push(ev);
-        });
-
-        window._accountEventMap = eventMap;
-
-        const map = new Map();
-
-        sourceRows.forEach(row => {
-            if (!row.cr714_accountnum) return;
-
-            if (!map.has(row.cr714_accountnum)) {
-                map.set(row.cr714_accountnum, {
-                    cr714_id: row.cr714_accountnum,
-                    company: row.cr714_accountname,
-                    rep: row.cr714_rep || 'Unassigned',
-                    _latestRepDate: new Date(row.LastModified || 0),
-                    action: row.cr714_action || '',
-                    message: row.message || '',
-                    managerNotes: row.RawNotes || '',
-                    modifiedon: row.LastModified || null,
-                    emailDate: row.cr714_actionemailsent || null,
-                    contact: row.contact || '--',
-                    phone: window.formatPhone ? window.formatPhone(row.phone || '--') : (row.phone || '--'),
-                    email: row.email || '--',
-                    address: row.address || '--',
-                    sources: [],
-                    isHelp: false,
-                    isClose: false,
-                    intro: !!row.IsIntro,
-                    helpStatus: row.HelpStatus || '',
-                    statecode: 'Active',
-                    importantInfo: row.importantInfo || '',
-                    _historyLoaded: true,
-                    _d365Loaded: false,
-                    _introAcknowledged: false
-                });
+            setMeta({ lastFullSync: nowIso(), lastDeltaSync: nowIso() });
+            softStatus('Data synced');
+        }finally{
+            if(!silent){
+                document.getElementById('global-loader').style.display='none';
             }
-
-            const acct = map.get(row.cr714_accountnum);
-            const modifiedDate = new Date(row.LastModified || 0);
-
-            if (modifiedDate > acct._latestRepDate) {
-                acct._latestRepDate = modifiedDate;
-                acct.rep = row.cr714_rep || acct.rep;
-                acct.action = row.cr714_action || acct.action;
-                acct.company = row.cr714_accountname || acct.company;
-                acct.helpStatus = row.HelpStatus || acct.helpStatus;
-                acct.message = row.message || acct.message;
-                acct.modifiedon = row.LastModified || acct.modifiedon;
-            }
-
-            acct.sources.push({
-                type: (DATASET_SOURCE_META[row.SourceDataset] || {}).short || row.SourceDataset,
-                table: row.EntitySetName,
-                id: row.RecordId,
-                rawNotes: row.RawNotes || '',
-                message: row.message || '',
-                rep: row.cr714_rep || acct.rep,
-                sourceDataset: row.SourceDataset
-            });
-
-            if (row.contact && row.contact !== '--' && acct.contact === '--') acct.contact = row.contact;
-            if (row.phone && row.phone !== '--' && acct.phone === '--') acct.phone = row.phone;
-            if (row.email && row.email !== '--' && acct.email === '--') acct.email = row.email;
-            if (row.address && row.address !== '--' && acct.address === '--') acct.address = row.address;
-            if (row.importantInfo && !acct.importantInfo) acct.importantInfo = row.importantInfo;
-
-            acct.intro = acct.intro || !!row.IsIntro;
-
-            const hs = safeTrim(row.HelpStatus).toUpperCase();
-            const msg = safeTrim(row.message).toUpperCase();
-
-            if ((hs === 'HELP REQUESTED' || msg.includes('[HELP REQUEST]')) && hs !== 'RESOLVED' && hs !== 'CLEAR') {
-                acct.isHelp = true;
-            }
-            if ((hs === 'CLOSE REQUESTED' || msg.includes('[CLOSED]')) && hs !== 'RESOLVED' && hs !== 'CLEAR') {
-                acct.isClose = true;
-            }
-        });
-
-        for (const [acctId, acct] of map.entries()) {
-            const events = eventMap.get(acctId) || [];
-            let latestEmail = acct.emailDate ? new Date(acct.emailDate) : null;
-
-            events.forEach(ev => {
-                if ((ev.EmailSubject || ev.EmailSegment) && ev['Note Date']) {
-                    const d = new Date(ev['Note Date']);
-                    if (!latestEmail || d > latestEmail) latestEmail = d;
-                }
-            });
-
-            acct.emailDate = latestEmail && !isNaN(latestEmail.getTime()) ? latestEmail.toISOString() : acct.emailDate;
-        }
-
-        return Array.from(map.values());
-    }
-
-    async function fetchDataverseEntityWithFallback(token, config) {
-        let lastError = null;
-        const headers = {
-            'Authorization': `Bearer ${token}`,
-            'Prefer': 'odata.maxpagesize=5000, odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
-        };
-
-        for (const entitySet of config.entitySetCandidates) {
-            try {
-                let rows = [];
-                let url = `${window.DATAVERSE_URL}/${entitySet}?$select=${config.select}`;
-
-                while (url) {
-                    const res = await fetch(url, { headers });
-                    if (!res.ok) throw new Error(`${entitySet}: ${res.status}`);
-                    const data = await res.json();
-                    rows = rows.concat(data.value || []);
-                    window.totalLoadedRecords += (data.value || []).length;
-                    window.updateLoader(null, null, window.totalLoadedRecords);
-                    url = data['@odata.nextLink'] || null;
-                }
-
-                config.entitySetResolved = entitySet;
-                return rows;
-            } catch (err) {
-                lastError = err;
-            }
-        }
-
-        console.warn(`Unable to load ${config.sourceDataset}`, lastError);
-        return [];
-    }
-
-    window.parseNoteHistory = function(rawNotesStr, sourceLabel, modifiedOn) {
-        return parseRawNotesM(rawNotesStr || '').map(rec => ({
-            date: rec.eventDateText ? new Date(rec.eventDateText).toLocaleString() : (modifiedOn || 'Unknown Date'),
-            author: rec.eventRep || 'Unknown',
-            text: rec.noteSegment || '',
-            src: sourceLabel,
-            tags: [],
-            metaLoc: '',
-            metaDm: '',
-            metaComp: '',
-            metaOpp: '',
-            metaIntro: '',
-            historicalAction: rec.historicalAction || null,
-            emailSubject: rec.emailSubject || null,
-            touchType: rec.emailSubject || rec.emailSegment ? 'Email' : (rec.extractedLink ? 'Masonville' : 'Note'),
-            extractedLink: rec.extractedLink || null
-        }));
-    };
-
-    window.populateDynamicActionSet = function() {
-        const actions = new Set();
-
-        (window.mergedAccounts || []).forEach(a => {
-            if (a.action && String(a.action).trim() !== '') actions.add(String(a.action));
-        });
-
-        (window.unifiedEventRows || []).forEach(e => {
-            if (e['Action at time of Note'] && String(e['Action at time of Note']).trim() !== '') {
-                actions.add(String(e['Action at time of Note']));
-            }
-        });
-
-        window.dynamicActionSet = Array.from(actions).sort();
-    };
-
-    window.fetchAllData = async function() {
-        document.getElementById('global-loader').style.display = 'flex';
-        window.updateLoader(20, 'Establishing Unified Event Stream...', 0);
-
-        window.mergedAccounts = [];
-        window.unifiedEventRows = [];
-        window.rawUnifiedSourceRows = [];
-        window.totalLoadedRecords = 0;
-
-        try {
-            const token = await window.getToken();
-
-            const datasetConfigs = [
-                {
-                    sourceDataset: 'Account Management',
-                    entitySetCandidates: ['cr714_accountmanagementdatasets'],
-                    idField: 'cr714_accountmanagementdatasetid',
-                    select: 'cr714_accountmanagementdatasetid,cr714_accountnum,cr714_accountmanagementnotes,cr714_managernotes,cr714_accountname,cr714_rep,cr714_action,cr714_help,cr714_actionmessage,cr714_actionemailsent,modifiedon,createdon,cr714_address,cr714_namemost,cr714_phone,cr714_emailmost,cr714_importantaccountinformation',
-                    rawNotes: r => choose(r.cr714_accountmanagementnotes, r.cr714_managernotes, '')
-                },
-                {
-                    sourceDataset: 'Cadence',
-                    entitySetCandidates: ['cr714_cadencedatasets'],
-                    idField: 'cr714_cadencedatasetid',
-                    select: 'cr714_cadencedatasetid,cr714_accountnum,cr714_qbnotes,cr714_managernotes,cr714_company,cr714_retentionrep,cr714_action,cr714_recordstatus,cr714_recordstatusname,cr714_actionmessage,cr714_introname,cr714_intro,cr714_actionemailsent,modifiedon,createdon,cr714_billingaddress,cr714_namemost,cr714_primaryphone,cr714_emailmost',
-                    rawNotes: r => choose(r.cr714_qbnotes, r.cr714_managernotes, '')
-                },
-                {
-                    sourceDataset: 'Prospecting',
-                    entitySetCandidates: ['cr714_prospectingdatasets'],
-                    idField: 'cr714_prospectingdatasetid',
-                    select: 'cr714_prospectingdatasetid,cr714_accountnum,cr714_prospectingnotes,cr714_managernotes,cr714_acctname,cr714_repassigned,cr714_action,cr714_help,cr714_actionmessage,cr714_introname,cr714_intro,cr714_emailsenttimestamp,modifiedon,createdon,cr714_address,cr714_namelatest,cr714_phone,cr714_email_latest,cr714_importantaccountinfo',
-                    rawNotes: r => choose(r.cr714_prospectingnotes, r.cr714_managernotes, '')
-                },
-                {
-                    sourceDataset: 'Louise Brown',
-                    entitySetCandidates: ['cr714_louisebrowndatasets'],
-                    idField: 'cr714_louisebrowndatasetid',
-                    select: 'cr714_louisebrowndatasetid,cr714_accountnum,cr714_notesfr,cr714_managernotes,cr714_accountname,cr714_company,cr714_assignedrep,cr714_action,cr714_help,cr714_actionmessage,cr714_introname,cr714_intro,cr714_actionemailsent,modifiedon,createdon,cr714_address,cr714_namemost,cr714_phone,cr714_emaillatest',
-                    rawNotes: r => choose(r.cr714_notesfr, r.cr714_managernotes, '')
-                },
-                {
-                    sourceDataset: 'Logistics',
-                    entitySetCandidates: [ 'cr714_logisticslog_2'],
-                    idField: 'cr714_logisticslog_2id',
-                    select: 'cr714_logisticslog_2id,cr714_accountnumber,cr714_logisticsnotes,cr714_companyordeliveryname,cr714_rep,cr714_action,cr714_actionmessage,modifiedon,createdon',
-                    rawNotes: r => choose(r.cr714_logisticsnotes, '')
-                }
-            ];
-
-            let sourceRows = [];
-            for (const config of datasetConfigs) {
-                const rows = await fetchDataverseEntityWithFallback(token, config);
-                sourceRows = sourceRows.concat(normalizeDatasetRows(rows, config));
-            }
-
-            sourceRows = sourceRows.filter(r => safeTrim(r.cr714_accountnum) !== '');
-
-            window.rawUnifiedSourceRows = sourceRows;
-            window.unifiedEventRows = buildUnifiedEventsFromSourceRows(sourceRows);
-            window.mergedAccounts = summariseAccounts(sourceRows, window.unifiedEventRows);
-            window.populateDynamicActionSet();
-            window.initDateSlider();
-            window.reportsDirty = true;
-
-            window.updateLoader(
-                100,
-                `Unified Activity Synced (${window.unifiedEventRows.length.toLocaleString()} events).`,
-                window.totalLoadedRecords
-            );
-
-            setTimeout(() => {
-                document.getElementById('global-loader').style.display = 'none';
-            }, 450);
-        } catch (e) {
-            console.error('Unified fetch failure', e);
-            window.showToast('Sync Failure: ' + e.message, 'error');
-            document.getElementById('global-loader').style.display = 'none';
         }
     };
 
-    function getFilteredEventRows(reportingAccounts, dateFilter = true) {
-        const accountIds = new Set((reportingAccounts || []).map(a => a.cr714_id));
-        let events = (window.unifiedEventRows || []).filter(ev => accountIds.has(ev.cr714_accountnum));
+    // ---------------------------------------------------------
+    // DELTA REFRESH (MODIFIEDON WATERMARK)
+    // ---------------------------------------------------------
+    window.deltaRefresh = async function(){
+        const meta = getMeta();
+        if(!meta.lastDeltaSync) return;
 
-        if (dateFilter && (window.reportStartDate || window.reportEndDate)) {
-            events = events.filter(ev => {
-                const d = ev['Note Date'] ? new Date(ev['Note Date']) : null;
-                if (!d || isNaN(d.getTime())) return false;
-                if (window.reportStartDate && d < window.reportStartDate) return false;
-                if (window.reportEndDate && d > window.reportEndDate) return false;
-                return true;
-            });
-        }
-
-        const includeUnassigned = document.getElementById('rep-include-unassigned')
-            ? document.getElementById('rep-include-unassigned').checked
-            : false;
-
-        if (!includeUnassigned) {
-            events = events.filter(ev => (ev.cr714_rep || 'Unassigned') !== 'Unassigned');
-        }
-
-        return events;
-    }
-
-    function isOpenRequest(acct) {
-        const hs = String(acct.helpStatus || '').toUpperCase();
-        return (
-            (acct.isHelp || acct.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') &&
-            !String(acct.managerNotes || '').toUpperCase().includes('[RESOLVED]') &&
-            hs !== 'RESOLVED' &&
-            hs !== 'CLEAR'
-        );
-    }
-
-    window.renderReports = function() {
-        if (!document.getElementById('tab-reports').classList.contains('active')) return;
-
-        const reportingAccounts = [...(window.teamFilteredAccounts || [])].filter(a => {
-            const includeUnassigned = document.getElementById('rep-include-unassigned')
-                ? document.getElementById('rep-include-unassigned').checked
-                : false;
-            return includeUnassigned || (a.rep || 'Unassigned') !== 'Unassigned';
-        });
-
-        const reportingEvents = getFilteredEventRows(reportingAccounts, true);
-
-        const repMap = new Map();
-        const actionMap = new Map();
-        const monthlyData = {};
-
-        const ensureRep = (rep) => {
-            if (!repMap.has(rep)) {
-                repMap.set(rep, {
-                    totalRecords: 0,
-                    touches: 0,
-                    emails: 0,
-                    notes: 0,
-                    masonville: 0,
-                    requests: 0,
-                    intro: 0,
-                    stale: 0
-                });
-            }
-            if (!monthlyData[rep]) monthlyData[rep] = {};
-            return repMap.get(rep);
-        };
-
-        const ensureAction = (action) => {
-            if (!actionMap.has(action)) {
-                actionMap.set(action, {
-                    totalRecords: 0,
-                    touches: 0,
-                    emails: 0,
-                    notes: 0,
-                    masonville: 0,
-                    _accountIds: new Set()
-                });
-            }
-            return actionMap.get(action);
-        };
-
-        const now = new Date();
-
-        let tAccts = 0;
-        let tStale = 0;
-        let tEmails = 0;
-        let totalIntros = 0;
-        let tReq = 0;
-        let totalActionable = 0;
-
-        reportingAccounts.forEach(acct => {
-            const rep = acct.rep || 'Unassigned';
-            const action = acct.action || 'None';
-            const repStats = ensureRep(rep);
-            const actionStats = ensureAction(action);
-
-            repStats.totalRecords += 1;
-            actionStats._accountIds.add(acct.cr714_id);
-            tAccts += 1;
-
-            if (action && action !== 'None') totalActionable += 1;
-
-            if (acct.intro) {
-                repStats.intro += 1;
-                totalIntros += 1;
-            }
-
-            if (isOpenRequest(acct)) {
-                repStats.requests += 1;
-                tReq += 1;
-            }
-
-            const modDate = acct.modifiedon ? new Date(acct.modifiedon) : null;
-            if (!modDate || ((now - modDate) / (1000 * 60 * 60 * 24) > 30)) {
-                repStats.stale += 1;
-                tStale += 1;
-            }
-        });
-
-        reportingEvents.forEach(ev => {
-            const rep = ev.cr714_rep || 'Unassigned';
-            const action = ev['Action at time of Note'] || ev.cr714_action || 'None';
-
-            const repStats = ensureRep(rep);
-            const actionStats = ensureAction(action);
-
-            repStats.touches += 1;
-            actionStats.touches += 1;
-            actionStats._accountIds.add(ev.cr714_accountnum);
-
-            const noteDate = ev['Note Date'] ? new Date(ev['Note Date']) : null;
-            const monthKey = noteDate && !isNaN(noteDate.getTime())
-                ? `${noteDate.getFullYear()}-${String(noteDate.getMonth() + 1).padStart(2, '0')}`
-                : 'Unknown';
-
-            if (!monthlyData[rep][monthKey]) {
-                monthlyData[rep][monthKey] = {
-                    records: new Set(),
-                    touches: 0,
-                    emails: 0
-                };
-            }
-
-            monthlyData[rep][monthKey].records.add(ev.cr714_accountnum);
-            monthlyData[rep][monthKey].touches += 1;
-
-            if (ev.EmailSubject || ev.EmailSegment) {
-                repStats.emails += 1;
-                actionStats.emails += 1;
-                tEmails += 1;
-                monthlyData[rep][monthKey].emails += 1;
-            } else if (ev['Masonville Link']) {
-                repStats.masonville += 1;
-                actionStats.masonville += 1;
-            } else {
-                repStats.notes += 1;
-                actionStats.notes += 1;
-            }
-        });
-
-        for (const [, stats] of actionMap.entries()) {
-            stats.totalRecords = stats._accountIds.size;
-        }
-
-        const scorecardBody = document.getElementById('scorecard-body');
-        const actionsBody = document.getElementById('actions-body');
-        const engagementBody = document.getElementById('engagement-body');
-        const monthlyBody = document.getElementById('monthly-body');
-
-        scorecardBody.innerHTML = '';
-        actionsBody.innerHTML = '';
-        engagementBody.innerHTML = '';
-        monthlyBody.innerHTML = '';
-
-        const sortedReps = Array.from(repMap.entries()).sort(
-            (a, b) => b[1].totalRecords - a[1].totalRecords || a[0].localeCompare(b[0])
-        );
-
-        const sortedActions = Array.from(actionMap.entries()).sort(
-            (a, b) => b[1].totalRecords - a[1].totalRecords || a[0].localeCompare(b[0])
-        );
-
-        const allMonths = Array.from(
-            new Set(
-                reportingEvents
-                    .map(ev => {
-                        const d = ev['Note Date'] ? new Date(ev['Note Date']) : null;
-                        return d && !isNaN(d.getTime())
-                            ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-                            : null;
-                    })
-                    .filter(Boolean)
-            )
-        ).sort().reverse();
-
-        sortedReps.forEach(([rep, stats]) => {
-            const safeRep = window.escapeHTML(rep);
-            const jsRep = window.escapeJS(rep);
-
-            scorecardBody.innerHTML += `
-                <tr class="transition-colors">
-                    <td class="font-black drilldown-cell uppercase" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
-                    <td class="drilldown-cell font-bold" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
-                    <td class="font-black drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
-                    <td class="drilldown-cell font-black" style="color: var(--accent-danger);" onclick="window.openDrilldown('${jsRep}', 'stale')">${stats.stale}</td>
-                    <td class="drilldown-cell font-bold" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
-                    <td class="drilldown-cell font-black" style="color: var(--accent-warning);" onclick="window.openDrilldown('${jsRep}', 'requests')">${stats.requests}</td>
-                    <td class="drilldown-cell font-black" style="color: var(--primary);" onclick="window.openDrilldown('${jsRep}', 'intro')">${stats.intro}</td>
-                </tr>`;
-
-            const emailPer = stats.totalRecords > 0 ? (stats.emails / stats.totalRecords).toFixed(2) : '0.00';
-
-            engagementBody.innerHTML += `
-                <tr class="transition-colors">
-                    <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
-                    <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsRep}', 'notes')">${stats.notes}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsRep}', 'masonville')">${stats.masonville}</td>
-                    <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
-                </tr>`;
-        });
-
-        sortedActions.forEach(([act, stats]) => {
-            const safeAct = window.escapeHTML(act);
-            const jsAct = window.escapeJS(act);
-            const emailPer = stats.totalRecords > 0 ? (stats.emails / stats.totalRecords).toFixed(2) : '0.00';
-
-            actionsBody.innerHTML += `
-                <tr class="transition-colors">
-                    <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsAct}', 'total')">${safeAct}</td>
-                    <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsAct}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsAct}', 'touched')">${stats.touches}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsAct}', 'emails')">${stats.emails}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsAct}', 'notes')">${stats.notes}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsAct}', 'masonville')">${stats.masonville}</td>
-                    <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
-                </tr>`;
-        });
-
-        let monthlyHeaderHtml = `
-            <th>
-                <div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', 0)">
-                    <span>Rep Name</span>
-                    <i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i>
-                </div>
-            </th>`;
-
-        allMonths.forEach((m, idx) => {
-            monthlyHeaderHtml += `
-                <th class="text-center">
-                    <div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', ${idx + 1})">
-                        <span>${m}<br><span class="text-[9px] font-normal text-muted">Accounts Touched / Total Activities / Emails</span></span>
-                        <i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i>
-                    </div>
-                </th>`;
-        });
-
-        document.getElementById('monthly-table').querySelector('thead tr').innerHTML = monthlyHeaderHtml;
-
-        sortedReps.forEach(([rep]) => {
-            const safeRep = window.escapeHTML(rep);
-            const jsRep = window.escapeJS(rep);
-
-            let rowHtml = `<td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>`;
-
-            allMonths.forEach(m => {
-                const bucket = (monthlyData[rep] || {})[m] || { records: new Set(), touches: 0, emails: 0 };
-                rowHtml += `
-                    <td class="text-center">
-                        <span class="font-black text-[11px]" style="color: var(--primary);" title="Unique Accounts Touched">${bucket.records.size}</span>
-                        <span class="text-muted mx-1">\</span>
-                        <span class="font-bold" style="color: var(--accent-success);" title="Total Activities">${bucket.touches}</span>
-                        <span class="text-muted mx-1">/</span>
-                        <span class="font-bold" style="color: var(--chart-email);" title="Total Emails Sent">${bucket.emails}</span>
-                    </td>`;
-            });
-
-            monthlyBody.innerHTML += `<tr class="transition-colors">${rowHtml}</tr>`;
-        });
-
-        document.getElementById('rep-tot-accts').innerText = tAccts;
-        document.getElementById('rep-tot-req').innerText = tReq;
-        document.getElementById('rep-tot-stale').innerText = tStale;
-        document.getElementById('rep-tot-email').innerText = tEmails;
-        document.getElementById('rep-tot-intro').innerText = totalIntros;
-        document.getElementById('act-tot-actions').innerText = totalActionable;
-        document.getElementById('act-action-rate').innerText = tAccts > 0 ? Math.round((totalActionable / tAccts) * 100) + '%' : '0%';
-
-        window.renderCharts(sortedReps, sortedActions, monthlyData, allMonths);
-
-        ['scorecard-table', 'actions-table', 'engagement-table', 'monthly-table'].forEach(tableId => {
-            window.calculateTableTotals(tableId);
-        });
-
-        window.reportsDirty = false;
-    };
-
-    window.openDrilldown = function(contextKey, metric) {
-        const accounts = [...(window.teamFilteredAccounts || [])];
-        const repMatchExists = accounts.some(a => a.rep === contextKey);
-        const mode = repMatchExists ? 'rep' : 'action';
-        const accountIds = new Set();
-        const filteredEvents = getFilteredEventRows(accounts, true);
-
-        if (mode === 'rep') {
-            accounts
-                .filter(a => a.rep === contextKey)
-                .forEach(a => accountIds.add(a.cr714_id));
-        } else {
-            filteredEvents
-                .filter(ev => (ev['Action at time of Note'] || ev.cr714_action || 'None') === contextKey)
-                .forEach(ev => accountIds.add(ev.cr714_accountnum));
-
-            accounts
-                .filter(a => (a.action || 'None') === contextKey)
-                .forEach(a => accountIds.add(a.cr714_id));
-        }
-
-        let data = accounts.filter(a => accountIds.has(a.cr714_id));
-
-        const eventByAccount = new Map();
-        filteredEvents.forEach(ev => {
-            if (!eventByAccount.has(ev.cr714_accountnum)) eventByAccount.set(ev.cr714_accountnum, []);
-            eventByAccount.get(ev.cr714_accountnum).push(ev);
-        });
-
-        if (metric === 'touched') {
-            data = data.filter(a => (eventByAccount.get(a.cr714_id) || []).length > 0);
-        }
-        if (metric === 'emails') {
-            data = data.filter(a => (eventByAccount.get(a.cr714_id) || []).some(ev => ev.EmailSubject || ev.EmailSegment));
-        }
-        if (metric === 'notes') {
-            data = data.filter(a => (eventByAccount.get(a.cr714_id) || []).some(ev =>
-                ev.NoteSegment && !ev.EmailSubject && !ev.EmailSegment && !ev['Masonville Link']
-            ));
-        }
-        if (metric === 'masonville') {
-            data = data.filter(a => (eventByAccount.get(a.cr714_id) || []).some(ev => ev['Masonville Link']));
-        }
-        if (metric === 'stale') {
-            data = data.filter(a => !a.modifiedon || ((new Date() - new Date(a.modifiedon)) / (1000 * 60 * 60 * 24) > 30));
-        }
-        if (metric === 'requests') {
-            data = data.filter(a => isOpenRequest(a));
-        }
-        if (metric === 'intro') {
-            data = data.filter(a => a.intro);
-        }
-
-        window.currentDrilldownData = data;
-        window.drilldownRepContext = contextKey;
-        window._lastDrilldownMetric = metric;
-
-        document.getElementById('dd-title').innerText = `${contextKey.toUpperCase()} - ${metric.toUpperCase()} DATASET`;
-        document.getElementById('dd-count').innerText = data.length;
-        document.getElementById('dd-sync-btn').classList.remove('hidden-force');
-        document.getElementById('dd-sync-btn').style.display = '';
-
-        document.getElementById('dd-body').innerHTML = data.map(a => `
-            <tr class="hover:bg-gray-100 transition-colors">
-                <td class="font-black uppercase font-mono" style="color: var(--primary);">${a.cr714_id}</td>
-                <td class="font-bold">${window.escapeHTML(a.company)}</td>
-                <td class="text-muted uppercase text-[10px]">${window.escapeHTML(a.rep)}</td>
-                <td>
-                    <span class="px-2 py-0.5 rounded border border-gray-200 bg-white text-[9px] font-black uppercase" style="color: var(--text-main);">
-                        ${window.escapeHTML(a.action || 'Idle')}
-                    </span>
-                </td>
-                <td class="font-bold text-[10px]">${a.modifiedon ? new Date(a.modifiedon).toLocaleDateString() : '--'}</td>
-                <td class="text-center">
-                    <button onclick="window.jumpToAccount('${a.cr714_id}')" class="hover:scale-125 transition-transform bg-transparent border-none cursor-pointer" style="color: var(--primary);">
-                        <i class="fas fa-crosshairs"></i>
-                    </button>
-                </td>
-            </tr>`).join('');
-
-        document.getElementById('drilldown-modal').classList.remove('hidden-force');
-        document.getElementById('drilldown-modal').style.display = 'flex';
-    };
-
-    window.pollLiveUpdates = async function() {
-        try {
+        try{
             const token = await window.getToken();
             const headers = {
                 'Authorization': `Bearer ${token}`,
-                'Prefer': 'odata.maxpagesize=1'
+                'Prefer': 'odata.maxpagesize=5000, odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
             };
 
-            const candidates = [
-                ['cr714_accountmanagementdatasets', 'cr714_accountmanagementdataset'],
-                ['cr714_cadencedatasets', 'cr714_cadencedataset'],
-                ['cr714_prospectingdatasets', 'cr714_prospectingdataset'],
-                ['cr714_louisebrowndatasets', 'cr714_louisebrowndataset'],
-                ['cr714_logisticslog_2s', 'cr714_logisticslog_2', 'cr714_logisticslogs']
-            ];
+            const since = meta.lastDeltaSync;
+            let updatedRows = [];
 
-            let hasUpdates = false;
-
-            for (const setCandidates of candidates) {
-                for (const entitySet of setCandidates) {
-                    try {
-                        const filterStr = encodeURIComponent(`modifiedon gt ${window.lastPollTime}`);
-                        const url = `${window.DATAVERSE_URL}/${entitySet}?$select=modifiedon&$filter=${filterStr}`;
-                        const res = await fetch(url, { headers });
-                        if (!res.ok) continue;
-                        const data = await res.json();
-                        if ((data.value || []).length > 0) {
-                            hasUpdates = true;
-                            break;
-                        }
-                    } catch (e) {}
+            // Reuse same dataset list, but filtered by modifiedon
+            for(const cfg of window.__datasetConfigs || []){
+                let url = `${window.DATAVERSE_URL}/${cfg.entitySetResolved || cfg.entitySetCandidates[0]}?$select=${cfg.select}&$filter=modifiedon gt ${since}`;
+                while(url){
+                    const res = await fetch(url,{headers});
+                    if(!res.ok) break;
+                    const data = await res.json();
+                    const rows = (data.value||[]).map(r => window.__normalizeRow(r,cfg));
+                    updatedRows.push(...rows);
+                    url = data['@odata.nextLink'] || null;
                 }
-                if (hasUpdates) break;
             }
 
-            const nowIso = new Date().toISOString();
+            if(updatedRows.length){
+                // merge by accountnum + record id
+                const byKey = new Map();
+                window.rawUnifiedSourceRows.forEach(r=> byKey.set(r.RecordId, r));
+                updatedRows.forEach(r=> byKey.set(r.RecordId, r));
+                window.rawUnifiedSourceRows = Array.from(byKey.values());
 
-            if (hasUpdates) {
-                window.showToast('Live changes detected. Refreshing unified activity stream...', 'info');
-                await window.fetchAllData();
-                window.applyFilters(true);
+                // rebuild events + accounts incrementally (safe path = rebuild events)
+                window.unifiedEventRows = window.buildUnifiedEventsFromSourceRows(window.rawUnifiedSourceRows);
+                window.mergedAccounts   = window.summariseAccounts(window.rawUnifiedSourceRows, window.unifiedEventRows);
+
+                setCache({
+                    rawUnifiedSourceRows: window.rawUnifiedSourceRows,
+                    unifiedEventRows: window.unifiedEventRows,
+                    mergedAccounts: window.mergedAccounts
+                });
+                setMeta({ ...meta, lastDeltaSync: nowIso() });
+                window.applyFilters && window.applyFilters(true);
+                softStatus(`Updated ${updatedRows.length} records`);
             }
-
-            window.lastPollTime = nowIso;
-            const syncDisplay = document.getElementById('sync-time-display');
-            if (syncDisplay) {
-                syncDisplay.innerText = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
-            }
-        } catch (e) {
-            console.warn('Live sync skipped', e);
-        }
-    };
-})();
-</script>
-
-
-<script>
-(function () {
-    function _safe(val) {
-        return val === null || val === undefined ? '' : String(val);
-    }
-
-    function _nowStamp() {
-        return new Date().toLocaleString();
-    }
-
-    function _datasetKey(src) {
-        const t = _safe(src && src.table).toLowerCase();
-        const ds = _safe(src && src.sourceDataset).toLowerCase();
-
-        if (t.includes('accountmanagement') || ds.includes('account management')) return 'am';
-        if (t.includes('cadence') || ds.includes('cadence')) return 'cad';
-        if (t.includes('prospecting') || ds.includes('prospecting')) return 'pro';
-        if (t.includes('louisebrown') || t.includes('louise_brown') || ds.includes('louise brown')) return 'lb';
-        if (t.includes('logistics') || ds.includes('logistics')) return 'log';
-        return 'unknown';
-    }
-
-    function _getPatchConfig(src) {
-        const key = _datasetKey(src);
-
-        switch (key) {
-            case 'am':
-                return {
-                    noteField: 'cr714_managernotes',
-                    statusField: 'cr714_help',
-                    actionField: 'cr714_action',
-                    supportsStatus: true
-                };
-            case 'cad':
-                return {
-                    noteField: 'cr714_managernotes',
-                    statusField: 'cr714_recordstatus',
-                    actionField: 'cr714_action',
-                    supportsStatus: true
-                };
-            case 'pro':
-                return {
-                    noteField: 'cr714_managernotes',
-                    statusField: 'cr714_help',
-                    actionField: 'cr714_action',
-                    supportsStatus: true
-                };
-            case 'lb':
-                return {
-                    noteField: 'cr714_notesfr',
-                    statusField: 'cr714_help',
-                    actionField: 'cr714_action',
-                    supportsStatus: true
-                };
-            case 'log':
-                return {
-                    noteField: 'cr714_logisticsnotes',
-                    statusField: null,
-                    actionField: 'cr714_action',
-                    supportsStatus: false
-                };
-            default:
-                return {
-                    noteField: 'cr714_managernotes',
-                    statusField: null,
-                    actionField: 'cr714_action',
-                    supportsStatus: false
-                };
-        }
-    }
-
-    function _buildManagerNoteBlock(noteInput, markResolved, extraPrefix = '') {
-        let block = `Modified On: ${_nowStamp()}\nModified By: ${window.currentUserName}\n\n`;
-        if (extraPrefix) block += `${extraPrefix}\n`;
-        if (markResolved) block += `[RESOLVED] `;
-        block += `${_safe(noteInput).trim()}\n------------------------------\n`;
-        return block;
-    }
-
-    function _prependNote(existingRaw, newBlock) {
-        return `${newBlock}${_safe(existingRaw)}`;
-    }
-
-    async function _patchSourceRecord(src, payload, token) {
-        if (!src || !src.table || !src.id || !payload || Object.keys(payload).length === 0) return false;
-
-        const headers = {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=representation'
-        };
-
-        try {
-            const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, {
-                method: 'PATCH',
-                headers,
-                body: JSON.stringify(payload)
-            });
-
-            if (!res.ok) {
-                console.warn('PATCH failed', src.table, src.id, payload, res.status);
-                return false;
-            }
-
-            return true;
-        } catch (e) {
-            console.error('PATCH exception', src.table, src.id, e);
-            return false;
-        }
-    }
-
-    function _buildEmailBody(account, noteInput, statusLabel) {
-        return `
-            <h2 style="color:#0f766e;">A.C.T. Manager Update</h2>
-            <p><strong>Account:</strong> ${window.escapeHTML(account.company)} (${account.cr714_id})</p>
-            <p><strong>Manager:</strong> ${window.escapeHTML(window.currentUserName)}</p>
-            <p><strong>Status:</strong> ${window.escapeHTML(statusLabel || 'Updated')}</p>
-            <hr/>
-            <p><strong>Notes:</strong><br/>${window.escapeHTML(_safe(noteInput)).replace(/\n/g, '<br/>')}</p>
-        `;
-    }
-
-    function _getUnifiedEventsForAccount(accountId) {
-        return (window.unifiedEventRows || [])
-            .filter(ev => ev.cr714_accountnum === accountId)
-            .sort((a, b) => new Date(b['Note Date'] || 0) - new Date(a['Note Date'] || 0));
-    }
-
-    function _sourceBadgeHtml(sourceDataset) {
-        const ds = _safe(sourceDataset);
-        let cls = 'badge-pro';
-        if (ds === 'Account Management') cls = 'badge-am';
-        else if (ds === 'Cadence') cls = 'badge-cad';
-        else if (ds === 'Louise Brown') cls = 'badge-lb';
-
-        return `<span class="badge-ds ${cls}">${window.escapeHTML(ds || 'Unknown')}</span>`;
-    }
-
-    function _touchTypeHtml(ev) {
-        const touchType = ev._touchType || ((ev.EmailSubject || ev.EmailSegment) ? 'Email' : (ev['Masonville Link'] ? 'Masonville' : 'Note'));
-        const label = window.escapeHTML(touchType);
-        let color = 'var(--chart-note)';
-        let icon = 'fa-comment-alt';
-
-        if (touchType === 'Email') {
-            color = 'var(--chart-email)';
-            icon = 'fa-envelope';
-        } else if (touchType === 'Masonville') {
-            color = 'var(--chart-masonville)';
-            icon = 'fa-link';
-        }
-
-        return `<span class="text-[10px] font-black uppercase tracking-wider" style="color:${color};"><i class="fas ${icon} mr-1"></i>${label}</span>`;
-    }
-
-    function _renderUnifiedHistory(accountId) {
-        const container = document.getElementById('fv-history');
-        if (!container) return;
-
-        const events = _getUnifiedEventsForAccount(accountId);
-
-        if (!events.length) {
-            container.innerHTML = `
-                <div class="h-full flex flex-col items-center justify-center text-muted opacity-30">
-                    <i class="fas fa-clock-rotate-left text-5xl mb-4"></i>
-                    <p class="text-xs uppercase font-black tracking-widest">History Log Empty</p>
-                </div>`;
-            return;
-        }
-
-        container.innerHTML = events.map(ev => {
-            const noteDate = ev['Note Date'] ? new Date(ev['Note Date']) : null;
-            const headerDate = noteDate && !isNaN(noteDate.getTime())
-                ? noteDate.toLocaleString()
-                : 'Unknown Date';
-
-            const rep = ev.EventRep || 'Unknown';
-            const actionAtTime = ev['Action at time of Note'];
-            const actionHtml = actionAtTime
-                ? `<div class="text-[10px] font-bold mb-2" style="color: var(--primary);"><i class="fas fa-tasks mr-1"></i>Action: ${window.escapeHTML(actionAtTime)}</div>`
-                : '';
-
-            const subjectHtml = ev.EmailSubject
-                ? `<div class="text-[10px] font-bold mb-2" style="color: var(--accent-info);"><i class="fas fa-envelope-open-text mr-1"></i>Subject: ${window.escapeHTML(ev.EmailSubject)}</div>`
-                : '';
-
-            const sourceBadge = _sourceBadgeHtml(ev.SourceDataset);
-            const touchHtml = _touchTypeHtml(ev);
-
-            const cardHtml = ev['HTML Note Card']
-                ? ev['HTML Note Card']
-                : `
-                    <div style="font-family:'Segoe UI',sans-serif;font-size:14px;color:#333;padding:15px;border:1px solid #EAEAEA;border-radius:8px;background-color:#FAFAFA;box-shadow:0 2px 4px rgba(0,0,0,0.05);">
-                        ${actionHtml}
-                        ${subjectHtml}
-                        <div>${window.escapeHTML(ev.NoteSegment || '').replace(/\n/g, '<br>')}</div>
-                    </div>`;
-
-            return `
-                <div class="note-card border" style="border-color: var(--border-color);">
-                    <div class="p-2 flex justify-between items-center border-b" style="background-color: var(--bg-hover); border-color: var(--border-color);">
-                        <span class="flex items-center gap-2 font-bold text-[11px]" style="color: var(--text-muted);">
-                            ${sourceBadge}
-                            ${touchHtml}
-                            <span>${window.escapeHTML(headerDate)}</span>
-                        </span>
-                        <span class="font-black text-[11px] uppercase tracking-wider" style="color: var(--primary);">
-                            ${window.escapeHTML(rep)}
-                        </span>
-                    </div>
-                    <div class="p-3 text-sm" style="color: var(--text-main);">
-                        ${actionHtml}
-                        ${subjectHtml}
-                        ${cardHtml}
-                    </div>
-                </div>`;
-        }).join('');
-    }
-
-    function _buildExportRowsFromUnified(accountId) {
-        return _getUnifiedEventsForAccount(accountId).map(ev => ({
-            Source: ev.SourceDataset || '',
-            Date: ev['Note Date'] ? new Date(ev['Note Date']).toLocaleString() : '',
-            Author: ev.EventRep || '',
-            TouchType: ev._touchType || ((ev.EmailSubject || ev.EmailSegment) ? 'Email' : (ev['Masonville Link'] ? 'Masonville' : 'Note')),
-            Tags: '',
-            Text: ev.NoteSegment || '',
-            ExtractedLink: ev['Masonville Link'] || ''
-        }));
-    }
-
-    if (window.selectAccount) {
-        const _originalSelectAccount = window.selectAccount;
-        window.selectAccount = async function (id) {
-            await _originalSelectAccount(id);
-            try {
-                if (window.unifiedEventRows && window.unifiedEventRows.length) {
-                    _renderUnifiedHistory(id);
-                }
-            } catch (e) {
-                console.warn('Unified history render skipped', e);
-            }
-        };
-    }
-
-    window.copyHistory = function () {
-        if (!window.activeAccountId) return;
-
-        const rows = _buildExportRowsFromUnified(window.activeAccountId);
-        if (!rows.length) {
-            window.showToast('No unified history available to copy.', 'warning');
-            return;
-        }
-
-        const text = rows.map(r =>
-            `Source: ${r.Source}\nDate: ${r.Date}\nAuthor: ${r.Author}\nTouchType: ${r.TouchType}\nText: ${r.Text}\nLink: ${r.ExtractedLink}\n`
-        ).join('\n------------------------------\n');
-
-        navigator.clipboard.writeText(text)
-            .then(() => window.showToast('Unified history copied to clipboard.', 'success'))
-            .catch(() => window.showToast('Clipboard copy failed.', 'error'));
+        }catch(e){ console.warn('Delta refresh skipped', e); }
     };
 
-    window.exportHistory = function () {
-        if (!window.activeAccountId) return;
-
-        const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId);
-        const rows = _buildExportRowsFromUnified(window.activeAccountId);
-
-        if (!rows.length) {
-            window.showToast('No unified history available to export.', 'warning');
-            return;
+    // ---------------------------------------------------------
+    // INIT OVERRIDE: CACHE FIRST, LOAD SILENTLY
+    // ---------------------------------------------------------
+    const _origInit = window.initApp;
+    window.initApp = async function(){
+        const booted = window.bootstrapFromCache();
+        if(!booted){
+            await window.fetchAllData({silent:false});
         }
-
-        const csv = [
-            'Source,Date,Author,TouchType,Tags,Text,ExtractedLink',
-            ...rows.map(r =>
-                `"${window.escapeHTML(r.Source)}","${window.escapeHTML(r.Date)}","${window.escapeHTML(r.Author)}","${window.escapeHTML(r.TouchType)}","${window.escapeHTML(r.Tags)}","${window.escapeHTML(r.Text).replace(/"/g, '""')}","${window.escapeHTML(r.ExtractedLink)}"`
-            )
-        ];
-
-        const blob = new Blob([csv.join('\n')], { type: 'text/csv' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${(account ? account.cr714_id : 'Account')}_UnifiedHistory.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
-    };
-
-    window.saveManagerNote = async function () {
-        if (!window.activeAccountId) return;
-
-        const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId);
-        if (!account) return;
-
-        const noteInput = document.getElementById('fv-manager-note').value.trim();
-        const markResolved = document.getElementById('fv-mark-resolved').checked;
-        const doEmail = document.getElementById('fv-notify-email').checked;
-        const statusVal = document.getElementById('fv-help-select').value;
-        const actionVal = document.getElementById('fv-action-select').value;
-
-        if (!noteInput && !markResolved && !statusVal && actionVal === account.action) {
-            window.showToast('No changes detected to push.', 'warning');
-            return;
-        }
-
-        const btn = document.getElementById('btn-push-note');
-        const originalText = btn.innerHTML;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-        btn.disabled = true;
-
-        try {
-            const token = await window.getToken();
-            let patchSuccess = false;
-
-            for (const src of (account.sources || [])) {
-                const cfg = _getPatchConfig(src);
-                const payload = {};
-                const currentRaw = src.rawNotes || '';
-
-                let finalStatus = statusVal;
-                if (markResolved) finalStatus = 'Resolved';
-
-                if (noteInput || markResolved) {
-                    const block = _buildManagerNoteBlock(noteInput, markResolved);
-                    payload[cfg.noteField] = _prependNote(currentRaw, block);
-                }
-
-                if (cfg.supportsStatus && finalStatus !== '') {
-                    payload[cfg.statusField] = finalStatus === 'Clear' ? null : finalStatus;
-                }
-
-                if (actionVal !== '' && actionVal !== account.action) {
-                    payload[cfg.actionField] = actionVal === 'Clear' ? null : actionVal;
-                }
-
-                if (Object.keys(payload).length > 0) {
-                    const ok = await _patchSourceRecord(src, payload, token);
-                    if (ok) patchSuccess = true;
-                }
-            }
-
-            if (!patchSuccess) {
-                window.showToast('No records were updated.', 'warning');
-                return;
-            }
-
-            window.showToast('Updates pushed successfully.', 'success');
-
-            if (doEmail) {
-                const statusLabel = markResolved ? 'Resolved' : (statusVal || 'Updated');
-                await window.sendSilentEmail(
-                    account.rep,
-                    `A.C.T. Manager Update - ${account.company} (${account.cr714_id})`,
-                    _buildEmailBody(account, noteInput, statusLabel)
-                );
-            }
-
-            await window.fetchAllData();
-            window.applyFilters(true);
-            if (window.activeAccountId) await window.selectAccount(window.activeAccountId);
-        } catch (e) {
-            console.error('saveManagerNote failed', e);
-            window.showToast('Failed to push manager note.', 'error');
-        } finally {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-        }
-    };
-
-    window.quickResolve = async function () {
-        if (!window.activeAccountId) return;
-
-        const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId);
-        if (!account) return;
-
-        try {
-            const token = await window.getToken();
-            let success = false;
-
-            for (const src of (account.sources || [])) {
-                const cfg = _getPatchConfig(src);
-                const payload = {};
-
-                if (cfg.supportsStatus) {
-                    payload[cfg.statusField] = 'Resolved';
-                }
-
-                const currentRaw = src.rawNotes || '';
-                const block = _buildManagerNoteBlock('Resolved by manager quick action.', true);
-                payload[cfg.noteField] = _prependNote(currentRaw, block);
-
-                const ok = await _patchSourceRecord(src, payload, token);
-                if (ok) success = true;
-            }
-
-            if (success) {
-                window.showToast('Help resolved.', 'success');
-                await window.fetchAllData();
-                window.applyFilters(true);
-                if (window.activeAccountId) await window.selectAccount(window.activeAccountId);
-            } else {
-                window.showToast('Unable to resolve this account.', 'error');
-            }
-        } catch (e) {
-            console.error('quickResolve failed', e);
-            window.showToast('Quick resolve failed.', 'error');
-        }
-    };
-
-    window.executeBulkNote = async function () {
-        if (!window.bulkSelectedIds || window.bulkSelectedIds.size === 0) {
-            window.showToast('No accounts selected.', 'warning');
-            return;
-        }
-
-        const noteInput = document.getElementById('bulk-manager-note').value.trim();
-        const markResolved = document.getElementById('bulk-mark-resolved').checked;
-        const doEmail = document.getElementById('bulk-notify-email').checked;
-
-        if (!noteInput && !markResolved) {
-            window.showToast('Enter a note or mark resolved.', 'warning');
-            return;
-        }
-
-        const btn = document.getElementById('btn-execute-bulk');
-        const originalText = btn.innerHTML;
-        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-        btn.disabled = true;
-
-        try {
-            const token = await window.getToken();
-            let updatedCount = 0;
-
-            const targets = (window.teamFilteredAccounts || []).filter(a => window.bulkSelectedIds.has(a.cr714_id));
-
-            for (const account of targets) {
-                let accountUpdated = false;
-
-                for (const src of (account.sources || [])) {
-                    const cfg = _getPatchConfig(src);
-                    const payload = {};
-                    const currentRaw = src.rawNotes || '';
-
-                    const block = _buildManagerNoteBlock(noteInput, markResolved);
-                    payload[cfg.noteField] = _prependNote(currentRaw, block);
-
-                    if (markResolved && cfg.supportsStatus) {
-                        payload[cfg.statusField] = 'Resolved';
-                    }
-
-                    const ok = await _patchSourceRecord(src, payload, token);
-                    if (ok) accountUpdated = true;
-                }
-
-                if (accountUpdated) {
-                    updatedCount += 1;
-
-                    if (doEmail) {
-                        const statusLabel = markResolved ? 'Resolved' : 'Updated';
-                        await window.sendSilentEmail(
-                            account.rep,
-                            `A.C.T. Manager Batch Update - ${account.company} (${account.cr714_id})`,
-                            _buildEmailBody(account, noteInput, statusLabel)
-                        );
-                    }
-                }
-            }
-
-            if (updatedCount > 0) {
-                window.showToast(`Batch patch complete. ${updatedCount} accounts updated.`, 'success');
-                document.getElementById('bulk-modal').classList.add('hidden-force');
-                document.getElementById('bulk-modal').style.display = 'none';
-                window.clearBulkSelection();
-                await window.fetchAllData();
-                window.applyFilters(true);
-            } else {
-                window.showToast('Batch patch made no changes.', 'warning');
-            }
-        } catch (e) {
-            console.error('executeBulkNote failed', e);
-            window.showToast('Batch patch failed.', 'error');
-        } finally {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-        }
-    };
-
-    window.executeBulkResolve = async function () {
-        document.getElementById('bulk-manager-note').value = 'Resolved by manager bulk action.';
-        document.getElementById('bulk-mark-resolved').checked = true;
-        const bulkModal = document.getElementById('bulk-modal');
-        if (bulkModal) {
-            bulkModal.classList.add('hidden-force');
-            bulkModal.style.display = 'none';
-        }
-        await window.executeBulkNote();
-    };
-
-    window.pushIntroEmail = async function () {
-        if (!window.activeAccountId) return;
-
-        const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId);
-        if (!account) return;
-
-        try {
-            const subject = `Intro Follow-Up Required - ${account.company} (${account.cr714_id})`;
-            const body = `
-                <h2 style="color:#0f766e;">New Intro Detected</h2>
-                <p><strong>Account:</strong> ${window.escapeHTML(account.company)} (${account.cr714_id})</p>
-                <p><strong>Rep:</strong> ${window.escapeHTML(account.rep)}</p>
-                <p>Please review and follow up on this intro.</p>`;
-
-            const emailOk = await window.sendSilentEmail(account.rep, subject, body);
-            if (!emailOk) return;
-
-            const token = await window.getToken();
-            let logSuccess = false;
-
-            for (const src of (account.sources || [])) {
-                const cfg = _getPatchConfig(src);
-                const currentRaw = src.rawNotes || '';
-                const block = _buildManagerNoteBlock(
-                    'Push Intro Email to Rep',
-                    false,
-                    '[Intro Email Dispatched to Rep]'
-                );
-
-                const payload = {};
-                payload[cfg.noteField] = _prependNote(currentRaw, block);
-
-                const ok = await _patchSourceRecord(src, payload, token);
-                if (ok) logSuccess = true;
-            }
-
-            if (logSuccess) {
-                window.showToast('Intro email pushed and logged.', 'success');
-                await window.fetchAllData();
-                window.applyFilters(true);
-                if (window.activeAccountId) await window.selectAccount(window.activeAccountId);
-            } else {
-                window.showToast('Email sent, but intro log note failed.', 'warning');
-            }
-        } catch (e) {
-            console.error('pushIntroEmail failed', e);
-            window.showToast('Failed to push intro email.', 'error');
-        }
+        // background delta polling, no loader, no toast
+        setInterval(window.deltaRefresh, 60000);
+        softStatus('Live sync active');
     };
 })();
 </script>
