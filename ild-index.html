@@ -1069,36 +1069,44 @@ window.chartDist = null; window.chartAct = null; window.chartActionsPie = null; 
 window.applyDateChange = function() {
     if (window.markReportInteraction) window.markReportInteraction();
     window.reportsDirty = true;
-    if (window.markReportInteraction) window.markReportInteraction();
     if(document.getElementById('tab-reports').classList.contains('active')) {
         window.renderReports();
     }
 };
 
-    window.applyDateBoxChange = function() {
-        let boxMin = document.getElementById('date-box-min');
-        let boxMax = document.getElementById('date-box-max');
-        
-        let minD = new Date(boxMin.value + 'T00:00:00');
-        let maxD = new Date(boxMax.value + 'T00:00:00');
-        
-        if(isNaN(minD.getTime())) minD = window.globalMinDate;
-        if(isNaN(maxD.getTime())) maxD = window.globalMaxDate;
-        if (window.markReportInteraction) window.markReportInteraction();
-        if (minD > maxD) { let temp = minD; minD = maxD; maxD = temp; }
-        if (minD < window.globalMinDate) minD = window.globalMinDate;
-        if (maxD > window.globalMaxDate) maxD = window.globalMaxDate;
+window.applyDateBoxChange = function() {
+    let boxMin = document.getElementById('date-box-min');
+    let boxMax = document.getElementById('date-box-max');
 
-        let diffMin = Math.max(0, Math.floor((minD - window.globalMinDate) / (1000*60*60*24)));
-        let diffMax = Math.min(parseInt(document.getElementById('date-slider-max').max), Math.ceil((maxD - window.globalMinDate) / (1000*60*60*24)));
+    let minD = new Date(boxMin.value + 'T00:00:00');
+    let maxD = new Date(boxMax.value + 'T00:00:00');
 
-        document.getElementById('date-slider-min').value = diffMin;
-        document.getElementById('date-slider-max').value = diffMax;
-        
-        window.updateDateSliderUI(false);
-        if (window.markReportInteraction) window.markReportInteraction();
-        window.applyDateChange();
-    };
+    if (isNaN(minD.getTime())) minD = window.globalMinDate;
+    if (isNaN(maxD.getTime())) maxD = window.globalMaxDate;
+
+    if (window.markReportInteraction) window.markReportInteraction();
+
+    if (minD > maxD) {
+        let temp = minD;
+        minD = maxD;
+        maxD = temp;
+    }
+
+    if (minD < window.globalMinDate) minD = window.globalMinDate;
+    if (maxD > window.globalMaxDate) maxD = window.globalMaxDate;
+
+    let diffMin = Math.max(0, Math.floor((minD - window.globalMinDate) / (1000 * 60 * 60 * 24)));
+    let diffMax = Math.min(
+        parseInt(document.getElementById('date-slider-max').max),
+        Math.ceil((maxD - window.globalMinDate) / (1000 * 60 * 60 * 24))
+    );
+
+    document.getElementById('date-slider-min').value = diffMin;
+    document.getElementById('date-slider-max').value = diffMax;
+
+    window.updateDateSliderUI(false);
+    window.applyDateChange();
+};
 
 window.resetDateSlider = function() {
     if (window.markReportInteraction) window.markReportInteraction();
@@ -3220,267 +3228,477 @@ let fvOpts = '<option value="">-- Leave Action Unchanged --</option>' + window.d
     };
 };
 
-    window.renderReports = function() {
-        if(!document.getElementById('tab-reports').classList.contains('active')) return;
-        
-        let actMenu = document.getElementById('menu-actions-table'); if(actMenu) actMenu.innerHTML = '';
-        let scoreMenu = document.getElementById('menu-scorecard-table'); if(scoreMenu) scoreMenu.innerHTML = '';
-        let engMenu = document.getElementById('menu-engagement-table'); if(engMenu) engMenu.innerHTML = '';
-        let momMenu = document.getElementById('menu-monthly-table'); if(momMenu) momMenu.innerHTML = '';
+    window.buildReportingFacts = function() {
+    const facts = [];
+    const now = new Date();
 
-        let sDate = window.reportStartDate;
-        let eDate = window.reportEndDate;
+    const accountMap = new Map((window.mergedAccounts || []).map(a => [a.cr714_id, a]));
 
-        let reportingSet = window.teamFilteredAccounts;
+    (window.mergedAccounts || []).forEach(a => {
+        const modDate = a.modifiedon ? new Date(a.modifiedon) : null;
+        const hs = String(a.helpStatus || '').toUpperCase();
+        const isRequest =
+            (a.isHelp || a.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') &&
+            !String(a.managerNotes || '').toUpperCase().includes('[RESOLVED]') &&
+            hs !== 'RESOLVED' &&
+            hs !== 'CLEAR';
 
-        let repMap = new Map();
-        let actionMap = new Map();
-        const now = new Date();
+        const isStale = !modDate || ((now - modDate) / (1000 * 60 * 60 * 24) > 30);
 
-        let tAccts=0, tStale=0, tEmails=0, totalIntros=0, tReq=0, totalActionable=0;
-let monthlyData = {};
-        
-        let isActionFilterActive = window.activeFilters && window.activeFilters['action'] && window.activeFilters['action'].size > 0;
-        
-        const includeUnassigned = document.getElementById('rep-include-unassigned') ? document.getElementById('rep-include-unassigned').checked : false;
+        const lastEmailDate = a.emailDate || null;
+        const daysSinceLastTouch = modDate && !isNaN(modDate.getTime())
+            ? Math.floor((now - modDate) / (1000 * 60 * 60 * 24))
+            : null;
+        const daysSinceLastEmail = lastEmailDate
+            ? Math.floor((now - new Date(lastEmailDate)) / (1000 * 60 * 60 * 24))
+            : null;
 
-        reportingSet.forEach(a => {
-            let rep = a.rep || 'Unassigned';
-            let act = a.action || 'None';
-
-            if (rep === 'Unassigned' && !includeUnassigned) return;
-
-            if(!repMap.has(rep)) {
-                repMap.set(rep, { totalRecords: 0, touches: 0, emails: 0, notes: 0, masonville: 0, requests: 0, intro: 0, stale: 0 });
-            }
-            if(!actionMap.has(act)) {
-                actionMap.set(act, { totalRecords: 0, touches: 0, emails: 0, notes: 0, masonville: 0 });
-            }
-
-            let rStats = repMap.get(rep);
-            let aStats = actionMap.get(act);
-
-            let fallsInDateRange = true;
-            if(sDate || eDate) {
-                let modDate = a.modifiedon ? new Date(a.modifiedon) : null;
-                if(sDate && (!modDate || modDate < sDate)) fallsInDateRange = false;
-                if(eDate && (!modDate || modDate > eDate)) fallsInDateRange = false;
-            }
-
-            if(fallsInDateRange) {
-                rStats.totalRecords++;
-                aStats.totalRecords++;
-                tAccts++;
-
-                const diffDays = a.modifiedon ? (now - new Date(a.modifiedon)) / (1000*60*60*24) : 999;
-                if(diffDays > 30) { rStats.stale++; tStale++; }
-
-                const hs = String(a.helpStatus || '').toUpperCase();
-                if((a.isHelp || a.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') && !String(a.managerNotes||'').toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR') {
-                    rStats.requests++;
-                    tReq++;
-                }
-
-                if(a.intro) { rStats.intro++; totalIntros++; }
-                if(act && act !== 'None') { totalActionable++; }
-            }
-
-            if (!monthlyData[rep]) monthlyData[rep] = {};
-
-            let accountHistory = [];
-            a.sources.forEach(src => {
-                let combinedNotes = src.rawNotes || '';
-                if (src.message && String(src.message).trim() !== '') {
-                    combinedNotes += "\n------------------------------\n" + src.message;
-                }
-                accountHistory = accountHistory.concat(window.parseNoteHistory(combinedNotes, src.type, a.modifiedon));
-            });
-
-            let emailDatesSet = new Set();
-
-            accountHistory.forEach(h => {
-                if (h.date === 'Permanent' || h.date === 'Unknown Date') return;
-                const d = new Date(h.date);
-                if (isNaN(d.getTime())) return;
-
-                if(sDate && d < sDate) return;
-                if(eDate && d > eDate) return;
-
-                // Tie touch to its actual historical action, fallback to current account action
-                let touchAction = h.historicalAction || act;
-                
-                // If filtering by Action, ONLY count history events that belong to the filtered action(s)
-                if (isActionFilterActive && !window.activeFilters['action'].has(touchAction)) return;
-
-                if (!actionMap.has(touchAction)) {
-                    actionMap.set(touchAction, { totalRecords: 0, touches: 0, emails: 0, notes: 0, masonville: 0 });
-                }
-                let touchAStats = actionMap.get(touchAction);
-
-                const mKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-                if(!monthlyData[rep][mKey]) monthlyData[rep][mKey] = { records: new Set(), touches: 0, emails: 0 };
-                
-                let isSubstantive = false;
-
-                if (h.touchType === 'Email') {
-                    rStats.emails++;
-                    touchAStats.emails++;
-                    tEmails++; 
-                    monthlyData[rep][mKey].emails++;
-                    emailDatesSet.add(d.toDateString());
-                    isSubstantive = true;
-                } else if (h.touchType === 'Masonville') {
-                    rStats.masonville++;
-                    touchAStats.masonville++;
-                    isSubstantive = true;
-                } else if (h.text && h.text.trim() !== '') {
-                    rStats.notes++;
-                    touchAStats.notes++;
-                    isSubstantive = true;
-                }
-
-                // Only increment total touches if it was a substantive action, not just a system log
-                if (isSubstantive) {
-                    monthlyData[rep][mKey].records.add(a.cr714_id);
-                    monthlyData[rep][mKey].touches++;
-                    rStats.touches++;
-                    touchAStats.touches++;
-                }
-            });
-
-            if (a.emailDate) {
-                let ed = new Date(a.emailDate);
-                if (!isNaN(ed.getTime())) {
-                    let inRange = true;
-                    if(sDate && ed < sDate) inRange = false;
-                    if(eDate && ed > eDate) inRange = false;
-                    
-                    let dateStr = ed.toDateString();
-                    if (inRange && !emailDatesSet.has(dateStr)) {
-                        rStats.emails++;
-                        aStats.emails++;
-                        tEmails++;
-                        
-                        let mKey = `${ed.getFullYear()}-${String(ed.getMonth() + 1).padStart(2, '0')}`;
-                        if(!monthlyData[rep][mKey]) monthlyData[rep][mKey] = { records: new Set(), touches: 0, emails: 0 };
-                        monthlyData[rep][mKey].emails++;
-                        
-                        monthlyData[rep][mKey].records.add(a.cr714_id);
-                        monthlyData[rep][mKey].touches++;
-                        rStats.touches++;
-                        aStats.touches++;
-                        emailDatesSet.add(dateStr);
-                    }
-                }
-            }
+        facts.push({
+            factType: 'account',
+            accountId: a.cr714_id,
+            rep: a.rep || 'Unassigned',
+            action: a.action || 'None',
+            sourceDataset: null,
+            noteDate: a.modifiedon || null,
+            monthKey: modDate && !isNaN(modDate.getTime())
+                ? `${modDate.getFullYear()}-${String(modDate.getMonth() + 1).padStart(2, '0')}`
+                : null,
+            touchType: null,
+            isIntro: !!a.intro,
+            isRequest: !!isRequest,
+            isStale: !!isStale,
+            helpStatus: a.helpStatus || '',
+            lastEmailDate,
+            emailedToday: !!(lastEmailDate && new Date(lastEmailDate).toDateString() === now.toDateString()),
+            emailedLast7Days: !!(lastEmailDate && ((now - new Date(lastEmailDate)) / (1000 * 60 * 60 * 24) <= 7)),
+            daysSinceLastTouch,
+            daysSinceLastEmail,
+            count: 1
         });
+    });
 
-        const scorecardBody = document.getElementById('scorecard-body'); scorecardBody.innerHTML = '';
-        const actionsBody = document.getElementById('actions-body'); actionsBody.innerHTML = '';
-        const engagementBody = document.getElementById('engagement-body'); engagementBody.innerHTML = '';
-        const monthlyBody = document.getElementById('monthly-body'); monthlyBody.innerHTML = '';
+    (window.unifiedEventRows || []).forEach(ev => {
+        const d = ev['Note Date'] ? new Date(ev['Note Date']) : null;
+        const monthKey = d && !isNaN(d.getTime())
+            ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+            : null;
 
-        let sortedReps = Array.from(repMap.entries()).sort((a,b) => b[1].totalRecords - a[1].totalRecords);
-        let sortedActions = Array.from(actionMap.entries()).sort((a,b) => b[1].totalRecords - a[1].totalRecords);
-        let allMonthsSet = new Set();
+        const touchType =
+            ev._touchType ||
+            (ev.EmailSubject || ev.EmailSegment
+                ? 'Email'
+                : (ev['Masonville Link'] ? 'Masonville' : 'Note'));
 
-        sortedReps.forEach(([rep, stats]) => {
-            let safeRep = window.escapeHTML(rep);
-            let jsRep = window.escapeJS(rep);
+        const acct = accountMap.get(ev.cr714_accountnum);
+        const lastEmailDate = acct ? acct.emailDate || null : null;
+        const daysSinceLastEmail = lastEmailDate
+            ? Math.floor((now - new Date(lastEmailDate)) / (1000 * 60 * 60 * 24))
+            : null;
 
-            scorecardBody.innerHTML += `
-                <tr class="transition-colors">
-                    <td class="font-black drilldown-cell uppercase" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
-                    <td class="drilldown-cell font-bold" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
-                    <td class="font-black drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
-                    <td class="drilldown-cell font-black" style="color: var(--accent-danger);" onclick="window.openDrilldown('${jsRep}', 'stale')">${stats.stale}</td>
-                    <td class="drilldown-cell font-bold" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
-                    <td class="drilldown-cell font-black" style="color: var(--accent-warning);" onclick="window.openDrilldown('${jsRep}', 'requests')">${stats.requests}</td>
-                    <td class="drilldown-cell font-black" style="color: var(--primary);" onclick="window.openDrilldown('${jsRep}', 'intro')">${stats.intro}</td>
-                </tr>`;
-
-            if (monthlyData[rep]) {
-                Object.keys(monthlyData[rep]).forEach(m => allMonthsSet.add(m));
-            }
+        facts.push({
+            factType: 'event',
+            accountId: ev.cr714_accountnum,
+            rep: ev.cr714_rep || (acct ? acct.rep : 'Unassigned'),
+            action: ev['Action at time of Note'] || ev.cr714_action || (acct ? acct.action : 'None') || 'None',
+            sourceDataset: ev.SourceDataset || null,
+            noteDate: ev['Note Date'] || null,
+            monthKey,
+            touchType,
+            isIntro: acct ? !!acct.intro : !!ev.IsIntro,
+            isRequest: acct ? (
+                (acct.isHelp || acct.isClose || ['HELP REQUESTED', 'CLOSE REQUESTED'].includes(String(acct.helpStatus || '').toUpperCase())) &&
+                !String(acct.managerNotes || '').toUpperCase().includes('[RESOLVED]') &&
+                !['RESOLVED', 'CLEAR'].includes(String(acct.helpStatus || '').toUpperCase())
+            ) : false,
+            isStale: acct ? (!acct.modifiedon || ((now - new Date(acct.modifiedon)) / (1000 * 60 * 60 * 24) > 30)) : false,
+            helpStatus: acct ? (acct.helpStatus || '') : (ev.HelpStatus || ''),
+            lastEmailDate,
+            emailedToday: !!(lastEmailDate && new Date(lastEmailDate).toDateString() === now.toDateString()),
+            emailedLast7Days: !!(lastEmailDate && ((now - new Date(lastEmailDate)) / (1000 * 60 * 60 * 24) <= 7)),
+            daysSinceLastTouch: acct && acct.modifiedon ? Math.floor((now - new Date(acct.modifiedon)) / (1000 * 60 * 60 * 24)) : null,
+            daysSinceLastEmail,
+            count: 1
         });
+    });
 
-        sortedActions.forEach(([act, stats]) => {
-            let safeAct = window.escapeHTML(act);
-            let jsAct = window.escapeJS(act);
-            let emailPer = stats.totalRecords > 0 ? (stats.emails / stats.totalRecords).toFixed(2) : '0.00';
-
-            actionsBody.innerHTML += `
-                <tr class="transition-colors">
-                    <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsAct}', 'total')">${safeAct}</td>
-                    <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsAct}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsAct}', 'touched')">${stats.touches}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsAct}', 'emails')">${stats.emails}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsAct}', 'notes')">${stats.notes}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsAct}', 'masonville')">${stats.masonville}</td>
-                    <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
-                </tr>`;
-        });
-
-        sortedReps.forEach(([rep, stats]) => {
-            let safeRep = window.escapeHTML(rep);
-            let jsRep = window.escapeJS(rep);
-            let emailPer = stats.totalRecords > 0 ? (stats.emails / stats.totalRecords).toFixed(2) : '0.00';
-
-            engagementBody.innerHTML += `
-                <tr class="transition-colors">
-                    <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
-                    <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsRep}', 'notes')">${stats.notes}</td>
-                    <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsRep}', 'masonville')">${stats.masonville}</td>
-                    <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
-                </tr>`;
-        });
-
-        let allMonths = Array.from(allMonthsSet).sort().reverse();
-        let monthlyHeaderHtml = `<th><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', 0)"><span>Rep Name</span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`;
-        allMonths.forEach((m, idx) => {
-            monthlyHeaderHtml += `<th class="text-center"><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', ${idx+1})"><span>${m}<br/><span class="text-[9px] font-normal text-muted">Accounts Touched / Total Activities / Emails</span></span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`;
-        });
-        document.getElementById('monthly-table').querySelector('thead tr').innerHTML = monthlyHeaderHtml;
-
-        sortedReps.forEach(([rep, stats]) => {
-            let safeRep = window.escapeHTML(rep);
-            let jsRep = window.escapeJS(rep);
-            let rowHtml = `<td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>`;
-            allMonths.forEach(m => {
-                let recordsTouched = monthlyData[rep] && monthlyData[rep][m] && monthlyData[rep][m].records ? monthlyData[rep][m].records.size : 0;
-                let touched = monthlyData[rep] && monthlyData[rep][m] ? monthlyData[rep][m].touches : 0;
-                let emails = monthlyData[rep] && monthlyData[rep][m] ? monthlyData[rep][m].emails : 0;
-                rowHtml += `<td class="text-center">
-                    <span class="font-black text-[11px]" style="color: var(--primary);" title="Unique Accounts Touched">${recordsTouched}</span> 
-                    <span class="text-muted mx-1">|</span> 
-                    <span class="font-bold" style="color: var(--accent-success);" title="Total Activities">${touched}</span> 
-                    <span class="text-muted mx-1">/</span> 
-                    <span class="font-bold" style="color: var(--chart-email);" title="Total Emails Sent">${emails}</span>
-                </td>`;
-            });
-            monthlyBody.innerHTML += `<tr class="transition-colors">${rowHtml}</tr>`;
-        });
-
-        document.getElementById('rep-tot-accts').innerText = tAccts;
-        document.getElementById('rep-tot-req').innerText = tReq;
-        document.getElementById('rep-tot-stale').innerText = tStale;
-        document.getElementById('rep-tot-email').innerText = tEmails;
-        document.getElementById('rep-tot-intro').innerText = totalIntros;
-        document.getElementById('act-tot-actions').innerText = totalActionable;
-        document.getElementById('act-action-rate').innerText = tAccts > 0 ? Math.round((totalActionable / tAccts) * 100) + '%' : '0%';
-
-        window.renderCharts(sortedReps, sortedActions, monthlyData, allMonths);
-
-        const reportingTables = ['scorecard-table', 'actions-table', 'engagement-table', 'monthly-table'];
-        reportingTables.forEach(tableId => {
-            window.calculateTableTotals(tableId);
-        });
-
-        window.reportsDirty = false; 
+    window.reportingFacts = facts;
+    window.reportingDims = {
+        reps: Array.from(new Set(facts.map(f => f.rep).filter(Boolean))).sort(),
+        actions: Array.from(new Set(facts.map(f => f.action).filter(Boolean))).sort(),
+        months: Array.from(new Set(facts.map(f => f.monthKey).filter(Boolean))).sort().reverse()
     };
+};
+
+window.buildReportingFactsAsync = async function() {
+    const facts = [];
+    const now = new Date();
+
+    const accountMap = new Map((window.mergedAccounts || []).map(a => [a.cr714_id, a]));
+
+    const accounts = window.mergedAccounts || [];
+    const events = window.unifiedEventRows || [];
+
+    for (let i = 0; i < accounts.length; i += 400) {
+        const slice = accounts.slice(i, i + 400);
+
+        slice.forEach(a => {
+            const modDate = a.modifiedon ? new Date(a.modifiedon) : null;
+            const hs = String(a.helpStatus || '').toUpperCase();
+            const isRequest =
+                (a.isHelp || a.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') &&
+                !String(a.managerNotes || '').toUpperCase().includes('[RESOLVED]') &&
+                hs !== 'RESOLVED' &&
+                hs !== 'CLEAR';
+
+            const isStale = !modDate || ((now - modDate) / (1000 * 60 * 60 * 24) > 30);
+
+            const lastEmailDate = a.emailDate || null;
+            const daysSinceLastTouch = modDate && !isNaN(modDate.getTime())
+                ? Math.floor((now - modDate) / (1000 * 60 * 60 * 24))
+                : null;
+            const daysSinceLastEmail = lastEmailDate
+                ? Math.floor((now - new Date(lastEmailDate)) / (1000 * 60 * 60 * 24))
+                : null;
+
+            facts.push({
+                factType: 'account',
+                accountId: a.cr714_id,
+                rep: a.rep || 'Unassigned',
+                action: a.action || 'None',
+                sourceDataset: null,
+                noteDate: a.modifiedon || null,
+                monthKey: modDate && !isNaN(modDate.getTime())
+                    ? `${modDate.getFullYear()}-${String(modDate.getMonth() + 1).padStart(2, '0')}`
+                    : null,
+                touchType: null,
+                isIntro: !!a.intro,
+                isRequest: !!isRequest,
+                isStale: !!isStale,
+                helpStatus: a.helpStatus || '',
+                lastEmailDate,
+                emailedToday: !!(lastEmailDate && new Date(lastEmailDate).toDateString() === now.toDateString()),
+                emailedLast7Days: !!(lastEmailDate && ((now - new Date(lastEmailDate)) / (1000 * 60 * 60 * 24) <= 7)),
+                daysSinceLastTouch,
+                daysSinceLastEmail,
+                count: 1
+            });
+        });
+
+        await new Promise(requestAnimationFrame);
+    }
+
+    for (let i = 0; i < events.length; i += 1000) {
+        const slice = events.slice(i, i + 1000);
+
+        slice.forEach(ev => {
+            const d = ev['Note Date'] ? new Date(ev['Note Date']) : null;
+            const monthKey = d && !isNaN(d.getTime())
+                ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+                : null;
+
+            const touchType =
+                ev._touchType ||
+                (ev.EmailSubject || ev.EmailSegment
+                    ? 'Email'
+                    : (ev['Masonville Link'] ? 'Masonville' : 'Note'));
+
+            const acct = accountMap.get(ev.cr714_accountnum);
+            const lastEmailDate = acct ? acct.emailDate || null : null;
+            const daysSinceLastEmail = lastEmailDate
+                ? Math.floor((now - new Date(lastEmailDate)) / (1000 * 60 * 60 * 24))
+                : null;
+
+            facts.push({
+                factType: 'event',
+                accountId: ev.cr714_accountnum,
+                rep: ev.cr714_rep || (acct ? acct.rep : 'Unassigned'),
+                action: ev['Action at time of Note'] || ev.cr714_action || (acct ? acct.action : 'None') || 'None',
+                sourceDataset: ev.SourceDataset || null,
+                noteDate: ev['Note Date'] || null,
+                monthKey,
+                touchType,
+                isIntro: acct ? !!acct.intro : !!ev.IsIntro,
+                isRequest: acct ? (
+                    (acct.isHelp || acct.isClose || ['HELP REQUESTED', 'CLOSE REQUESTED'].includes(String(acct.helpStatus || '').toUpperCase())) &&
+                    !String(acct.managerNotes || '').toUpperCase().includes('[RESOLVED]') &&
+                    !['RESOLVED', 'CLEAR'].includes(String(acct.helpStatus || '').toUpperCase())
+                ) : false,
+                isStale: acct ? (!acct.modifiedon || ((now - new Date(acct.modifiedon)) / (1000 * 60 * 60 * 24) > 30)) : false,
+                helpStatus: acct ? (acct.helpStatus || '') : (ev.HelpStatus || ''),
+                lastEmailDate,
+                emailedToday: !!(lastEmailDate && new Date(lastEmailDate).toDateString() === now.toDateString()),
+                emailedLast7Days: !!(lastEmailDate && ((now - new Date(lastEmailDate)) / (1000 * 60 * 60 * 24) <= 7)),
+                daysSinceLastTouch: acct && acct.modifiedon ? Math.floor((now - new Date(acct.modifiedon)) / (1000 * 60 * 60 * 24)) : null,
+                daysSinceLastEmail,
+                count: 1
+            });
+        });
+
+        await new Promise(requestAnimationFrame);
+    }
+
+    window.reportingFacts = facts;
+    window.reportingDims = {
+        reps: Array.from(new Set(facts.map(f => f.rep).filter(Boolean))).sort(),
+        actions: Array.from(new Set(facts.map(f => f.action).filter(Boolean))).sort(),
+        months: Array.from(new Set(facts.map(f => f.monthKey).filter(Boolean))).sort().reverse()
+    };
+};
+
+    window.renderReports = function() {
+    if (!document.getElementById('tab-reports').classList.contains('active')) return;
+
+    const includeUnassigned = document.getElementById('rep-include-unassigned')
+        ? document.getElementById('rep-include-unassigned').checked
+        : false;
+
+    const visibleAccounts = new Set((window.teamFilteredAccounts || []).map(a => a.cr714_id));
+
+    let facts = (window.reportingFacts || []).filter(f => visibleAccounts.has(f.accountId));
+
+    if (!includeUnassigned) {
+        facts = facts.filter(f => (f.rep || 'Unassigned') !== 'Unassigned');
+    }
+
+    if (window.reportStartDate || window.reportEndDate) {
+        facts = facts.filter(f => {
+            if (!f.noteDate) return true;
+            const d = new Date(f.noteDate);
+            if (isNaN(d.getTime())) return false;
+            if (window.reportStartDate && d < window.reportStartDate) return false;
+            if (window.reportEndDate && d > window.reportEndDate) return false;
+            return true;
+        });
+    }
+
+    const repMap = new Map();
+    const actionMap = new Map();
+    const monthlyData = {};
+
+    const ensureRep = (rep) => {
+        if (!repMap.has(rep)) {
+            repMap.set(rep, {
+                totalRecords: 0,
+                touches: 0,
+                emails: 0,
+                notes: 0,
+                masonville: 0,
+                requests: 0,
+                intro: 0,
+                stale: 0,
+                emailedToday: 0,
+                emailedLast7Days: 0
+            });
+        }
+        if (!monthlyData[rep]) monthlyData[rep] = {};
+        return repMap.get(rep);
+    };
+
+    const ensureAction = (action) => {
+        if (!actionMap.has(action)) {
+            actionMap.set(action, {
+                totalRecords: 0,
+                touches: 0,
+                emails: 0,
+                notes: 0,
+                masonville: 0,
+                _accountIds: new Set()
+            });
+        }
+        return actionMap.get(action);
+    };
+
+    let tAccts = 0;
+    let tStale = 0;
+    let tEmails = 0;
+    let totalIntros = 0;
+    let tReq = 0;
+    let totalActionable = 0;
+
+    facts.filter(f => f.factType === 'account').forEach(f => {
+        const rep = f.rep || 'Unassigned';
+        const action = f.action || 'None';
+        const repStats = ensureRep(rep);
+        const actionStats = ensureAction(action);
+
+        repStats.totalRecords += 1;
+        actionStats._accountIds.add(f.accountId);
+        tAccts += 1;
+
+        if (action && action !== 'None') totalActionable += 1;
+        if (f.isIntro) { repStats.intro += 1; totalIntros += 1; }
+        if (f.isRequest) { repStats.requests += 1; tReq += 1; }
+        if (f.isStale) { repStats.stale += 1; tStale += 1; }
+        if (f.emailedToday) repStats.emailedToday += 1;
+        if (f.emailedLast7Days) repStats.emailedLast7Days += 1;
+    });
+
+    facts.filter(f => f.factType === 'event').forEach(f => {
+        const rep = f.rep || 'Unassigned';
+        const action = f.action || 'None';
+        const repStats = ensureRep(rep);
+        const actionStats = ensureAction(action);
+
+        repStats.touches += 1;
+        actionStats.touches += 1;
+        actionStats._accountIds.add(f.accountId);
+
+        if (f.monthKey) {
+            if (!monthlyData[rep][f.monthKey]) {
+                monthlyData[rep][f.monthKey] = {
+                    records: new Set(),
+                    touches: 0,
+                    emails: 0
+                };
+            }
+            monthlyData[rep][f.monthKey].records.add(f.accountId);
+            monthlyData[rep][f.monthKey].touches += 1;
+        }
+
+        if (f.touchType === 'Email') {
+            repStats.emails += 1;
+            actionStats.emails += 1;
+            tEmails += 1;
+            if (f.monthKey) monthlyData[rep][f.monthKey].emails += 1;
+        } else if (f.touchType === 'Masonville') {
+            repStats.masonville += 1;
+            actionStats.masonville += 1;
+        } else {
+            repStats.notes += 1;
+            actionStats.notes += 1;
+        }
+    });
+
+    for (const [, stats] of actionMap.entries()) {
+        stats.totalRecords = stats._accountIds.size;
+    }
+
+    const scorecardBody = document.getElementById('scorecard-body');
+    const actionsBody = document.getElementById('actions-body');
+    const engagementBody = document.getElementById('engagement-body');
+    const monthlyBody = document.getElementById('monthly-body');
+
+    scorecardBody.innerHTML = '';
+    actionsBody.innerHTML = '';
+    engagementBody.innerHTML = '';
+    monthlyBody.innerHTML = '';
+
+    const sortedReps = Array.from(repMap.entries()).sort(
+        (a, b) => b[1].totalRecords - a[1].totalRecords || a[0].localeCompare(b[0])
+    );
+    const sortedActions = Array.from(actionMap.entries()).sort(
+        (a, b) => b[1].totalRecords - a[1].totalRecords || a[0].localeCompare(b[0])
+    );
+    const allMonths = Array.from(
+        new Set(facts.map(f => f.monthKey).filter(Boolean))
+    ).sort().reverse();
+
+    sortedReps.forEach(([rep, stats]) => {
+        const safeRep = window.escapeHTML(rep);
+        const jsRep = window.escapeJS(rep);
+
+        scorecardBody.innerHTML += `
+            <tr class="transition-colors">
+                <td class="font-black drilldown-cell uppercase" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
+                <td class="drilldown-cell font-bold" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
+                <td class="font-black drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
+                <td class="drilldown-cell font-black" style="color: var(--accent-danger);" onclick="window.openDrilldown('${jsRep}', 'stale')">${stats.stale}</td>
+                <td class="drilldown-cell font-bold" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
+                <td class="drilldown-cell font-black" style="color: var(--accent-warning);" onclick="window.openDrilldown('${jsRep}', 'requests')">${stats.requests}</td>
+                <td class="drilldown-cell font-black" style="color: var(--primary);" onclick="window.openDrilldown('${jsRep}', 'intro')">${stats.intro}</td>
+            </tr>`;
+
+        const emailPer = stats.totalRecords > 0 ? (stats.emails / stats.totalRecords).toFixed(2) : '0.00';
+
+        engagementBody.innerHTML += `
+            <tr class="transition-colors">
+                <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
+                <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
+                <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
+                <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
+                <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsRep}', 'notes')">${stats.notes}</td>
+                <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsRep}', 'masonville')">${stats.masonville}</td>
+                <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
+            </tr>`;
+    });
+
+    sortedActions.forEach(([act, stats]) => {
+        const safeAct = window.escapeHTML(act);
+        const jsAct = window.escapeJS(act);
+        const emailPer = stats.totalRecords > 0 ? (stats.emails / stats.totalRecords).toFixed(2) : '0.00';
+
+        actionsBody.innerHTML += `
+            <tr class="transition-colors">
+                <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsAct}', 'total')">${safeAct}</td>
+                <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsAct}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
+                <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsAct}', 'touched')">${stats.touches}</td>
+                <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsAct}', 'emails')">${stats.emails}</td>
+                <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsAct}', 'notes')">${stats.notes}</td>
+                <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsAct}', 'masonville')">${stats.masonville}</td>
+                <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
+            </tr>`;
+    });
+
+    let monthlyHeaderHtml = `
+        <th>
+            <div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', 0)">
+                <span>Rep Name</span>
+                <i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i>
+            </div>
+        </th>`;
+
+    allMonths.forEach((m, idx) => {
+        monthlyHeaderHtml += `
+            <th class="text-center">
+                <div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', ${idx + 1})">
+                    <span>${m}<br><span class="text-[9px] font-normal text-muted">Accounts Touched / Total Activities / Emails</span></span>
+                    <i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i>
+                </div>
+            </th>`;
+    });
+
+    document.getElementById('monthly-table').querySelector('thead tr').innerHTML = monthlyHeaderHtml;
+
+    sortedReps.forEach(([rep]) => {
+        const safeRep = window.escapeHTML(rep);
+        const jsRep = window.escapeJS(rep);
+        let rowHtml = `<td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>`;
+
+        allMonths.forEach(m => {
+            const bucket = (monthlyData[rep] || {})[m] || { records: new Set(), touches: 0, emails: 0 };
+            rowHtml += `
+                <td class="text-center">
+                    <span class="font-black text-[11px]" style="color: var(--primary);" title="Unique Accounts Touched">${bucket.records.size}</span>
+                    <span class="text-muted mx-1">\</span>
+                    <span class="font-bold" style="color: var(--accent-success);" title="Total Activities">${bucket.touches}</span>
+                    <span class="text-muted mx-1">/</span>
+                    <span class="font-bold" style="color: var(--chart-email);" title="Total Emails Sent">${bucket.emails}</span>
+                </td>`;
+        });
+
+        monthlyBody.innerHTML += `<tr class="transition-colors">${rowHtml}</tr>`;
+    });
+
+    document.getElementById('rep-tot-accts').innerText = tAccts;
+    document.getElementById('rep-tot-req').innerText = tReq;
+    document.getElementById('rep-tot-stale').innerText = tStale;
+    document.getElementById('rep-tot-email').innerText = tEmails;
+    document.getElementById('rep-tot-intro').innerText = totalIntros;
+    document.getElementById('act-tot-actions').innerText = tAccts > 0 ? totalActionable : 0;
+    document.getElementById('act-action-rate').innerText = tAccts > 0
+        ? Math.round((totalActionable / tAccts) * 100) + '%'
+        : '0%';
+
+    window.renderCharts(sortedReps, sortedActions, monthlyData, allMonths);
+
+    ['scorecard-table', 'actions-table', 'engagement-table', 'monthly-table'].forEach(tableId => {
+        window.calculateTableTotals(tableId);
+    });
+
+    window.reportsDirty = false;
+};
+    
+
 
     window.renderCharts = function(sortedReps, sortedActions, monthlyData, allMonths) {
         const top5Reps = sortedReps.slice(0, 5);
@@ -4048,8 +4266,93 @@ let monthlyData = {};
     // =========================================================
 
     // ---------- Session cache keys ----------
-    const CACHE_KEY = 'act_mgr_session_cache_v3';
-    const META_KEY  = 'act_mgr_session_meta_v3';
+const CACHE_KEY = 'act_mgr_session_cache_v4';
+const CACHE_PART_PREFIX = 'act_mgr_session_cache_v4_part_';
+const CACHE_PART_COUNT_KEY = 'act_mgr_session_cache_v4_part_count';
+const META_KEY  = 'act_mgr_session_meta_v4';
+
+function getMeta() {
+    try {
+        return JSON.parse(sessionStorage.getItem(META_KEY)) || {};
+    } catch (e) {
+        return {};
+    }
+}
+
+function setMeta(obj) {
+    sessionStorage.setItem(META_KEY, JSON.stringify(obj));
+}
+
+function clearCache() {
+    try {
+        sessionStorage.removeItem(CACHE_KEY);
+
+        const partCount = parseInt(sessionStorage.getItem(CACHE_PART_COUNT_KEY) || '0', 10);
+        for (let i = 0; i < partCount; i++) {
+            sessionStorage.removeItem(`${CACHE_PART_PREFIX}${i}`);
+        }
+
+        sessionStorage.removeItem(CACHE_PART_COUNT_KEY);
+        sessionStorage.removeItem(META_KEY);
+    } catch (e) {}
+}
+
+function getCache() {
+    try {
+        const single = sessionStorage.getItem(CACHE_KEY);
+        if (single) return JSON.parse(single);
+
+        const partCount = parseInt(sessionStorage.getItem(CACHE_PART_COUNT_KEY) || '0', 10);
+        if (!partCount) return null;
+
+        let json = '';
+        for (let i = 0; i < partCount; i++) {
+            const part = sessionStorage.getItem(`${CACHE_PART_PREFIX}${i}`);
+            if (!part) return null;
+            json += part;
+        }
+
+        return JSON.parse(json);
+    } catch (e) {
+        console.warn('Cache read failed, clearing cache:', e);
+        clearCache();
+        return null;
+    }
+}
+
+function setCache(obj) {
+    try {
+        sessionStorage.removeItem(CACHE_KEY);
+
+        const oldPartCount = parseInt(sessionStorage.getItem(CACHE_PART_COUNT_KEY) || '0', 10);
+        for (let i = 0; i < oldPartCount; i++) {
+            sessionStorage.removeItem(`${CACHE_PART_PREFIX}${i}`);
+        }
+        sessionStorage.removeItem(CACHE_PART_COUNT_KEY);
+    } catch (e) {}
+
+    try {
+        const json = JSON.stringify(obj);
+
+        const chunkSize = 750000; // ~0.75MB chunks
+        if (json.length <= chunkSize) {
+            sessionStorage.setItem(CACHE_KEY, json);
+            return true;
+        }
+
+        const partCount = Math.ceil(json.length / chunkSize);
+        for (let i = 0; i < partCount; i++) {
+            const slice = json.slice(i * chunkSize, (i + 1) * chunkSize);
+            sessionStorage.setItem(`${CACHE_PART_PREFIX}${i}`, slice);
+        }
+        sessionStorage.setItem(CACHE_PART_COUNT_KEY, String(partCount));
+        return true;
+    } catch (err) {
+        console.warn('Session cache skipped:', err);
+        try { clearCache(); } catch (e) {}
+        return false;
+    }
+}
 
     // ---------- Session helpers ----------
     function _safe(v){ return v === null || v === undefined ? '' : String(v); }
@@ -4058,10 +4361,7 @@ let monthlyData = {};
     function normalizeText(text){ return text === null || text === undefined ? '' : String(text).replace(/\r\n/g,'\n').replace(/\r/g,'\n'); }
     function nowIso(){ return new Date().toISOString(); }
 
-const CACHE_KEY = 'act_mgr_session_cache_v4';
-const CACHE_PART_PREFIX = 'act_mgr_session_cache_v4_part_';
-const CACHE_PART_COUNT_KEY = 'act_mgr_session_cache_v4_part_count';
-const META_KEY  = 'act_mgr_session_meta_v4';
+
 
 function getMeta() {
     try {
@@ -4174,7 +4474,7 @@ function setCache(obj) {
             el.style.transform = 'translateY(6px)';
         }, 2200);
     }
-    window._reportRefreshTimer = null;
+window._reportRefreshTimer = null;
 window._reportInteractionUntil = 0;
 window._reportRefreshInProgress = false;
 
@@ -4219,6 +4519,7 @@ window.scheduleReportRefresh = function(force = false) {
         }
     }, force ? 50 : 1200);
 };
+
 
     // ---------- Date helpers ----------
     function parseMDate(raw) {
@@ -4550,57 +4851,53 @@ function buildUnifiedEventsFromSourceRows(sourceRows){
                     .trim()
                 : null;
 
-            // Blank placeholder-only notes to keep merged history compact
-            if (cleanedNote && /^Account Management Note \(At time of email\):\s*$/i.test(cleanedNote)) {
+            if (cleanedNote && /^(?:Account Management|Cadence|Prospecting|Louise Brown|Logistics)\s+Note(?:\s+\(At time of email\))?:\s*$/i.test(cleanedNote)) {
                 cleanedNote = null;
             }
 
-const eventRow = {
-    'Note Date': toIsoOrNull(noteDate),
-    cr714_accountnum: row.cr714_accountnum,
-    cr714_accountname: row.cr714_accountname,
-    cr714_rep: row.cr714_rep,
-    cr714_action: row.cr714_action,
-    HelpStatus: row.HelpStatus,
-    IsIntro: row.IsIntro === null || row.IsIntro === undefined ? true : !!row.IsIntro,
-    LastModified: row.LastModified,
-    SourceDataset: row.SourceDataset,
-    EventRep: ev.eventRep,
-    'Action at time of Note': safeTrim((ev.historicalAction || '').replace(/\]/g, '')) || null,
-    NoteSegment: cleanedNote,
-    EmailSubject: ev.emailSubject || null,
-    EmailSegment: ev.emailSegment || null,
-    'Masonville Link': ev.extractedLink || null,
-    EmailDate: toDateOnly(emailDate),
-    'Last 5 Days': withinLastDays(emailDate, 5),
-    'Last 7 Days': withinLastDays(emailDate, 7),
-    'Last 14 Days': withinLastDays(emailDate, 14),
-    'Last 30 Days': withinLastDays(emailDate, 30),
-    'Last 60 Days': withinLastDays(emailDate, 60),
-    'Last 90 Days': withinLastDays(emailDate, 90),
-    'Last 6 Months': withinLastMonths(emailDate, 6),
-    Count: 1,
-    _recordRef: row.RecordId,
-    _entitySet: row.EntitySetName,
-    _rawSource: row,
-    _touchType: ev.emailSubject || ev.emailSegment ? 'Email' : (ev.extractedLink ? 'Masonville' : 'Note')
-};
+            const eventRow = {
+                'Note Date': toIsoOrNull(noteDate),
+                cr714_accountnum: row.cr714_accountnum,
+                cr714_accountname: row.cr714_accountname,
+                cr714_rep: row.cr714_rep,
+                cr714_action: row.cr714_action,
+                HelpStatus: row.HelpStatus,
+                IsIntro: row.IsIntro === null || row.IsIntro === undefined ? true : !!row.IsIntro,
+                LastModified: row.LastModified,
+                SourceDataset: row.SourceDataset,
+                EventRep: ev.eventRep,
+                'Action at time of Note': safeTrim((ev.historicalAction || '').replace(/\]/g, '')) || null,
+                NoteSegment: cleanedNote,
+                EmailSubject: ev.emailSubject || null,
+                EmailSegment: ev.emailSegment || null,
+                'Masonville Link': ev.extractedLink || null,
+                EmailDate: toDateOnly(emailDate),
+                'Last 5 Days': withinLastDays(emailDate, 5),
+                'Last 7 Days': withinLastDays(emailDate, 7),
+                'Last 14 Days': withinLastDays(emailDate, 14),
+                'Last 30 Days': withinLastDays(emailDate, 30),
+                'Last 60 Days': withinLastDays(emailDate, 60),
+                'Last 90 Days': withinLastDays(emailDate, 90),
+                'Last 6 Months': withinLastMonths(emailDate, 6),
+                Count: 1,
+                _recordRef: row.RecordId,
+                _entitySet: row.EntitySetName,
+                _rawSource: row,
+                _touchType: ev.emailSubject || ev.emailSegment ? 'Email' : (ev.extractedLink ? 'Masonville' : 'Note')
+            };
 
-// Skip placeholder-only / empty fragments so they never become visible history cards
-const hasVisibleNoteText = !!eventRow.NoteSegment;
-const hasOtherUsefulContent =
-    !!eventRow.EmailSubject ||
-    !!eventRow['Masonville Link'] ||
-    !!eventRow['Action at time of Note'];
+            const hasVisibleNoteText = !!eventRow.NoteSegment;
+            const hasOtherUsefulContent =
+                !!eventRow.EmailSubject ||
+                !!eventRow['Masonville Link'] ||
+                !!eventRow['Action at time of Note'];
 
-if (hasVisibleNoteText || hasOtherUsefulContent) {
-    rawEvents.push(eventRow);
-}
+            if (hasVisibleNoteText || hasOtherUsefulContent) {
+                rawEvents.push(eventRow);
+            }
         });
     });
 
-    // Merge events that are really the same note split by old dashed separators
-    // Keyed by account + exact note date/time + author + source
     const mergedMap = new Map();
 
     rawEvents.forEach(ev => {
@@ -4621,7 +4918,6 @@ if (hasVisibleNoteText || hasOtherUsefulContent) {
 
         const existing = mergedMap.get(key);
 
-        // Merge note text without duplicating blank/placeholder fragments
         if (ev.NoteSegment) {
             const normalizedIncoming = ev.NoteSegment.trim();
             const alreadyExists = existing._noteParts.some(p => p.trim() === normalizedIncoming);
@@ -4630,7 +4926,6 @@ if (hasVisibleNoteText || hasOtherUsefulContent) {
             }
         }
 
-        // Preserve first non-empty metadata, but don't overwrite good values with blanks
         if (!existing.EmailSubject && ev.EmailSubject) existing.EmailSubject = ev.EmailSubject;
         if (!existing.EmailSegment && ev.EmailSegment) existing.EmailSegment = ev.EmailSegment;
         if (!existing['Masonville Link'] && ev['Masonville Link']) existing['Masonville Link'] = ev['Masonville Link'];
@@ -4638,7 +4933,6 @@ if (hasVisibleNoteText || hasOtherUsefulContent) {
             existing['Action at time of Note'] = ev['Action at time of Note'];
         }
 
-        // Keep the strongest touch type if one of the split parts was an email/link
         if (existing._touchType !== 'Email' && ev._touchType === 'Email') existing._touchType = 'Email';
         else if (existing._touchType === 'Note' && ev._touchType === 'Masonville') existing._touchType = 'Masonville';
 
@@ -4750,7 +5044,83 @@ if (hasVisibleNoteText || hasOtherUsefulContent) {
     window.__datasetConfigs = datasetConfigs;
     window.__normalizeRow = normalizeDatasetRows;
 
-window.bootstrapFromCache = function
+window.reportingFacts = [];
+window.reportingDims = {
+    reps: [],
+    actions: [],
+    months: []
+};
+
+function buildCachePayload() {
+    return {
+        employeesData: (window.employeesData || []).map(e => ({
+            cr714_employeename: e.cr714_employeename || '',
+            cr714_managerassigned: e.cr714_managerassigned || '',
+            cr714_supervisors: e.cr714_supervisors || '',
+            cr714_srmanager: e.cr714_srmanager || '',
+            cr714_departmentname: e.cr714_departmentname || '',
+            statecode: e.statecode,
+            _mappedStatecode: e._mappedStatecode || '',
+            internalemailaddress: e.internalemailaddress || '',
+            emailaddress1: e.emailaddress1 || '',
+            telephone1: e.telephone1 || '',
+            mobilephone: e.mobilephone || '',
+            cr714_extension: e.cr714_extension || ''
+        })),
+
+        mergedAccounts: (window.mergedAccounts || []).map(a => ({
+            cr714_id: a.cr714_id || '',
+            company: a.company || '',
+            rep: a.rep || '',
+            action: a.action || '',
+            message: a.message || '',
+            modifiedon: a.modifiedon || null,
+            emailDate: a.emailDate || null,
+            contact: a.contact || '--',
+            phone: a.phone || '--',
+            email: a.email || '--',
+            address: a.address || '--',
+            isHelp: !!a.isHelp,
+            isClose: !!a.isClose,
+            intro: !!a.intro,
+            helpStatus: a.helpStatus || '',
+            statecode: a.statecode || 'Active',
+            importantInfo: a.importantInfo || '',
+            sources: (a.sources || []).map(s => ({
+                type: s.type || '',
+                table: s.table || '',
+                id: s.id || '',
+                rep: s.rep || '',
+                sourceDataset: s.sourceDataset || ''
+            }))
+        })),
+
+        reportingFacts: window.reportingFacts || [],
+        reportingDims: window.reportingDims || { reps: [], actions: [], months: [] }
+    };
+}
+
+window.bootstrapFromCache = function() {
+    const cached = getCache();
+    if (!cached) return false;
+
+    try {
+        window.employeesData = cached.employeesData || [];
+        window.mergedAccounts = cached.mergedAccounts || [];
+        window.reportingFacts = cached.reportingFacts || [];
+        window.reportingDims = cached.reportingDims || { reps: [], actions: [], months: [] };
+
+        // Intentionally NOT restored from cache anymore
+        window.rawUnifiedSourceRows = [];
+        window.unifiedEventRows = [];
+
+        window.populateDynamicActionSet && window.populateDynamicActionSet();
+        return true;
+    } catch (e) {
+        console.warn('Cache bootstrap failed:', e);
+        return false;
+    }
+};
 
     // ---------- Full unified load ----------
     async function unifiedFullLoad(options={}){
@@ -5077,6 +5447,26 @@ softStatus(`Updated ${updatedRows.length} changed records`, 'neutral');
         } catch(e){ window.showToast('Failed to push manager note.', 'error'); }
         finally { btn.innerHTML = originalText; btn.disabled = false; }
     };
+    window.recordManagerAudit = function(type, details, accountId = null) {
+    try {
+        let log = JSON.parse(localStorage.getItem('act_mgr_audit_log') || '[]');
+        log.push({
+            timestamp: new Date().toISOString(),
+            type,
+            accountId,
+            details
+        });
+
+        // keep last 1000 only
+        if (log.length > 1000) {
+            log = log.slice(log.length - 1000);
+        }
+
+        localStorage.setItem('act_mgr_audit_log', JSON.stringify(log));
+    } catch (e) {
+        console.warn('Manager audit log write skipped:', e);
+    }
+};
     window.quickResolve = async function(){
         if(!window.activeAccountId) return;
         const account = window.teamFilteredAccounts.find(a => a.cr714_id === window.activeAccountId); if(!account) return;
