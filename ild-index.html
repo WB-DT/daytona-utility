@@ -1074,39 +1074,30 @@ window.applyDateChange = function() {
     }
 };
 
-window.applyDateBoxChange = function() {
-    let boxMin = document.getElementById('date-box-min');
-    let boxMax = document.getElementById('date-box-max');
+    window.applyDateBoxChange = function() {
+        let boxMin = document.getElementById('date-box-min');
+        let boxMax = document.getElementById('date-box-max');
+        
+        let minD = new Date(boxMin.value + 'T00:00:00');
+        let maxD = new Date(boxMax.value + 'T00:00:00');
+        
+        if(isNaN(minD.getTime())) minD = window.globalMinDate;
+        if(isNaN(maxD.getTime())) maxD = window.globalMaxDate;
+        if (window.markReportInteraction) window.markReportInteraction();
+        if (minD > maxD) { let temp = minD; minD = maxD; maxD = temp; }
+        if (minD < window.globalMinDate) minD = window.globalMinDate;
+        if (maxD > window.globalMaxDate) maxD = window.globalMaxDate;
 
-    let minD = new Date(boxMin.value + 'T00:00:00');
-    let maxD = new Date(boxMax.value + 'T00:00:00');
+        let diffMin = Math.max(0, Math.floor((minD - window.globalMinDate) / (1000*60*60*24)));
+        let diffMax = Math.min(parseInt(document.getElementById('date-slider-max').max), Math.ceil((maxD - window.globalMinDate) / (1000*60*60*24)));
 
-    if (isNaN(minD.getTime())) minD = window.globalMinDate;
-    if (isNaN(maxD.getTime())) maxD = window.globalMaxDate;
-
-    if (window.markReportInteraction) window.markReportInteraction();
-
-    if (minD > maxD) {
-        let temp = minD;
-        minD = maxD;
-        maxD = temp;
-    }
-
-    if (minD < window.globalMinDate) minD = window.globalMinDate;
-    if (maxD > window.globalMaxDate) maxD = window.globalMaxDate;
-
-    let diffMin = Math.max(0, Math.floor((minD - window.globalMinDate) / (1000 * 60 * 60 * 24)));
-    let diffMax = Math.min(
-        parseInt(document.getElementById('date-slider-max').max),
-        Math.ceil((maxD - window.globalMinDate) / (1000 * 60 * 60 * 24))
-    );
-
-    document.getElementById('date-slider-min').value = diffMin;
-    document.getElementById('date-slider-max').value = diffMax;
-
-    window.updateDateSliderUI(false);
-    window.applyDateChange();
-};
+        document.getElementById('date-slider-min').value = diffMin;
+        document.getElementById('date-slider-max').value = diffMax;
+        
+        window.updateDateSliderUI(false);
+        if (window.markReportInteraction) window.markReportInteraction();
+        if (window.markReportInteraction) window.markReportInteraction(); window.applyDateChange();
+    };
 
 window.resetDateSlider = function() {
     if (window.markReportInteraction) window.markReportInteraction();
@@ -3698,7 +3689,267 @@ window.buildReportingFactsAsync = async function() {
     window.reportsDirty = false;
 };
     
+    window.renderReports = function() {
+        if(!document.getElementById('tab-reports').classList.contains('active')) return;
+        
+        let actMenu = document.getElementById('menu-actions-table'); if(actMenu) actMenu.innerHTML = '';
+        let scoreMenu = document.getElementById('menu-scorecard-table'); if(scoreMenu) scoreMenu.innerHTML = '';
+        let engMenu = document.getElementById('menu-engagement-table'); if(engMenu) engMenu.innerHTML = '';
+        let momMenu = document.getElementById('menu-monthly-table'); if(momMenu) momMenu.innerHTML = '';
 
+        let sDate = window.reportStartDate;
+        let eDate = window.reportEndDate;
+
+        let reportingSet = window.teamFilteredAccounts;
+
+        let repMap = new Map();
+        let actionMap = new Map();
+        const now = new Date();
+
+        let tAccts=0, tStale=0, tEmails=0, totalIntros=0, tReq=0, totalActionable=0;
+let monthlyData = {};
+        
+        let isActionFilterActive = window.activeFilters && window.activeFilters['action'] && window.activeFilters['action'].size > 0;
+        
+        const includeUnassigned = document.getElementById('rep-include-unassigned') ? document.getElementById('rep-include-unassigned').checked : false;
+
+        reportingSet.forEach(a => {
+            let rep = a.rep || 'Unassigned';
+            let act = a.action || 'None';
+
+            if (rep === 'Unassigned' && !includeUnassigned) return;
+
+            if(!repMap.has(rep)) {
+                repMap.set(rep, { totalRecords: 0, touches: 0, emails: 0, notes: 0, masonville: 0, requests: 0, intro: 0, stale: 0 });
+            }
+            if(!actionMap.has(act)) {
+                actionMap.set(act, { totalRecords: 0, touches: 0, emails: 0, notes: 0, masonville: 0 });
+            }
+
+            let rStats = repMap.get(rep);
+            let aStats = actionMap.get(act);
+
+            let fallsInDateRange = true;
+            if(sDate || eDate) {
+                let modDate = a.modifiedon ? new Date(a.modifiedon) : null;
+                if(sDate && (!modDate || modDate < sDate)) fallsInDateRange = false;
+                if(eDate && (!modDate || modDate > eDate)) fallsInDateRange = false;
+            }
+
+            if(fallsInDateRange) {
+                rStats.totalRecords++;
+                aStats.totalRecords++;
+                tAccts++;
+
+                const diffDays = a.modifiedon ? (now - new Date(a.modifiedon)) / (1000*60*60*24) : 999;
+                if(diffDays > 30) { rStats.stale++; tStale++; }
+
+                const hs = String(a.helpStatus || '').toUpperCase();
+                if((a.isHelp || a.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') && !String(a.managerNotes||'').toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR') {
+                    rStats.requests++;
+                    tReq++;
+                }
+
+                if(a.intro) { rStats.intro++; totalIntros++; }
+                if(act && act !== 'None') { totalActionable++; }
+            }
+
+            if (!monthlyData[rep]) monthlyData[rep] = {};
+
+            let accountHistory = [];
+            a.sources.forEach(src => {
+                let combinedNotes = src.rawNotes || '';
+                if (src.message && String(src.message).trim() !== '') {
+                    combinedNotes += "\n------------------------------\n" + src.message;
+                }
+                accountHistory = accountHistory.concat(window.parseNoteHistory(combinedNotes, src.type, a.modifiedon));
+            });
+
+            let emailDatesSet = new Set();
+
+            accountHistory.forEach(h => {
+                if (h.date === 'Permanent' || h.date === 'Unknown Date') return;
+                const d = new Date(h.date);
+                if (isNaN(d.getTime())) return;
+
+                if(sDate && d < sDate) return;
+                if(eDate && d > eDate) return;
+
+                // Tie touch to its actual historical action, fallback to current account action
+                let touchAction = h.historicalAction || act;
+                
+                // If filtering by Action, ONLY count history events that belong to the filtered action(s)
+                if (isActionFilterActive && !window.activeFilters['action'].has(touchAction)) return;
+
+                if (!actionMap.has(touchAction)) {
+                    actionMap.set(touchAction, { totalRecords: 0, touches: 0, emails: 0, notes: 0, masonville: 0 });
+                }
+                let touchAStats = actionMap.get(touchAction);
+
+                const mKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                if(!monthlyData[rep][mKey]) monthlyData[rep][mKey] = { records: new Set(), touches: 0, emails: 0 };
+                
+                let isSubstantive = false;
+
+                if (h.touchType === 'Email') {
+                    rStats.emails++;
+                    touchAStats.emails++;
+                    tEmails++; 
+                    monthlyData[rep][mKey].emails++;
+                    emailDatesSet.add(d.toDateString());
+                    isSubstantive = true;
+                } else if (h.touchType === 'Masonville') {
+                    rStats.masonville++;
+                    touchAStats.masonville++;
+                    isSubstantive = true;
+                } else if (h.text && h.text.trim() !== '') {
+                    rStats.notes++;
+                    touchAStats.notes++;
+                    isSubstantive = true;
+                }
+
+                // Only increment total touches if it was a substantive action, not just a system log
+                if (isSubstantive) {
+                    monthlyData[rep][mKey].records.add(a.cr714_id);
+                    monthlyData[rep][mKey].touches++;
+                    rStats.touches++;
+                    touchAStats.touches++;
+                }
+            });
+
+            if (a.emailDate) {
+                let ed = new Date(a.emailDate);
+                if (!isNaN(ed.getTime())) {
+                    let inRange = true;
+                    if(sDate && ed < sDate) inRange = false;
+                    if(eDate && ed > eDate) inRange = false;
+                    
+                    let dateStr = ed.toDateString();
+                    if (inRange && !emailDatesSet.has(dateStr)) {
+                        rStats.emails++;
+                        aStats.emails++;
+                        tEmails++;
+                        
+                        let mKey = `${ed.getFullYear()}-${String(ed.getMonth() + 1).padStart(2, '0')}`;
+                        if(!monthlyData[rep][mKey]) monthlyData[rep][mKey] = { records: new Set(), touches: 0, emails: 0 };
+                        monthlyData[rep][mKey].emails++;
+                        
+                        monthlyData[rep][mKey].records.add(a.cr714_id);
+                        monthlyData[rep][mKey].touches++;
+                        rStats.touches++;
+                        aStats.touches++;
+                        emailDatesSet.add(dateStr);
+                    }
+                }
+            }
+        });
+
+        const scorecardBody = document.getElementById('scorecard-body'); scorecardBody.innerHTML = '';
+        const actionsBody = document.getElementById('actions-body'); actionsBody.innerHTML = '';
+        const engagementBody = document.getElementById('engagement-body'); engagementBody.innerHTML = '';
+        const monthlyBody = document.getElementById('monthly-body'); monthlyBody.innerHTML = '';
+
+        let sortedReps = Array.from(repMap.entries()).sort((a,b) => b[1].totalRecords - a[1].totalRecords);
+        let sortedActions = Array.from(actionMap.entries()).sort((a,b) => b[1].totalRecords - a[1].totalRecords);
+        let allMonthsSet = new Set();
+
+        sortedReps.forEach(([rep, stats]) => {
+            let safeRep = window.escapeHTML(rep);
+            let jsRep = window.escapeJS(rep);
+
+            scorecardBody.innerHTML += `
+                <tr class="transition-colors">
+                    <td class="font-black drilldown-cell uppercase" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
+                    <td class="drilldown-cell font-bold" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
+                    <td class="font-black drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
+                    <td class="drilldown-cell font-black" style="color: var(--accent-danger);" onclick="window.openDrilldown('${jsRep}', 'stale')">${stats.stale}</td>
+                    <td class="drilldown-cell font-bold" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
+                    <td class="drilldown-cell font-black" style="color: var(--accent-warning);" onclick="window.openDrilldown('${jsRep}', 'requests')">${stats.requests}</td>
+                    <td class="drilldown-cell font-black" style="color: var(--primary);" onclick="window.openDrilldown('${jsRep}', 'intro')">${stats.intro}</td>
+                </tr>`;
+
+            if (monthlyData[rep]) {
+                Object.keys(monthlyData[rep]).forEach(m => allMonthsSet.add(m));
+            }
+        });
+
+        sortedActions.forEach(([act, stats]) => {
+            let safeAct = window.escapeHTML(act);
+            let jsAct = window.escapeJS(act);
+            let emailPer = stats.totalRecords > 0 ? (stats.emails / stats.totalRecords).toFixed(2) : '0.00';
+
+            actionsBody.innerHTML += `
+                <tr class="transition-colors">
+                    <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsAct}', 'total')">${safeAct}</td>
+                    <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsAct}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsAct}', 'touched')">${stats.touches}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsAct}', 'emails')">${stats.emails}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsAct}', 'notes')">${stats.notes}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsAct}', 'masonville')">${stats.masonville}</td>
+                    <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
+                </tr>`;
+        });
+
+        sortedReps.forEach(([rep, stats]) => {
+            let safeRep = window.escapeHTML(rep);
+            let jsRep = window.escapeJS(rep);
+            let emailPer = stats.totalRecords > 0 ? (stats.emails / stats.totalRecords).toFixed(2) : '0.00';
+
+            engagementBody.innerHTML += `
+                <tr class="transition-colors">
+                    <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
+                    <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsRep}', 'notes')">${stats.notes}</td>
+                    <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsRep}', 'masonville')">${stats.masonville}</td>
+                    <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
+                </tr>`;
+        });
+
+        let allMonths = Array.from(allMonthsSet).sort().reverse();
+        let monthlyHeaderHtml = `<th><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', 0)"><span>Rep Name</span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`;
+        allMonths.forEach((m, idx) => {
+            monthlyHeaderHtml += `<th class="text-center"><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', ${idx+1})"><span>${m}<br/><span class="text-[9px] font-normal text-muted">Accounts Touched / Total Activities / Emails</span></span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`;
+        });
+        document.getElementById('monthly-table').querySelector('thead tr').innerHTML = monthlyHeaderHtml;
+
+        sortedReps.forEach(([rep, stats]) => {
+            let safeRep = window.escapeHTML(rep);
+            let jsRep = window.escapeJS(rep);
+            let rowHtml = `<td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>`;
+            allMonths.forEach(m => {
+                let recordsTouched = monthlyData[rep] && monthlyData[rep][m] && monthlyData[rep][m].records ? monthlyData[rep][m].records.size : 0;
+                let touched = monthlyData[rep] && monthlyData[rep][m] ? monthlyData[rep][m].touches : 0;
+                let emails = monthlyData[rep] && monthlyData[rep][m] ? monthlyData[rep][m].emails : 0;
+                rowHtml += `<td class="text-center">
+                    <span class="font-black text-[11px]" style="color: var(--primary);" title="Unique Accounts Touched">${recordsTouched}</span> 
+                    <span class="text-muted mx-1">|</span> 
+                    <span class="font-bold" style="color: var(--accent-success);" title="Total Activities">${touched}</span> 
+                    <span class="text-muted mx-1">/</span> 
+                    <span class="font-bold" style="color: var(--chart-email);" title="Total Emails Sent">${emails}</span>
+                </td>`;
+            });
+            monthlyBody.innerHTML += `<tr class="transition-colors">${rowHtml}</tr>`;
+        });
+
+        document.getElementById('rep-tot-accts').innerText = tAccts;
+        document.getElementById('rep-tot-req').innerText = tReq;
+        document.getElementById('rep-tot-stale').innerText = tStale;
+        document.getElementById('rep-tot-email').innerText = tEmails;
+        document.getElementById('rep-tot-intro').innerText = totalIntros;
+        document.getElementById('act-tot-actions').innerText = totalActionable;
+        document.getElementById('act-action-rate').innerText = tAccts > 0 ? Math.round((totalActionable / tAccts) * 100) + '%' : '0%';
+
+        window.renderCharts(sortedReps, sortedActions, monthlyData, allMonths);
+
+        const reportingTables = ['scorecard-table', 'actions-table', 'engagement-table', 'monthly-table'];
+        reportingTables.forEach(tableId => {
+            window.calculateTableTotals(tableId);
+        });
+
+        window.reportsDirty = false; 
+    };
 
     window.renderCharts = function(sortedReps, sortedActions, monthlyData, allMonths) {
         const top5Reps = sortedReps.slice(0, 5);
@@ -4361,7 +4612,10 @@ function setCache(obj) {
     function normalizeText(text){ return text === null || text === undefined ? '' : String(text).replace(/\r\n/g,'\n').replace(/\r/g,'\n'); }
     function nowIso(){ return new Date().toISOString(); }
 
-
+const CACHE_KEY = 'act_mgr_session_cache_v4';
+const CACHE_PART_PREFIX = 'act_mgr_session_cache_v4_part_';
+const CACHE_PART_COUNT_KEY = 'act_mgr_session_cache_v4_part_count';
+const META_KEY  = 'act_mgr_session_meta_v4';
 
 function getMeta() {
     try {
@@ -4520,6 +4774,43 @@ window.scheduleReportRefresh = function(force = false) {
     }, force ? 50 : 1200);
 };
 
+window.scheduleReportRefresh = function(force = false) {
+    clearTimeout(window._reportRefreshTimer);
+
+    window._reportRefreshTimer = setTimeout(async () => {
+        const reportsTabActive =
+            document.getElementById('tab-reports') &&
+            document.getElementById('tab-reports').classList.contains('active');
+
+        const userStillInteracting = Date.now() < window._reportInteractionUntil;
+
+        if (!force && userStillInteracting) {
+            window.scheduleReportRefresh(false);
+            return;
+        }
+
+        if (!reportsTabActive) {
+            window.reportsDirty = true;
+            return;
+        }
+
+        if (window._reportRefreshInProgress) return;
+
+        try {
+            window._reportRefreshInProgress = true;
+
+            if (window.buildReportingFactsAsync) {
+                await window.buildReportingFactsAsync();
+            } else if (window.buildReportingFacts) {
+                window.buildReportingFacts();
+            }
+
+            window.renderReports();
+        } finally {
+            window._reportRefreshInProgress = false;
+        }
+    }, force ? 50 : 1200);
+};
 
     // ---------- Date helpers ----------
     function parseMDate(raw) {
@@ -5557,6 +5848,390 @@ softStatus(`Updated ${updatedRows.length} changed records`, 'neutral');
     };
 
 })();
+
+
+/* === REPORTING HOTFIX (added by M365 Copilot) === */
+(function(){
+  if (window.__reportingHotfixApplied) return;
+  window.__reportingHotfixApplied = true;
+
+  const originalFetchAllData = typeof window.fetchAllData === 'function' ? window.fetchAllData : null;
+  const originalExecuteSwitchTab = typeof window._executeSwitchTab === 'function' ? window._executeSwitchTab : null;
+  const originalRenderReports = typeof window.renderReports === 'function' ? window.renderReports : null;
+  const originalScheduleReportRefresh = typeof window.scheduleReportRefresh === 'function' ? window.scheduleReportRefresh : null;
+
+  const safeNum = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+  const escapeHtml = (value) => {
+    if (value === null || value === undefined) return '';
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  };
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  };
+  const setHTML = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = value;
+  };
+  const getRepIncludeUnassigned = () => {
+    const el = document.getElementById('rep-include-unassigned');
+    return !!(el && el.checked);
+  };
+  const getDateInRange = (dateStr) => {
+    if (!dateStr) return true;
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return false;
+    if (window.reportStartDate && d < window.reportStartDate) return false;
+    if (window.reportEndDate && d > window.reportEndDate) return false;
+    return true;
+  };
+  const isRequestAccount = (acct) => {
+    if (!acct) return false;
+    const hs = String(acct.helpStatus || '').toUpperCase();
+    return (acct.isHelp || acct.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED')
+      && !String(acct.managerNotes || '').toUpperCase().includes('[RESOLVED]')
+      && hs !== 'RESOLVED'
+      && hs !== 'CLEAR';
+  };
+  const isStaleAccount = (acct) => {
+    if (!acct || !acct.modifiedon) return true;
+    const d = new Date(acct.modifiedon);
+    if (isNaN(d.getTime())) return true;
+    return ((Date.now() - d.getTime()) / (1000 * 60 * 60 * 24)) > 30;
+  };
+
+  function ensureReportingData(force){
+    if (!Array.isArray(window.mergedAccounts)) window.mergedAccounts = [];
+    if (!Array.isArray(window.teamFilteredAccounts)) window.teamFilteredAccounts = [];
+    if (
+      window.teamFilteredAccounts.length === 0 &&
+      window.mergedAccounts.length > 0 &&
+      !window.activeAccountId &&
+      !window.drilldownActive &&
+      !(window.massFilteredIds && window.massFilteredIds.size > 0) &&
+      (!window.activeFilters || !Object.keys(window.activeFilters).some(k => window.activeFilters[k] && window.activeFilters[k].size > 0))
+    ) {
+      window.teamFilteredAccounts = [...window.mergedAccounts];
+    }
+    if (typeof window.buildReportingFacts === 'function') {
+      const needsBuild = force || !Array.isArray(window.reportingFacts) || window.reportingFacts.length === 0 || window.reportsDirty;
+      if (needsBuild) {
+        try {
+          window.buildReportingFacts();
+        } catch (err) {
+          console.error('Reporting hotfix: buildReportingFacts failed', err);
+        }
+      }
+    }
+    if (!window.reportingDims || typeof window.reportingDims !== 'object') {
+      window.reportingDims = { reps: [], actions: [], months: [] };
+    }
+  }
+
+  function getVisibleAccounts(){
+    const includeUnassigned = getRepIncludeUnassigned();
+    return (window.teamFilteredAccounts || []).filter(acct => includeUnassigned || (acct.rep || 'Unassigned') !== 'Unassigned');
+  }
+
+  function getFilteredFacts(){
+    ensureReportingData(false);
+    const visibleAccountIds = new Set(getVisibleAccounts().map(a => a.cr714_id));
+    const includeUnassigned = getRepIncludeUnassigned();
+    return (window.reportingFacts || []).filter(f => {
+      if (!visibleAccountIds.has(f.accountId)) return false;
+      if (!includeUnassigned && (f.rep || 'Unassigned') === 'Unassigned') return false;
+      return getDateInRange(f.noteDate);
+    });
+  }
+
+  function safeDestroyChart(chartRefName){
+    try {
+      if (window[chartRefName] && typeof window[chartRefName].destroy === 'function') {
+        window[chartRefName].destroy();
+      }
+    } catch (e) {
+      console.warn('Chart destroy skipped for', chartRefName, e);
+    }
+    window[chartRefName] = null;
+  }
+
+  function makeChart(chartRefName, canvasId, config){
+    if (typeof Chart === 'undefined') return;
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    safeDestroyChart(chartRefName);
+    try {
+      window[chartRefName] = new Chart(canvas, config);
+    } catch (e) {
+      console.error('Chart render failed for', canvasId, e);
+    }
+  }
+
+  function renderFallbackReports(){
+    const visibleAccounts = getVisibleAccounts();
+    const visibleAccountIds = new Set(visibleAccounts.map(a => a.cr714_id));
+    const facts = getFilteredFacts();
+    const accountFacts = facts.filter(f => f.factType === 'account');
+    const eventFacts = facts.filter(f => f.factType === 'event');
+
+    const repMap = new Map();
+    const actionMap = new Map();
+    const monthlyMap = new Map();
+
+    const ensureRep = (rep) => {
+      if (!repMap.has(rep)) {
+        repMap.set(rep, { totalRecords: 0, totalActivities: 0, emails: 0, notes: 0, masonville: 0, requests: 0, intro: 0, stale: 0 });
+      }
+      return repMap.get(rep);
+    };
+    const ensureAction = (action) => {
+      if (!actionMap.has(action)) {
+        actionMap.set(action, { totalRecords: 0, totalActivities: 0, emails: 0, notes: 0, masonville: 0 });
+      }
+      return actionMap.get(action);
+    };
+    const monthKeyFromDate = (dateStr) => {
+      const d = new Date(dateStr || '');
+      if (isNaN(d.getTime())) return null;
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+    };
+
+    visibleAccounts.forEach(acct => {
+      const rep = acct.rep || 'Unassigned';
+      const action = acct.action || 'None';
+      const repStats = ensureRep(rep);
+      const actionStats = ensureAction(action);
+      repStats.totalRecords += 1;
+      actionStats.totalRecords += 1;
+      if (isRequestAccount(acct)) repStats.requests += 1;
+      if (acct.intro) repStats.intro += 1;
+      if (isStaleAccount(acct)) repStats.stale += 1;
+    });
+
+    eventFacts.forEach(f => {
+      const rep = f.rep || 'Unassigned';
+      const action = f.action || 'None';
+      const monthKey = f.monthKey || monthKeyFromDate(f.noteDate);
+      const repStats = ensureRep(rep);
+      const actionStats = ensureAction(action);
+      repStats.totalActivities += 1;
+      actionStats.totalActivities += 1;
+      if (f.touchType === 'Email') { repStats.emails += 1; actionStats.emails += 1; }
+      else if (f.touchType === 'Masonville') { repStats.masonville += 1; actionStats.masonville += 1; }
+      else { repStats.notes += 1; actionStats.notes += 1; }
+      if (monthKey) {
+        const repMonthKey = `${rep}||${monthKey}`;
+        if (!monthlyMap.has(repMonthKey)) monthlyMap.set(repMonthKey, { rep, monthKey, totalActivities: 0, emails: 0, uniqueAccounts: new Set() });
+        const bucket = monthlyMap.get(repMonthKey);
+        bucket.totalActivities += 1;
+        if (f.touchType === 'Email') bucket.emails += 1;
+        bucket.uniqueAccounts.add(f.accountId);
+      }
+    });
+
+    const totalPool = visibleAccounts.length;
+    const alertQueue = visibleAccounts.filter(isRequestAccount).length;
+    const staleAccounts = visibleAccounts.filter(isStaleAccount).length;
+    const totalEmails = eventFacts.filter(f => f.touchType === 'Email').length || visibleAccounts.filter(a => a.emailDate && getDateInRange(a.emailDate)).length;
+    const totalIntros = visibleAccounts.filter(a => !!a.intro).length;
+
+    setText('rep-tot-accts', totalPool.toLocaleString());
+    setText('rep-tot-req', alertQueue.toLocaleString());
+    setText('rep-tot-stale', staleAccounts.toLocaleString());
+    setText('rep-tot-email', totalEmails.toLocaleString());
+    setText('rep-tot-intro', totalIntros.toLocaleString());
+
+    const actionableCount = eventFacts.length;
+    setText('act-tot-actions', actionableCount.toLocaleString());
+    setText('act-action-rate', totalPool > 0 ? `${((actionableCount / totalPool) * 100).toFixed(1)}%` : '0%');
+
+    const sortedReps = Array.from(repMap.entries()).sort((a,b) => (b[1].totalActivities + b[1].emails + b[1].notes + b[1].masonville) - (a[1].totalActivities + a[1].emails + a[1].notes + a[1].masonville) || a[0].localeCompare(b[0]));
+    const sortedActions = Array.from(actionMap.entries()).sort((a,b) => b[1].totalActivities - a[1].totalActivities || a[0].localeCompare(b[0]));
+
+    setHTML('scorecard-body', sortedReps.map(([rep, s]) => `
+      <tr>
+        <td class="font-bold drilldown-cell" onclick="window.openDrilldown('${escapeHtml(rep)}', 'touched')">${escapeHtml(rep)}</td>
+        <td>${safeNum(s.totalRecords).toLocaleString()}</td>
+        <td>${safeNum(s.totalActivities).toLocaleString()}</td>
+        <td>${safeNum(s.stale).toLocaleString()}</td>
+        <td>${safeNum(s.emails).toLocaleString()}</td>
+        <td>${safeNum(s.requests).toLocaleString()}</td>
+        <td>${safeNum(s.intro).toLocaleString()}</td>
+      </tr>`).join('') || '<tr><td colspan="7" class="text-center text-muted italic py-6">No report data in current filter context.</td></tr>');
+
+    setHTML('engagement-body', sortedReps.map(([rep, s]) => `
+      <tr>
+        <td class="font-bold drilldown-cell" onclick="window.openDrilldown('${escapeHtml(rep)}', 'touched')">${escapeHtml(rep)}</td>
+        <td>${safeNum(s.totalRecords).toLocaleString()}</td>
+        <td>${safeNum(s.totalActivities).toLocaleString()}</td>
+        <td>${safeNum(s.emails).toLocaleString()}</td>
+        <td>${safeNum(s.notes).toLocaleString()}</td>
+        <td>${safeNum(s.masonville).toLocaleString()}</td>
+        <td>${s.totalRecords > 0 ? (s.emails / s.totalRecords).toFixed(2) : '0.00'}</td>
+      </tr>`).join('') || '<tr><td colspan="7" class="text-center text-muted italic py-6">No rep engagement data in current filter context.</td></tr>');
+
+    setHTML('actions-body', sortedActions.map(([action, s]) => `
+      <tr>
+        <td class="font-bold drilldown-cell" onclick="window.openDrilldown('${escapeHtml(action)}', 'touched')">${escapeHtml(action)}</td>
+        <td>${safeNum(s.totalRecords).toLocaleString()}</td>
+        <td>${safeNum(s.totalActivities).toLocaleString()}</td>
+        <td>${safeNum(s.emails).toLocaleString()}</td>
+        <td>${safeNum(s.notes).toLocaleString()}</td>
+        <td>${safeNum(s.masonville).toLocaleString()}</td>
+        <td>${s.totalRecords > 0 ? (s.emails / s.totalRecords).toFixed(2) : '0.00'}</td>
+      </tr>`).join('') || '<tr><td colspan="7" class="text-center text-muted italic py-6">No action data in current filter context.</td></tr>');
+
+    const months = Array.from(new Set(
+      Array.from(monthlyMap.values()).map(v => v.monthKey)
+        .concat((window.reportingDims && Array.isArray(window.reportingDims.months)) ? window.reportingDims.months : [])
+        .filter(Boolean)
+    )).sort();
+    const monthHeader = ['<th>Rep Name</th>'].concat(months.map(m => `<th>${escapeHtml(m)}</th>`)).join('');
+    const monthlyHeadRow = document.querySelector('#monthly-table thead tr');
+    if (monthlyHeadRow) monthlyHeadRow.innerHTML = monthHeader;
+
+    const monthLookup = {};
+    Array.from(monthlyMap.values()).forEach(v => {
+      if (!monthLookup[v.rep]) monthLookup[v.rep] = {};
+      monthLookup[v.rep][v.monthKey] = v;
+    });
+    setHTML('monthly-body', sortedReps.map(([rep]) => {
+      const cells = months.map(m => {
+        const bucket = monthLookup[rep] && monthLookup[rep][m];
+        const touched = bucket ? bucket.uniqueAccounts.size : 0;
+        const activities = bucket ? bucket.totalActivities : 0;
+        const emails = bucket ? bucket.emails : 0;
+        return `<td><div class="flex flex-col"><span class="font-bold">Touched: ${touched}</span><span>Activities: ${activities}</span><span>Emails: ${emails}</span></div></td>`;
+      }).join('');
+      return `<tr><td class="font-bold">${escapeHtml(rep)}</td>${cells}</tr>`;
+    }).join('') || '<tr><td colspan="99" class="text-center text-muted italic py-6">No monthly trend data in current filter context.</td></tr>');
+
+    ['scorecard-table','actions-table','engagement-table','monthly-table'].forEach(tableId => {
+      if (typeof window.calculateTableTotals === 'function') {
+        try { window.calculateTableTotals(tableId); } catch(e) { console.warn('Totals skipped for', tableId, e); }
+      }
+    });
+
+    const distLabels = sortedReps.map(([rep]) => rep);
+    const distValues = sortedReps.map(([,s]) => s.totalRecords);
+    makeChart('chartDist', 'chart-distribution', {
+      type: 'bar',
+      data: { labels: distLabels, datasets: [{ label: 'Accounts', data: distValues, backgroundColor: 'rgba(59,130,246,0.7)' }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+    });
+
+    makeChart('chartAct', 'chart-activity', {
+      type: 'doughnut',
+      data: { labels: ['Emails','Notes','Masonville'], datasets: [{ data: [
+        eventFacts.filter(f => f.touchType === 'Email').length,
+        eventFacts.filter(f => (f.touchType || 'Note') === 'Note').length,
+        eventFacts.filter(f => f.touchType === 'Masonville').length
+      ], backgroundColor: ['#3b82f6','#a855f7','#f97316'] }] },
+      options: { responsive: true, maintainAspectRatio: false }
+    });
+
+    makeChart('chartActionsPie', 'chart-actions-pie', {
+      type: 'doughnut',
+      data: { labels: sortedActions.map(([a]) => a), datasets: [{ data: sortedActions.map(([,s]) => s.totalActivities), backgroundColor: ['#0f766e','#3b82f6','#a855f7','#f97316','#eab308','#ef4444','#22c55e'] }] },
+      options: { responsive: true, maintainAspectRatio: false }
+    });
+
+    makeChart('chartActionsBar', 'chart-actions-bar', {
+      type: 'bar',
+      data: { labels: sortedActions.map(([a]) => a), datasets: [{ label: 'Activities', data: sortedActions.map(([,s]) => s.totalActivities), backgroundColor: 'rgba(15,118,110,0.7)' }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } }
+    });
+
+    makeChart('chartEngagement', 'chart-engagement', {
+      type: 'bar',
+      data: {
+        labels: sortedReps.map(([r]) => r),
+        datasets: [
+          { label: 'Emails', data: sortedReps.map(([,s]) => s.emails), backgroundColor: 'rgba(59,130,246,0.7)' },
+          { label: 'Notes', data: sortedReps.map(([,s]) => s.notes), backgroundColor: 'rgba(168,85,247,0.7)' }
+        ]
+      },
+      options: { responsive: true, maintainAspectRatio: false }
+    });
+
+    const monthlyLabels = months;
+    const monthlyTotals = months.map(m => Array.from(monthlyMap.values()).filter(v => v.monthKey === m).reduce((sum, v) => sum + v.totalActivities, 0));
+    makeChart('chartMonthly', 'chart-monthly', {
+      type: 'line',
+      data: { labels: monthlyLabels, datasets: [{ label: 'Activities', data: monthlyTotals, borderColor: '#0f766e', backgroundColor: 'rgba(15,118,110,0.15)', fill: true, tension: 0.2 }] },
+      options: { responsive: true, maintainAspectRatio: false }
+    });
+  }
+
+  if (originalFetchAllData) {
+    window.fetchAllData = async function(){
+      const result = await originalFetchAllData.apply(this, arguments);
+      ensureReportingData(true);
+      return result;
+    };
+  }
+
+  if (originalExecuteSwitchTab) {
+    window._executeSwitchTab = function(id){
+      const result = originalExecuteSwitchTab.apply(this, arguments);
+      if (id === 'reports') {
+        ensureReportingData(true);
+        requestAnimationFrame(() => {
+          try { window.renderReports(); } catch (e) { console.error('Reporting hotfix post-tab render failed', e); }
+        });
+      }
+      return result;
+    };
+  }
+
+  if (originalRenderReports) {
+    window.renderReports = function(){
+      ensureReportingData(false);
+      try {
+        const result = originalRenderReports.apply(this, arguments);
+        window.reportsDirty = false;
+        return result;
+      } catch (err) {
+        console.error('Reporting hotfix: original renderReports failed, using fallback renderer.', err);
+        renderFallbackReports();
+        window.reportsDirty = false;
+      }
+    };
+  } else {
+    window.renderReports = function(){
+      ensureReportingData(false);
+      renderFallbackReports();
+      window.reportsDirty = false;
+    };
+  }
+
+  if (originalScheduleReportRefresh) {
+    window.scheduleReportRefresh = function(force = false){
+      clearTimeout(window._reportRefreshTimer);
+      window._reportRefreshTimer = setTimeout(() => {
+        const reportsTabActive = document.getElementById('tab-reports') && document.getElementById('tab-reports').classList.contains('active');
+        if (!reportsTabActive) {
+          window.reportsDirty = true;
+          return;
+        }
+        ensureReportingData(!!force || window.reportsDirty);
+        try {
+          window.renderReports();
+        } catch (e) {
+          console.error('Reporting hotfix: scheduleReportRefresh render failed', e);
+          renderFallbackReports();
+        }
+      }, force ? 50 : 150);
+    };
+  }
+})();
+/* === END REPORTING HOTFIX === */
+
 </script>
 </body>
 </html>
