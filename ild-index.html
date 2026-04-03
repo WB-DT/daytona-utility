@@ -4510,50 +4510,133 @@ window.scheduleReportRefresh = function(force = false) {
         return normalizeDatasetRows(rows, config);
     }
 
-    function buildUnifiedEventsFromSourceRows(sourceRows){
-        const events = [];
-        sourceRows.forEach(row => {
-            const combinedNotes = normalizeText(row.RawNotes || '').replace(/Modified By: /g, ' Modified By: ');
-            parseRawNotesM(combinedNotes).forEach(ev => {
-                const noteDate = ev.eventDateText instanceof Date ? ev.eventDateText : parseMDate(ev.eventDateText);
-                const emailDate = noteDate ? new Date(noteDate.getFullYear(), noteDate.getMonth(), noteDate.getDate()) : null;
-                const eventRow = {
-                    'Note Date': toIsoOrNull(noteDate),
-                    cr714_accountnum: row.cr714_accountnum,
-                    cr714_accountname: row.cr714_accountname,
-                    cr714_rep: row.cr714_rep,
-                    cr714_action: row.cr714_action,
-                    HelpStatus: row.HelpStatus,
-                    IsIntro: row.IsIntro === null || row.IsIntro === undefined ? true : !!row.IsIntro,
-                    LastModified: row.LastModified,
-                    SourceDataset: row.SourceDataset,
-                    EventRep: ev.eventRep,
-                    'Action at time of Note': safeTrim((ev.historicalAction || '').replace(/\]/g, '')) || null,
-                    NoteSegment: ev.noteSegment ? ev.noteSegment.replace(/------------------------/g,'').replace(/--------------------/g,'').replace(/\n\n+/g,'\n').trim() : null,
-                    EmailSubject: ev.emailSubject || null,
-                    EmailSegment: ev.emailSegment || null,
-                    'Masonville Link': ev.extractedLink || null,
-                    EmailDate: toDateOnly(emailDate),
-                    'Last 5 Days': withinLastDays(emailDate, 5),
-                    'Last 7 Days': withinLastDays(emailDate, 7),
-                    'Last 14 Days': withinLastDays(emailDate, 14),
-                    'Last 30 Days': withinLastDays(emailDate, 30),
-                    'Last 60 Days': withinLastDays(emailDate, 60),
-                    'Last 90 Days': withinLastDays(emailDate, 90),
-                    'Last 6 Months': withinLastMonths(emailDate, 6),
-                    Count: 1,
-                    _recordRef: row.RecordId,
-                    _entitySet: row.EntitySetName,
-                    _rawSource: row,
-                    _touchType: ev.emailSubject || ev.emailSegment ? 'Email' : (ev.extractedLink ? 'Masonville' : 'Note')
-                };
-                eventRow['HTML Note Card'] = buildHtmlNoteCard(eventRow);
-                events.push(eventRow);
-            });
+function buildUnifiedEventsFromSourceRows(sourceRows){
+    const rawEvents = [];
+
+    sourceRows.forEach(row => {
+        const combinedNotes = normalizeText(row.RawNotes || '').replace(/Modified By: /g, ' Modified By: ');
+
+        parseRawNotesM(combinedNotes).forEach(ev => {
+            const noteDate = ev.eventDateText instanceof Date ? ev.eventDateText : parseMDate(ev.eventDateText);
+            const emailDate = noteDate ? new Date(noteDate.getFullYear(), noteDate.getMonth(), noteDate.getDate()) : null;
+
+            let cleanedNote = ev.noteSegment
+                ? ev.noteSegment
+                    .replace(/------------------------/g, '')
+                    .replace(/--------------------/g, '')
+                    .replace(/\n\n+/g, '\n')
+                    .trim()
+                : null;
+
+            // Blank placeholder-only notes to keep merged history compact
+            if (cleanedNote && /^Account Management Note \(At time of email\):\s*$/i.test(cleanedNote)) {
+                cleanedNote = null;
+            }
+
+            const eventRow = {
+                'Note Date': toIsoOrNull(noteDate),
+                cr714_accountnum: row.cr714_accountnum,
+                cr714_accountname: row.cr714_accountname,
+                cr714_rep: row.cr714_rep,
+                cr714_action: row.cr714_action,
+                HelpStatus: row.HelpStatus,
+                IsIntro: row.IsIntro === null || row.IsIntro === undefined ? true : !!row.IsIntro,
+                LastModified: row.LastModified,
+                SourceDataset: row.SourceDataset,
+                EventRep: ev.eventRep,
+                'Action at time of Note': safeTrim((ev.historicalAction || '').replace(/\]/g, '')) || null,
+                NoteSegment: cleanedNote,
+                EmailSubject: ev.emailSubject || null,
+                EmailSegment: ev.emailSegment || null,
+                'Masonville Link': ev.extractedLink || null,
+                EmailDate: toDateOnly(emailDate),
+                'Last 5 Days': withinLastDays(emailDate, 5),
+                'Last 7 Days': withinLastDays(emailDate, 7),
+                'Last 14 Days': withinLastDays(emailDate, 14),
+                'Last 30 Days': withinLastDays(emailDate, 30),
+                'Last 60 Days': withinLastDays(emailDate, 60),
+                'Last 90 Days': withinLastDays(emailDate, 90),
+                'Last 6 Months': withinLastMonths(emailDate, 6),
+                Count: 1,
+                _recordRef: row.RecordId,
+                _entitySet: row.EntitySetName,
+                _rawSource: row,
+                _touchType: ev.emailSubject || ev.emailSegment ? 'Email' : (ev.extractedLink ? 'Masonville' : 'Note')
+            };
+
+            rawEvents.push(eventRow);
         });
-        events.sort((a,b) => { const acctCompare = String(a.cr714_accountnum || '').localeCompare(String(b.cr714_accountnum || '')); if (acctCompare !== 0) return acctCompare; return new Date(b['Note Date'] || 0) - new Date(a['Note Date'] || 0); });
-        return events;
-    }
+    });
+
+    // Merge events that are really the same note split by old dashed separators
+    // Keyed by account + exact note date/time + author + source
+    const mergedMap = new Map();
+
+    rawEvents.forEach(ev => {
+        const key = [
+            ev.cr714_accountnum || '',
+            ev['Note Date'] || '',
+            ev.EventRep || '',
+            ev.SourceDataset || ''
+        ].join('|');
+
+        if (!mergedMap.has(key)) {
+            mergedMap.set(key, {
+                ...ev,
+                _noteParts: ev.NoteSegment ? [ev.NoteSegment] : []
+            });
+            return;
+        }
+
+        const existing = mergedMap.get(key);
+
+        // Merge note text without duplicating blank/placeholder fragments
+        if (ev.NoteSegment) {
+            const normalizedIncoming = ev.NoteSegment.trim();
+            const alreadyExists = existing._noteParts.some(p => p.trim() === normalizedIncoming);
+            if (!alreadyExists) {
+                existing._noteParts.push(ev.NoteSegment);
+            }
+        }
+
+        // Preserve first non-empty metadata, but don't overwrite good values with blanks
+        if (!existing.EmailSubject && ev.EmailSubject) existing.EmailSubject = ev.EmailSubject;
+        if (!existing.EmailSegment && ev.EmailSegment) existing.EmailSegment = ev.EmailSegment;
+        if (!existing['Masonville Link'] && ev['Masonville Link']) existing['Masonville Link'] = ev['Masonville Link'];
+        if (!existing['Action at time of Note'] && ev['Action at time of Note']) {
+            existing['Action at time of Note'] = ev['Action at time of Note'];
+        }
+
+        // Keep the strongest touch type if one of the split parts was an email/link
+        if (existing._touchType !== 'Email' && ev._touchType === 'Email') existing._touchType = 'Email';
+        else if (existing._touchType === 'Note' && ev._touchType === 'Masonville') existing._touchType = 'Masonville';
+
+        existing.Count = (existing.Count || 1) + 1;
+    });
+
+    const mergedEvents = Array.from(mergedMap.values()).map(ev => {
+        const mergedNote = (ev._noteParts || [])
+            .map(s => String(s || '').trim())
+            .filter(Boolean)
+            .join('\n\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+
+        ev.NoteSegment = mergedNote || null;
+        delete ev._noteParts;
+
+        ev['HTML Note Card'] = buildHtmlNoteCard(ev);
+        return ev;
+    });
+
+    mergedEvents.sort((a,b) => {
+        const acctCompare = String(a.cr714_accountnum || '').localeCompare(String(b.cr714_accountnum || ''));
+        if (acctCompare !== 0) return acctCompare;
+        return new Date(b['Note Date'] || 0) - new Date(a['Note Date'] || 0);
+    });
+
+    return mergedEvents;
+}
 
     function summariseAccounts(sourceRows, eventRows){
         const eventMap = new Map();
