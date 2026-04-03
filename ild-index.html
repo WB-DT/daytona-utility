@@ -3956,11 +3956,95 @@ let monthlyData = {};
     function normalizeText(text){ return text === null || text === undefined ? '' : String(text).replace(/\r\n/g,'\n').replace(/\r/g,'\n'); }
     function nowIso(){ return new Date().toISOString(); }
 
-    function getCache(){ try { return JSON.parse(sessionStorage.getItem(CACHE_KEY)) || null; } catch(e){ return null; } }
-    function setCache(obj){ sessionStorage.setItem(CACHE_KEY, JSON.stringify(obj)); }
-    function clearCache(){ sessionStorage.removeItem(CACHE_KEY); sessionStorage.removeItem(META_KEY); }
-    function getMeta(){ try { return JSON.parse(sessionStorage.getItem(META_KEY)) || {}; } catch(e){ return {}; } }
-    function setMeta(obj){ sessionStorage.setItem(META_KEY, JSON.stringify(obj)); }
+const CACHE_KEY = 'act_mgr_session_cache_v4';
+const CACHE_PART_PREFIX = 'act_mgr_session_cache_v4_part_';
+const CACHE_PART_COUNT_KEY = 'act_mgr_session_cache_v4_part_count';
+const META_KEY  = 'act_mgr_session_meta_v4';
+
+function getMeta() {
+    try {
+        return JSON.parse(sessionStorage.getItem(META_KEY)) || {};
+    } catch (e) {
+        return {};
+    }
+}
+
+function setMeta(obj) {
+    sessionStorage.setItem(META_KEY, JSON.stringify(obj));
+}
+
+function clearCache() {
+    try {
+        sessionStorage.removeItem(CACHE_KEY);
+        const partCount = parseInt(sessionStorage.getItem(CACHE_PART_COUNT_KEY) || '0', 10);
+        for (let i = 0; i < partCount; i++) {
+            sessionStorage.removeItem(`${CACHE_PART_PREFIX}${i}`);
+        }
+        sessionStorage.removeItem(CACHE_PART_COUNT_KEY);
+        sessionStorage.removeItem(META_KEY);
+    } catch (e) {}
+}
+
+function getCache() {
+    try {
+        const single = sessionStorage.getItem(CACHE_KEY);
+        if (single) return JSON.parse(single);
+
+        const partCount = parseInt(sessionStorage.getItem(CACHE_PART_COUNT_KEY) || '0', 10);
+        if (!partCount) return null;
+
+        let json = '';
+        for (let i = 0; i < partCount; i++) {
+            const part = sessionStorage.getItem(`${CACHE_PART_PREFIX}${i}`);
+            if (!part) return null;
+            json += part;
+        }
+
+        return JSON.parse(json);
+    } catch (e) {
+        console.warn('Cache read failed, clearing cache:', e);
+        clearCache();
+        return null;
+    }
+}
+
+function setCache(obj) {
+    // Always reset old cache first
+    try {
+        sessionStorage.removeItem(CACHE_KEY);
+        const oldPartCount = parseInt(sessionStorage.getItem(CACHE_PART_COUNT_KEY) || '0', 10);
+        for (let i = 0; i < oldPartCount; i++) {
+            sessionStorage.removeItem(`${CACHE_PART_PREFIX}${i}`);
+        }
+        sessionStorage.removeItem(CACHE_PART_COUNT_KEY);
+    } catch (e) {}
+
+    try {
+        const json = JSON.stringify(obj);
+
+        // Small payload: store as one item
+        const chunkSize = 750000; // ~0.75MB chunks
+        if (json.length <= chunkSize) {
+            sessionStorage.setItem(CACHE_KEY, json);
+            return true;
+        }
+
+        // Larger payload: split into parts
+        const partCount = Math.ceil(json.length / chunkSize);
+        for (let i = 0; i < partCount; i++) {
+            const slice = json.slice(i * chunkSize, (i + 1) * chunkSize);
+            sessionStorage.setItem(`${CACHE_PART_PREFIX}${i}`, slice);
+        }
+        sessionStorage.setItem(CACHE_PART_COUNT_KEY, String(partCount));
+        return true;
+    } catch (err) {
+        console.warn('Session cache skipped:', err);
+        try {
+            clearCache();
+        } catch (e) {}
+        return false;
+    }
+}
 
     // ---------- Soft tasteful sync indicator ----------
     function softStatus(msg, tone='neutral'){
@@ -4403,19 +4487,7 @@ let monthlyData = {};
     window.__datasetConfigs = datasetConfigs;
     window.__normalizeRow = normalizeDatasetRows;
 
-    // ---------- Cache bootstrap ----------
-    window.bootstrapFromCache = function(){
-        const cached = getCache();
-        if (!cached) return false;
-        try {
-            window.employeesData = cached.employeesData || window.employeesData || [];
-            window.rawUnifiedSourceRows = cached.rawUnifiedSourceRows || [];
-            window.unifiedEventRows = cached.unifiedEventRows || [];
-            window.mergedAccounts = cached.mergedAccounts || [];
-            window.populateDynamicActionSet && window.populateDynamicActionSet();
-            return true;
-        } catch(e){ return false; }
-    };
+window.bootstrapFromCache = function
 
     // ---------- Full unified load ----------
     async function unifiedFullLoad(options={}){
@@ -4433,12 +4505,13 @@ let monthlyData = {};
         window.rawUnifiedSourceRows = sourceRows;
         window.unifiedEventRows = buildUnifiedEventsFromSourceRows(sourceRows);
         window.mergedAccounts = summariseAccounts(sourceRows, window.unifiedEventRows);
-        setCache({
-            employeesData: window.employeesData || [],
-            rawUnifiedSourceRows: window.rawUnifiedSourceRows,
-            unifiedEventRows: window.unifiedEventRows,
-            mergedAccounts: window.mergedAccounts
-        });
+// Build reporting facts before caching
+if (window.buildReportingFacts) {
+    window.buildReportingFacts();
+}
+
+// Cache only the compact reporting/startup payload
+setCache(buildCachePayload());
         setMeta({ ...getMeta(), lastFullSync: nowIso(), lastDeltaSync: nowIso(), entitySetMap });
         softStatus(`Data synced • ${window.unifiedEventRows.length.toLocaleString()} events`, 'good');
         if (!silent && document.getElementById('global-loader')) {
@@ -4450,6 +4523,16 @@ let monthlyData = {};
     // ---------- Delta refresh ----------
     let _deltaInFlight = false;
     window.deltaRefresh = async function(){
+    if (_deltaInFlight) return;
+
+    // If the heavy in-memory dataset is not currently loaded,
+    // skip delta merge and let the next silent/full refresh rebuild it.
+    if (!window.rawUnifiedSourceRows || window.rawUnifiedSourceRows.length === 0) {
+        return;
+    }
+
+    const meta = getMeta();
+    if (!meta.lastDeltaSync) return;
         if (_deltaInFlight) return;
         const meta = getMeta();
         if (!meta.lastDeltaSync) return;
@@ -4467,12 +4550,11 @@ let monthlyData = {};
             window.rawUnifiedSourceRows = Array.from(byKey.values());
             window.unifiedEventRows = buildUnifiedEventsFromSourceRows(window.rawUnifiedSourceRows);
             window.mergedAccounts = summariseAccounts(window.rawUnifiedSourceRows, window.unifiedEventRows);
-            setCache({
-                employeesData: window.employeesData || [],
-                rawUnifiedSourceRows: window.rawUnifiedSourceRows,
-                unifiedEventRows: window.unifiedEventRows,
-                mergedAccounts: window.mergedAccounts
-            });
+if (window.buildReportingFacts) {
+    window.buildReportingFacts();
+}
+
+setCache(buildCachePayload());
             setMeta({ ...getMeta(), lastDeltaSync: nowIso(), entitySetMap });
             const activeId = window.activeAccountId;
             const listContainer = document.getElementById('account-list-container');
