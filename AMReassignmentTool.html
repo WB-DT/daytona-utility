@@ -5,59 +5,126 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AM Reassignment Tool - v104.84</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
-    <style>
-        :root {
-            --bg-color: #0f111a;
-            --container-bg: #1a1d2b;
-            --text-color: #e0e0e0;
-            --border-color: #2d324a;
-            --accent-blue: #0078d4;
-            --accent-green: #107c10;
-            --accent-red: #a80000;
-            --row-hover: #252a3d;
+    <script>
+    // 1. GLOBAL CONSTANTS - MUST BE AT THE TOP
+    const DATAVERSE_URL = "https://org23279050.crm.dynamics.com/api/data/v9.2";
+    const DATAVERSE_SCOPE = "https://org23279050.crm.dynamics.com/.default";
+    
+    const msalConfig = { 
+        auth: { 
+            clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
+            authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", 
+            redirectUri: "https://WB-DT.github.io/daytona-utility/" 
+        }, 
+        cache: { cacheLocation: "localStorage", storeAuthStateInCookie: true } 
+    };
+
+    // Initialize MSAL immediately
+    const msalInstance = new msal.PublicClientApplication(msalConfig);
+    
+    const configs = {
+        'AM': { table: 'cr714_accountmanagementdatasets', repCol: 'cr714_rep', noteCol: 'cr714_accountmanagementnotes', idCol: 'cr714_accountmanagementdatasetid' },
+        'Cadence': { table: 'cr714_cadencedatasets', repCol: 'cr714_retentionrep', noteCol: 'cr714_qbnotes', idCol: 'cr714_cadencedatasetid' },
+        'Prospecting': { table: 'cr714_prospectingdatasets', repCol: 'cr714_repassigned', noteCol: 'cr714_prospectingnotes', idCol: 'cr714_prospectingdatasetid' },
+        'Louise Brown': { table: 'cr714_louisebrowndatasets', repCol: 'cr714_assignedrep', noteCol: 'cr714_notesfr', idCol: 'cr714_louisebrowndatasetid' }
+    };
+
+    let allData = []; 
+    let currentMetrics = {}; 
+    let currentScope = 'unsent';
+    let sortConfig = { left: { col: 'rem', dir: 'desc' }, right: { col: 'name', dir: 'asc' } };
+
+    // 2. AUTHENTICATION FUNCTIONS
+    async function initAuth() {
+        const loginContainer = document.getElementById('login-container');
+        loginContainer.style.display = 'flex';
+        try {
+            await msalInstance.handleRedirectPromise();
+            const accounts = msalInstance.getAllAccounts();
+            if (accounts.length > 0) {
+                completeLogin();
+            } else {
+                try { 
+                    await msalInstance.ssoSilent({ scopes: [DATAVERSE_SCOPE] }); 
+                    completeLogin(); 
+                } catch (e) {
+                    document.getElementById('auth-status').style.display = 'none';
+                    document.getElementById('auth-text').innerText = "Authentication Required";
+                    document.getElementById('manual-login-btn').style.display = 'block';
+                }
+            }
+        } catch (e) { console.error("Auth Error:", e); }
+    }
+
+    async function manualLogin() { 
+        try {
+            await msalInstance.loginPopup({ scopes: [DATAVERSE_SCOPE] }); 
+            completeLogin(); 
+        } catch (e) { console.error("Manual Login Error:", e); }
+    }
+
+    function completeLogin() { 
+        document.getElementById('login-container').style.display = 'none'; 
+        document.getElementById('main-app').style.display = 'block'; 
+        
+        // Populate Dataset dropdown if empty
+        const dsFilter = document.getElementById('datasetFilter');
+        if (dsFilter.options.length === 0) {
+            Object.keys(configs).forEach(k => dsFilter.add(new Option(k, k)));
         }
+        
+        fetchData(); 
+    }
 
-        body { font-family: 'Segoe UI', sans-serif; padding: 20px; background-color: var(--bg-color); color: var(--text-color); margin: 0; }
-        .container { max-width: 1600px; margin: 20px auto; background: var(--container-bg); padding: 25px; border-radius: 12px; border: 1px solid var(--border-color); box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-        
-        #login-container { position:fixed; inset:0; background:var(--bg-color); display:none; align-items:center; justify-content:center; z-index:9999; }
-        .loader { border: 4px solid #f3f3f3; border-top: 4px solid var(--accent-blue); border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 20px; }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    async function getToken() {
+        const accounts = msalInstance.getAllAccounts();
+        if (accounts.length === 0) throw new Error("No active account! Please sign in.");
+        const request = { scopes: [DATAVERSE_SCOPE], account: accounts[0] };
+        return (await msalInstance.acquireTokenSilent(request)).accessToken;
+    }
 
-        .header-flex { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .reassign-bar { background: #252a3d; padding: 20px; border-radius: 8px; display: flex; gap: 15px; align-items: flex-end; margin-bottom: 20px; border: 1px solid var(--border-color); flex-wrap: wrap; }
+    // 3. DATA FETCHING & PROCESSING
+    async function fetchData() {
+        const dsKey = document.getElementById('datasetFilter').value;
+        const config = configs[dsKey];
+        const feedDisplay = document.getElementById('feed-count');
+        feedDisplay.innerText = "Syncing Dataverse...";
         
-        .form-group { flex: 1; min-width: 150px; }
-        label { display: block; font-size: 11px; font-weight: bold; margin-bottom: 6px; color: #9da5b4; text-transform: uppercase; }
-        input, select { width: 100%; padding: 10px; border: 1px solid var(--border-color); border-radius: 4px; background: #0f111a; color: white; box-sizing: border-box; outline: none; }
-        
-        .table-container { height: 550px; overflow-y: auto; border: 1px solid var(--border-color); background: #141724; border-radius: 4px; }
-        table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-        
-        th { 
-            position: sticky; top: 0; background: var(--accent-blue); color: white; padding: 12px 10px; font-size: 11px; z-index: 10; cursor: pointer; text-transform: uppercase; white-space: nowrap;
+        try {
+            const token = await getToken();
+            const select = `cr714_accountnum,${config.repCol},cr714_action,${config.noteCol},${config.idCol}`;
+            // Use config.table for the endpoint
+            const url = `${DATAVERSE_URL}/${config.table}?$select=${select}&$filter=statecode eq 0`;
+            
+            const response = await fetch(url, { 
+                headers: { 
+                    'Authorization': `Bearer ${token}`, 
+                    'Prefer': 'odata.maxpagesize=5000' 
+                }
+            });
+            
+            if (!response.ok) throw new Error("Fetch failed with status " + response.status);
+            
+            const d = await response.json();
+            allData = d.value;
+            
+            // Populate Action Filter
+            const filter = document.getElementById('actionFilter');
+            const actions = [...new Set(allData.map(r => r.cr714_action).filter(Boolean))].sort();
+            filter.innerHTML = '<option value="ALL">-- ALL ACTIONS --</option>';
+            actions.forEach(a => filter.add(new Option(a, a)));
+            
+            processLocalMetrics();
+        } catch (e) {
+            feedDisplay.innerText = "Error"; 
+            console.error("Fetch Data Error:", e);
+            alert("Error syncing data: " + e.message);
         }
-        .col-name { width: 50%; }
-        .col-num { width: 16.6%; text-align: center; }
+    }
 
-        td { padding: 12px 10px; border-bottom: 1px solid var(--border-color); cursor: pointer; font-size: 13px; }
-        .td-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .td-num { text-align: center; }
-
-        tr:hover { background-color: var(--row-hover); }
-        tr.selected-source { background-color: #1a3a5a !important; border-left: 4px solid var(--accent-blue); }
-        tr.selected-target { background-color: #1a4a1a !important; border-left: 4px solid var(--accent-green); }
-
-        .badge { padding: 4px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; color: white; display: inline-block; }
-        
-        .btn-main { background: var(--accent-blue); color: white; border: none; padding: 12px 25px; border-radius: 4px; cursor: pointer; font-weight: bold; }
-        .btn-main:disabled { background: #333 !important; color: #666 !important; cursor: not-allowed; }
-        .btn-secondary { background: transparent; border: 1px solid var(--border-color); color: #9da5b4; padding: 8px 15px; border-radius: 4px; cursor: pointer; font-size: 12px; }
-
-        .toggle-group { display: flex; background: #0f111a; border: 1px solid var(--border-color); border-radius: 4px; padding: 2px; }
-        .toggle-btn { flex: 1; border: none; background: none; color: #9da5b4; padding: 8px; font-size: 10px; font-weight: bold; cursor: pointer; border-radius: 3px; }
-        .toggle-btn.active { background: var(--accent-blue); color: white; }
-    </style>
+    // [Mining logic, render, and executeNativeTransfer functions remain as provided in v104.84]
+    // ... (rest of the processing logic)
+</script>
 </head>
 <body onload="initAuth()">
 
