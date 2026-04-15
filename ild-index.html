@@ -167,6 +167,37 @@
         return safeText;
     };
 
+    
+window.globalTokenCache = {
+    expiresAt: {},
+    tokens: {}
+};
+window.actTokenSync = new BroadcastChannel('act_d365_token_sync');
+try {
+    const stored = sessionStorage.getItem("act_global_token_cache");
+    if(stored){
+        window.globalTokenCache = JSON.parse(stored);
+    }
+}catch(e){};
+    window.persistTokenCache = function(){
+    sessionStorage.setItem(
+        "act_global_token_cache",
+        JSON.stringify(window.globalTokenCache)
+    );
+};
+    window.actTokenSync.onmessage = function(event){
+
+    if(event.data?.type === "TOKEN_SYNC"){
+
+        window.globalTokenCache.tokens[event.data.scope] =
+            event.data.token;
+
+        window.globalTokenCache.expiresAt[event.data.scope] =
+            event.data.expiry;
+
+        window.persistTokenCache();
+    }
+};
     window.stripHTML = function(html) { if (!html) return ''; let tmp = document.createElement("DIV"); let withLineBreaks = String(html).replace(/<br\s*[\/]?>/gi, '\n').replace(/<\/p>/gi, '\n'); tmp.innerHTML = withLineBreaks; return (tmp.textContent || tmp.innerText || "").replace(/[\r\n\t]+/g, ' ').replace(/\s\s+/g, ' ').trim(); }
     window.getElementValue = function(id) { const el=document.getElementById(id); return el ? (el.value?.trim() ?? el.textContent?.trim() ?? null) : null; }
     window.safeJSONParse = function(str) { try { if (typeof str === 'object' && str !== null) return str; const parsed = JSON.parse(str); return typeof parsed === 'string' ? JSON.parse(parsed) : parsed; } catch (e) { return null; } };
@@ -319,15 +350,66 @@
     const msalInstance = new msal.PublicClientApplication(msalConfig);
     let msalAccount = null;
 
-    window.getToken = async function(scopeStr, silentFallback = false) {
-        let account = (typeof msalAccount !== 'undefined' && msalAccount) ? msalAccount : null;
-        if (!account) { const activeAccounts = msalInstance.getAllAccounts(); if (activeAccounts.length > 0) account = activeAccounts[0]; }
-        const request = { scopes: scopeStr.split(" "), account: account, authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401" };
-        try { return (await msalInstance.acquireTokenSilent(request)).accessToken; } catch (e) { 
-            if(silentFallback) { console.warn(`Silent token fetch failed for ${scopeStr}. Ignoring. Error: ${e.message}`); throw e; }
-            return (await msalInstance.acquireTokenPopup(request)).accessToken; 
-        }
+window.getToken = async function(scopeStr, forceRefresh=false) {
+
+    const account = msalAccount ||
+                    msalInstance.getAllAccounts()[0];
+
+    const resourceKey = scopeStr.toLowerCase();
+
+    const cachedToken = globalTokenCache.tokens[resourceKey];
+    const expiry = globalTokenCache.expiresAt[resourceKey];
+
+    // ✅ GLOBAL SESSION CACHE CHECK
+    if(!forceRefresh &&
+       cachedToken &&
+       expiry &&
+       Date.now() < expiry) {
+
+        return cachedToken;
     }
+
+    const request = {
+        scopes: [scopeStr],
+        account: account,
+        authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401"
+    };
+
+    try {
+
+        const resp = await msalInstance.acquireTokenSilent(request);
+
+globalTokenCache.tokens[resourceKey] = resp.accessToken;
+globalTokenCache.expiresAt[resourceKey] = resp.expiresOn.getTime();
+
+window.persistTokenCache();
+
+// ✅ SHARE TOKEN WITH OTHER ACT TABS
+window.actTokenSync.postMessage({
+    type: "TOKEN_SYNC",
+    scope: resourceKey,
+    token: resp.accessToken,
+    expiry: resp.expiresOn.getTime()
+});
+
+        sessionStorage.setItem("act_d365_" + resourceKey,
+                               resp.accessToken);
+
+        return resp.accessToken;
+
+    } catch (e) {
+
+        const resp = await msalInstance.acquireTokenPopup(request);
+
+        globalTokenCache.tokens[resourceKey] = resp.accessToken;
+        globalTokenCache.expiresAt[resourceKey] = resp.expiresOn.getTime();
+
+        sessionStorage.setItem("act_d365_" + resourceKey,
+                               resp.accessToken);
+
+        return resp.accessToken;
+    }
+};
 
     window.preloadTemplateImages = async function() {
         const imagesToCache = [ { key: 'daytona_img_chair', url: "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/WB%20Chair%20Mat.png" }, { key: 'daytona_img_shamrock', url: "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/15offShamrock.jpeg" }, { key: 'daytona_img_catalog', url: "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/WB%20Logo%203.4.2026.png" }, { key: 'daytona_img_keurig', url: "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/Keurig%20Email.png" } ];
@@ -353,9 +435,43 @@
         document.addEventListener('keydown', (e) => { if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { e.preventDefault(); document.getElementById('search-bar')?.focus(); }});
     }
 
-    window.login = function() {
-        msalInstance.loginPopup({ scopes: ["User.Read", "Mail.Send"] }).then(resp => { msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp(); }).catch(e => { document.getElementById('login-error').innerText = e.message; document.getElementById('login-error').classList.remove('hidden'); });
-    }
+window.login = function() {
+
+    msalInstance.loginPopup({
+        scopes: ["User.Read","Mail.Send"]
+    }).then(async resp => {
+
+        msalAccount = resp.account;
+        currentUserRepName = msalAccount.name;
+
+        // ✅ PRELOAD ALL DYNAMICS TOKEN SCOPES
+        // happens within SAME login interaction
+
+        try {
+
+            await window.getToken(
+                "https://wbmasonco.crm.dynamics.com//user_impersonation",
+                true
+            );
+
+            await window.getToken(
+                "https://org23279050.crm.dynamics.com//user_impersonation",
+                true
+            );
+
+        } catch(e) {
+            console.warn("Dynamics preload failed (will retry silently)",e);
+        }
+
+        // ✅ Now ACT loads already holding Dynamics tokens
+        window.initializeApp();
+
+    }).catch(e=>{
+        document.getElementById('login-error').innerText = e.message;
+        document.getElementById('login-error').classList.remove('hidden');
+    });
+
+};
 
     window.fetchGraphProfile = async function() {
         try {
@@ -519,14 +635,53 @@ window.renderMasonvilleDetailsInSlideout = function() {
         htmlString += `</div>`; contentArea.innerHTML = htmlString; window.openDataverseSlideout(`Work Orders: ${currentRecordId}`);
     };
 
-    window.fetchAndRenderTopItems = async function() {
-        if (!currentSelectedRecord) { window.showToast("Select an account first", "error"); return; }
-        window.showToast("Loading Top Items...", "processing");
-        setTimeout(() => {
-            const mockItems = [ { id: "WBM-1001", name: "Premium Copy Paper, 8.5x11", qty: 45, spend: "$2,150.00" }, { id: "KEU-8392", name: "Keurig K-Cups, Donut Shop", qty: 22, spend: "$880.00" }, { id: "PIL-G207", name: "Pilot G2 Pens, Black 12/PK", qty: 15, spend: "$195.00" }, { id: "JAN-X991", name: "Jumbo Roll Toilet Tissue", qty: 10, spend: "$450.00" } ];
-            window.renderTopItemsInSlideout(mockItems);
-        }, 800);
-    };
+window.fetchAndRenderTopItems = async function() {
+
+    if (!currentSelectedRecord) return;
+
+    const accountId = currentSelectedRecord.cr714_id;
+
+    try {
+
+        const token = await window.getToken(
+            "https://org23279050.crm.dynamics.com//user_impersonation"
+        );
+
+        const res = await fetch(
+            `${DATAVERSE_URL}/cr714_logisticslog_2s?$filter=cr714_accountnumber eq '${accountId}'`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'Prefer': 'odata.include-annotations="*"'
+                }
+            }
+        );
+
+        let items = [];
+
+        if (res.ok) {
+
+            const data = await res.json();
+
+            items = (data.value || []).map(i=>{
+                return {
+                    id: i.cr714_item,
+                    name: i.cr714_description,
+                    qty: i.cr714_quantity,
+                    spend: i.cr714_spend
+                };
+            });
+        }
+
+        window.renderTopItemsInSlideout(items);
+
+    } catch(e) {
+
+        window.renderTopItemsInSlideout([]);
+
+    }
+};
 
     window.renderTopItemsInSlideout = function(itemsArray) {
         const contentArea = document.getElementById('slideout-content');
@@ -552,12 +707,12 @@ window.renderMasonvilleDetailsInSlideout = function() {
 
 window.fetchD365Account = async function(accountId) {
     try {
-        let token;
-        try {
-            token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
-        } catch (tokenErr) {
-            return null;
-        }
+
+        const token = await window.getToken(
+            "https://wbmasonco.crm.dynamics.com//user_impersonation",
+            true
+        );
+
         if (!token) return null;
 
         const headers = {
@@ -565,6 +720,26 @@ window.fetchD365Account = async function(accountId) {
             'Content-Type': 'application/json',
             'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
         };
+
+        const cleanId = String(accountId).trim().replace(/'/g, "''");
+
+        const res = await fetch(
+            `${PRIMARY_CRM_URL}/accounts` +
+            `?$filter=accountnumber eq '${cleanId}'` +
+            `&$expand=primarycontactid($select=fullname,telephone1,emailaddress1)` +
+            `&$select=accountid,name,telephone1,emailaddress1,address1_line1,address1_city,address1_stateorprovince,mss_messagecenter,description,address1_composite,numberofemployees,industrycode,_defaultpricelevelid_value,_territoryid_value,_parentaccountid_value`,
+            { headers }
+        );
+
+        if (!res.ok) return null;
+
+        const data = await res.json();
+        return (data.value && data.value.length > 0) ? data.value[0] : null;
+
+    } catch (e) {
+        return null;
+    }
+};
 
         const cleanId = String(accountId).trim().replace(/'/g, "''");
 
@@ -1287,6 +1462,8 @@ window.fetchD365Account = async function(accountId) {
 
     document.addEventListener('DOMContentLoaded', () => {
         window.loadSavedTheme();
+        
+
         document.addEventListener('click', function(event) { if (!event.target.matches('#theme-toggle-btn') && !event.target.closest('#theme-toggle-btn')) { const menu = document.getElementById('theme-menu'); if (menu && menu.classList.contains('show')) { menu.classList.remove('show'); } } if (!event.target.closest('.theme-dropdown')) { const settings = document.getElementById('gallery-settings-menu'); if(settings && settings.style.display === 'block') settings.style.display = 'none'; } });
         msalInstance.handleRedirectPromise().then(resp => { if (resp && resp.account) { msalAccount = resp.account; currentUserRepName = msalAccount.name; window.initializeApp(); } else { const accounts = msalInstance.getAllAccounts(); if(accounts.length > 0) { msalAccount = accounts[0]; currentUserRepName = msalAccount.name; window.initializeApp(); } else { document.getElementById('global-loader').style.display='none'; document.getElementById('login-container').classList.remove('hidden'); document.getElementById('login-container').style.display='flex'; } } }).catch(e => { console.error(e); document.getElementById('global-loader').style.display='none'; document.getElementById('login-container').style.display='flex'; });
         const resizer = document.getElementById('history-resizer'); const grid = document.querySelector('.app-grid'); const historyCol = document.getElementById('history-column');
