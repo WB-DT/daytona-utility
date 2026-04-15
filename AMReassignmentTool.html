@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AM Reassignment Tool - v104.94</title>
+    <title>AM Reassignment Tool - v104.95</title>
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
     <style>
         :root {
@@ -78,10 +78,10 @@
 <div class="container" id="main-app" style="display:none;">
     <div class="header-flex">
         <div>
-            <h2 style="margin:0; letter-spacing: -0.5px;">Assignment Control <span style="font-size: 11px; font-weight:normal; color: #8b949e; margin-left: 10px;">v104.94</span></h2>
+            <h2 style="margin:0; letter-spacing: -0.5px;">Assignment Control <span style="font-size: 11px; font-weight:normal; color: #8b949e; margin-left: 10px;">v104.95</span></h2>
             <div style="font-size: 11px; margin-top: 4px;">
                 <span class="sync-pulse"></span>
-                <span id="sync-status" style="color: var(--accent-green);">Live Feed Active</span>
+                <span id="sync-status" style="color: var(--accent-green);">Live Feed Active (Filtering Inactive Reps)</span>
                 <span id="last-refresh" style="color: #8b949e; margin-left: 15px; font-family: monospace;">Updated: Just now</span>
             </div>
         </div>
@@ -194,7 +194,7 @@
                 try { await msalInstance.ssoSilent({ scopes: [DATAVERSE_SCOPE] }); completeLogin(); }
                 catch (e) {
                     document.querySelector('.loader').style.display = 'none';
-                    document.getElementById('auth-text').innerText = "Session Required";
+                    document.getElementById('auth-text').innerText = "Session Error";
                     document.getElementById('manual-login-btn').style.display = 'block';
                 }
             }
@@ -228,22 +228,29 @@
         
         try {
             const token = await getToken();
-            const hrUrl = `${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_managerassigned,cr714_department,cr714_supervisors`;
+
+            // 1. FETCH HR DATA (FILTERING OUT INACTIVE REPS)
+            const hrUrl = `${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_managerassigned,cr714_department,cr714_supervisors,cr714_status`;
             const hrResponse = await fetch(hrUrl, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' }});
             const hrJson = await hrResponse.json();
             
             hrData = {}; 
             hrJson.value.forEach(e => {
-                const deptLabel = e['cr714_department@OData.Community.Display.V1.FormattedValue'] || e.cr714_department || 'Unassigned';
-                hrData[e.cr714_employeename] = { 
-                    cr714_managerassigned: e.cr714_managerassigned || 'Unknown', 
-                    cr714_department: deptLabel,
-                    cr714_supervisors: e.cr714_supervisors || 'None'
-                };
+                const status = (e.cr714_status || '').toLowerCase();
+                // ONLY ADD IF ACTIVE
+                if (status === 'active') {
+                    const deptLabel = e['cr714_department@OData.Community.Display.V1.FormattedValue'] || e.cr714_department || 'Unassigned';
+                    hrData[e.cr714_employeename] = { 
+                        cr714_managerassigned: e.cr714_managerassigned || 'Unknown', 
+                        cr714_department: deptLabel,
+                        cr714_supervisors: e.cr714_supervisors || 'None'
+                    };
+                }
             });
 
             populateFilterValues();
 
+            // 2. FETCH CAMPAIGN DATA
             const select = `cr714_accountnum,${config.repCol},cr714_action,${config.noteCol},${config.idCol}`;
             let url = `${DATAVERSE_URL}/${config.table}?$select=${select}&$filter=statecode eq 0`;
             let fresh = [];
@@ -298,7 +305,7 @@
         
         currentMetrics = {};
 
-        // Seed with filtered HR list
+        // Seed with filtered HR list (Only Active Reps)
         Object.keys(hrData).forEach(repName => {
             const repHR = hrData[repName];
             if (filterVal === "ALL" || repHR[filterLevel] === filterVal) {
@@ -306,11 +313,13 @@
             }
         });
 
-        // Fill with campaign data
+        // Fill with actual data
         allData.forEach(r => {
             const rep = (r[repCol] || "Unassigned").trim();
             const action = r.cr714_action || "None";
-            if ((selAction === "ALL" || action === selAction) && currentMetrics[rep]) {
+            const actionMatch = (selAction === "ALL" || action === selAction);
+
+            if (actionMatch && currentMetrics[rep]) {
                 const unsent = isUnsent(r, action);
                 currentMetrics[rep].total++;
                 if (unsent) currentMetrics[rep].unsentCount++;
@@ -318,7 +327,10 @@
             }
         });
 
-        Object.keys(currentMetrics).forEach(k => currentMetrics[k].rem = (currentScope === 'unsent') ? currentMetrics[k].unsentCount : currentMetrics[k].total);
+        Object.keys(currentMetrics).forEach(k => {
+            currentMetrics[k].rem = (currentScope === 'unsent') ? currentMetrics[k].unsentCount : currentMetrics[k].total;
+        });
+
         render(); 
         updateDashboard();
     }
@@ -363,24 +375,30 @@
         const sSearch = document.getElementById('sourceRepDisplay').value.toLowerCase();
         const tSearch = document.getElementById('targetRepDisplay').value.toLowerCase();
         sBody.innerHTML = ''; tBody.innerHTML = '';
+
         const sorter = (side) => (a, b) => {
             const config = sortConfig[side];
             let valA = (config.col === 'name') ? a : (currentMetrics[a] ? currentMetrics[a][config.col] : 0);
             let valB = (config.col === 'name') ? b : (currentMetrics[b] ? currentMetrics[b][config.col] : 0);
             return config.dir === 'asc' ? String(valA).localeCompare(String(valB)) : String(valB).localeCompare(String(valA));
         };
+
         const reps = Object.keys(currentMetrics);
+        
         reps.filter(k => k.toLowerCase().includes(sSearch)).sort(sorter('left')).forEach(r => {
-            const tr = document.createElement('tr'); if (document.getElementById('sourceRepDisplay').value === r) tr.classList.add('selected-source');
+            const tr = document.createElement('tr'); 
+            if (document.getElementById('sourceRepDisplay').value === r) tr.classList.add('selected-source');
             const badgeColor = currentMetrics[r].rem > 0 ? 'var(--accent-red)' : '#484f58';
             tr.innerHTML = `<td>${r}</td><td class="td-num">${currentMetrics[r].total}</td><td class="td-num"><span class="badge" style="background:${badgeColor}">${currentMetrics[r].rem}</span></td>`;
             tr.onclick = () => { document.getElementById('sourceRepDisplay').value = r; validate(); render(); };
             sBody.appendChild(tr);
         });
+
         reps.filter(n => n.toLowerCase().includes(tSearch)).sort(sorter('right')).forEach(n => {
-            const tr = document.createElement('tr'); if (document.getElementById('targetRepDisplay').value === n) tr.classList.add('selected-target');
-            const badgeColor = currentMetrics[n].rem > 0 ? 'var(--accent-green)' : '#484f58';
-            tr.innerHTML = `<td>${n}</td><td class="td-num">${currentMetrics[n].total}</td><td class="td-num"><span class="badge" style="background:${badgeColor}">${currentMetrics[n].rem}</span></td>`;
+            const tr = document.createElement('tr'); 
+            if (document.getElementById('targetRepDisplay').value === n) tr.classList.add('selected-target');
+            const badgeColor = currentMetrics[n].unsentCount > 0 ? 'var(--accent-green)' : '#484f58';
+            tr.innerHTML = `<td>${n}</td><td class="td-num">${currentMetrics[n].total}</td><td class="td-num"><span class="badge" style="background:${badgeColor}">${currentMetrics[n].unsentCount}</span></td>`;
             tr.onclick = () => { document.getElementById('targetRepDisplay').value = n; validate(); render(); };
             tBody.appendChild(tr);
         });
@@ -400,17 +418,26 @@
         const qty = parseInt(document.getElementById('count').value);
         const dsKey = document.getElementById('datasetFilter').value;
         const config = configs[dsKey];
+        
         let candidates = (currentMetrics[sourceName] && currentMetrics[sourceName].records) ? currentMetrics[sourceName].records : [];
         if (currentScope === 'unsent') candidates = candidates.filter(r => r._isUnsent);
         const toMove = candidates.slice(0, qty);
+        
         if (!toMove.length || !confirm(`Move ${toMove.length} accounts to ${targetName}?`)) return;
         btn.disabled = true;
         try {
             const token = await getToken();
             for (let i = 0; i < toMove.length; i++) {
                 btn.innerText = `PATCHING ${i+1}/${toMove.length}...`;
-                const res = await fetch(`${DATAVERSE_URL}/${config.table}(${toMove[i][config.idCol]})`, { method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ [config.repCol]: targetName })});
-                if (res.ok) { const idx = allData.findIndex(item => item[config.idCol] === toMove[i][config.idCol]); if (idx !== -1) allData[idx][config.repCol] = targetName; }
+                const res = await fetch(`${DATAVERSE_URL}/${config.table}(${toMove[i][config.idCol]})`, { 
+                    method: 'PATCH', 
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ [config.repCol]: targetName })
+                });
+                if (res.ok) { 
+                    const idx = allData.findIndex(item => item[config.idCol] === toMove[i][config.idCol]); 
+                    if (idx !== -1) allData[idx][config.repCol] = targetName; 
+                }
             }
             processLocalMetrics();
         } catch (e) { alert(e.message); }
