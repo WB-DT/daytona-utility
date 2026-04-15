@@ -97,10 +97,18 @@
     </div>
 
     <div class="reassign-bar">
+        <div class="form-group" style="max-width:200px;">
+        <label>Filter By Category</label>
+            <select id="filterLevel" onchange="populateFilterValues()">
+                <option value="cr714_department">Department</option>
+                <option value="cr714_managerassigned">Manager</option>
+                <option value="cr714_supervisors">Supervisor</option>
+            </select>
+        </div>
         <div class="form-group">
-            <label>Department Team Filter</label>
-            <select id="teamFilter" onchange="processLocalMetrics()">
-                <option value="ALL">-- ALL DEPARTMENTS --</option>
+            <label>Select Team/Person</label>
+            <select id="filterValue" onchange="processLocalMetrics()">
+                <option value="ALL">-- SHOW ALL --</option>
             </select>
         </div>
         <div class="form-group">
@@ -216,73 +224,127 @@
     }
 
     async function fetchData(silent = false) {
-        if (silent && (document.activeElement.id === 'sourceRepDisplay' || document.activeElement.id === 'targetRepDisplay')) return;
+    if (silent && (document.activeElement.id === 'sourceRepDisplay' || document.activeElement.id === 'targetRepDisplay')) return;
 
-        const dsKey = document.getElementById('datasetFilter').value;
-        const config = configs[dsKey];
-        if (!silent) document.getElementById('sync-status').innerText = "Streaming Data...";
-        
-        try {
-            const token = await getToken();
+    const dsKey = document.getElementById('datasetFilter').value;
+    const config = configs[dsKey];
+    if (!silent) document.getElementById('sync-status').innerText = "Streaming Data...";
+    
+    try {
+        const token = await getToken();
 
-            // 1. FETCH HR DATA
-            // Added the 'Prefer' header to get the text labels (FormattedValue)
-            const hrUrl = `${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_managerassigned,cr714_department`;
-            const hrResponse = await fetch(hrUrl, { 
-                headers: { 
-                    'Authorization': `Bearer ${token}`,
-                    'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' 
-                }
-            });
-            
-            const hrJson = await hrResponse.json();
-            hrData = {};
-            const departments = new Set();
-            
-            hrJson.value.forEach(e => {
-                // Look for the Label first, then fall back to the raw number if missing
-                const deptLabel = e['cr714_department@OData.Community.Display.V1.FormattedValue'] || e.cr714_department || 'Unassigned';
-                
-                hrData[e.cr714_employeename] = { 
-                    manager: e.cr714_managerassigned || 'Unknown', 
-                    department: deptLabel 
-                };
-                
-                if (deptLabel) departments.add(deptLabel);
-            });
-
-            // Populate Team Filter
-            const teamFilter = document.getElementById('teamFilter');
-            const currentTeam = teamFilter.value;
-            teamFilter.innerHTML = '<option value="ALL">-- ALL DEPARTMENTS --</option>';
-            Array.from(departments).sort().forEach(d => teamFilter.add(new Option(d, d)));
-            teamFilter.value = currentTeam || "ALL";
-
-            // 2. FETCH CAMPAIGN DATA
-            const select = `cr714_accountnum,${config.repCol},cr714_action,${config.noteCol},${config.idCol}`;
-            let url = `${DATAVERSE_URL}/${config.table}?$select=${select}&$filter=statecode eq 0`;
-            let fresh = [];
-            while (url) {
-                const response = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.maxpagesize=5000' }});
-                const d = await response.json();
-                fresh = fresh.concat(d.value);
-                url = d['@odata.nextLink'] || null;
+        // 1. FETCH HR DATA WITH FORMATTED LABELS
+        const hrUrl = `${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_managerassigned,cr714_department,cr714_supervisors`;
+        const hrResponse = await fetch(hrUrl, { 
+            headers: { 
+                'Authorization': `Bearer ${token}`,
+                'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' 
             }
-            allData = fresh;
-            lastRefreshTime = new Date();
-            document.getElementById('feed-count').innerText = allData.length.toLocaleString();
-            document.getElementById('sync-status').innerText = "Direct Stream Active";
-            
-            const filter = document.getElementById('actionFilter');
-            const prev = filter.value;
-            const actions = [...new Set(allData.map(r => r.cr714_action).filter(Boolean))].sort();
-            filter.innerHTML = '<option value="ALL">-- ALL ACTIONS --</option>';
-            actions.forEach(a => filter.add(new Option(a, a)));
-            if (prev) filter.value = prev;
+        });
+        const hrJson = await hrResponse.json();
+        
+        hrData = {}; 
+        hrJson.value.forEach(e => {
+            const deptLabel = e['cr714_department@OData.Community.Display.V1.FormattedValue'] || e.cr714_department || 'Unassigned';
+            hrData[e.cr714_employeename] = { 
+                cr714_managerassigned: e.cr714_managerassigned || 'Unknown', 
+                cr714_department: deptLabel,
+                cr714_supervisors: e.cr714_supervisors || 'None'
+            };
+        });
 
-            processLocalMetrics();
-        } catch (e) { console.error(e); }
-    }
+        // Initialize the cascading dropdowns
+        populateFilterValues();
+
+        // 2. FETCH CAMPAIGN DATA
+        const select = `cr714_accountnum,${config.repCol},cr714_action,${config.noteCol},${config.idCol}`;
+        let url = `${DATAVERSE_URL}/${config.table}?$select=${select}&$filter=statecode eq 0`;
+        let fresh = [];
+        while (url) {
+            const response = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.maxpagesize=5000' }});
+            const d = await response.json();
+            fresh = fresh.concat(d.value);
+            url = d['@odata.nextLink'] || null;
+        }
+        allData = fresh;
+        lastRefreshTime = new Date();
+        document.getElementById('feed-count').innerText = allData.length.toLocaleString();
+        document.getElementById('sync-status').innerText = "Direct Stream Active";
+        
+        const filter = document.getElementById('actionFilter');
+        const prevAction = filter.value;
+        const actions = [...new Set(allData.map(r => r.cr714_action).filter(Boolean))].sort();
+        filter.innerHTML = '<option value="ALL">-- ALL ACTIONS --</option>';
+        actions.forEach(a => filter.add(new Option(a, a)));
+        if (prevAction) filter.value = prevAction;
+
+        processLocalMetrics();
+    } catch (e) { console.error(e); }
+}
+
+    // NEW: Cascading Dropdown Logic
+function populateFilterValues() {
+    const level = document.getElementById('filterLevel').value;
+    const valueDropdown = document.getElementById('filterValue');
+    const currentSelection = valueDropdown.value;
+
+    const uniqueValues = new Set();
+    Object.values(hrData).forEach(emp => {
+        if (emp[level] && emp[level] !== 'Unknown' && emp[level] !== 'None') {
+            uniqueValues.add(emp[level]);
+        }
+    });
+
+    valueDropdown.innerHTML = '<option value="ALL">-- SHOW ALL --</option>';
+    Array.from(uniqueValues).sort().forEach(val => {
+        valueDropdown.add(new Option(val, val));
+    });
+
+    valueDropdown.value = currentSelection || "ALL";
+    if (valueDropdown.selectedIndex === -1) valueDropdown.value = "ALL";
+}
+
+// NEW: Updated Metrics Processor
+function processLocalMetrics() {
+    const selAction = document.getElementById('actionFilter').value;
+    const filterLevel = document.getElementById('filterLevel').value;
+    const filterVal = document.getElementById('filterValue').value;
+    const dsKey = document.getElementById('datasetFilter').value;
+    const repCol = configs[dsKey].repCol;
+    
+    currentMetrics = {};
+
+    allData.forEach(r => {
+        const rep = (r[repCol] || "Unassigned").trim();
+        const action = r.cr714_action || "None";
+        const repHR = hrData[rep] || { cr714_managerassigned: '--', cr714_department: '--', cr714_supervisors: '--' };
+
+        const actionMatch = (selAction === "ALL" || action === selAction);
+        const hierarchyMatch = (filterVal === "ALL" || repHR[filterLevel] === filterVal);
+
+        if (actionMatch && hierarchyMatch) {
+            if (!currentMetrics[rep]) {
+                currentMetrics[rep] = { 
+                    total: 0, 
+                    unsentCount: 0, 
+                    records: [], 
+                    manager: repHR.cr714_managerassigned 
+                };
+            }
+            const unsent = isUnsent(r, action);
+            currentMetrics[rep].total++;
+            if (unsent) currentMetrics[rep].unsentCount++;
+            currentMetrics[rep].records.push({ ...r, _isUnsent: unsent });
+        }
+    });
+
+    Object.keys(currentMetrics).forEach(k => {
+        currentMetrics[k].rem = (currentScope === 'unsent') ? currentMetrics[k].unsentCount : currentMetrics[k].total;
+    });
+
+    render(); 
+    updateDashboard();
+}
 
     function isUnsent(record, targetAction) {
         const dsKey = document.getElementById('datasetFilter').value;
