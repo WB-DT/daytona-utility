@@ -238,7 +238,7 @@
                 <div id="app-loader" class="absolute inset-0 z-20 glass-panel flex flex-col items-center justify-center hidden bg-[#0b0f19]/80">
                     <i class="fas fa-circle-notch fa-spin text-6xl neon-text mb-6"></i>
                     <h2 class="text-2xl font-bold tracking-widest uppercase text-white">Aggregating Data</h2>
-                    <p class="text-sm text-slate-400 mt-2">Combining AM, Prospecting & Cadence...</p>
+                    <p class="text-sm text-slate-400 mt-2">Connecting to Dataverse Nodes...</p>
                 </div>
 
                 <!-- TAB 1: DASHBOARD -->
@@ -343,11 +343,23 @@
                             <p class="text-xs text-slate-400">Data mapped from cr714_logisticslog_2.</p>
                         </div>
                     </div>
-                    <div class="glass-panel flex-grow flex items-center justify-center text-center p-8">
-                        <div>
-                            <i class="fas fa-boxes-packing text-6xl mb-4 text-slate-600"></i>
-                            <h3 class="text-xl font-bold text-slate-300">Logistics Module Active</h3>
-                            <p class="text-sm text-slate-500 mt-2 max-w-md mx-auto">This tab successfully maps the schema for Logistics Logs. Data will populate when the CRM endpoint returns valid cr714_logisticslog_2 records within the date range.</p>
+                    <div class="glass-panel flex-grow flex flex-col overflow-hidden relative">
+                        <div class="overflow-auto h-full custom-scrollbar">
+                            <table class="w-full glass-table whitespace-nowrap">
+                                <thead>
+                                    <tr>
+                                        <th>Date</th>
+                                        <th>Account & Company</th>
+                                        <th>Logistics Owner</th>
+                                        <th>Issue Type</th>
+                                        <th>Summary</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="logistics-table-body">
+                                    <!-- Populated via JS -->
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -358,7 +370,6 @@
 
     <!-- APPLICATION LOGIC -->
     <script>
-        // Separate Scope and Endpoint for proper Azure AD routing
         const DATAVERSE_ENDPOINT = "https://org23279050.crm.dynamics.com/api/data/v9.2";
         const DATAVERSE_SCOPE = "https://org23279050.crm.dynamics.com//user_impersonation";
 
@@ -378,6 +389,7 @@
                 this.account = null;
                 this.rawDataset = []; // Combined Data
                 this.processedData = []; // Filtered Data
+                this.logisticsData = []; // Logistics Tab Data
                 this.charts = {};
                 
                 // Set default 30-day range
@@ -386,8 +398,15 @@
                 thirtyDaysAgo.setDate(today.getDate() - 30);
                 document.getElementById('filter-end-date').valueAsDate = today;
                 document.getElementById('filter-start-date').valueAsDate = thirtyDaysAgo;
+            }
 
-                this.checkExistingSession();
+            // Initializes session tracking (called heavily by window.onload)
+            async initialize() {
+                const accounts = msalInstance.getAllAccounts();
+                if (accounts.length > 0) {
+                    this.account = accounts[0];
+                    this.initWorkspace();
+                }
             }
 
             // --- AUTHENTICATION ---
@@ -409,19 +428,16 @@
 
             logout() { msalInstance.logoutPopup().then(() => window.location.reload()); }
 
-            checkExistingSession() {
-                const accounts = msalInstance.getAllAccounts();
-                if (accounts.length > 0) {
-                    this.account = accounts[0];
-                    this.initWorkspace();
-                }
-            }
-
             async getToken() {
                 if (!this.account || this.account.name === "Exec Bypass") return "mock_token";
                 const req = { scopes: [DATAVERSE_SCOPE], account: this.account };
-                try { return (await msalInstance.acquireTokenSilent(req)).accessToken; } 
-                catch (e) { return (await msalInstance.acquireTokenPopup(req)).accessToken; }
+                try { 
+                    // Attempt silent fetch (will fail on page load if session requires interaction)
+                    return (await msalInstance.acquireTokenSilent(req)).accessToken; 
+                } catch (e) { 
+                    console.warn("Silent token acquisition failed. User interaction is required.", e);
+                    throw new Error("interaction_required");
+                }
             }
 
             // --- UI STATE ---
@@ -456,40 +472,96 @@
             async fetchData() {
                 document.getElementById('app-loader').classList.remove('hidden');
                 this.rawDataset = [];
+                this.logisticsData = [];
 
                 try {
                     const token = await this.getToken();
-                    if (token === "mock_token") throw new Error("Using Mock Data Bypass");
+                    if (token === "mock_token") {
+                        this.rawDataset = this.generateRealisticMockData();
+                        this.logisticsData = this.generateLogisticsMockData();
+                        this.processDataset();
+                        document.getElementById('app-loader').classList.add('hidden');
+                        return;
+                    }
 
-                    // Parallel requests to construct the "Combined_ACT_Datasets"
-                    const headers = { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.include-annotations="*"' };
+                    const headers = { 
+                        'Authorization': `Bearer ${token}`, 
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                        'Prefer': 'odata.include-annotations="*"' 
+                    };
+
+                    // Robust fetch handler to prevent silent schema failures
+                    const fetchAPI = async (url) => {
+                        try {
+                            const r = await fetch(url, { headers });
+                            if (!r.ok) {
+                                const err = await r.text();
+                                console.error(`Fetch error for ${url}: HTTP ${r.status}`, err);
+                                return { value: [] }; 
+                            }
+                            return await r.json();
+                        } catch (e) {
+                            console.error(`Network error for ${url}:`, e);
+                            return { value: [] };
+                        }
+                    };
                     
-                    const p1 = fetch(`${DATAVERSE_ENDPOINT}/cr714_accountmanagementdatasets?$select=createdon,cr714_accountnum,cr714_accountname,cr714_action,cr714_managernotes,cr714_actionmessage,cr714_rep&$top=150`, {headers}).then(r => r.ok ? r.json() : {value:[]});
-                    const p2 = fetch(`${DATAVERSE_ENDPOINT}/cr714_prospectingdatasets?$select=createdon,cr714_accountnum,cr714_acctname,cr714_action,cr714_prospectingnotes,cr714_actionmessage,cr714_repassigned&$top=150`, {headers}).then(r => r.ok ? r.json() : {value:[]});
-                    const p3 = fetch(`${DATAVERSE_ENDPOINT}/cr714_cadencedatasets?$select=createdon,cr714_accountnum,cr714_company,cr714_action,cr714_managernotes,cr714_actionmessage,cr714_retentionrep&$top=150`, {headers}).then(r => r.ok ? r.json() : {value:[]});
+                    // Specific API Mapping per live CSV definitions
+                    const amUrl = `${DATAVERSE_ENDPOINT}/cr714_accountmanagementdatasets?$select=createdon,cr714_accountnum,cr714_accountname,cr714_action,cr714_managernotes,cr714_actionmessage,cr714_rep&$top=2000&$orderby=createdon desc`;
+                    const prosUrl = `${DATAVERSE_ENDPOINT}/cr714_prospectingdatasets?$select=createdon,cr714_accountnum,cr714_acctname,cr714_action,cr714_prospectingnotes,cr714_actionmessage,cr714_repassigned&$top=2000&$orderby=createdon desc`;
+                    const cadUrl = `${DATAVERSE_ENDPOINT}/cr714_cadencedatasets?$select=createdon,cr714_accountnum,cr714_company,cr714_action,cr714_managernotes,cr714_actionmessage,cr714_retentionrep&$top=2000&$orderby=createdon desc`;
+                    const logUrl = `${DATAVERSE_ENDPOINT}/cr714_logisticslog_2s?$select=createdon,cr714_accountnumber,cr714_companyordeliveryname,cr714_logisticsowner,cr714_issue,cr714_briefsummaryissue,cr714_disposition,cr714_logisticsnotes&$top=1000&$orderby=createdon desc`;
 
-                    const [amData, prosData, cadData] = await Promise.all([p1, p2, p3]);
+                    const [amData, prosData, cadData, logData] = await Promise.all([
+                        fetchAPI(amUrl), 
+                        fetchAPI(prosUrl), 
+                        fetchAPI(cadUrl),
+                        fetchAPI(logUrl)
+                    ]);
 
-                    // Normalize and Merge
+                    // Normalize and Merge Core Sets
                     this.rawDataset = [
-                        ...amData.value.map(r => this.normalizeRecord(r, 'Account Management')),
-                        ...prosData.value.map(r => this.normalizeRecord(r, 'Prospecting')),
-                        ...cadData.value.map(r => this.normalizeRecord(r, 'Cadence'))
+                        ...(amData.value || []).map(r => this.normalizeRecord(r, 'Account Management')),
+                        ...(prosData.value || []).map(r => this.normalizeRecord(r, 'Prospecting')),
+                        ...(cadData.value || []).map(r => this.normalizeRecord(r, 'Cadence'))
                     ];
 
-                    if(this.rawDataset.length === 0) throw new Error("No data mapped.");
+                    // Process Logistics Independent Tab
+                    this.logisticsData = (logData.value || []).map(r => ({
+                        date: new Date(r.createdon),
+                        accountNum: r.cr714_accountnumber || 'Unknown',
+                        company: r.cr714_companyordeliveryname || 'Unknown',
+                        owner: r.cr714_logisticsowner || 'Unassigned',
+                        issue: r.cr714_issue || 'None',
+                        summary: r.cr714_briefsummaryissue || '',
+                        disposition: r.cr714_disposition || 'Pending',
+                        notes: r.cr714_logisticsnotes || ''
+                    }));
+
+                    if(this.rawDataset.length === 0) {
+                        console.warn("API succeeded, but no data mapped. Verify CRM data or schema names.");
+                    }
+
+                    this.processDataset();
 
                 } catch (error) {
-                    console.warn("API Error/Bypass, generating realistic CSV-based mock data...", error);
-                    this.rawDataset = this.generateRealisticMockData();
+                    console.error("Critical Fetch Exception:", error);
+                    if (error.message === "interaction_required") {
+                        // User session expired or block token popup on initialization. Ask them to login manually.
+                        document.getElementById('main-app').classList.add('hidden');
+                        document.getElementById('login-container').classList.remove('hidden');
+                        document.getElementById('login-error').innerText = "Your session requires interaction. Please click Authenticate SSO.";
+                        document.getElementById('login-error').classList.remove('hidden');
+                    } else {
+                        alert("Failed to pull data from CRM. Check console for specific schema errors.");
+                    }
                 } finally {
                     document.getElementById('app-loader').classList.add('hidden');
-                    this.processDataset();
                 }
             }
 
             normalizeRecord(r, source) {
-                // Resolving Dataverse field inconsistencies across the 3 tables
                 return {
                     id: r.cr714_accountmanagementdatasetid || r.cr714_prospectingdatasetid || r.cr714_cadencedatasetid || Math.random().toString(),
                     date: new Date(r.createdon),
@@ -502,29 +574,51 @@
                 };
             }
 
-            // Highly specific parsing based on the user's provided CSVs
+            // Integrated robust logic matching the ACT App functionality
             parseNoteLogic(noteText) {
                 const str = String(noteText || '');
                 let parsedAction = 'No Action Logged';
                 let emailSent = false;
 
-                // 1. Look for live CSV format: "Email was generated for Action: NOVNoSales"
+                // 1. Explicit brackets e.g. [CLOSED], [CALL]
+                const actionMatchBracket = str.match(/\[([A-Z\s]+)\]/i);
+                if (actionMatchBracket) {
+                    parsedAction = actionMatchBracket[1].trim();
+                }
+
+                // 2. Metadata block parsing (ACT style) {{METADATA: EmailSent=Yes | Action=Outbound}}
+                const metaMatch = str.match(/\{\{METADATA:(.*?)\}\}/i);
+                if (metaMatch) {
+                    const metaParts = metaMatch[1].split('|');
+                    metaParts.forEach(part => {
+                        const kv = part.split('=');
+                        if (kv.length === 2) {
+                            const key = kv[0].trim().toLowerCase();
+                            const val = kv[1].trim();
+                            if (key === 'emailsent' && val.toLowerCase() === 'yes') emailSent = true;
+                            if (key === 'action') parsedAction = val;
+                        }
+                    });
+                }
+
+                // 3. Fallbacks based on Live CSV string matching
                 const genMatch = str.match(/Email was generated for Action:\s*([a-zA-Z0-9]+)/i);
                 const actionMatch = str.match(/Action:\s*([a-zA-Z0-9]+)/i);
 
                 if (genMatch) {
                     parsedAction = genMatch[1].trim();
                     emailSent = true;
-                } 
-                // 2. Look for live CSV format: "Action: FebruaryNonBuy ASAP"
-                else if (actionMatch) {
+                } else if (actionMatch && !actionMatchBracket) {
                     parsedAction = actionMatch[1].trim();
+                } else if (str.toLowerCase().includes('voicemail')) {
+                    parsedAction = 'Voicemail';
+                } else if (str.toLowerCase().includes('call')) {
+                    parsedAction = 'Call';
                 }
-                // 3. Fallbacks
-                else if (str.toLowerCase().includes('voicemail')) parsedAction = 'Voicemail';
-                else if (str.toLowerCase().includes('call')) parsedAction = 'Call';
                 
-                if (!emailSent && (str.toLowerCase().includes('sent email') || str.toLowerCase().includes('emailed'))) emailSent = true;
+                if (!emailSent && (str.toLowerCase().includes('sent email') || str.toLowerCase().includes('emailed'))) {
+                    emailSent = true;
+                }
 
                 return { parsedAction, emailSent };
             }
@@ -532,14 +626,13 @@
             processDataset() {
                 this.processedData = this.rawDataset.map(row => {
                     const parsed = this.parseNoteLogic(row.rawNote);
-                    
-                    // Specific logic: Cadence table sets system action to "Cadence" inherently.
                     let isMatch = false;
-                    if(row.source === 'Cadence' && row.systemAction === 'Cadence') isMatch = true; 
+                    
+                    if (row.source === 'Cadence' && row.systemAction === 'Cadence') isMatch = true; 
                     else isMatch = row.systemAction.toLowerCase().includes(parsed.parsedAction.toLowerCase());
 
                     return { ...row, ...parsed, isMatch };
-                }).sort((a,b) => b.date - a.date); // Sort newest first
+                }).sort((a,b) => b.date - a.date); 
 
                 this.applyFilters();
             }
@@ -554,8 +647,9 @@
                 this.currentFiltered = this.processedData.filter(d => d.date >= start && d.date <= end);
                 
                 this.updateDashboard();
-                this.filterAnalyticsTable(); // Renders table with search applied
+                this.filterAnalyticsTable(); 
                 this.updateRoster();
+                this.updateLogisticsTable(start, end);
             }
 
             // --- RENDERING MODULES ---
@@ -591,7 +685,6 @@
                 Chart.defaults.color = '#94a3b8';
                 Chart.defaults.font.family = "'Inter', sans-serif";
 
-                // 1. Trend Chart
                 const trends = {};
                 data.forEach(d => {
                     const dStr = d.date.toISOString().split('T')[0];
@@ -613,7 +706,6 @@
                     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { grid: { color: 'rgba(255,255,255,0.05)' }, beginAtZero: true }, x: { grid: { display: false } } } }
                 });
 
-                // 2. Source Breakdown
                 const sources = { 'Account Management': 0, 'Prospecting': 0, 'Cadence': 0 };
                 data.forEach(d => { if(sources[d.source] !== undefined) sources[d.source]++; });
 
@@ -644,7 +736,7 @@
                     return;
                 }
 
-                filtered.slice(0, 100).forEach(row => { // Limit to 100 for DOM performance
+                filtered.slice(0, 100).forEach(row => {
                     const dateStr = row.date.toLocaleDateString() + ' ' + row.date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
                     
                     let srcBadge = '';
@@ -680,7 +772,6 @@
                 const grid = document.getElementById('roster-grid');
                 grid.innerHTML = '';
 
-                // Group by Account
                 const accMap = new Map();
                 this.currentFiltered.forEach(r => {
                     if(!accMap.has(r.accountNum)) {
@@ -720,6 +811,44 @@
                 });
             }
 
+            updateLogisticsTable(start, end) {
+                const tbody = document.getElementById('logistics-table-body');
+                if(!tbody) return;
+                tbody.innerHTML = '';
+
+                const filtered = this.logisticsData.filter(d => d.date >= start && d.date <= end);
+
+                if (filtered.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-slate-500 py-8">No logistics logs match your filters.</td></tr>`;
+                    return;
+                }
+
+                filtered.slice(0, 100).forEach(row => {
+                    const dateStr = row.date.toLocaleDateString();
+                    
+                    let dispBadge = `<span class="badge badge-info">${row.disposition}</span>`;
+                    if(row.disposition.toLowerCase().includes('complete') || row.disposition.toLowerCase().includes('resolved')) {
+                        dispBadge = `<span class="badge badge-success">${row.disposition}</span>`;
+                    } else if(row.disposition.toLowerCase().includes('pending') || row.disposition.toLowerCase().includes('hold')) {
+                        dispBadge = `<span class="badge badge-warning">${row.disposition}</span>`;
+                    }
+
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td class="font-mono text-xs text-slate-400">${dateStr}</td>
+                        <td>
+                            <div class="font-bold text-white">${row.accountNum}</div>
+                            <div class="text-[10px] text-slate-400 truncate max-w-[150px]">${row.company}</div>
+                        </td>
+                        <td class="text-xs text-blue-400"><i class="fas fa-headset mr-1"></i> ${row.owner}</td>
+                        <td class="text-xs text-slate-300">${row.issue}</td>
+                        <td class="text-xs text-slate-400 max-w-[200px] truncate" title="${row.summary.replace(/"/g, "'")}">${row.summary}</td>
+                        <td>${dispBadge}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            }
+
             exportToCSV() {
                 if(!this.currentFiltered || this.currentFiltered.length === 0) return alert('No data to export.');
                 const headers = ['Date', 'Source', 'Account Number', 'Account Name', 'Rep', 'System Action', 'Parsed Action', 'Email Sent', 'Is Match', 'Raw Note Content'];
@@ -738,7 +867,6 @@
                 const mock = [];
                 const now = new Date();
                 
-                // Account Management Pattern
                 for(let i=0; i<80; i++) {
                     const isEmail = Math.random() > 0.4;
                     const action = isEmail ? 'NOVNoSales' : 'Decline';
@@ -749,7 +877,6 @@
                         cr714_action: action, cr714_managernotes: msg, cr714_rep: 'Zaria Robinson'
                     }, 'Account Management'));
                 }
-                // Prospecting Pattern
                 for(let i=0; i<50; i++) {
                     mock.push(this.normalizeRecord({
                         createdon: new Date(now.getTime() - Math.random()*30*86400000).toISOString(),
@@ -757,7 +884,6 @@
                         cr714_action: 'Prospecting', cr714_prospectingnotes: 'Prospecting - Send initial Email', cr714_repassigned: 'Matt Bleakley'
                     }, 'Prospecting'));
                 }
-                // Cadence Pattern
                 for(let i=0; i<50; i++) {
                     mock.push(this.normalizeRecord({
                         createdon: new Date(now.getTime() - Math.random()*30*86400000).toISOString(),
@@ -767,9 +893,33 @@
                 }
                 return mock;
             }
+
+            generateLogisticsMockData() {
+                const mock = [];
+                const issues = ['Missing Item', 'Damaged Box', 'Wrong Address', 'Delayed'];
+                const owners = ['Stacy', 'Paula', 'BJ Scott', 'Mikaela Ham'];
+                const now = new Date();
+                for(let i=0; i<30; i++) {
+                    mock.push({
+                        date: new Date(now.getTime() - Math.random()*30*86400000),
+                        accountNum: `C${10000+i}`,
+                        company: `Test Logistics Corp ${i}`,
+                        owner: owners[Math.floor(Math.random()*owners.length)],
+                        issue: issues[Math.floor(Math.random()*issues.length)],
+                        summary: 'Customer called stating missing items. Need to manifest tomorrow.',
+                        disposition: Math.random() > 0.5 ? 'Sent Back' : 'Complete',
+                        notes: 'Followed up via email.'
+                    });
+                }
+                return mock;
+            }
         }
 
-        window.onload = () => { window.app = new ListsHubApp(); };
+        // Properly await window load before binding class to DOM components to ensure stability
+        window.addEventListener('load', () => { 
+            window.app = new ListsHubApp(); 
+            window.app.initialize(); 
+        });
     </script>
 </body>
 </html>
