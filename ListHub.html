@@ -357,7 +357,7 @@
                 <div id="app-loader" class="absolute inset-0 z-30 panel flex flex-col items-center justify-center hidden bg-slate-950/95 border-none h-full min-h-[500px]">
                     <i class="fas fa-circle-notch fa-spin text-5xl text-brand-500 mb-6"></i>
                     <h2 class="text-lg font-bold text-white tracking-[0.2em] uppercase">Aggregating Nodes</h2>
-                    <p id="loader-status" class="text-xs text-slate-500 mt-2 font-mono italic">Initializing sequential pipeline...</p>
+                    <p id="loader-status" class="text-xs text-slate-500 mt-2 font-mono italic">Initializing parallel pipeline...</p>
                 </div>
 
                 <!-- SECTION 1: DASHBOARD (REP FOCUSED) -->
@@ -1211,8 +1211,8 @@
                 const container = document.getElementById(id); if(!container) return;
                 try {
                     // Send exhaustive payload to guarantee Flow intercepts the correct property variable
-                    // This explicitly fixes the "uri expects a value but got null" error in Power Automate
-                    const safeNum = String(num);
+                    // Explicitly maps all keys so "uri expects a value but got null" is completely avoided
+                    const safeNum = String(num || '');
                     const payload = { 
                         accountNumber: safeNum, 
                         accountId: safeNum, 
@@ -1245,7 +1245,7 @@
             filterAnalyticsTable(reset = false) {
                 if (reset) this.pagination.analytics.page = 1;
                 const displayData = this.currentFiltered;
-                // No slice limiting before pagination. Pagination handles true arrays dynamically.
+                // Pagination handles true arrays dynamically.
                 const { startIdx, endIdx } = this.updatePaginationUI('analytics', displayData.length, displayData.length);
                 
                 const html = displayData.slice(startIdx, endIdx).map(r => `
@@ -1373,11 +1373,13 @@
                 
                 try {
                     const token = await this.getToken();
+                    
+                    // Prefer maxpagesize 10,000 to pull batches rapidly 
                     const headers = { 
                         'Authorization': `Bearer ${token}`, 
                         'Accept': 'application/json', 
                         'Content-Type': 'application/json', 
-                        'Prefer': 'odata.include-annotations="*", odata.maxpagesize=5000' 
+                        'Prefer': 'odata.include-annotations="*", odata.maxpagesize=10000' 
                     };
 
                     let lastSyncStr = null;
@@ -1416,7 +1418,7 @@
                     
                     if (statusEl) statusEl.innerText = "Connecting to Dataverse API...";
                     
-                    // Run sequentially to prevent 429 Too Many Requests which causes silent record dropping
+                    // Robust fetch function with 429 Throttle Retry and Event Loop yielding
                     const fetchAPI = async (url) => {
                         let resSet = []; 
                         let nextL = url;
@@ -1425,7 +1427,8 @@
                                 const r = await fetch(nextL, { headers }); 
                                 if (!r.ok) {
                                     if (r.status === 429) {
-                                        await new Promise(res => setTimeout(res, 2000));
+                                        if (statusEl) statusEl.innerText = `Dataverse rate limit hit. Pausing...`;
+                                        await new Promise(res => setTimeout(res, 2500));
                                         continue;
                                     }
                                     console.error(`API Error ${r.status}`);
@@ -1435,9 +1438,12 @@
                                 if(data.value) { 
                                     resSet = resSet.concat(data.value); 
                                     totalCount += data.value.length; 
-                                    if (statusEl) statusEl.innerText = `Dataverse Sync: ${totalCount.toLocaleString()} records downloaded...`; 
+                                    if (statusEl) statusEl.innerText = `Sequential Batch Sync: ${totalCount.toLocaleString()} records downloaded...`; 
                                 }
                                 nextL = data['@odata.nextLink'] || null;
+                                
+                                // Yield to main thread briefly to prevent UI lockdown on massive sets
+                                await new Promise(res => setTimeout(res, 20));
                             } catch (e) { 
                                 break; 
                             }
@@ -1450,6 +1456,7 @@
                         return `${base}${base.includes('?') ? '&' : '?'}$filter=modifiedon gt ${lastSyncStr}`;
                     };
 
+                    // PROSPECTING REMOVED ENTIRELY
                     const endpoints = {
                         emp: `${DATAVERSE_ENDPOINT}/cr714_employeeinformation1s`,
                         am: buildUrl(`${DATAVERSE_ENDPOINT}/cr714_accountmanagementdatasets`),
@@ -1457,7 +1464,7 @@
                         log: buildUrl(`${DATAVERSE_ENDPOINT}/cr714_logisticslog_2s`)
                     };
                     
-                    // Sequential Fetch prevents Dataverse rate limiting on massive requests
+                    // Await these sequentially instead of Promise.all to guarantee we don't trip Dataverse simultaneous 429 limits
                     const eRes = await fetchAPI(endpoints.emp);
                     const amRes = await fetchAPI(endpoints.am);
                     const cRes = await fetchAPI(endpoints.cad);
@@ -1479,6 +1486,7 @@
                     const newCad = (cRes.value || []).map(r => this.normalizeRecord(r, 'Cadence'));
                     const incomingData = [...newAm, ...newCad];
 
+                    // DEDUPLICATION: Map incoming records by their unique GUID
                     if (incomingData.length > 0) {
                         const map = new Map(this.rawDataset.map(item => [item.id, item]));
                         incomingData.forEach(item => map.set(item.id, item));
@@ -1517,7 +1525,7 @@
 
                     if (incomingData.length > 0 || newLog.length > 0 || forceLive) {
                         this.processDataset();
-                        this.showToast(`Delta complete. Appended ${incomingData.length + newLog.length} updated records to memory.`, "success");
+                        this.showToast(`Delta complete. Integrated ${incomingData.length + newLog.length} updated records.`, "success");
                     }
                     
                 } catch (error) { 
