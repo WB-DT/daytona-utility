@@ -535,7 +535,7 @@
       justify-content: flex-end;
       margin-top: 2rem;
       padding-top: 1.5rem;
-      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
     }
 
     .btn {
@@ -897,7 +897,7 @@
             </button>
         </div>
 
-        <div class="form-grid cols-3" style="margin-bottom: 1.5rem;">
+        <div class="form-grid" style="margin-bottom: 1.5rem;">
             <div class="field metric-item">
                 <label for="m-lunch-adherence">Lunch Adherence (%)</label>
                 <div style="display:flex; gap:0.5rem;">
@@ -932,6 +932,12 @@
                         <option value="Yellow">🟡</option>
                         <option value="Red">🔴</option>
                     </select>
+                </div>
+            </div>
+            <div class="field metric-item">
+                <label for="m-days-present">Working Days Present</label>
+                <div style="display:flex; gap:0.5rem;">
+                    <input type="text" id="m-days-present" placeholder="0 / 0" readonly style="flex:1; background: var(--bg-input-readonly);" />
                 </div>
             </div>
         </div>
@@ -1550,6 +1556,21 @@
     document.getElementById('tenure').value = label.trim() + ` (${diffDays} days total)`;
   }
 
+  // Calculate generic Working Days (Mon-Fri) in a given Month
+  function getWorkingDaysInMonth(year, month) {
+      let days = 0;
+      const date = new Date(year, month, 1);
+      while (date.getMonth() === month) {
+          const dayOfWeek = date.getDay();
+          // Exclude Sunday (0) and Saturday (6)
+          if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+              days++;
+          }
+          date.setDate(date.getDate() + 1);
+      }
+      return days;
+  }
+
   // ── Fetch Active Employees ─────────────────────────────────────────────────
   async function fetchActiveEmployees() {
     const empDropdown = document.getElementById('employee-name');
@@ -1743,7 +1764,7 @@
       });
   }
 
-  // Fetch Panel 2 Metric Adherence
+  // Fetch Panel 2 Metric Adherence & Days Present Counter
   async function fetchPowerBIData() {
       const empName = val('employee-name');
       const period = val('review-period');
@@ -1757,40 +1778,62 @@
       btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Fetching...';
       btn.disabled = true;
 
-      try {
-          const dates = getMonthDateRange(period);
-          
-          // =======================================================================
-          // !! INSERT DATASET & DAX HERE FOR ADHERENCE METRICS !!
-          // =======================================================================
-          const datasetId = "YOUR_ADHERENCE_DATASET_ID_HERE";
-          const tableName = "AdherenceTable"; // Replace with actual
-          
-          const daxQuery = `EVALUATE FILTER('${tableName}', '${tableName}'[AgentName] = "${empName}" && '${tableName}'[Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}) && '${tableName}'[Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+      const dates = getMonthDateRange(period);
 
-          // Execute via Tunnel
+      try {
+          // --- 1. FETCH ADHERENCE PERCENTAGES ---
+          const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; // Extracted from Connections file
+          const tableName = "Avaya Details"; // Verified from DiagramLayout
+          
+          const daxQuery = `EVALUATE FILTER('${tableName}', '${tableName}'[AgentName] = "${empName}" && '${tableName}'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}) && '${tableName}'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
 
-          if (reportData.length === 0) {
-              showError("No Adherence data found for this period.");
-          } else {
+          if (reportData.length > 0) {
               // Assume the reportData returns the aggregated metric for that month
               const row = reportData[0]; 
               if (row['LunchAdherence']) document.getElementById('m-lunch-adherence').value = row['LunchAdherence'];
               if (row['BreakAdherence']) document.getElementById('m-break-adherence').value = row['BreakAdherence'];
               if (row['ReportingAccuracy']) document.getElementById('m-reporting-accuracy').value = row['ReportingAccuracy'];
               
-              // Re-trigger the arrow calculation logic after injection
               calculateArrow('m-lunch-adherence');
               calculateArrow('m-break-adherence');
               calculateArrow('m-reporting-accuracy');
-              
-              btn.innerHTML = '<i class="fas fa-check"></i> Success';
           }
       } catch(err) {
-          console.error("Power BI Fetch Error: ", err);
-          showError("Error fetching data. Check Console.");
-          btn.innerHTML = originalHtml;
+          console.warn("Failed to fetch Adherence Data:", err);
+      }
+
+      try {
+          // --- 2. FETCH LOGIN/LOGOUT TO CALCULATE DAYS PRESENT ---
+          const llDatasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; // Login/Logout Dataset ID
+          const llTableName = "2026"; 
+          
+          const llDaxQuery = `EVALUATE FILTER('${llTableName}', '${llTableName}'[Agent Name] = "${empName}" && '${llTableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}) && '${llTableName}'[Logout Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+
+          const llData = await executePowerBIQueryViaTunnel(llDatasetId, llDaxQuery);
+
+          // Find unique days present
+          const uniqueDays = new Set();
+          llData.forEach(row => {
+              const dateVal = row['Logout Date'] || row['Login Date'];
+              if (dateVal) {
+                  const d = new Date(dateVal);
+                  if (!isNaN(d.getTime())) {
+                      uniqueDays.add(d.toISOString().split('T')[0]); // Add unique YYYY-MM-DD
+                  }
+              }
+          });
+
+          // Calculate working days in that month
+          const totalWorkingDays = getWorkingDaysInMonth(dates.startYear, dates.startMonth - 1);
+          
+          document.getElementById('m-days-present').value = `${uniqueDays.size} / ${totalWorkingDays} Days`;
+
+          btn.innerHTML = '<i class="fas fa-check"></i> Success';
+      } catch (err) {
+          console.warn("Failed to calculate Days Present:", err);
+          btn.innerHTML = '<i class="fas fa-check"></i> Partial Success'; // If adherence worked but this failed
       } finally {
           setTimeout(() => { btn.innerHTML = originalHtml; btn.disabled = false; }, 2500);
       }
@@ -1814,11 +1857,8 @@
       try {
           const dates = getMonthDateRange(period);
           
-          // =======================================================================
-          // !! INSERT LOGIN/LOGOUT DATASET ID !!
-          // =======================================================================
-          const datasetId = "YOUR_LOGIN_LOGOUT_DATASET_ID_HERE";
-          const tableName = "Login Logout"; // Match exact PBI Table Name
+          const datasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; // Login Logout Reporting
+          const tableName = "2026"; // Match exact PBI Table Name
           
           const daxQuery = `EVALUATE FILTER('${tableName}', '${tableName}'[Agent Name] = "${empName}" && '${tableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}) && '${tableName}'[Logout Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
 
@@ -1840,7 +1880,14 @@
           // Rows
           reportData.forEach(row => {
               tableHtml += `<tr>`;
-              Object.values(row).forEach(v => tableHtml += `<td>${v}</td>`);
+              Object.values(row).forEach(v => {
+                  // Clean long ISO dates for display if needed
+                  let cellVal = v;
+                  if (typeof v === 'string' && v.includes('T00:00:00')) {
+                      cellVal = new Date(v).toLocaleDateString();
+                  }
+                  tableHtml += `<td>${cellVal}</td>`;
+              });
               tableHtml += `</tr>`;
           });
           tableHtml += `</tbody></table>`;
@@ -1879,11 +1926,8 @@
       try {
           const dates = getMonthDateRange(period);
           
-          // =======================================================================
-          // !! INSERT LUNCH/BREAK DATASET ID !!
-          // =======================================================================
-          const datasetId = "YOUR_LUNCH_BREAK_DATASET_ID_HERE";
-          const tableName = "All Avaya"; // Match exact PBI Table Name
+          const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; // Extracted from Connections file
+          const tableName = "Avaya Details"; // Verified from DiagramLayout
           
           const daxQuery = `EVALUATE FILTER('${tableName}', '${tableName}'[AgentName] = "${empName}" && '${tableName}'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}) && '${tableName}'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
 
@@ -1905,7 +1949,13 @@
           // Rows
           reportData.forEach(row => {
               tableHtml += `<tr>`;
-              Object.values(row).forEach(v => tableHtml += `<td>${v}</td>`);
+              Object.values(row).forEach(v => {
+                  let cellVal = v;
+                  if (typeof v === 'string' && v.includes('T00:00:00')) {
+                      cellVal = new Date(v).toLocaleDateString();
+                  }
+                  tableHtml += `<td>${cellVal}</td>`;
+              });
               tableHtml += `</tr>`;
           });
           tableHtml += `</tbody></table>`;
@@ -2046,6 +2096,7 @@
       html += row('Lunch Adherence', formatMetricWithArrow('m-lunch-adherence', '(%)'));
       html += row('Break Adherence', formatMetricWithArrow('m-break-adherence', '(%)'));
       html += row('Reporting Accuracy', formatMetricWithArrow('m-reporting-accuracy', '(%)'));
+      html += row('Working Days Present', val('m-days-present'));
 
       // Inject Ratings 
       // Helper function to color code standard ratings to arrows
@@ -2189,6 +2240,7 @@
             payload.cr714_lunchadherence = getValSafe('m-lunch-adherence') ? parseFloat(getValSafe('m-lunch-adherence')) : null; 
             payload.cr714_breakadherence = getValSafe('m-break-adherence') ? parseFloat(getValSafe('m-break-adherence')) : null; 
             payload.cr714_reportingaccuracy = getValSafe('m-reporting-accuracy') ? parseFloat(getValSafe('m-reporting-accuracy')) : null; 
+            payload.cr714_dayspresent = getValSafe('m-days-present');
             
             // EOM Ratings & Text
             payload.cr714_overallrating = val('eom-overall-rating');
@@ -2284,6 +2336,7 @@
 
     // Reset adherence arrows
     document.querySelectorAll('#m-lunch-adherence-arrow, #m-break-adherence-arrow, #m-reporting-accuracy-arrow').forEach(el => el.value = '');
+    document.getElementById('m-days-present').value = '';
 
     // Clear Report Containers
     document.getElementById('login-logout-container').innerHTML = '';
