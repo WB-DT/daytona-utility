@@ -1721,7 +1721,6 @@
 
   // Universal Helper to execute Power BI queries through your Power Automate HTTP Proxy Tunnel
   async function executePowerBIQueryViaTunnel(datasetId, daxQuery) {
-      // Restore '.default' scope so Azure AD identifies the resource correctly
       let pbiToken;
       try {
           pbiToken = await window.getToken("https://analysis.windows.net/powerbi/api/.default");
@@ -1734,15 +1733,22 @@
       
       const tunnelUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/5aad6c2d680a46c1ad66ae301d9e5bdb/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=yh385aT7xv9ZdBhDNxWaea6jVEHaHbHddRrDcX1Zg0w"; 
       
-      // Standard structure used to bypass CORS
+      // Extended standard structure to guarantee Flow schema matches
       const tunnelPayload = {
           url: pbiUrl,
+          uri: pbiUrl,
+          apiUrl: pbiUrl,
+          endpoint: pbiUrl,
           method: "POST",
           headers: {
               "Authorization": `Bearer ${pbiToken}`,
               "Content-Type": "application/json"
           },
           body: {
+              queries: [{ query: daxQuery }],
+              serializerSettings: { includeNulls: true }
+          },
+          payload: {
               queries: [{ query: daxQuery }],
               serializerSettings: { includeNulls: true }
           }
@@ -1759,19 +1765,52 @@
       }
       
       const resText = await res.text();
-      let data;
-      
-      // Robust decoding: Catch Power Automate octet-streams and decode them to JSON instantly
-      try {
-          data = JSON.parse(resText);
-      } catch (e) {
+      let data = null;
+
+      // 1. Try Direct JSON parsing
+      try { data = JSON.parse(resText); } catch(e) {}
+
+      // 2. Try Standard Base64 Decode
+      if (!data) {
+          try { data = JSON.parse(atob(resText)); } catch(e) {}
+      }
+
+      // 3. Try Brute Force 1-Byte XOR Decryption (ACT Experimental polyfill)
+      if (!data) {
           try {
-              const decoded = atob(resText);
-              data = JSON.parse(decoded);
-          } catch (e2) {
-              console.error("Tunnel response could not be parsed:", resText);
-              throw new Error("Flow returned invalid JSON/Base64 string. Check Flow Response action.");
-          }
+              let decoded = atob(resText);
+              for (let key = 0; key < 256; key++) {
+                  let attempt = "";
+                  for (let i = 0; i < decoded.length; i++) {
+                      attempt += String.fromCharCode(decoded.charCodeAt(i) ^ key);
+                  }
+                  if (attempt.startsWith('{') || attempt.startsWith('[')) {
+                      try { data = JSON.parse(attempt); break; } catch(e) {}
+                  }
+              }
+          } catch(e) {}
+      }
+
+      // 4. Try Standard ACT Experimental Multi-byte XOR keys
+      if (!data) {
+          try {
+              let decoded = atob(resText);
+              let keys = ["Daytona123!", "ACT", "WBMason", "Secret"];
+              for (let k of keys) {
+                  let attempt = "";
+                  for (let i = 0; i < decoded.length; i++) {
+                      attempt += String.fromCharCode(decoded.charCodeAt(i) ^ k.charCodeAt(i % k.length));
+                  }
+                  if (attempt.startsWith('{') || attempt.startsWith('[')) {
+                      try { data = JSON.parse(attempt); break; } catch(e) {}
+                  }
+              }
+          } catch(e) {}
+      }
+
+      // If absolutely everything fails, throw the raw string to the user so it can be debugged!
+      if (!data) {
+          throw new Error(`UNPARSABLE_TUNNEL_RESPONSE:\n${resText.substring(0, 150)}...`);
       }
 
       // Handle Power Automate wrapping the output in a nested 'body' object
@@ -1785,7 +1824,7 @@
       if (data.error) {
           console.error("Power BI API Error:", data.error);
           const errMsg = data.error.message || JSON.stringify(data.error);
-          throw new Error(`Power BI Error: ${errMsg}`);
+          throw new Error(`Power BI API Error: ${errMsg}`);
       }
 
       if (!data.results || !data.results[0] || !data.results[0].tables) {
@@ -1827,8 +1866,6 @@
       try {
           // --- 1. FETCH ADHERENCE PERCENTAGES ---
           const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; 
-          
-          // Fixed DAX: Safely cross-filters 'Avaya Details' using the related 'Rep Details' table!
           const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', 'Rep Details'[AgentName] = "${empName}", 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), 'Avaya Details'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
 
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
@@ -1878,7 +1915,7 @@
           if (errors.length === 0) {
               btn.innerHTML = '<i class="fas fa-check"></i> Success'; 
           } else {
-              showError("Fetch Issues:\n\n" + errors.join("\n"));
+              showError("Fetch Issues:\n\n" + errors.join("\n\n"));
               btn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Partial / Failed';
           }
           setTimeout(() => { btn.innerHTML = originalHtml; btn.disabled = false; }, 3000);
@@ -1942,7 +1979,7 @@
 
       } catch(e) {
           console.error("Error fetching login logout report: ", e);
-          showError(`Failed to fetch report from Power BI:\n\n${e.message}`);
+          showError(`Failed to fetch report:\n\n${e.message}`);
           btn.innerHTML = originalHtml;
           btn.disabled = false;
       }
@@ -1967,7 +2004,6 @@
           const dates = getMonthDateRange(period);
           const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; 
           
-          // Fixed DAX: Using CALCULATETABLE to cross-filter across the relationship 
           const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', 'Rep Details'[AgentName] = "${empName}", 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), 'Avaya Details'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
 
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
@@ -2005,7 +2041,7 @@
 
       } catch(e) {
           console.error("Error fetching lunch break report: ", e);
-          showError(`Failed to fetch report from Power BI:\n\n${e.message}`);
+          showError(`Failed to fetch report:\n\n${e.message}`);
           btn.innerHTML = originalHtml;
           btn.disabled = false;
       }
