@@ -1721,7 +1721,7 @@
 
   // Universal Helper to execute Power BI queries through your Power Automate HTTP Proxy Tunnel
   async function executePowerBIQueryViaTunnel(datasetId, daxQuery) {
-      // FIXED: Restored exactly to '.default' scope. Azure AD explicitly requires ONLY the '.default' suffix to target the API properly.
+      // Restore '.default' scope so Azure AD identifies the resource correctly
       let pbiToken;
       try {
           pbiToken = await window.getToken("https://analysis.windows.net/powerbi/api/.default");
@@ -1754,33 +1754,38 @@
           body: JSON.stringify(tunnelPayload)
       });
       
-      if (!res.ok) throw new Error(`Tunnel request failed: ${res.statusText}`);
+      if (!res.ok) {
+          throw new Error(`Tunnel HTTP Error ${res.status}: ${res.statusText}`);
+      }
       
-      // FIXED: Robust parsing to handle Base64 / octet-stream responses from Power Automate
       const resText = await res.text();
       let data;
+      
+      // Robust decoding: Catch Power Automate octet-streams and decode them to JSON instantly
       try {
           data = JSON.parse(resText);
       } catch (e) {
           try {
-              // Attempt to decode base64 if Power Automate returned it as an octet-stream instead of clean JSON
               const decoded = atob(resText);
               data = JSON.parse(decoded);
           } catch (e2) {
               console.error("Tunnel response could not be parsed:", resText);
-              throw new Error("Invalid response format from Power Automate.");
+              throw new Error("Flow returned invalid JSON/Base64 string. Check Flow Response action.");
           }
       }
 
       // Handle Power Automate wrapping the output in a nested 'body' object
       if (data.body && data.body.results) {
           data = data.body;
+      } else if (data.body && data.body.error) {
+          data = data.body;
       }
       
       // Look for specific error messages forwarded through the payload
       if (data.error) {
           console.error("Power BI API Error:", data.error);
-          throw new Error(`Power BI Error: ${data.error.message}`);
+          const errMsg = data.error.message || JSON.stringify(data.error);
+          throw new Error(`Power BI Error: ${errMsg}`);
       }
 
       if (!data.results || !data.results[0] || !data.results[0].tables) {
@@ -1817,18 +1822,18 @@
       btn.disabled = true;
 
       const dates = getMonthDateRange(period);
+      let errors = [];
 
       try {
           // --- 1. FETCH ADHERENCE PERCENTAGES ---
-          const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; // Extracted from Connections file
-          const tableName = "Avaya Details"; // Verified from DiagramLayout
+          const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; 
           
-          const daxQuery = `EVALUATE FILTER('${tableName}', '${tableName}'[AgentName] = "${empName}" && '${tableName}'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}) && '${tableName}'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+          // Fixed DAX: Safely cross-filters 'Avaya Details' using the related 'Rep Details' table!
+          const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', 'Rep Details'[AgentName] = "${empName}", 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), 'Avaya Details'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
 
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
 
           if (reportData.length > 0) {
-              // Assume the reportData returns the aggregated metric for that month
               const row = reportData[0]; 
               if (row['LunchAdherence']) document.getElementById('m-lunch-adherence').value = row['LunchAdherence'];
               
@@ -1836,43 +1841,48 @@
           }
       } catch(err) {
           console.warn("Failed to fetch Adherence Data:", err);
+          errors.push("Adherence: " + err.message);
       }
 
       try {
           // --- 2. FETCH LOGIN/LOGOUT TO CALCULATE DAYS PRESENT ---
-          const llDatasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; // Login/Logout Dataset ID
+          const llDatasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; 
           const llTableName = "2026"; 
           
-          const llDaxQuery = `EVALUATE FILTER('${llTableName}', '${llTableName}'[Agent Name] = "${empName}" && '${llTableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}) && '${llTableName}'[Logout Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+          const llDaxQuery = `EVALUATE CALCULATETABLE('${llTableName}', '${llTableName}'[Agent Name] = "${empName}", '${llTableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), '${llTableName}'[Logout Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
 
           const llData = await executePowerBIQueryViaTunnel(llDatasetId, llDaxQuery);
 
-          // Find unique days present
           const uniqueDays = new Set();
           llData.forEach(row => {
               const dateVal = row['Logout Date'] || row['Login Date'];
               if (dateVal) {
                   const d = new Date(dateVal);
                   if (!isNaN(d.getTime())) {
-                      uniqueDays.add(d.toISOString().split('T')[0]); // Add unique YYYY-MM-DD
+                      uniqueDays.add(d.toISOString().split('T')[0]); 
                   }
               }
           });
 
-          // Calculate working days in that month
           const totalWorkingDays = getWorkingDaysInMonth(dates.startYear, dates.startMonth - 1);
-          
-          // Separate logic: Int into the field, string into the label next to it
           document.getElementById('m-days-present').value = uniqueDays.size;
           document.getElementById('days-present-label').innerText = `/ ${totalWorkingDays} Days`;
 
-          btn.innerHTML = '<i class="fas fa-check"></i> Success';
       } catch (err) {
           console.warn("Failed to calculate Days Present:", err);
-          btn.innerHTML = '<i class="fas fa-check"></i> Partial Success'; // If adherence worked but this failed
-      } finally {
-          setTimeout(() => { btn.innerHTML = originalHtml; btn.disabled = false; }, 2500);
-      }
+          errors.push("Days Present: " + err.message);
+      } 
+      
+      // Give feedback
+      setTimeout(() => { 
+          if (errors.length === 0) {
+              btn.innerHTML = '<i class="fas fa-check"></i> Success'; 
+          } else {
+              showError("Fetch Issues:\n\n" + errors.join("\n"));
+              btn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Partial / Failed';
+          }
+          setTimeout(() => { btn.innerHTML = originalHtml; btn.disabled = false; }, 3000);
+      }, 500);
   }
 
   // Fetch Login / Logout Table (Panel 3 Attachment)
@@ -1892,16 +1902,13 @@
 
       try {
           const dates = getMonthDateRange(period);
+          const datasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; 
+          const tableName = "2026"; 
           
-          const datasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; // Login Logout Reporting
-          const tableName = "2026"; // Match exact PBI Table Name
-          
-          const daxQuery = `EVALUATE FILTER('${tableName}', '${tableName}'[Agent Name] = "${empName}" && '${tableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}) && '${tableName}'[Logout Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+          const daxQuery = `EVALUATE CALCULATETABLE('${tableName}', '${tableName}'[Agent Name] = "${empName}", '${tableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), '${tableName}'[Logout Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
 
-          // Fetch Via ACT Proxy Tunnel
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
 
-          // Build HTML Table
           if (reportData.length === 0) {
               showError("No login/logout data found for this period.");
               btn.innerHTML = originalHtml;
@@ -1910,14 +1917,11 @@
           }
 
           let tableHtml = `<table class="report-table"><thead><tr>`;
-          // Headers
           Object.keys(reportData[0]).forEach(k => tableHtml += `<th>${k}</th>`);
           tableHtml += `</tr></thead><tbody>`;
-          // Rows
           reportData.forEach(row => {
               tableHtml += `<tr>`;
               Object.values(row).forEach(v => {
-                  // Clean long ISO dates for display if needed
                   let cellVal = v;
                   if (typeof v === 'string' && v.includes('T00:00:00')) {
                       cellVal = new Date(v).toLocaleDateString();
@@ -1938,7 +1942,7 @@
 
       } catch(e) {
           console.error("Error fetching login logout report: ", e);
-          showError("Failed to fetch report from Power BI. Check Console.");
+          showError(`Failed to fetch report from Power BI:\n\n${e.message}`);
           btn.innerHTML = originalHtml;
           btn.disabled = false;
       }
@@ -1961,16 +1965,13 @@
 
       try {
           const dates = getMonthDateRange(period);
+          const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; 
           
-          const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; // Extracted from Connections file
-          const tableName = "Avaya Details"; // Verified from DiagramLayout
-          
-          const daxQuery = `EVALUATE FILTER('${tableName}', '${tableName}'[AgentName] = "${empName}" && '${tableName}'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}) && '${tableName}'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+          // Fixed DAX: Using CALCULATETABLE to cross-filter across the relationship 
+          const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', 'Rep Details'[AgentName] = "${empName}", 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), 'Avaya Details'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
 
-          // Fetch Via ACT Proxy Tunnel
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
 
-          // Build HTML Table
           if (reportData.length === 0) {
               showError("No lunch/break data found for this period.");
               btn.innerHTML = originalHtml;
@@ -1979,10 +1980,8 @@
           }
 
           let tableHtml = `<table class="report-table"><thead><tr>`;
-          // Headers
           Object.keys(reportData[0]).forEach(k => tableHtml += `<th>${k}</th>`);
           tableHtml += `</tr></thead><tbody>`;
-          // Rows
           reportData.forEach(row => {
               tableHtml += `<tr>`;
               Object.values(row).forEach(v => {
@@ -2006,7 +2005,7 @@
 
       } catch(e) {
           console.error("Error fetching lunch break report: ", e);
-          showError("Failed to fetch report from Power BI. Check Console.");
+          showError(`Failed to fetch report from Power BI:\n\n${e.message}`);
           btn.innerHTML = originalHtml;
           btn.disabled = false;
       }
