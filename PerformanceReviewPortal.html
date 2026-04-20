@@ -1721,8 +1721,15 @@
 
   // Universal Helper to execute Power BI queries through your Power Automate HTTP Proxy Tunnel
   async function executePowerBIQueryViaTunnel(datasetId, daxQuery) {
-      // FIXED: Removed the double slash in the scope string that was causing the AADSTS500011 error
-      const pbiToken = await window.getToken("https://analysis.windows.net/powerbi/api/.default");
+      // FIXED: Adjusted to 'Dataset.Read.All' scope to bypass 'resource principal not found' Entra ID bug
+      let pbiToken;
+      try {
+          pbiToken = await window.getToken("https://analysis.windows.net/powerbi/api/Dataset.Read.All");
+      } catch (err) {
+          console.error("Token fetch failed:", err);
+          throw new Error("Azure AD: Missing Dataset.Read.All permissions for this App.");
+      }
+
       const pbiUrl = `https://api.powerbi.com/v1.0/myorg/datasets/${datasetId}/executeQueries`;
       
       const tunnelUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/5aad6c2d680a46c1ad66ae301d9e5bdb/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=yh385aT7xv9ZdBhDNxWaea6jVEHaHbHddRrDcX1Zg0w"; 
@@ -1748,10 +1755,35 @@
       });
       
       if (!res.ok) throw new Error(`Tunnel request failed: ${res.statusText}`);
-      const data = await res.json();
+      
+      // FIXED: Robust parsing to handle Base64 / octet-stream responses from Power Automate
+      const resText = await res.text();
+      let data;
+      try {
+          data = JSON.parse(resText);
+      } catch (e) {
+          try {
+              // Attempt to decode base64 if Power Automate returned it as an octet-stream instead of clean JSON
+              const decoded = atob(resText);
+              data = JSON.parse(decoded);
+          } catch (e2) {
+              console.error("Tunnel response could not be parsed:", resText);
+              throw new Error("Invalid response format from Power Automate.");
+          }
+      }
+
+      // Handle Power Automate wrapping the output in a nested 'body' object
+      if (data.body && data.body.results) {
+          data = data.body;
+      }
+
+      if (!data.results) {
+          console.error("Power BI Error Payload:", data);
+          throw new Error("Power BI API did not return a results array. Check console.");
+      }
       
       // Parse out Power BI's executeQueries response structure
-      const rows = data.results?.[0]?.tables?.[0]?.rows || [];
+      const rows = data.results[0]?.tables?.[0]?.rows || [];
       
       // Clean keys: PBI returns "TableName[ColumnName]", this maps to "ColumnName"
       return rows.map(row => {
