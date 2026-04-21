@@ -1732,23 +1732,22 @@
       const pbiUrl = `https://api.powerbi.com/v1.0/myorg/datasets/${datasetId}/executeQueries`;
       const tunnelUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/5aad6c2d680a46c1ad66ae301d9e5bdb/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=yh385aT7xv9ZdBhDNxWaea6jVEHaHbHddRrDcX1Zg0w"; 
       
-      // FIXED: Sending BOTH standard JSON body and requestBody explicitly to bypass strict Flow trigger schema parsing issues
+      const pbiPayload = {
+          queries: [{ query: daxQuery }],
+          serializerSettings: { includeNulls: true }
+      };
+
+      // FIXED: Specifically flattening and duplicating the payload so that NO MATTER HOW your Flow maps "triggerBody()", it will find the URI, URL, and the Body.
       const tunnelPayload = {
-          uri: pbiUrl,       // ADDED: The specific property the flow's HTTP action is looking for
-          url: pbiUrl,       // Kept for backward compatibility
+          uri: pbiUrl,
+          url: pbiUrl,
           method: "POST",
           headers: {
               "Authorization": `Bearer ${pbiToken}`,
               "Content-Type": "application/json"
           },
-          body: {
-              queries: [{ query: daxQuery }],
-              serializerSettings: { includeNulls: true }
-          },
-          requestBody: {
-              queries: [{ query: daxQuery }],
-              serializerSettings: { includeNulls: true }
-          }
+          body: pbiPayload,
+          requestBody: pbiPayload
       };
 
       const res = await fetch(tunnelUrl, {
@@ -1762,47 +1761,49 @@
       }
       
       const resText = await res.text();
-
-      // Specifically catches when Flow returns 0 bytes due to a skipped Response action!
-      if (!resText || resText.trim() === "") {
-          throw new Error(
-            "Power Automate returned an empty response (0 bytes). This means the Power BI HTTP action inside your Flow FAILED, and the Flow terminated before returning the error to the app.\n\n" +
-            "TO FIX THIS AND SEE THE REAL ERROR:\n" +
-            "1. Open your Flow in Edit mode.\n" +
-            "2. Click the three dots (...) on the final 'Response' action -> select 'Configure run after'.\n" +
-            "3. Check the boxes for 'has failed' and 'is skipped' and click Save.\n" +
-            "4. Test again to see the exact Power BI error!"
-          );
-      }
-
       let data = null;
 
-      // Try Direct JSON parsing
       try {
           data = JSON.parse(resText);
       } catch (e) {
-          throw new Error(`Unparsable Tunnel Response (Not JSON). Flow output:\n\n${resText.substring(0, 150)}...`);
+          // If Flow fails it might base64 encode the error string
+          try {
+              const decoded = atob(resText);
+              data = JSON.parse(decoded);
+          } catch(e2) {
+              throw new Error(`Flow output is not JSON:\n\n${resText.substring(0, 150)}...`);
+          }
       }
 
-      // Handle nested body if Power Automate passes the raw HTTP action output object
-      if (data.body) {
+      // DIAGNOSTIC CHECK 1: Did the flow return the hardcoded "success" message?
+      if (data && data.status === "success" && data.result === 0) {
+          throw new Error("Power Automate returned '{status: success, result: 0}'.\n\nYour Flow's final Response action is STILL hardcoded to return this message instead of the Power BI data!\n\nPlease edit your Flow and map the dynamic 'Body' of the HTTP action into the Response block.");
+      }
+
+      // Unwrap nested Flow body
+      if (data && data.body) {
           data = typeof data.body === 'string' ? JSON.parse(data.body) : data.body;
       }
       
       // Look for specific error messages forwarded through the payload
-      if (data.error) {
+      if (data && data.error) {
           console.error("Power BI API Error:", data.error);
           const errMsg = data.error.message || JSON.stringify(data.error);
           throw new Error(`Power BI Error: ${errMsg}`);
       }
 
-      if (!data.results || !data.results[0] || !data.results[0].tables) {
+      if (!data || !data.results || !data.results[0] || !data.results[0].tables) {
           console.error("Unexpected Power BI Payload:", data);
-          throw new Error("Power BI API did not return standard table results.");
+          throw new Error("Power BI API did not return standard table results. Open your Network tab (F12) to see exactly what the Flow returned.");
       }
       
       // Parse out Power BI's executeQueries response structure
       const rows = data.results[0].tables[0].rows || [];
+
+      // DIAGNOSTIC CHECK 2: Did the Flow's strict JSON Schema strip out all the columns?
+      if (rows.length > 0 && Object.keys(rows[0]).length === 0) {
+          throw new Error("Power Automate stripped all your columns!\n\nOpen your Flow, go to the final 'Response' action, and completely clear out the 'JSON Schema' box so it stops filtering the data.");
+      }
       
       // Clean keys: PBI returns "TableName[ColumnName]", this maps to "ColumnName"
       return rows.map(row => {
@@ -1847,7 +1848,7 @@
           }
       } catch(err) {
           console.warn("Failed to fetch Adherence Data:", err);
-          errors.push("Adherence: " + err.message);
+          errors.push("Adherence Data Error: \n" + err.message);
       }
 
       try {
@@ -1876,7 +1877,7 @@
 
       } catch (err) {
           console.warn("Failed to calculate Days Present:", err);
-          errors.push("Days Present: " + err.message);
+          errors.push("Days Present Error: \n" + err.message);
       } 
       
       // Give feedback
@@ -1884,8 +1885,8 @@
           if (errors.length === 0) {
               btn.innerHTML = '<i class="fas fa-check"></i> Success'; 
           } else {
-              showError("Fetch Issues:\n\n" + errors.join("\n\n"));
-              btn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Partial / Failed';
+              showError("Fetch Issues Found:\n\n" + errors.join("\n\n"));
+              btn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Data Incomplete';
           }
           setTimeout(() => { btn.innerHTML = originalHtml; btn.disabled = false; }, 3000);
       }, 500);
