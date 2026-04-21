@@ -1737,26 +1737,15 @@
           serializerSettings: { includeNulls: true }
       };
 
-      // FIXED: Specifically flattening and duplicating the payload so that NO MATTER HOW your Flow maps "triggerBody()", it will find the URI, URL, and the Body.
+      // FIXED: Perfectly matching the precise expressions your Flow's HTTP action is looking for!
       const tunnelPayload = {
-          uri: pbiUrl,
-          url: pbiUrl,
-          method: "POST",
-          headers: {
-              "Authorization": `Bearer ${pbiToken}`,
-              "Content-Type": "application/json"
-          },
+          reqMethod: "POST",           // Maps to: @coalesce(triggerBody()?['reqMethod'], 'GET')
+          msalToken: pbiToken,         // Maps to: Bearer @{triggerBody()?['msalToken']}
+          requestBody: pbiPayload,     // Maps to: @triggerBody()?['requestBody']
+          uri: pbiUrl,                 // Failsafe root property
           body: {
-              uri: pbiUrl,
-              url: pbiUrl,
-              method: "POST",
-              headers: {
-                  "Authorization": `Bearer ${pbiToken}`,
-                  "Content-Type": "application/json"
-              },
-              requestBody: pbiPayload
-          },
-          requestBody: pbiPayload
+              uri: pbiUrl              // Maps to: @triggerBody()?['body']?['uri']
+          }
       };
 
       const res = await fetch(tunnelUrl, {
@@ -1770,6 +1759,13 @@
       }
       
       const resText = await res.text();
+
+      if (!resText || resText.trim() === "") {
+          throw new Error(
+            "Power Automate returned an empty response. This usually means your Flow's Response action STILL has a 'JSON Schema' defined that is blocking the data. Please completely clear the JSON Schema box in your Flow's Response action!"
+          );
+      }
+
       let data = null;
 
       try {
@@ -1784,37 +1780,32 @@
           }
       }
 
-      // DIAGNOSTIC CHECK 1: Did the flow return the hardcoded "success" message?
       if (data && data.status === "success" && data.result === 0) {
           throw new Error("Power Automate returned '{status: success, result: 0}'.\n\nYour Flow's final Response action is STILL hardcoded to return this message instead of the Power BI data!\n\nPlease edit your Flow and map the dynamic 'Body' of the HTTP action into the Response block.");
       }
 
-      // Unwrap nested Flow body
-      if (data && data.body) {
+      if (data.body) {
           data = typeof data.body === 'string' ? JSON.parse(data.body) : data.body;
       }
       
-      // Look for specific error messages forwarded through the payload
-      if (data && data.error) {
+      if (data.error) {
           console.error("Power BI API Error:", data.error);
           const errMsg = data.error.message || JSON.stringify(data.error);
           throw new Error(`Power BI Error: ${errMsg}`);
       }
 
-      if (!data || !data.results || !data.results[0] || !data.results[0].tables) {
+      // If Power Automate applies a bad schema, it might return { results: [] } or something similar.
+      if (!data.results || !data.results[0] || !data.results[0].tables) {
+          // Check if they left the Table[Column1] schema by checking if it's completely stripped
+          if (Object.keys(data).length === 0) {
+              throw new Error("Power Automate stripped the data. Delete the 'JSON Schema' in the Response action!");
+          }
           console.error("Unexpected Power BI Payload:", data);
-          throw new Error("Power BI API did not return standard table results. Open your Network tab (F12) to see exactly what the Flow returned.");
+          throw new Error("Power BI API did not return standard table results.");
       }
       
-      // Parse out Power BI's executeQueries response structure
       const rows = data.results[0].tables[0].rows || [];
-
-      // DIAGNOSTIC CHECK 2: Did the Flow's strict JSON Schema strip out all the columns?
-      if (rows.length > 0 && Object.keys(rows[0]).length === 0) {
-          throw new Error("Power Automate stripped all your columns!\n\nOpen your Flow, go to the final 'Response' action, and completely clear out the 'JSON Schema' box so it stops filtering the data.");
-      }
       
-      // Clean keys: PBI returns "TableName[ColumnName]", this maps to "ColumnName"
       return rows.map(row => {
           const cleanRow = {};
           for (const key in row) {
