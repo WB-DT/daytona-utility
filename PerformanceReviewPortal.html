@@ -1832,6 +1832,63 @@
     });
   }
 
+  // ── Auto-Fill Dynamic Department Metrics using PBI Data ────────────────────────
+  function autoFillDynamicMetrics(row) {
+      if (!currentMetrics || currentMetrics.length === 0) return;
+      
+      currentMetrics.forEach(m => {
+          const el = document.getElementById(m.id);
+          if (!el) return;
+
+          let matchedVal = null;
+          // Create a clean search string from our expected label (e.g. "outbound calls")
+          const targetLabel = m.label.toLowerCase().replace(/\(min\)|\(%\)/g, '').trim();
+          
+          const keys = Object.keys(row);
+          for (let k of keys) {
+              const cleanK = k.toLowerCase().replace(/\[|\]/g, '').trim();
+              
+              // Direct or contained match
+              if (cleanK === targetLabel || cleanK.includes(targetLabel) || targetLabel.includes(cleanK)) {
+                  matchedVal = row[k]; 
+                  break;
+              }
+              // Common fuzzy fallbacks based on PBI quirks
+              if (targetLabel.includes('talk time') && cleanK.includes('talk')) { matchedVal = row[k]; break; }
+              if (targetLabel.includes('break') && cleanK.includes('break') && !cleanK.includes('adherence')) { matchedVal = row[k]; break; }
+              if (targetLabel.includes('lunch') && cleanK.includes('lunch') && !cleanK.includes('adherence')) { matchedVal = row[k]; break; }
+              if (targetLabel.includes('aux') && cleanK.includes('aux')) { matchedVal = row[k]; break; }
+              if (targetLabel.includes('qa') && cleanK.includes('qa')) { matchedVal = row[k]; break; }
+              if (targetLabel.includes('handle time') && cleanK.includes('handle')) { matchedVal = row[k]; break; }
+              if (targetLabel.includes('outbound calls') && cleanK.includes('outbound')) { matchedVal = row[k]; break; }
+              if (targetLabel.includes('inbound calls') && cleanK.includes('inbound')) { matchedVal = row[k]; break; }
+              if (targetLabel.includes('personal time') && cleanK.includes('personal')) { matchedVal = row[k]; break; }
+          }
+          
+          if (matchedVal !== null && matchedVal !== undefined && matchedVal !== '') {
+              let numVal = parseFloat(matchedVal);
+              if (!isNaN(numVal)) {
+                  // Format: PBI often returns Seconds for Time duration metrics. Convert to Minutes if > 200
+                  if (m.label.includes('(min)') && numVal > 200) {
+                      numVal = numVal / 60;
+                  }
+                  // Format: PBI often returns Percentages as 0.95. Convert to 95 if applicable.
+                  if (m.label.includes('(%)') && numVal <= 1 && numVal > 0) {
+                      numVal = numVal * 100;
+                  }
+                  
+                  // Apply specific field precision
+                  if (m.step === '1') el.value = Math.round(numVal);
+                  else if (m.step === '0.1') el.value = numVal.toFixed(1);
+                  else if (m.step === '0.01') el.value = numVal.toFixed(2);
+                  else el.value = numVal;
+
+                  calculateArrow(m.id);
+              }
+          }
+      });
+  }
+
   // ── Auto-Calculate KPI Arrows ───────────────────────────────────────────────
   function calculateArrow(id) {
       // Find the target config for the ID
@@ -1913,7 +1970,6 @@
           mgrSig.placeholder = "Manager full name";
       }
   }
-
 
   // ── Utility ────────────────────────────────────────────────────────────────
   function val(id) { return (document.getElementById(id)?.value || '').trim(); }
@@ -2131,13 +2187,23 @@
       return tableHtml;
   }
 
+  // ── Secure Card Date Key Finder ────────────────────────────────────────────
+  function getCardDateKey(rowObj) {
+      const keys = Object.keys(rowObj);
+      // Strictly match commonly used real date columns first
+      const exact = keys.find(k => k.toLowerCase() === 'row date' || k.toLowerCase() === 'logout date' || k.toLowerCase() === 'login date' || k.toLowerCase() === 'date');
+      if (exact) return exact;
+      // Fallback: look for 'date' in header but ONLY if the row value isn't a Power BI time placeholder (1899)
+      const fuzzy = keys.find(k => k.toLowerCase().includes('date') && rowObj[k] && !String(rowObj[k]).includes('1899-12'));
+      return fuzzy || keys[0];
+  }
+
   // ── Abbreviated Cards Formatter ────────────────────────────────────────────
   function generateAbbreviatedCards(reportData, type) {
       // SORT THE DATA FROM OLDEST TO NEWEST
       reportData.sort((a, b) => {
-          // EXPLICITLY ignore Power BI's 1899 default duration wrapper when picking the sort key
-          let dateKeyA = Object.keys(a).find(k => k.toLowerCase().includes('date') && a[k] && !String(a[k]).startsWith('1899')) || Object.keys(a)[0];
-          let dateKeyB = Object.keys(b).find(k => k.toLowerCase().includes('date') && b[k] && !String(b[k]).startsWith('1899')) || Object.keys(b)[0];
+          let dateKeyA = getCardDateKey(a);
+          let dateKeyB = getCardDateKey(b);
           let valA = a[dateKeyA] ? new Date(a[dateKeyA]).getTime() : 0;
           let valB = b[dateKeyB] ? new Date(b[dateKeyB]).getTime() : 0;
           return valA - valB;
@@ -2146,7 +2212,7 @@
       let html = `<div class="abbrev-grid">`;
       
       reportData.forEach(row => {
-          let dateKey = Object.keys(row).find(k => k.toLowerCase().includes('date') && row[k] && !String(row[k]).startsWith('1899')) || Object.keys(row)[0];
+          let dateKey = getCardDateKey(row);
           let rawDateVal = row[dateKey];
           
           let monthName = 'N/A';
@@ -2463,6 +2529,9 @@
               if (row['BreakAdherence']) document.getElementById('m-break-adherence').value = row['BreakAdherence'];
               calculateArrow('m-lunch-adherence');
               calculateArrow('m-break-adherence');
+              
+              // Map all other dynamic KPIs intelligently 
+              autoFillDynamicMetrics(row);
           }
       } catch(err) {
           console.warn("Avaya Fetch Error:", err);
@@ -2871,7 +2940,7 @@
         showError("Failed to submit review to Dataverse: \n" + error.message);
     } finally {
         btnSubmit.disabled = false;
-        btnSubmit.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Submit to Dataverse';
+        btnSubmit.innerHTML = 'Submit to Dataverse';
     }
   }
 
@@ -2903,6 +2972,18 @@
     document.getElementById('lunch-break-container').innerHTML = '';
     document.getElementById('lunch-break-container').style.display = 'none';
     
+    const btnLLF = document.getElementById('btn-fetch-login-logout-full');
+    if(btnLLF) { btnLLF.innerHTML = '<i class="fas fa-list" style="width:20px;"></i> Attach Full Login/Logout'; btnLLF.className = 'btn btn-secondary'; }
+    
+    const btnLLA = document.getElementById('btn-fetch-login-logout-abbrev');
+    if(btnLLA) { btnLLA.innerHTML = '<i class="fas fa-sign-in-alt" style="width:20px;"></i> Attach Login/Logout Cards'; btnLLA.className = 'btn btn-secondary'; }
+
+    const btnLBF = document.getElementById('btn-fetch-lunch-break-full');
+    if(btnLBF) { btnLBF.innerHTML = '<i class="fas fa-list" style="width:20px;"></i> Attach Full Lunch/Break'; btnLBF.className = 'btn btn-secondary'; }
+    
+    const btnLBA = document.getElementById('btn-fetch-lunch-break-abbrev');
+    if(btnLBA) { btnLBA.innerHTML = '<i class="fas fa-coffee" style="width:20px;"></i> Attach Lunch/Break Cards'; btnLBA.className = 'btn btn-secondary'; }
+
     document.getElementById('success-screen').style.display = 'none';
     document.getElementById('panel-1').style.display = 'block';
     document.getElementById('panel-2').style.display = 'none';
