@@ -1555,7 +1555,27 @@
     document.getElementById('tenure').value = label.trim() + ` (${diffDays} days total)`;
   }
 
-  // Calculate generic Working Days (Mon-Fri) in a given Month
+  // ── DATE CALCULATIONS ──────────────────────────────────────────────────────
+  // Calculate exact bounds (First day of month to First day of NEXT month)
+  // This guarantees we catch all datetime values ending on the last day at 11:59PM
+  function getMonthDateRange(periodStr) {
+      if (!periodStr) return null;
+      const d = new Date(Date.parse(periodStr + " 1"));
+      if(isNaN(d)) return null;
+      
+      const startYear = d.getFullYear();
+      const startMonth = d.getMonth() + 1; // 1-12
+      
+      let endYear = startYear;
+      let endMonth = startMonth + 1;
+      if (endMonth > 12) {
+          endMonth = 1;
+          endYear++;
+      }
+
+      return { startYear, startMonth, endYear, endMonth };
+  }
+
   function getWorkingDaysInMonth(year, month) {
       let days = 0;
       const date = new Date(year, month, 1);
@@ -1568,6 +1588,21 @@
           date.setDate(date.getDate() + 1);
       }
       return days;
+  }
+
+  // ── DAX NAME FILTER BUILDER ────────────────────────────────────────────────
+  // Safely converts "First Last" to an immune SEARCH() function
+  // This completely fixes the "Doe, John" vs "John Doe" format mismatch in PBI!
+  function buildDaxNameFilter(tableName, colName, fullName) {
+      const parts = fullName.trim().split(/\s+/);
+      if (parts.length === 0) return `1=1`;
+      if (parts.length === 1) return `SEARCH("${parts[0]}", '${tableName}'[${colName}], 1, 0) > 0`;
+      
+      const first = parts[0];
+      const last = parts[parts.length - 1]; // Works even if they have middle names
+      
+      // SEARCH is case-insensitive in DAX. It checks if BOTH names exist anywhere in the string!
+      return `SEARCH("${first}", '${tableName}'[${colName}], 1, 0) > 0 && SEARCH("${last}", '${tableName}'[${colName}], 1, 0) > 0`;
   }
 
   // ── Fetch Active Employees ─────────────────────────────────────────────────
@@ -1704,21 +1739,6 @@
 
   // ── Power Automate / Power BI Fetch Using ACT TUNNEL FLOW ──────────────────
 
-  // Helper to construct exact YYYY, MM, DD for DAX DATE() function
-  function getMonthDateRange(periodStr) {
-      if (!periodStr) return null;
-      const d = new Date(Date.parse(periodStr + " 1"));
-      if(isNaN(d)) return null;
-      
-      const firstDay = new Date(d.getFullYear(), d.getMonth(), 1);
-      const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-
-      return { 
-          startYear: firstDay.getFullYear(), startMonth: firstDay.getMonth() + 1, startDay: firstDay.getDate(),
-          endYear: lastDay.getFullYear(), endMonth: lastDay.getMonth() + 1, endDay: lastDay.getDate()
-      };
-  }
-
   // Universal Helper to execute Power BI queries through your Power Automate HTTP Proxy Tunnel
   async function executePowerBIQueryViaTunnel(datasetId, daxQuery) {
       let pbiToken;
@@ -1737,14 +1757,13 @@
           serializerSettings: { includeNulls: true }
       };
 
-      // FIXED: Perfectly matching the precise expressions your Flow's HTTP action is looking for!
       const tunnelPayload = {
-          reqMethod: "POST",           // Maps to: @coalesce(triggerBody()?['reqMethod'], 'GET')
-          msalToken: pbiToken,         // Maps to: Bearer @{triggerBody()?['msalToken']}
-          requestBody: pbiPayload,     // Maps to: @triggerBody()?['requestBody']
-          uri: pbiUrl,                 // Failsafe root property
+          reqMethod: "POST",           
+          msalToken: pbiToken,         
+          requestBody: pbiPayload,     
+          uri: pbiUrl,                 
           body: {
-              uri: pbiUrl              // Maps to: @triggerBody()?['body']?['uri']
+              uri: pbiUrl              
           }
       };
 
@@ -1771,7 +1790,6 @@
       try {
           data = JSON.parse(resText);
       } catch (e) {
-          // If Flow fails it might base64 encode the error string
           try {
               const decoded = atob(resText);
               data = JSON.parse(decoded);
@@ -1794,9 +1812,7 @@
           throw new Error(`Power BI Error: ${errMsg}`);
       }
 
-      // If Power Automate applies a bad schema, it might return { results: [] } or something similar.
       if (!data.results || !data.results[0] || !data.results[0].tables) {
-          // Check if they left the Table[Column1] schema by checking if it's completely stripped
           if (Object.keys(data).length === 0) {
               throw new Error("Power Automate stripped the data. Delete the 'JSON Schema' in the Response action!");
           }
@@ -1836,7 +1852,11 @@
       try {
           // --- 1. FETCH ADHERENCE PERCENTAGES ---
           const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; 
-          const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', 'Rep Details'[AgentName] = "${empName}", 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), 'Avaya Details'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+          
+          // FIXED: Smart SEARCH() filter for "Last, First" vs "First Last" formatting immunity
+          // FIXED: Date Bounds use strict < startOfNextMonth to capture all trailing time components
+          const repFilter = buildDaxNameFilter('Rep Details', 'AgentName', empName);
+          const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', FILTER('Rep Details', ${repFilter}), 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), 'Avaya Details'[Row Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
 
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
 
@@ -1856,7 +1876,8 @@
           const llDatasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; 
           const llTableName = "2026"; 
           
-          const llDaxQuery = `EVALUATE CALCULATETABLE('${llTableName}', '${llTableName}'[Agent Name] = "${empName}", '${llTableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), '${llTableName}'[Logout Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+          const llFilter = buildDaxNameFilter(llTableName, 'Agent Name', empName);
+          const llDaxQuery = `EVALUATE CALCULATETABLE('${llTableName}', FILTER('${llTableName}', ${llFilter}), '${llTableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), '${llTableName}'[Logout Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
 
           const llData = await executePowerBIQueryViaTunnel(llDatasetId, llDaxQuery);
 
@@ -1912,7 +1933,8 @@
           const datasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; 
           const tableName = "2026"; 
           
-          const daxQuery = `EVALUATE CALCULATETABLE('${tableName}', '${tableName}'[Agent Name] = "${empName}", '${tableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), '${tableName}'[Logout Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+          const llFilter = buildDaxNameFilter(tableName, 'Agent Name', empName);
+          const daxQuery = `EVALUATE CALCULATETABLE('${tableName}', FILTER('${tableName}', ${llFilter}), '${tableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), '${tableName}'[Logout Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
 
           // Fetch Via ACT Proxy Tunnel
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
@@ -1977,7 +1999,8 @@
           const dates = getMonthDateRange(period);
           const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; 
           
-          const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', 'Rep Details'[AgentName] = "${empName}", 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), 'Avaya Details'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
+          const repFilter = buildDaxNameFilter('Rep Details', 'AgentName', empName);
+          const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', FILTER('Rep Details', ${repFilter}), 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), 'Avaya Details'[Row Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
 
           // Fetch Via ACT Proxy Tunnel
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
