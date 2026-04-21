@@ -1730,25 +1730,17 @@
       }
 
       const pbiUrl = `https://api.powerbi.com/v1.0/myorg/datasets/${datasetId}/executeQueries`;
-      
       const tunnelUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/5aad6c2d680a46c1ad66ae301d9e5bdb/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=yh385aT7xv9ZdBhDNxWaea6jVEHaHbHddRrDcX1Zg0w"; 
       
-      // Extended standard structure to guarantee Flow schema matches
+      // FIXED: Send pure, unencrypted JSON payload to match the Flow's exact HTTP expectations
       const tunnelPayload = {
           url: pbiUrl,
-          uri: pbiUrl,
-          apiUrl: pbiUrl,
-          endpoint: pbiUrl,
           method: "POST",
           headers: {
               "Authorization": `Bearer ${pbiToken}`,
               "Content-Type": "application/json"
           },
-          body: {
-              queries: [{ query: daxQuery }],
-              serializerSettings: { includeNulls: true }
-          },
-          payload: {
+          requestBody: {
               queries: [{ query: daxQuery }],
               serializerSettings: { includeNulls: true }
           }
@@ -1765,66 +1757,37 @@
       }
       
       const resText = await res.text();
+
+      // Ensure Flow doesn't return 0 bytes
+      if (!resText || resText.trim() === "") {
+          throw new Error("Power Automate returned an empty response. Please delete the 'JSON Schema' in your Flow's Response action.");
+      }
+
       let data = null;
 
       // 1. Try Direct JSON parsing
-      try { data = JSON.parse(resText); } catch(e) {}
-
-      // 2. Try Standard Base64 Decode
-      if (!data) {
-          try { data = JSON.parse(atob(resText)); } catch(e) {}
-      }
-
-      // 3. Try Brute Force 1-Byte XOR Decryption (ACT Experimental polyfill)
-      if (!data) {
+      try {
+          data = JSON.parse(resText);
+      } catch (e) {
+          // 2. Try Base64 decoding (Fallback if Flow encountered an error and forwarded it as binary)
           try {
-              let decoded = atob(resText);
-              for (let key = 0; key < 256; key++) {
-                  let attempt = "";
-                  for (let i = 0; i < decoded.length; i++) {
-                      attempt += String.fromCharCode(decoded.charCodeAt(i) ^ key);
-                  }
-                  if (attempt.startsWith('{') || attempt.startsWith('[')) {
-                      try { data = JSON.parse(attempt); break; } catch(e) {}
-                  }
-              }
-          } catch(e) {}
+              const decoded = atob(resText);
+              data = JSON.parse(decoded);
+          } catch (e2) {
+              throw new Error(`Unparsable Tunnel Response:\n\n${resText.substring(0, 150)}...`);
+          }
       }
 
-      // 4. Try Standard ACT Experimental Multi-byte XOR keys
-      if (!data) {
-          try {
-              let decoded = atob(resText);
-              let keys = ["Daytona123!", "ACT", "WBMason", "Secret"];
-              for (let k of keys) {
-                  let attempt = "";
-                  for (let i = 0; i < decoded.length; i++) {
-                      attempt += String.fromCharCode(decoded.charCodeAt(i) ^ k.charCodeAt(i % k.length));
-                  }
-                  if (attempt.startsWith('{') || attempt.startsWith('[')) {
-                      try { data = JSON.parse(attempt); break; } catch(e) {}
-                  }
-              }
-          } catch(e) {}
-      }
-
-      // If absolutely everything fails, throw the raw string to the user so it can be debugged!
-      if (!data) {
-          throw new Error(`UNPARSABLE_TUNNEL_RESPONSE:\n${resText.substring(0, 150)}...`);
-      }
-
-      // Handle Power Automate wrapping the output in a nested 'body' object
-      if (data.body && data.body.results) {
-          data = data.body;
-      } else if (data.body && data.body.error) {
-          data = data.body;
+      // Handle nested body if Power Automate passes the raw HTTP action output object
+      if (data.body) {
+          data = typeof data.body === 'string' ? JSON.parse(data.body) : data.body;
       }
       
       // Look for specific error messages forwarded through the payload
       if (data.error) {
           console.error("Power BI API Error:", data.error);
           const errMsg = data.error.message || JSON.stringify(data.error);
-          throw new Error(`Power BI API Error: ${errMsg}`);
+          throw new Error(`Power BI Error: ${errMsg}`);
       }
 
       if (!data.results || !data.results[0] || !data.results[0].tables) {
