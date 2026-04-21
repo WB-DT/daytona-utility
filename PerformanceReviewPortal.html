@@ -9,6 +9,10 @@
   <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
   <!-- Font Awesome for Icons -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <!-- Tabulator JS & CSS (Excel-like Grid Engine) -->
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/tabulator/6.2.1/css/tabulator.min.css" rel="stylesheet">
+  <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/tabulator/6.2.1/js/tabulator.min.js"></script>
 
   <!-- Early Theme Initialization -->
   <script>
@@ -151,6 +155,17 @@
       line-height: 1.5;
       -webkit-font-smoothing: antialiased;
     }
+
+    /* ── Tabulator Native Overrides ── */
+    .tabulator { border-radius: var(--radius-sm); border: 1px solid var(--border) !important; background-color: var(--bg-card) !important; color: var(--text-main) !important; font-family: var(--font) !important; }
+    .tabulator-header { background-color: var(--bg-table-alt) !important; color: var(--text-brand) !important; border-bottom: 2px solid var(--border) !important; }
+    .tabulator-col-title { font-weight: 700; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px; }
+    .tabulator-row { background-color: var(--bg-card) !important; border-bottom: 1px solid var(--bg-table-border) !important; color: var(--text-main) !important; }
+    .tabulator-row:nth-child(even) { background-color: var(--bg-table-alt) !important; }
+    .tabulator-row:hover { background-color: var(--bg-accent) !important; }
+    .tabulator-footer { background-color: var(--bg-table-alt) !important; border-top: 1px solid var(--border) !important; color: var(--text-muted) !important; }
+    .tabulator-page { color: var(--text-main) !important; border: 1px solid var(--border) !important; border-radius: 4px; }
+    .tabulator-page.active { background-color: var(--brand) !important; color: white !important; }
 
     /* ── Login Overlay ── */
     #login-overlay {
@@ -702,7 +717,7 @@
     .btn-print:hover { background: var(--gray-800); }
     html.dark .btn-print:hover { background: var(--gray-500); }
 
-    /* ── PBI Report Tables & Abbreviated Cards ── */
+    /* ── HTML Rendered Report Tables (Used for Printing PDF) ── */
     .report-table {
         width: 100%;
         border-collapse: collapse;
@@ -994,6 +1009,8 @@
       .abbrev-card { width: calc(33% - 1rem) !important; box-sizing: border-box !important; border: 1px solid #ccc !important; box-shadow: none !important; break-inside: avoid; border-left: 1px solid #ccc !important;}
       .calendar-badge { border: 1px solid #999 !important; box-shadow: none !important; }
       .calendar-badge .month { -webkit-print-color-adjust: exact; print-color-adjust: exact; background-color: var(--brand) !important; color: white !important; }
+      /* Hide dynamic elements that should not be printed */
+      .tabulator-toolbar, .column-visibility-menu { display: none !important; }
     }
   </style>
 </head>
@@ -1511,7 +1528,7 @@
           <!-- Full Table Buttons Box -->
           <div class="sig-box" style="display:flex; flex-direction:column; gap:0.75rem; border-top: 4px solid var(--gray-500);">
             <h4 style="font-weight: 700; color: var(--text-brand); margin-bottom: 0.5rem; font-size: 1.05rem;"><i class="fas fa-table"></i> Full Table Data</h4>
-            <p style="font-size: 0.85rem; color: var(--text-muted); margin-top:-0.5rem;">Detailed raw spreadsheet grids</p>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-top:-0.5rem;">Interactive Excel-like grids</p>
             <button class="btn btn-secondary" id="btn-fetch-login-logout-full" onclick="renderCachedReport('login', false)" style="width: 100%; justify-content: flex-start;">
                 <i class="fas fa-list" style="width:20px;"></i> Attach Full Login/Logout
             </button>
@@ -1524,8 +1541,8 @@
       </div>
 
       <!-- Dynamic Report Containers -->
-      <div id="login-logout-container" style="display:none; margin-bottom: 2.5rem; overflow-x: auto;"></div>
-      <div id="lunch-break-container" style="display:none; margin-bottom: 2.5rem; overflow-x: auto;"></div>
+      <div id="login-logout-container" style="display:none; margin-bottom: 2.5rem;"></div>
+      <div id="lunch-break-container" style="display:none; margin-bottom: 2.5rem;"></div>
 
 
       <!-- Acknowledgment -->
@@ -1712,6 +1729,18 @@
     
     // Instantly calculate Total Working Days (Denominator) on page load
     fetchAllPbiDataInBackground(false);
+    
+    // Hide column menus when clicking outside
+    document.addEventListener('click', function(event) {
+        ['login', 'avaya'].forEach(type => {
+            const menu = document.getElementById(`col-menu-${type}`);
+            if (menu && menu.style.display === 'block') {
+                if (!event.target.closest(`#col-menu-${type}`) && !event.target.closest(`button[onclick="toggleColMenu('${type}')"]`)) {
+                    menu.style.display = 'none';
+                }
+            }
+        });
+    });
   };
 
   // ── Session Restore on Load ────────────────────────────────────────────────
@@ -1868,6 +1897,10 @@
           }
           
           if (matchedVal !== null && matchedVal !== undefined && matchedVal !== '') {
+              // Check if matchedVal is a string with a '%' sign already!
+              if (typeof matchedVal === 'string' && matchedVal.includes('%')) {
+                  matchedVal = matchedVal.replace('%', '');
+              }
               let numVal = parseFloat(matchedVal);
               if (!isNaN(numVal)) {
                   // Format: PBI often returns Seconds for Time duration metrics. Convert to Minutes if > 200
@@ -2180,8 +2213,8 @@
       return { html: formatted, styleStr: styleStr };
   }
 
-  // ── Table Auto-Formatter ───────────────────────────────────────────────────
-  function generateFormattedTable(reportData) {
+  // ── Format Static HTML Table (Only used for PDF Printing) ──────────────────
+  function generateFormattedHTMLTable(reportData) {
       let tableHtml = `<table class="report-table"><thead><tr>`;
       Object.keys(reportData[0]).forEach(k => {
           tableHtml += `<th>${k}</th>`;
@@ -2549,10 +2582,34 @@
 
           if (avayaData.length > 0) {
               const row = avayaData[0]; 
-              if (row['LunchAdherence']) document.getElementById('m-lunch-adherence').value = row['LunchAdherence'];
-              if (row['BreakAdherence']) document.getElementById('m-break-adherence').value = row['BreakAdherence'];
-              calculateArrow('m-lunch-adherence');
-              calculateArrow('m-break-adherence');
+              
+              // 🧲 FUZZY MATCH PERCENTAGES
+              let lunchAdh = null, breakAdh = null, repAcc = null;
+              Object.keys(row).forEach(k => {
+                  const lowerK = k.toLowerCase();
+                  if (lowerK.includes('lunch') && lowerK.includes('adherence')) lunchAdh = row[k];
+                  if (lowerK.includes('break') && lowerK.includes('adherence')) breakAdh = row[k];
+                  if (lowerK.includes('reporting') && lowerK.includes('accuracy')) repAcc = row[k];
+              });
+
+              if (lunchAdh !== null) {
+                  let v = parseFloat(String(lunchAdh).replace('%',''));
+                  if(v <= 1 && v > 0 && String(lunchAdh).indexOf('%') === -1) v *= 100;
+                  document.getElementById('m-lunch-adherence').value = v.toFixed(2);
+                  calculateArrow('m-lunch-adherence');
+              }
+              if (breakAdh !== null) {
+                  let v = parseFloat(String(breakAdh).replace('%',''));
+                  if(v <= 1 && v > 0 && String(breakAdh).indexOf('%') === -1) v *= 100;
+                  document.getElementById('m-break-adherence').value = v.toFixed(2);
+                  calculateArrow('m-break-adherence');
+              }
+              if (repAcc !== null) {
+                  let v = parseFloat(String(repAcc).replace('%',''));
+                  if(v <= 1 && v > 0 && String(repAcc).indexOf('%') === -1) v *= 100;
+                  document.getElementById('m-reporting-accuracy').value = v.toFixed(2);
+                  calculateArrow('m-reporting-accuracy');
+              }
               
               // Map all other dynamic KPIs intelligently 
               autoFillDynamicMetrics(row);
@@ -2601,6 +2658,28 @@
       }
   }
 
+  // ── Tabulator Global Helpers ──
+  function toggleColMenu(type) {
+      const menu = document.getElementById(`col-menu-${type}`);
+      menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+  }
+  function toggleTableColumn(type, field, isVisible) {
+      const table = window[`table_${type}`];
+      if (table) {
+          if (isVisible) table.showColumn(field);
+          else table.hideColumn(field);
+      }
+  }
+  function clearFilters(type) {
+      const table = window[`table_${type}`];
+      if (table) table.clearHeaderFilter();
+  }
+  function downloadData(type) {
+      const table = window[`table_${type}`];
+      if (table) table.download("csv", `${type}_report.csv`);
+  }
+
+
   // ── Render Cached Reports on Panel 3 ───────────────────────────────────────
   // INSTANT Render using the background cache, no waiting required!
   function renderCachedReport(type, isSummary = false) {
@@ -2614,17 +2693,74 @@
           return;
       }
 
-      const renderHtml = isSummary ? generateAbbreviatedCards(data, type) : generateFormattedTable(data);
       const containerId = type === 'login' ? 'login-logout-container' : 'lunch-break-container';
       const container = document.getElementById(containerId);
-      
       let titleIcon = type === 'login' ? '<i class="fas fa-sign-in-alt"></i> Login / Logout Report' : '<i class="fas fa-coffee"></i> Lunch / Break Adherence';
-      let summaryTxt = isSummary ? " (Abbreviated Cards)" : " (Full Table)";
       
-      container.innerHTML = `<div class="section-heading" style="margin-top:0;">${titleIcon}${summaryTxt} (${period})</div>` + renderHtml;
-      container.style.display = 'block';
+      if (isSummary) {
+          const renderHtml = generateAbbreviatedCards(data, type);
+          container.innerHTML = `<div class="section-heading" style="margin-top:0;">${titleIcon} (Abbreviated Cards) (${period})</div>` + renderHtml;
+          container.style.display = 'block';
+          showError(`Cards Generated Successfully!`);
+      } else {
+          // INTERACTIVE EXCEL-LIKE TABULATOR GRID
+          const tableId = `tabulator-${type}`;
+          const renderHtml = `
+              <div class="tabulator-toolbar" style="margin-bottom: 1rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+                  <div style="position: relative;">
+                      <button class="btn btn-secondary" style="padding: 0.4rem 0.8rem; font-size: 0.85rem;" onclick="toggleColMenu('${type}')"><i class="fas fa-columns"></i> Columns</button>
+                      <div id="col-menu-${type}" style="display: none; position: absolute; top: 100%; left: 0; background: var(--bg-card); border: 1px solid var(--border); box-shadow: var(--shadow-lg); border-radius: var(--radius-sm); padding: 1rem; z-index: 1000; width: max-content; max-height: 300px; overflow-y: auto;"></div>
+                  </div>
+                  <button class="btn btn-secondary" style="padding: 0.4rem 0.8rem; font-size: 0.85rem;" onclick="clearFilters('${type}')"><i class="fas fa-filter-slash"></i> Clear Filters</button>
+                  <button class="btn btn-success" style="padding: 0.4rem 0.8rem; font-size: 0.85rem;" onclick="downloadData('${type}')"><i class="fas fa-file-excel"></i> Export CSV</button>
+              </div>
+              <div id="${tableId}" style="width: 100%;"></div>
+          `;
+          
+          container.innerHTML = `<div class="section-heading" style="margin-top:0;">${titleIcon} Full Table Data (${period})</div>` + renderHtml;
+          container.style.display = 'block';
 
-      showError(`${isSummary ? 'Cards' : 'Table'} Generated Successfully!`);
+          let columns = Object.keys(data[0]).map(k => {
+              let sorter = "string";
+              if (typeof data[0][k] === 'number') sorter = "number";
+              return {
+                  title: k,
+                  field: k,
+                  sorter: sorter,
+                  headerFilter: "input",
+                  formatter: function(cell) {
+                      let v = cell.getValue();
+                      let formatted = formatCellValue(k, v);
+                      if (formatted.styleStr) {
+                          cell.getElement().style.cssText = formatted.styleStr;
+                      }
+                      return formatted.html;
+                  }
+              };
+          });
+
+          window[`table_${type}`] = new Tabulator(`#${tableId}`, {
+              data: data,
+              layout: "fitDataFill",
+              columns: columns,
+              movableColumns: true,
+              resizableColumnFit: true,
+              pagination: "local",
+              paginationSize: 15,
+          });
+
+          // Build Visibility Menu
+          let menuHtml = '<div style="font-weight: 700; color: var(--text-muted); margin-bottom: 8px; font-size: 0.75rem; text-transform: uppercase;">Toggle Columns</div>';
+          columns.forEach(col => {
+              menuHtml += `<label style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px; cursor: pointer; font-size: 0.85rem; color: var(--text-main);">
+                              <input type="checkbox" checked onchange="toggleTableColumn('${type}', '${col.field}', this.checked)" style="width: 16px; height: 16px; margin: 0; box-shadow: none;"> 
+                              ${col.title}
+                           </label>`;
+          });
+          document.getElementById(`col-menu-${type}`).innerHTML = menuHtml;
+
+          showError(`Interactive Table Generated Successfully!`);
+      }
   }
 
   // ── Panel Navigation ───────────────────────────────────────────────────────
@@ -2834,11 +2970,16 @@
     // Append Power BI Reports to Printout if they were generated
     const llContainer = document.getElementById('login-logout-container');
     if (llContainer.style.display !== 'none') {
-        html += `<div class="summary-section">${llContainer.innerHTML}</div>`;
+        let isSummary = llContainer.innerHTML.includes('abbrev-grid');
+        let renderHtml = isSummary ? generateAbbreviatedCards(window.pbiCache.loginData, 'login') : generateFormattedHTMLTable(window.pbiCache.loginData);
+        html += `<div class="summary-section"><h3 style="border:none; padding:0;"><i class="fas fa-sign-in-alt"></i> Login / Logout Report</h3>${renderHtml}</div>`;
     }
+    
     const lbContainer = document.getElementById('lunch-break-container');
     if (lbContainer.style.display !== 'none') {
-        html += `<div class="summary-section">${lbContainer.innerHTML}</div>`;
+        let isSummary = lbContainer.innerHTML.includes('abbrev-grid');
+        let renderHtml = isSummary ? generateAbbreviatedCards(window.pbiCache.avayaData, 'avaya') : generateFormattedHTMLTable(window.pbiCache.avayaData);
+        html += `<div class="summary-section"><h3 style="border:none; padding:0; margin-top: 1rem;"><i class="fas fa-coffee"></i> Lunch / Break Adherence</h3>${renderHtml}</div>`;
     }
 
     return html;
