@@ -1732,13 +1732,18 @@
       const pbiUrl = `https://api.powerbi.com/v1.0/myorg/datasets/${datasetId}/executeQueries`;
       const tunnelUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/5aad6c2d680a46c1ad66ae301d9e5bdb/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=yh385aT7xv9ZdBhDNxWaea6jVEHaHbHddRrDcX1Zg0w"; 
       
-      // FIXED: Send pure, unencrypted JSON payload to match the Flow's exact HTTP expectations
+      // FIXED: Sending BOTH standard JSON body and requestBody explicitly to bypass strict Flow trigger schema parsing issues
       const tunnelPayload = {
-          url: pbiUrl,
+          uri: pbiUrl,       // ADDED: The specific property the flow's HTTP action is looking for
+          url: pbiUrl,       // Kept for backward compatibility
           method: "POST",
           headers: {
               "Authorization": `Bearer ${pbiToken}`,
               "Content-Type": "application/json"
+          },
+          body: {
+              queries: [{ query: daxQuery }],
+              serializerSettings: { includeNulls: true }
           },
           requestBody: {
               queries: [{ query: daxQuery }],
@@ -1758,24 +1763,25 @@
       
       const resText = await res.text();
 
-      // Ensure Flow doesn't return 0 bytes
+      // Specifically catches when Flow returns 0 bytes due to a skipped Response action!
       if (!resText || resText.trim() === "") {
-          throw new Error("Power Automate returned an empty response. Please delete the 'JSON Schema' in your Flow's Response action.");
+          throw new Error(
+            "Power Automate returned an empty response (0 bytes). This means the Power BI HTTP action inside your Flow FAILED, and the Flow terminated before returning the error to the app.\n\n" +
+            "TO FIX THIS AND SEE THE REAL ERROR:\n" +
+            "1. Open your Flow in Edit mode.\n" +
+            "2. Click the three dots (...) on the final 'Response' action -> select 'Configure run after'.\n" +
+            "3. Check the boxes for 'has failed' and 'is skipped' and click Save.\n" +
+            "4. Test again to see the exact Power BI error!"
+          );
       }
 
       let data = null;
 
-      // 1. Try Direct JSON parsing
+      // Try Direct JSON parsing
       try {
           data = JSON.parse(resText);
       } catch (e) {
-          // 2. Try Base64 decoding (Fallback if Flow encountered an error and forwarded it as binary)
-          try {
-              const decoded = atob(resText);
-              data = JSON.parse(decoded);
-          } catch (e2) {
-              throw new Error(`Unparsable Tunnel Response:\n\n${resText.substring(0, 150)}...`);
-          }
+          throw new Error(`Unparsable Tunnel Response (Not JSON). Flow output:\n\n${resText.substring(0, 150)}...`);
       }
 
       // Handle nested body if Power Automate passes the raw HTTP action output object
@@ -1907,8 +1913,10 @@
           
           const daxQuery = `EVALUATE CALCULATETABLE('${tableName}', '${tableName}'[Agent Name] = "${empName}", '${tableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), '${tableName}'[Logout Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
 
+          // Fetch Via ACT Proxy Tunnel
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
 
+          // Build HTML Table
           if (reportData.length === 0) {
               showError("No login/logout data found for this period.");
               btn.innerHTML = originalHtml;
@@ -1922,6 +1930,7 @@
           reportData.forEach(row => {
               tableHtml += `<tr>`;
               Object.values(row).forEach(v => {
+                  // Clean long ISO dates for display if needed
                   let cellVal = v;
                   if (typeof v === 'string' && v.includes('T00:00:00')) {
                       cellVal = new Date(v).toLocaleDateString();
@@ -1969,8 +1978,10 @@
           
           const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', 'Rep Details'[AgentName] = "${empName}", 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, ${dates.startDay}), 'Avaya Details'[Row Date] <= DATE(${dates.endYear}, ${dates.endMonth}, ${dates.endDay}))`;
 
+          // Fetch Via ACT Proxy Tunnel
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
 
+          // Build HTML Table
           if (reportData.length === 0) {
               showError("No lunch/break data found for this period.");
               btn.innerHTML = originalHtml;
