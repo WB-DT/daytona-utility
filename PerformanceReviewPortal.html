@@ -2545,7 +2545,7 @@ function updateMetricsUI() {
       });
   }
 
-  // 🟢 UNIFIED BACKGROUND FETCH ENGINE 🟢
+// 🟢 UNIFIED BACKGROUND FETCH ENGINE 🟢
   async function fetchAllPbiDataInBackground(showToasts = false) {
       const empName = val('employee-name');
       const period = val('review-period');
@@ -2563,9 +2563,8 @@ function updateMetricsUI() {
 
       if (!empName) return; 
 
-      // Check if we already cached this EXACT employee and period
       if (!showToasts && window.pbiCache.empName === empName && window.pbiCache.period === period) {
-          return; // Skip if silently running but data is perfectly cached
+          return; 
       }
 
       inputEl.value = '';
@@ -2580,6 +2579,16 @@ function updateMetricsUI() {
 
       let hasErrors = false;
 
+      // Helper to safely set UI values and trigger color arrows
+      const setMetric = (id, val) => {
+          const el = document.getElementById(id);
+          if (el && !isNaN(val)) {
+              // Format to 1 decimal place for times, whole numbers for calls
+              el.value = el.step === '1' ? Math.round(val) : val.toFixed(1);
+              calculateArrow(id);
+          }
+      };
+
       try {
           // 1. Fetch Avaya Data
           const avayaId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; 
@@ -2590,38 +2599,68 @@ function updateMetricsUI() {
           window.pbiCache.avayaData = avayaData;
 
           if (avayaData.length > 0) {
-              const row = avayaData[0]; 
-              
-              // 🧲 FUZZY MATCH PERCENTAGES
-              let lunchAdh = null, breakAdh = null, repAcc = null;
-              Object.keys(row).forEach(k => {
-                  const lowerK = k.toLowerCase();
-                  if (lowerK.includes('lunch') && lowerK.includes('adherence')) lunchAdh = row[k];
-                  if (lowerK.includes('break') && lowerK.includes('adherence')) breakAdh = row[k];
-                  if (lowerK.includes('reporting') && lowerK.includes('accuracy')) repAcc = row[k];
+              // Aggregate the month's data accurately
+              let totalACDTime = 0, totalACWTime = 0, totalInbound = 0, totalOutbound = 0;
+              let totalLunch = 0, totalBreak = 0, totalPersonal = 0, totalStaffed = 0;
+              let totalOE = 0, totalTech = 0;
+              let daysCount = avayaData.length;
+
+              avayaData.forEach(r => {
+                  totalACDTime += Number(r['ACD Time']) || 0;
+                  totalACWTime += Number(r['ACW Time']) || 0;
+                  totalInbound += Number(r['ACD Calls']) || 0;
+                  totalInbound += Number(r['Extn In Calls']) || 0; 
+                  totalOutbound += Number(r['Extn Out Calls']) || 0;
+                  totalLunch += Number(r['Time In Lunch']) || 0;
+                  totalBreak += Number(r['Time In Break']) || 0;
+                  totalPersonal += Number(r['Time In Personal Misc']) || 0;
+                  
+                  // For Prod % Calculation
+                  totalStaffed += Number(r['Staffed Time']) || 0;
+                  totalOE += Number(r['Time In OE/Payment Processing']) || 0;
+                  totalTech += Number(r['Time In Technical Issues']) || 0;
               });
 
-              if (lunchAdh !== null) {
-                  let v = parseFloat(String(lunchAdh).replace('%',''));
-                  if(v <= 1 && v > 0 && String(lunchAdh).indexOf('%') === -1) v *= 100;
-                  document.getElementById('m-lunch-adherence').value = v.toFixed(2);
-                  calculateArrow('m-lunch-adherence');
+              // Mathematical Averages (Converting Seconds to Minutes)
+              const avgTalkTime = totalInbound > 0 ? (totalACDTime / totalInbound) / 60 : 0;
+              const avgHandleTime = totalInbound > 0 ? ((totalACDTime + totalACWTime) / totalInbound) / 60 : 0;
+              const avgLunch = daysCount > 0 ? (totalLunch / daysCount) / 60 : 0;
+              const avgBreak = daysCount > 0 ? (totalBreak / daysCount) / 60 : 0;
+              const avgPersonal = daysCount > 0 ? (totalPersonal / daysCount) / 60 : 0;
+
+              // PERCENTAGE CALCULATIONS
+              // 1. Prod % (Mapped to AUX Accuracy / Primary KPI)
+              let prodPct = 0;
+              if (totalStaffed > 0) {
+                  let productiveSecs = totalStaffed - totalACWTime - totalBreak - totalLunch - totalOE - totalTech - totalPersonal;
+                  prodPct = (productiveSecs / totalStaffed) * 100;
               }
-              if (breakAdh !== null) {
-                  let v = parseFloat(String(breakAdh).replace('%',''));
-                  if(v <= 1 && v > 0 && String(breakAdh).indexOf('%') === -1) v *= 100;
-                  document.getElementById('m-break-adherence').value = v.toFixed(2);
-                  calculateArrow('m-break-adherence');
+
+              // 2. Schedule Adherence (Variance from expected scheduled time)
+              let lunchAdh = 0, breakAdh = 0;
+              if (daysCount > 0) {
+                  let expectedLunch = daysCount * 3600; // 60 mins per day
+                  let expectedBreak = daysCount * 1800; // 30 mins per day
+                  
+                  // 100% minus the % they deviated from the schedule
+                  lunchAdh = Math.max(0, 100 - ((Math.abs(expectedLunch - totalLunch) / expectedLunch) * 100));
+                  breakAdh = Math.max(0, 100 - ((Math.abs(expectedBreak - totalBreak) / expectedBreak) * 100));
               }
-              if (repAcc !== null) {
-                  let v = parseFloat(String(repAcc).replace('%',''));
-                  if(v <= 1 && v > 0 && String(repAcc).indexOf('%') === -1) v *= 100;
-                  document.getElementById('m-reporting-accuracy').value = v.toFixed(2);
-                  calculateArrow('m-reporting-accuracy');
-              }
+
+              // POPULATE UI
+              setMetric('m-inbound-calls', totalInbound);
+              setMetric('m-outbound-calls', totalOutbound);
+              setMetric('m-talk-time', avgTalkTime);
+              setMetric('m-handle-time', avgHandleTime);
+              setMetric('m-lunch', avgLunch);
+              setMetric('m-avg-break', avgBreak);
+              setMetric('m-personal-time', avgPersonal);
               
-              // Map all other dynamic KPIs intelligently 
-              autoFillDynamicMetrics(row);
+              // Populate Percentages
+              setMetric('m-aux-accuracy', prodPct);
+              setMetric('m-reporting-accuracy', prodPct); // Often mirrors Prod %
+              setMetric('m-lunch-adherence', lunchAdh);
+              setMetric('m-break-adherence', breakAdh);
           }
       } catch(err) {
           console.warn("Avaya Fetch Error:", err);
