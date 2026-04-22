@@ -170,7 +170,7 @@
       font-size: 0.85rem;
       background: var(--bg-error);
       padding: 0.75rem;
-      border-radius: 4px;
+      border-radius: var(--radius-sm);
       border: 1px solid var(--border-error);
       display: flex;
       align-items: center;
@@ -1051,7 +1051,7 @@
 
         <div class="form-grid">
           <div class="field">
-            <label for="eom-overall-rating">Monthly/Quarterly Performance Rating <span class="req">*</span></label>
+            <label for="eom-overall-rating">Monthly Performance Rating <span class="req">*</span></label>
             <select id="eom-overall-rating" onchange="window.colorRating(this)" style="font-weight: 600;">
               <option value="">— Select —</option>
               <option value="exceeds">Exceeds Expectations (▲)</option>
@@ -1074,8 +1074,8 @@
 
         <div class="form-grid cols-1">
           <div class="field">
-            <label for="eom-opportunities-month">Opportunities This Period</label>
-            <textarea id="eom-opportunities-month" placeholder="Describe key areas for improvement this period..."></textarea>
+            <label for="eom-opportunities-month">Opportunities This Month</label>
+            <textarea id="eom-opportunities-month" placeholder="Describe key areas for improvement this month..."></textarea>
           </div>
           <div class="field">
             <label for="eom-opportunities-year">Opportunities This Year</label>
@@ -1383,6 +1383,14 @@
 </div><!-- /page-wrap -->
 
 <script>
+  // ── CACHE INITIALIZATION ──
+  window.pbiCache = {
+      loginData: null,
+      avayaData: null,
+      empName: null,
+      period: null
+  };
+
   // ── MSAL / Authentication Configuration ────────────────────────────────────
   const DATAVERSE_URL = "https://org23279050.crm.dynamics.com/api/data/v9.2";
   
@@ -1559,7 +1567,7 @@
     }
 
     // Auto calculate days present in background when period changes
-    document.getElementById('review-period').addEventListener('change', fetchDaysPresentBackground);
+    document.getElementById('review-period').addEventListener('change', fetchAllPbiDataInBackground);
 
     // Fetch active employees to populate dropdown
     fetchActiveEmployees();
@@ -1568,7 +1576,7 @@
     updateMetricsUI();
 
     // Instantly calculate Total Working Days on page load
-    fetchDaysPresentBackground();
+    fetchAllPbiDataInBackground();
 
     // Setup click-outside listener to close column dropdowns
     document.addEventListener('click', function(event) {
@@ -1801,7 +1809,7 @@
       const toast = document.createElement('div');
       toast.className = 'toast';
       
-      const isSuccess = msg.toLowerCase().includes('success') || msg.toLowerCase().includes('attached');
+      const isSuccess = msg.toLowerCase().includes('success') || msg.toLowerCase().includes('attached') || msg.toLowerCase().includes('loaded');
       if(isSuccess) toast.classList.add('success');
       
       const iconClass = isSuccess ? 'fa-check-circle' : 'fa-exclamation-circle';
@@ -2160,7 +2168,12 @@
   async function autoFillEmployee() {
     const empName = val('employee-name');
     
-    // DOM Elements to manage
+    // Clear out global cache because employee changed
+    window.pbiCache.empName = empName;
+    window.pbiCache.loginData = null;
+    window.pbiCache.avayaData = null;
+
+    // Reset fields instantly whenever a new name is selected
     const elEmpId = document.getElementById('employee-id');
     const elJobTitle = document.getElementById('job-title');
     const elDept = document.getElementById('department');
@@ -2172,8 +2185,14 @@
     const elEmpBreak = document.getElementById('emp-break');
     const elSpecialInst = document.getElementById('special-instructions');
     const elLastReview = document.getElementById('last-review-date');
+    const elDaysPresent = document.getElementById('m-days-present');
 
-    // Reset fields instantly whenever a new name is selected
+    // Wipe tables if they were rendered for previous employee
+    document.getElementById('login-logout-container').innerHTML = '';
+    document.getElementById('login-logout-container').style.display = 'none';
+    document.getElementById('lunch-break-container').innerHTML = '';
+    document.getElementById('lunch-break-container').style.display = 'none';
+
     if (!empName) {
         elEmpId.value = '';
         elJobTitle.value = '';
@@ -2186,6 +2205,7 @@
         if (elEmpBreak) elEmpBreak.value = '';
         if (elSpecialInst) elSpecialInst.value = '';
         if (elLastReview) elLastReview.value = '';
+        if (elDaysPresent) elDaysPresent.value = '';
         updateMetricsUI();
         return;
     }
@@ -2287,16 +2307,17 @@
     } catch(e) {
         console.error("Auto-fill API error: ", e);
     } finally {
-        updateMetricsUI(); // Update the metrics grid after populating the department
-        // Automatically trigger background fetch for days present if period is already set
-        fetchDaysPresentBackground();
+        updateMetricsUI(); 
+        
+        // Wait for the background PBI fetch to complete before hiding the loader
+        await fetchAllPbiDataInBackground();
+        
         if(loader) loader.style.display = 'none';
     }
   }
 
   // ── Power Automate / Power BI Fetch Using ACT TUNNEL FLOW ──────────────────
 
-  // Universal Helper to execute Power BI queries through your Power Automate HTTP Proxy Tunnel
   async function executePowerBIQueryViaTunnel(datasetId, daxQuery) {
       let pbiToken;
       try {
@@ -2337,9 +2358,7 @@
       const resText = await res.text();
 
       if (!resText || resText.trim() === "") {
-          throw new Error(
-            "Power Automate returned an empty response. This usually means your Flow's Response action STILL has a 'JSON Schema' defined that is blocking the data. Please completely clear the JSON Schema box in your Flow's Response action!"
-          );
+          throw new Error("Power Automate returned an empty response. The flow's Response action 'JSON Schema' might be blocking the data.");
       }
 
       let data = null;
@@ -2355,8 +2374,9 @@
           }
       }
 
+      // Check if Flow returned success but skipped execution (Fallback block triggered)
       if (data && data.status === "success" && data.result === 0) {
-          console.error("Flow returned success with 0 results. Check flow for errors. PBI may have returned a 400.");
+          console.warn("Flow returned success with 0 results. PBI likely returned an empty or failed set.");
           return [];
       }
 
@@ -2390,13 +2410,16 @@
       });
   }
 
-  // Auto-fetch Days Present secretly in background when Month/Employee updates
-  async function fetchDaysPresentBackground() {
+  // ── Unified Background Fetch Engine ──
+  async function fetchAllPbiDataInBackground() {
       const empName = val('employee-name');
       const period = val('review-period');
       const labelEl = document.getElementById('days-present-label');
       const inputEl = document.getElementById('m-days-present');
       const hiddenTotalEl = document.getElementById('h-total-working-days');
+      
+      // Update global period cache
+      window.pbiCache.period = period;
       
       if (!period) return;
 
@@ -2415,13 +2438,17 @@
       }
       if (labelEl) labelEl.innerHTML = `<div class="spinner" style="display:inline-block; border-top-color:var(--text-muted); width:12px; height:12px; margin-right:4px;"></div> / ${totalWorkingDays} Days`;
 
+      let hasErrors = false;
+
       try {
+          // 1. Fetch Login Data (For Days Present & Caching)
           const llDatasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; 
           const llTableName = "2026"; 
           const llFilter = buildDaxNameFilter(llTableName, 'Agent Name', empName);
           const llDaxQuery = `EVALUATE CALCULATETABLE('${llTableName}', FILTER('${llTableName}', ${llFilter}), '${llTableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), '${llTableName}'[Logout Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
 
           const llData = await executePowerBIQueryViaTunnel(llDatasetId, llDaxQuery);
+          window.pbiCache.loginData = llData;
 
           const uniqueDays = new Set();
           llData.forEach(row => {
@@ -2438,13 +2465,30 @@
           if (labelEl) labelEl.innerText = `/ ${totalWorkingDays} Days`;
 
       } catch (err) {
-          console.warn("Background Days Present calculation failed:", err);
+          console.warn("Background Login fetch failed:", err);
           if (labelEl) labelEl.innerText = `/ ${totalWorkingDays} Days`;
           if (inputEl) inputEl.placeholder = "0";
+          hasErrors = true;
       } 
+      
+      try {
+          // 2. Fetch Avaya Data (For caching)
+          const avayaDatasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; 
+          const repFilter = buildDaxNameFilter('Rep Details', 'AgentName', empName);
+          const avayaDaxQuery = `EVALUATE CALCULATETABLE('Avaya Details', FILTER('Rep Details', ${repFilter}), 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), 'Avaya Details'[Row Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
+
+          const avayaData = await executePowerBIQueryViaTunnel(avayaDatasetId, avayaDaxQuery);
+          window.pbiCache.avayaData = avayaData;
+          
+      } catch (err) {
+          console.warn("Background Avaya fetch failed:", err);
+          hasErrors = true;
+      }
+      
+      if (!hasErrors) console.log("Background PBI Caching Complete.");
   }
 
-  // Fetch Panel 2 Metric Adherence
+  // Fetch Panel 2 Metric Adherence (User Initiated)
   async function fetchPowerBIData() {
       const empName = val('employee-name');
       const period = val('review-period');
@@ -2467,9 +2511,54 @@
           const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', FILTER('Rep Details', ${repFilter}), 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), 'Avaya Details'[Row Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
 
           const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
+          window.pbiCache.avayaData = reportData; // Update cache
 
           if (reportData.length > 0) {
               const row = reportData[0]; 
+              
+              // Map all metrics based on active configs
+              if (currentMetrics && currentMetrics.length > 0) {
+                  currentMetrics.forEach(m => {
+                      const el = document.getElementById(m.id);
+                      if (!el) return;
+                      const targetLabel = m.label.toLowerCase().replace(/\(min\)|\(%\)/g, '').trim();
+                      
+                      let matchedVal = null;
+                      const keys = Object.keys(row);
+                      for (let k of keys) {
+                          const cleanK = k.toLowerCase().replace(/\[|\]/g, '').trim();
+                          if (cleanK === targetLabel || cleanK.includes(targetLabel) || targetLabel.includes(cleanK)) {
+                              matchedVal = row[k]; 
+                              break;
+                          }
+                          if (targetLabel.includes('talk time') && cleanK.includes('talk')) { matchedVal = row[k]; break; }
+                          if (targetLabel.includes('break') && cleanK.includes('break') && !cleanK.includes('adherence')) { matchedVal = row[k]; break; }
+                          if (targetLabel.includes('lunch') && cleanK.includes('lunch') && !cleanK.includes('adherence')) { matchedVal = row[k]; break; }
+                          if (targetLabel.includes('aux') && cleanK.includes('aux')) { matchedVal = row[k]; break; }
+                          if (targetLabel.includes('qa') && cleanK.includes('qa')) { matchedVal = row[k]; break; }
+                          if (targetLabel.includes('handle time') && cleanK.includes('handle')) { matchedVal = row[k]; break; }
+                          if (targetLabel.includes('outbound calls') && cleanK.includes('outbound')) { matchedVal = row[k]; break; }
+                          if (targetLabel.includes('inbound calls') && cleanK.includes('inbound')) { matchedVal = row[k]; break; }
+                          if (targetLabel.includes('personal time') && cleanK.includes('personal')) { matchedVal = row[k]; break; }
+                      }
+                      
+                      if (matchedVal !== null && matchedVal !== undefined && matchedVal !== '') {
+                          if (typeof matchedVal === 'string' && matchedVal.includes('%')) matchedVal = matchedVal.replace('%', '');
+                          let numVal = parseFloat(matchedVal);
+                          if (!isNaN(numVal)) {
+                              if (m.label.includes('(min)') && numVal > 200) numVal = numVal / 60;
+                              if (m.label.includes('(%)') && numVal <= 1 && numVal > 0) numVal = numVal * 100;
+                              if (m.step === '1') el.value = Math.round(numVal);
+                              else if (m.step === '0.1') el.value = numVal.toFixed(1);
+                              else if (m.step === '0.01') el.value = numVal.toFixed(2);
+                              else el.value = numVal;
+                              calculateArrow(m.id);
+                          }
+                      }
+                  });
+              }
+
+              // Hardcoded adherence mappings
               if (row['LunchAdherence']) document.getElementById('m-lunch-adherence').value = row['LunchAdherence'];
               if (row['BreakAdherence']) document.getElementById('m-break-adherence').value = row['BreakAdherence'];
               
@@ -2481,10 +2570,8 @@
           errors.push("Adherence Data Error: \n" + err.message);
       }
 
-      // Call the background days fetch as a failsafe just in case it was missed
       await fetchDaysPresentBackground();
       
-      // Give feedback
       setTimeout(() => { 
           if (errors.length === 0) {
               showError("Successfully synced Power BI metrics.");
@@ -2513,15 +2600,19 @@
       btn.disabled = true;
 
       try {
-          const dates = getMonthDateRange(period);
-          const datasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; 
-          const tableName = "2026"; 
+          let reportData = window.pbiCache.loginData;
           
-          const llFilter = buildDaxNameFilter(tableName, 'Agent Name', empName);
-          const daxQuery = `EVALUATE CALCULATETABLE('${tableName}', FILTER('${tableName}', ${llFilter}), '${tableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), '${tableName}'[Logout Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
+          if (!reportData) {
+              const dates = getMonthDateRange(period);
+              const datasetId = "d2c1095c-66ea-4f94-bc0a-d50d8f707338"; 
+              const tableName = "2026"; 
+              
+              const llFilter = buildDaxNameFilter(tableName, 'Agent Name', empName);
+              const daxQuery = `EVALUATE CALCULATETABLE('${tableName}', FILTER('${tableName}', ${llFilter}), '${tableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), '${tableName}'[Logout Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
 
-          // Fetch Via ACT Proxy Tunnel
-          const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
+              reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
+              window.pbiCache.loginData = reportData;
+          }
 
           if (reportData.length === 0) {
               showError("No login/logout data found for this period.");
@@ -2541,12 +2632,12 @@
               buildTabulatorGrid(container.id, reportData, 'login');
               
               // Secret static HTML table for PDF printing
-              const staticHtml = generateFormattedTable(reportData, false, 'login');
+              const staticHtml = generateFormattedTable(reportData);
               container.innerHTML += `<div class="print-only-table">${staticHtml}</div>`;
           }
           container.style.display = 'block';
 
-          btn.innerHTML = '<i class="fas fa-check" style="width:20px;"></i> Attached';
+          btn.innerHTML = '<i class="fas fa-check" style="width:20px;"></i> Loaded';
           btn.classList.add('btn-success');
           btn.classList.remove('btn-secondary');
 
@@ -2575,14 +2666,17 @@
       btn.disabled = true;
 
       try {
-          const dates = getMonthDateRange(period);
-          const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; 
+          let reportData = window.pbiCache.avayaData;
           
-          const repFilter = buildDaxNameFilter('Rep Details', 'AgentName', empName);
-          const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', FILTER('Rep Details', ${repFilter}), 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), 'Avaya Details'[Row Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
+          if (!reportData) {
+              const dates = getMonthDateRange(period);
+              const datasetId = "aeec9af9-1c3f-4df4-aed2-f9ce36429e3e"; 
+              const repFilter = buildDaxNameFilter('Rep Details', 'AgentName', empName);
+              const daxQuery = `EVALUATE CALCULATETABLE('Avaya Details', FILTER('Rep Details', ${repFilter}), 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), 'Avaya Details'[Row Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
 
-          // Fetch Via ACT Proxy Tunnel
-          const reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
+              reportData = await executePowerBIQueryViaTunnel(datasetId, daxQuery);
+              window.pbiCache.avayaData = reportData;
+          }
 
           if (reportData.length === 0) {
               showError("No lunch/break data found for this period.");
@@ -2602,12 +2696,12 @@
               buildTabulatorGrid(container.id, reportData, 'lunch');
 
               // Secret static HTML table for PDF printing
-              const staticHtml = generateFormattedTable(reportData, false, 'lunch');
+              const staticHtml = generateFormattedTable(reportData);
               container.innerHTML += `<div class="print-only-table">${staticHtml}</div>`;
           }
           container.style.display = 'block';
 
-          btn.innerHTML = '<i class="fas fa-check" style="width:20px;"></i> Attached';
+          btn.innerHTML = '<i class="fas fa-check" style="width:20px;"></i> Loaded';
           btn.classList.add('btn-success');
           btn.classList.remove('btn-secondary');
 
@@ -2772,7 +2866,7 @@
         </div>
         <div class="summary-section">
           <h3>Qualitative Assessment</h3>
-          ${row('Opportunities This Month', val('eom-opportunities-month'))}
+          ${row('Opportunities This Period', val('eom-opportunities-month'))}
           ${row('Opportunities This Year', val('eom-opportunities-year'))}
           ${row('Best Practices &amp; Tips', val('eom-best-practices'))}
           ${row('SMART Action Plan', val('eom-smart-plan'))}
@@ -2987,7 +3081,7 @@
         showError("Failed to submit review to Dataverse: \n" + error.message);
     } finally {
         btnSubmit.disabled = false;
-        btnSubmit.innerHTML = '<i class="fas fa-cloud-upload-alt"></i> Submit to Dataverse';
+        btnSubmit.innerHTML = 'Submit to Dataverse';
     }
   }
 
@@ -3021,6 +3115,9 @@
     document.getElementById('tenure').value = '';
     document.getElementById('last-review-date').value = '';
 
+    // Clear global cache entirely
+    window.pbiCache = { loginData: null, avayaData: null, empName: null, period: null };
+
     // Uncheck physical signatures
     document.getElementById('physical-sig-toggle').checked = false;
     toggleSignatures();
@@ -3051,7 +3148,7 @@
     window.scrollTo({ top: 0, behavior: 'smooth' });
     
     // Recalculate days present for the default month
-    fetchDaysPresentBackground();
+    fetchAllPbiDataInBackground();
   }
 
 </script>
