@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Performance Review Portal</title>
-  
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
   <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   
@@ -1769,7 +1769,7 @@
 
   let currentMetrics = [];
 
-  function updateMetricsUI() {
+function updateMetricsUI() {
     const dept = (val('department') || '').trim().toLowerCase();
     let configKey = 'Default';
 
@@ -1783,23 +1783,35 @@
     const container = document.getElementById('metrics-container');
     if (!container) return;
     
-    container.innerHTML = ''; 
+    // Remove the generic form-grid class so we can use our custom 3-column layout
+    container.className = "";
     
-    // Inject correct metrics with overridable dropdown arrows
+    // Add the Comparison Header
+    container.innerHTML = `
+        <div style="display:grid; grid-template-columns: 1.5fr 1fr 1.5fr; gap:1rem; padding: 10px; background: var(--gray-200); border-radius: var(--radius-sm); margin-bottom: 0.5rem; border: 1px solid var(--border);">
+            <label style="margin:0; color: var(--text-main);">Metric Name</label>
+            <label style="margin:0; text-align:center; color: var(--brand);">Last Review</label>
+            <label style="margin:0;">Current Input</label>
+        </div>`;
+    
+    // Inject the metrics rows
     currentMetrics.forEach(m => {
         const placeholder = m.step && m.step.includes('.') ? '0.0' : '0';
         const displayLabel = m.format === 'percent' ? `${m.label} (%)` : m.label;
         
         container.innerHTML += `
-        <div class="field metric-item">
-            <label for="${m.id}">${displayLabel}</label>
+        <div style="display:grid; grid-template-columns: 1.5fr 1fr 1.5fr; gap:1rem; align-items:center; padding: 8px 5px; border-bottom: 1px solid var(--gray-200);">
+            <label for="${m.id}" style="margin:0; font-size: 0.8rem;">${displayLabel}</label>
+            
+            <div id="${m.id}-last" style="text-align:center; font-weight:800; color:var(--text-muted); font-size:1rem; font-family: monospace;">--</div>
+            
             <div style="display:flex; gap:0.5rem;">
-                <input type="${m.type}" id="${m.id}" placeholder="${placeholder}" step="${m.step}" min="0" oninput="calculateArrow('${m.id}')" style="flex:1;" />
-                <select id="${m.id}-arrow" class="styled-arrow-select" style="width: 135px; text-align: left; padding-left: 0.75rem; transition: color 0.3s ease;" onchange="this.style.color = this.value === 'Green' ? 'var(--success)' : (this.value === 'Yellow' ? 'var(--warning)' : (this.value === 'Red' ? 'var(--danger)' : 'inherit'))">
+                <input type="${m.type}" id="${m.id}" placeholder="${placeholder}" step="${m.step}" min="0" oninput="calculateArrow('${m.id}')" style="flex:1; padding: 6px;" />
+                <select id="${m.id}-arrow" class="styled-arrow-select" style="width: 60px; padding: 2px 5px; font-size: 0.8rem;" onchange="this.style.color = this.value === 'Green' ? 'var(--success)' : (this.value === 'Yellow' ? 'var(--warning)' : (this.value === 'Red' ? 'var(--danger)' : 'inherit'))">
                     <option value="">-</option>
-                    <option value="Green">▲ (Up)</option>
-                    <option value="Yellow">▶ (Flat)</option>
-                    <option value="Red">▼ (Down)</option>
+                    <option value="Green">▲</option>
+                    <option value="Yellow">▶</option>
+                    <option value="Red">▼</option>
                 </select>
             </div>
         </div>`;
@@ -2240,7 +2252,34 @@
     }
   }
 
-// ── Power Automate Tunnel: Fetch SharePoint Historical Reviews ──────────────
+// ── Parse Raw Text from SharePoint ────────────────────────────────────────
+  function parseLastMonthMetrics(rawText) {
+      if (!rawText) return;
+
+      // Clean the text: remove newlines and extra spaces to make it one searchable stream
+      const cleanText = rawText.replace(/\r?\n|\r/g, " ").replace(/\s+/g, " ");
+
+      // Regex Patterns based on your uploaded templates
+      const patterns = {
+          'm-outbound-calls': /(?:Outbound Calls|Outbound 50\+).*?(\d+\.?\d*)/i,
+          'm-talk-time': /(?:Avg\.? Talk Time).*?(\d+:\d+|\d+\.\d+)/i,
+          'm-aux-accuracy': /AUX Accuracy.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
+          'm-handle-time': /Handle Time.*?(\d+:\d+|\d+\.\d+)/i,
+          'm-lunch': /Average Lunch.*?(\d+:\d+|\d+\.\d+)/i,
+          'm-avg-break': /Average Break.*?(\d+:\d+|\d+\.\d+)/i
+      };
+
+      Object.keys(patterns).forEach(id => {
+          const match = cleanText.match(patterns[id]);
+          const displayEl = document.getElementById(id + '-last');
+          if (match && displayEl) {
+              displayEl.innerText = match[1]; // Put the found number in the UI
+              displayEl.style.color = 'var(--brand)'; // Highlight it blue so they know it worked
+          }
+      });
+  }
+
+  // ── Power Automate Tunnel: Fetch SharePoint Historical Reviews ──────────────
   async function fetchSharePointHistory(empName) {
       const container = document.getElementById('sp-history-container');
       const linksBox = document.getElementById('sp-file-links');
@@ -2252,12 +2291,20 @@
 
       if (!empName) return;
 
+      // Show container immediately and display a spinner
+      container.style.display = 'block';
+      linksBox.innerHTML = `
+        <div style="display:flex; align-items:center; gap:10px; padding:10px; color:var(--text-muted);">
+            <div class="spinner"></div> 
+            <span>Searching SharePoint and extracting previous review data...</span>
+        </div>`;
+
       // 🟢 ENSURE THIS IS YOUR NEW SHAREPOINT FLOW URL 🟢
       const spTunnelUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/1b60c5c63a74421cb18b90201ef097bc/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=sJ8369yEhSwS514WrkWgvwM-xLl0kZWrGYIDIueCTSI";
 
       try {
-          // Clean the name (remove commas if they exist) to avoid search issues
-          const cleanSearchName = empName.replace(',', '');
+          // Strips all spaces and commas to perfectly match the PA Flow Fuzzy filter
+          const cleanSearchName = empName.replace(/ /g, '').replace(',', '');
 
           const res = await fetch(spTunnelUrl, {
               method: 'POST',
@@ -2268,38 +2315,51 @@
           if (!res.ok) throw new Error("SharePoint Tunnel unreachable.");
           
           let rawData = await res.json();
-          // Safety check for flow response structure
+          
+          // 1. Decode and Parse the DOCX file instantly in the browser!
+          if (rawData.fileContentBase64) {
+              // Convert Base64 back to raw binary data
+              const binaryString = window.atob(rawData.fileContentBase64);
+              const len = binaryString.length;
+              const bytes = new Uint8Array(len);
+              for (let i = 0; i < len; i++) {
+                  bytes[i] = binaryString.charCodeAt(i);
+              }
+              
+              // Use Mammoth to extract the text
+              mammoth.extractRawText({ arrayBuffer: bytes.buffer })
+                  .then(function(result) {
+                      // Pass the extracted text to our existing regex parser
+                      parseLastMonthMetrics(result.value);
+                  })
+                  .catch(function(err) {
+                      console.error("Error reading DOCX:", err);
+                  });
+          }
+
+          // 2. Handle the array of files for the clickable links
           const files = Array.isArray(rawData) ? rawData : (rawData.value || []);
 
-          // 1. Filter out folders and non-doc files
           const reviewFiles = files.filter(f => {
               const name = f['{FilenameWithExtension}'] || "";
               const isFolder = f['{IsFolder}'];
-              // Only allow actual files ending in .pdf, .doc, or .docx
               return isFolder === false && (name.toLowerCase().endsWith('.pdf') || name.toLowerCase().includes('.doc'));
           });
 
           if (reviewFiles.length > 0) {
-              // 2. Sort by Created Date (Newest first)
               reviewFiles.sort((a, b) => new Date(b.Created) - new Date(a.Created));
 
-              // 3. Auto-fill the "Last Review" date box if empty
               const newestFile = reviewFiles[0];
               const newestDate = new Date(newestFile.Created);
-              
-              if (!isNaN(newestDate.getTime())) {
-                  // Only update if Dataverse result was "Not Found"
-                  if (!lastReviewEl.value || lastReviewEl.value.includes('Not Found')) {
-                      lastReviewEl.value = newestDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) + ' (SharePoint)';
-                  }
+              if (!isNaN(newestDate.getTime()) && (!lastReviewEl.value || lastReviewEl.value.includes('Not Found'))) {
+                  lastReviewEl.value = newestDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) + ' (SharePoint)';
               }
 
-              // 4. Generate clickable link buttons
+              linksBox.innerHTML = '';
               reviewFiles.forEach(file => {
                   const name = file['{FilenameWithExtension}'];
                   const link = file['{Link}']; 
                   const fileDate = new Date(file.Created).toLocaleDateString('en-US');
-                  
                   const icon = name.toLowerCase().endsWith('.pdf') ? 'fa-file-pdf' : 'fa-file-word';
                   const color = name.toLowerCase().endsWith('.pdf') ? '#dc2626' : '#2563a8';
                   
@@ -2308,16 +2368,17 @@
                         <i class="fas ${icon}" style="color:${color}; font-size:1.2rem; width:24px; text-align:center;"></i>
                         <div style="display:flex; flex-direction:column;">
                             <span style="font-weight:700; font-size:0.85rem;">${name}</span>
-                            <span style="color:var(--text-muted); font-size:0.7rem;">Shared on: ${fileDate}</span>
+                            <span style="color:var(--text-muted); font-size:0.7rem;">Created: ${fileDate}</span>
                         </div>
                         <i class="fas fa-external-link-alt" style="margin-left:auto; font-size:0.8rem; color:var(--gray-400);"></i>
                     </a>
                   `;
               });
-
-              container.style.display = 'block';
+          } else {
+              linksBox.innerHTML = '<div style="padding:10px; font-size:0.85rem; color:var(--text-muted);">No archived reviews found for this name.</div>';
           }
       } catch (err) {
+          linksBox.innerHTML = '<div style="padding:10px; font-size:0.85rem; color:var(--danger);">Error connecting to SharePoint archive.</div>';
           console.error("SharePoint Tunnel Error:", err);
       }
   }
