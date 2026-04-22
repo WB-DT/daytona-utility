@@ -113,6 +113,15 @@
     .field input, .field select {
       width: 100%; min-height: 42px; border-radius: 12px; border: 1px solid var(--line); background: var(--card-2); color: var(--text); padding: 10px 12px;
     }
+    .field select {
+      appearance: none; -webkit-appearance: none; -moz-appearance: none;
+      padding-right: 40px;
+      background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+      background-position: calc(100% - 18px) calc(50% - 3px), calc(100% - 12px) calc(50% - 3px);
+      background-size: 6px 6px, 6px 6px;
+      background-repeat: no-repeat;
+    }
+    .field select option, .field select optgroup { background: var(--bg-elev); color: var(--text); }
     .field input:focus, .field select:focus { outline: none; border-color: rgba(79,140,255,.65); box-shadow: 0 0 0 4px rgba(79,140,255,.14); }
     .pill-row { display: flex; flex-wrap: wrap; gap: 8px; }
     .chip { padding: 8px 10px; border-radius: 999px; background: var(--card-2); border: 1px solid var(--line); color: var(--muted); font-size: .78rem; }
@@ -447,6 +456,54 @@
     const fmtPct = (n) => Number.isFinite(n) ? `${fmt1(n)}%` : '—';
     const cleanText = (v) => (v == null || v === '') ? '—' : String(v);
 
+
+  function tryParseJson(value) {
+    if (typeof value !== 'string') return value;
+    const trimmed = value.trim();
+    if (!trimmed) return value;
+    if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) return value;
+    try { return JSON.parse(trimmed); } catch { return value; }
+  }
+
+  function unwrapTunnelPayload(payload) {
+    let data = tryParseJson(payload);
+    if (data && typeof data === 'object' && 'body' in data) {
+      data = tryParseJson(data.body);
+    }
+    if (data && typeof data === 'object' && data.outputs && data.outputs.body) {
+      data = tryParseJson(data.outputs.body);
+    }
+    return data;
+  }
+
+  function extractExecuteQueryRows(payload) {
+    const data = unwrapTunnelPayload(payload);
+    const candidates = [
+      data,
+      data?.results?.[0],
+      data?.body,
+      data?.body?.results?.[0],
+      data?.outputs?.body,
+      data?.outputs?.body?.results?.[0]
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      const tables = candidate?.tables || candidate?.results?.[0]?.tables;
+      const rows = tables?.[0]?.rows;
+      if (Array.isArray(rows)) return rows;
+    }
+    return [];
+  }
+
+  function setSelectValue(id, value) {
+    const control = el(id);
+    if (!control) return '';
+    const desired = value ?? '';
+    const hasMatch = Array.from(control.options).some(opt => opt.value === desired);
+    control.value = hasMatch ? desired : '';
+    return control.value;
+  }
+
     function toggleTheme() {
       document.documentElement.classList.toggle('light');
       localStorage.setItem('exec-report-theme', document.documentElement.classList.contains('light') ? 'light' : 'dark');
@@ -646,18 +703,21 @@
       };
       const res = await fetch(TUNNEL_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       if (!res.ok) throw new Error(`Power BI tunnel failed: ${res.status} ${res.statusText}`);
-      const data = await res.json();
-      const rows = data.results?.[0]?.tables?.[0]?.rows || [];
+
+      const rawText = await res.text();
+      const parsed = tryParseJson(rawText);
+      const rows = extractExecuteQueryRows(parsed);
+      if (!Array.isArray(rows)) throw new Error('Power BI tunnel returned an unexpected payload shape.');
+
       return rows.map(row => {
         const clean = {};
-        Object.keys(row).forEach(k => {
+        Object.keys(row || {}).forEach(k => {
           const ck = k.includes('[') ? k.split('[')[1].replace(']', '') : k;
           clean[ck] = row[k];
         });
         return clean;
       });
     }
-
     async function fetchPowerBIWindow() {
       const { first, last } = getMonthDateRange(state.filters.period);
       const employeeFilter = state.filters.employee || '';
@@ -683,13 +743,15 @@
     }
     function fillSelect(id, placeholder, values, selected) {
       const sel = el(id);
+      const currentValue = selected ?? sel.value ?? '';
       sel.innerHTML = `<option value="">${placeholder}</option>`;
       values.forEach(v => {
         const opt = document.createElement('option');
-        opt.value = v; opt.textContent = v;
-        if (selected && selected === v) opt.selected = true;
+        opt.value = v;
+        opt.textContent = v;
         sel.appendChild(opt);
       });
+      setSelectValue(id, currentValue);
     }
     function unique(arr) { return [...new Set(arr)].sort((a,b) => String(a).localeCompare(String(b))); }
 
@@ -697,8 +759,8 @@
       const department = el('filter-department').value;
       const rows = department ? state.directory.filter(d => d.department === department) : state.directory;
       const mgr = unique(rows.map(d => d.manager).filter(Boolean));
-      const current = state.filters.manager;
-      fillSelect('filter-manager', 'All Managers', mgr, mgr.includes(current) ? current : '');
+      const currentManager = el('filter-manager').value || state.filters.manager || '';
+      fillSelect('filter-manager', 'All Managers', mgr, mgr.includes(currentManager) ? currentManager : '');
       syncEmployeeOptions();
     }
     function syncEmployeeOptions() {
@@ -706,10 +768,9 @@
       const manager = el('filter-manager').value;
       const rows = state.directory.filter(d => (!department || d.department === department) && (!manager || d.manager === manager));
       const emp = unique(rows.map(d => d.employeeName).filter(Boolean));
-      const current = state.filters.employee;
-      fillSelect('filter-employee', 'All Employees', emp, emp.includes(current) ? current : '');
+      const currentEmployee = el('filter-employee').value || state.filters.employee || '';
+      fillSelect('filter-employee', 'All Employees', emp, emp.includes(currentEmployee) ? currentEmployee : '');
     }
-
     function applyFilters() {
       state.filters = {
         period: el('filter-period').value,
@@ -1199,13 +1260,32 @@
     }
 
     function registerEvents() {
-      ['filter-period','filter-review-type','filter-trend-window'].forEach(id => el(id).onchange = () => { applyFilters(); refreshAll(); });
-      el('filter-department').onchange = () => { state.filters.department = el('filter-department').value; syncManagerOptionsFromDepartment(); applyFilters(); renderAll(); refreshAll(); };
-      el('filter-manager').onchange = () => { state.filters.manager = el('filter-manager').value; syncEmployeeOptions(); applyFilters(); renderAll(); refreshAll(); };
-      el('filter-employee').onchange = () => { applyFilters(); renderAll(); refreshAll(); };
+      ['filter-period','filter-review-type','filter-trend-window'].forEach(id => {
+        el(id).onchange = async () => {
+          applyFilters();
+          await refreshAll();
+        };
+      });
+
+      el('filter-department').onchange = async () => {
+        syncManagerOptionsFromDepartment();
+        applyFilters();
+        await refreshAll();
+      };
+
+      el('filter-manager').onchange = async () => {
+        syncEmployeeOptions();
+        applyFilters();
+        await refreshAll();
+      };
+
+      el('filter-employee').onchange = async () => {
+        applyFilters();
+        await refreshAll();
+      };
+
       el('btn-refresh').onclick = refreshAll;
     }
-
     document.addEventListener('DOMContentLoaded', async () => {
       try {
         const resp = await msalInstance.handleRedirectPromise();
