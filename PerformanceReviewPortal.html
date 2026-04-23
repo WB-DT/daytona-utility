@@ -2123,7 +2123,9 @@
   }
 
   function buildDaxNameFilter(tableName, colName, fullName) {
-      const parts = fullName.trim().split(/\s+/);
+      // Strip commas from the name to prevent breaking the space split later
+      const cleanName = fullName.replace(/,/g, '');
+      const parts = cleanName.trim().split(/\s+/);
       if (parts.length === 0) return `1=1`;
       if (parts.length === 1) return `SEARCH("${parts[0]}", '${tableName}'[${colName}], 1, 0) > 0`;
       
@@ -2393,17 +2395,18 @@
       const cleanText = rawText.replace(/\r?\n|\r/g, " ").replace(/\s{2,}/g, " ");
 
       // Regex Patterns based on your uploaded templates and UI labels
+      // Allows for commas in numbers like "1,000" and extra whitespace variations
       const patterns = {
-          'Outbound Calls': /(?:Outbound Calls|Outbound 50\+).*?(\d+\.?\d*)/i,
-          'Avg. Talk Time': /(?:Avg\.? Talk Time).*?(\d+:\d+|\d+\.\d+)/i,
-          'AUX Accuracy': /AUX Accuracy.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
-          'Handle Time': /Handle Time.*?(\d+:\d+|\d+\.\d+)/i,
-          'Avg. Lunch': /Average Lunch.*?(\d+:\d+|\d+\.\d+)/i,
-          'Avg. Break': /Average Break.*?(\d+:\d+|\d+\.\d+)/i,
-          'Lunch Adherence': /Lunch Adherence.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
-          'Break Adherence': /Break Adherence.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
-          'Reporting Accuracy': /Reporting Accuracy.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
-          'Working Days Present': /Working Days Present.*?(\d+)/i
+          'Outbound Calls': /(?:Outbound Calls|Outbound 50\+).*?(\d+(?:,\d+)*(?:\.\d+)?)/i,
+          'Avg. Talk Time': /(?:Avg\.?\s*Talk\s*Time).*?(\d+:\d+|\d+(?:\.\d+)?)/i,
+          'AUX Accuracy': /AUX\s*Accuracy.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
+          'Handle Time': /(?:Avg\.?\s*)?Handle\s*Time.*?(\d+:\d+|\d+(?:\.\d+)?)/i,
+          'Avg. Lunch': /(?:Average|Avg\.?)\s*Lunch.*?(\d+:\d+|\d+(?:\.\d+)?)/i,
+          'Avg. Break': /(?:Average|Avg\.?)\s*Break.*?(\d+:\d+|\d+(?:\.\d+)?)/i,
+          'Lunch Adherence': /Lunch\s*Adherence.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
+          'Break Adherence': /Break\s*Adherence.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
+          'Reporting Accuracy': /Reporting\s*Accuracy.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
+          'Working Days Present': /Working\s*Days\s*Present.*?(\d+(?:,\d+)*(?:\.\d+)?)/i
       };
 
       let foundMetrics = false;
@@ -2450,8 +2453,16 @@
       const spTunnelUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/1b60c5c63a74421cb18b90201ef097bc/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=sJ8369yEhSwS514WrkWgvwM-xLl0kZWrGYIDIueCTSI";
 
       try {
-          // Strips all spaces and commas to perfectly match the PA Flow Fuzzy filter
-          const cleanSearchName = empName.replace(/ /g, '').replace(',', '');
+          // 1. If the name is "Last, First", flip it to "First Last" so it matches "EOM_First_Last.pdf"
+          let formattedName = empName;
+          if (formattedName.includes(',')) {
+              const parts = formattedName.split(',');
+              formattedName = parts[1].trim() + parts[0].trim();
+          }
+          
+          // 2. Strips ALL non-alphanumeric characters (spaces, commas, underscores, hyphens, periods)
+          // E.g. "Bella-Ann O'Connor" becomes "BellaAnnOConnor"
+          const cleanSearchName = formattedName.replace(/[^a-zA-Z0-9]/g, '');
 
           const res = await fetch(spTunnelUrl, {
               method: 'POST',
@@ -2477,6 +2488,7 @@
               const newestFile = reviewFiles[0];
               const newestDate = new Date(newestFile.Created);
               const fileName = newestFile['{FilenameWithExtension}'];
+              const fileNameLower = fileName.toLowerCase();
               
               if (!isNaN(newestDate.getTime()) && (!lastReviewEl.value || lastReviewEl.value.includes('Not Found'))) {
                   lastReviewEl.value = newestDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) + ' (SharePoint)';
@@ -2501,6 +2513,41 @@
               // Reveal the parsed data banner & modal trigger buttons 
               parsedInfo.style.display = 'flex';
               document.querySelectorAll('.btn-show-comparison').forEach(btn => btn.style.display = 'inline-flex');
+
+              // Handle background text extraction if needed
+              if (rawData.fileContentBase64) {
+                  const binaryString = window.atob(rawData.fileContentBase64);
+                  const len = binaryString.length;
+                  const bytes = new Uint8Array(len);
+                  for (let i = 0; i < len; i++) {
+                      bytes[i] = binaryString.charCodeAt(i);
+                  }
+                  
+                  if (fileNameLower.endsWith('.pdf')) {
+                      // Using PDF.js for PDF files
+                      const loadingTask = pdfjsLib.getDocument({data: bytes});
+                      loadingTask.promise.then(async function(pdf) {
+                          let fullText = '';
+                          for (let i = 1; i <= pdf.numPages; i++) {
+                              const page = await pdf.getPage(i);
+                              const textContent = await page.getTextContent();
+                              fullText += textContent.items.map(s => s.str).join(' ') + ' ';
+                          }
+                          window.parseLastMonthMetrics(fullText, fileName);
+                      }).catch(function(err) {
+                          console.error("PDF Parse Error:", err);
+                      });
+                  } else {
+                      // Using Mammoth for DOCX files
+                      mammoth.extractRawText({ arrayBuffer: bytes.buffer })
+                          .then(function(result) {
+                              window.parseLastMonthMetrics(result.value, fileName);
+                          })
+                          .catch(function(err) {
+                              console.error("DOCX Parse Error:", err);
+                          });
+                  }
+              }
 
               linksBox.innerHTML = '';
               reviewFiles.forEach(file => {
