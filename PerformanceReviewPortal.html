@@ -5,13 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Performance Review Portal</title>
   
-  <!-- Document Parsers (DOCX and PDF) for background metric extraction -->
+  <!-- Document Parsers for Native Browser Rendering -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
   <script>
       // Configure PDF.js worker
       pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
   </script>
+  
+  <!-- Advanced Native DOCX Renderer -->
+  <script src="https://unpkg.com/jszip/dist/jszip.min.js"></script>
+  <script src="https://unpkg.com/docx-preview/dist/docx-preview.min.js"></script>
 
   <!-- Authentication & UI -->
   <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -1097,10 +1101,9 @@
   <div id="comparison-modal-header">
     <div>
         <h2 style="font-size:1.25rem; font-weight:bold; color:var(--brand); margin:0;"><i class="fas fa-file-alt"></i> Previous Review Document</h2>
-        <div style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;" id="comparison-subtitle">Live preview from SharePoint archive</div>
+        <div style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;" id="comparison-subtitle">Extracted natively from secure tunnel</div>
     </div>
     <div style="display:flex; gap:10px;">
-        <a id="parsed-file-link-modal" href="#" target="_blank" class="btn btn-secondary" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;"><i class="fas fa-external-link-alt"></i> Open in New Tab</a>
         <button onclick="toggleComparisonModal(false)" class="btn btn-secondary" style="padding: 0.4rem 0.6rem;"><i class="fas fa-times"></i></button>
     </div>
   </div>
@@ -1114,6 +1117,9 @@
     <!-- Viewer containers for native rendering -->
     <iframe id="comparison-iframe" src="" style="width: 100%; height: 100%; border: none; flex: 1; display:none; position: relative; z-index: 2; background: transparent;"></iframe>
     
+    <div id="comparison-docx" style="display:none; flex: 1; padding: 2rem; overflow-y: auto; background: white; z-index: 2; position: relative; line-height: 1.6; font-size: 0.95rem;">
+        <!-- DOCX HTML goes here -->
+    </div>
   </div>
 </div>
 
@@ -2453,6 +2459,10 @@
           document.getElementById('comparison-iframe').src = '';
           document.getElementById('comparison-iframe').style.display = 'none';
       }
+      if (document.getElementById('comparison-docx')) {
+          document.getElementById('comparison-docx').innerHTML = '';
+          document.getElementById('comparison-docx').style.display = 'none';
+      }
 
       if (!empName) return;
 
@@ -2517,17 +2527,13 @@
               parsedInfo.style.display = 'flex';
               document.querySelectorAll('.btn-show-comparison').forEach(btn => btn.style.display = 'inline-flex');
 
-              // Display Native SharePoint Embed or Raw File in Iframe
+              // Display Native Browsers
               const iframeLoader = document.getElementById('iframe-loader');
               const compIframe = document.getElementById('comparison-iframe');
+              const docxContainer = document.getElementById('comparison-docx');
               
               if(iframeLoader) iframeLoader.style.display = 'flex';
               
-              if (compIframe) {
-                  compIframe.style.display = 'block';
-              }
-
-              // Handle background text extraction silently AND feed the iframe
               if (rawData.fileContentBase64) {
                   const binaryString = window.atob(rawData.fileContentBase64);
                   const len = binaryString.length;
@@ -2540,8 +2546,13 @@
                       // Feed raw blob to iframe for PDFs (bypasses SP blocks completely)
                       const blob = new Blob([bytes], { type: 'application/pdf' });
                       const blobUrl = URL.createObjectURL(blob);
-                      if (compIframe) compIframe.src = blobUrl;
-                      if(iframeLoader) iframeLoader.style.display = 'none';
+                      
+                      if (compIframe) {
+                          compIframe.src = blobUrl;
+                          compIframe.style.display = 'block';
+                      }
+                      if (docxContainer) docxContainer.style.display = 'none';
+                      if (iframeLoader) iframeLoader.style.display = 'none';
 
                       // Silent Background Parse
                       if (typeof pdfjsLib !== 'undefined') {
@@ -2557,12 +2568,18 @@
                           }).catch(err => console.error("PDF Parse Error:", err));
                       }
                   } else {
-                      // Fallback to SharePoint Embed for DOCX files
-                      if (compIframe) {
-                          let embedLink = newestFile['{Link}'];
-                          embedLink += embedLink.includes('?') ? '&action=embedview' : '?action=embedview';
-                          compIframe.src = embedLink;
-                      }
+                      // Native DOCX Previewer
+                      if (compIframe) compIframe.style.display = 'none';
+                      if (docxContainer) docxContainer.style.display = 'block';
+                      
+                      const docxBlob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+                      docx.renderAsync(docxBlob, docxContainer).then(() => {
+                          if(iframeLoader) iframeLoader.style.display = 'none';
+                      }).catch(err => {
+                          console.error("DOCX Render Error:", err);
+                          docxContainer.innerHTML = '<div style="padding:20px; color:var(--danger); text-align:center;">Failed to render DOCX. Please open in a new tab natively.</div>';
+                          if(iframeLoader) iframeLoader.style.display = 'none';
+                      });
 
                       // Silent Background Parse
                       if (typeof mammoth !== 'undefined') {
@@ -2572,11 +2589,27 @@
                       }
                   }
               } else {
-                  // If base64 is missing, fallback entirely to SharePoint Embed viewer
-                  if (compIframe) {
-                      let embedLink = newestFile['{Link}'];
-                      embedLink += embedLink.includes('?') ? '&action=embedview' : '?action=embedview';
-                      compIframe.src = embedLink;
+                  // Fallback if the user's flow doesn't successfully pass the base64 content
+                  if (compIframe) compIframe.style.display = 'none';
+                  if (iframeLoader) iframeLoader.style.display = 'none';
+                  if (docxContainer) {
+                      docxContainer.innerHTML = `
+                        <div style="padding: 2rem; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--text-main);">
+                            <i class="fas fa-file-code" style="font-size: 3rem; color: var(--gray-400); margin-bottom: 1rem;"></i>
+                            <h3 style="margin-bottom: 0.5rem; color: var(--text-brand);">Extraction Setup Required</h3>
+                            <p style="color: var(--text-muted); font-size: 0.95rem; max-width: 400px; line-height: 1.5;">
+                                The SharePoint Flow found the file <b>${fileName}</b>, but the file contents were not returned.
+                            </p>
+                            <div style="background: var(--bg-accent); padding: 1rem; border-radius: var(--radius-sm); border: 1px dashed var(--border-accent); margin-top: 1rem; text-align: left; font-size: 0.85rem; width: 100%;">
+                                <strong style="color: var(--brand-dark);"><i class="fas fa-wrench"></i> Flow Setup Check:</strong>
+                                <ol style="margin-top: 0.5rem; padding-left: 1.5rem; color: var(--gray-800); line-height: 1.6; margin-bottom: 0;">
+                                    <li style="margin-bottom: 0.25rem;">Add a <b>"Get file content"</b> action in Power Automate.</li>
+                                    <li style="margin-bottom: 0.25rem;">In your final Response, add a key called <code>fileContentBase64</code>.</li>
+                                    <li>Set its value exactly to:<br><code style="background:var(--bg-card); padding:2px 4px; display:inline-block; margin-top:4px;">@outputs('Get_file_content')?['body/$content']</code></li>
+                                </ol>
+                            </div>
+                        </div>`;
+                      docxContainer.style.display = 'block';
                   }
               }
 
@@ -2637,6 +2670,9 @@
         document.querySelectorAll('.btn-show-comparison').forEach(btn => btn.style.display = 'none');
         if (document.getElementById('comparison-iframe')) {
             document.getElementById('comparison-iframe').src = '';
+        }
+        if (document.getElementById('comparison-docx')) {
+            document.getElementById('comparison-docx').innerHTML = '';
         }
         return;
     }
@@ -3383,6 +3419,9 @@
     toggleComparisonModal(false);
     if (document.getElementById('comparison-iframe')) {
         document.getElementById('comparison-iframe').src = '';
+    }
+    if (document.getElementById('comparison-docx')) {
+        document.getElementById('comparison-docx').innerHTML = '';
     }
 
     document.getElementById('login-logout-container').innerHTML = '';
