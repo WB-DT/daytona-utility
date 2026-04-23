@@ -5,8 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Performance Review Portal</title>
   
-  <!-- Document Parser for DOCX to HTML -->
+  <!-- Document Parsers (DOCX and PDF) for background metric extraction -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script>
+      // Configure PDF.js worker
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+  </script>
 
   <!-- Authentication & UI -->
   <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -1092,9 +1097,10 @@
   <div id="comparison-modal-header">
     <div>
         <h2 style="font-size:1.25rem; font-weight:bold; color:var(--brand); margin:0;"><i class="fas fa-file-alt"></i> Previous Review Document</h2>
-        <div style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;" id="comparison-subtitle">Extracted natively from secure tunnel</div>
+        <div style="font-size:0.85rem; color:var(--text-muted); margin-top:4px;" id="comparison-subtitle">Live preview from SharePoint archive</div>
     </div>
     <div style="display:flex; gap:10px;">
+        <a id="parsed-file-link-modal" href="#" target="_blank" class="btn btn-secondary" style="padding: 0.4rem 0.8rem; font-size: 0.8rem;"><i class="fas fa-external-link-alt"></i> Open in New Tab</a>
         <button onclick="toggleComparisonModal(false)" class="btn btn-secondary" style="padding: 0.4rem 0.6rem;"><i class="fas fa-times"></i></button>
     </div>
   </div>
@@ -1108,9 +1114,6 @@
     <!-- Viewer containers for native rendering -->
     <iframe id="comparison-iframe" src="" style="width: 100%; height: 100%; border: none; flex: 1; display:none; position: relative; z-index: 2; background: transparent;"></iframe>
     
-    <div id="comparison-docx" style="display:none; flex: 1; padding: 2rem; overflow-y: auto; background: white; z-index: 2; position: relative; line-height: 1.6; font-size: 0.95rem;">
-        <!-- DOCX HTML goes here -->
-    </div>
   </div>
 </div>
 
@@ -2450,10 +2453,6 @@
           document.getElementById('comparison-iframe').src = '';
           document.getElementById('comparison-iframe').style.display = 'none';
       }
-      if (document.getElementById('comparison-docx')) {
-          document.getElementById('comparison-docx').innerHTML = '';
-          document.getElementById('comparison-docx').style.display = 'none';
-      }
 
       if (!empName) return;
 
@@ -2512,17 +2511,23 @@
 
               // Update parsed file info banner and modal iframe source
               document.getElementById('parsed-file-name').innerText = fileName;
-              document.getElementById('parsed-file-link').href = newestFile['{Link}'];
               document.getElementById('parsed-file-link-modal').href = newestFile['{Link}'];
               
               // Reveal the parsed data banner & modal trigger buttons 
               parsedInfo.style.display = 'flex';
               document.querySelectorAll('.btn-show-comparison').forEach(btn => btn.style.display = 'inline-flex');
 
-              // Handle native rendering directly from Base64
+              // Display Native SharePoint Embed or Raw File in Iframe
               const iframeLoader = document.getElementById('iframe-loader');
+              const compIframe = document.getElementById('comparison-iframe');
+              
               if(iframeLoader) iframeLoader.style.display = 'flex';
+              
+              if (compIframe) {
+                  compIframe.style.display = 'block';
+              }
 
+              // Handle background text extraction silently AND feed the iframe
               if (rawData.fileContentBase64) {
                   const binaryString = window.atob(rawData.fileContentBase64);
                   const len = binaryString.length;
@@ -2530,17 +2535,15 @@
                   for (let i = 0; i < len; i++) {
                       bytes[i] = binaryString.charCodeAt(i);
                   }
-                  
-                  if(iframeLoader) iframeLoader.style.display = 'none';
 
                   if (fileNameLower.endsWith('.pdf')) {
-                      // Using Native Browser Viewer for PDFs via Blob
+                      // Feed raw blob to iframe for PDFs (bypasses SP blocks completely)
                       const blob = new Blob([bytes], { type: 'application/pdf' });
                       const blobUrl = URL.createObjectURL(blob);
-                      document.getElementById('comparison-iframe').src = blobUrl;
-                      document.getElementById('comparison-iframe').style.display = 'block';
-                      
-                      // Also run silent extraction to maintain parser history functionality
+                      if (compIframe) compIframe.src = blobUrl;
+                      if(iframeLoader) iframeLoader.style.display = 'none';
+
+                      // Silent Background Parse
                       if (typeof pdfjsLib !== 'undefined') {
                           const loadingTask = pdfjsLib.getDocument({data: bytes});
                           loadingTask.promise.then(async function(pdf) {
@@ -2551,48 +2554,30 @@
                                   fullText += textContent.items.map(s => s.str).join(' ') + ' ';
                               }
                               window.parseLastMonthMetrics(fullText, fileName);
-                          }).catch(function(err) {
-                              console.error("PDF Parse Error:", err);
-                          });
+                          }).catch(err => console.error("PDF Parse Error:", err));
                       }
                   } else {
-                      // Using Mammoth for DOCX files -> Native HTML Viewer
-                      mammoth.convertToHtml({ arrayBuffer: bytes.buffer })
-                          .then(function(result) {
-                              document.getElementById('comparison-docx').innerHTML = result.value;
-                              document.getElementById('comparison-docx').style.display = 'block';
-                              
-                              // Run silent text extraction
-                              mammoth.extractRawText({ arrayBuffer: bytes.buffer }).then(res => {
-                                  window.parseLastMonthMetrics(res.value, fileName);
-                              });
-                          })
-                          .catch(function(err) {
-                              console.error("DOCX Parse Error:", err);
-                              document.getElementById('comparison-docx').innerHTML = '<div style="padding:20px; color:var(--danger); text-align:center;">Failed to render DOCX. Please open natively.</div>';
-                              document.getElementById('comparison-docx').style.display = 'block';
-                          });
+                      // Fallback to SharePoint Embed for DOCX files
+                      if (compIframe) {
+                          let embedLink = newestFile['{Link}'];
+                          embedLink += embedLink.includes('?') ? '&action=embedview' : '?action=embedview';
+                          compIframe.src = embedLink;
+                      }
+
+                      // Silent Background Parse
+                      if (typeof mammoth !== 'undefined') {
+                          mammoth.extractRawText({ arrayBuffer: bytes.buffer }).then(res => {
+                              window.parseLastMonthMetrics(res.value, fileName);
+                          }).catch(err => console.error("DOCX Parse Error:", err));
+                      }
                   }
               } else {
-                  // Fallback if the user's flow doesn't successfully pass the base64 content
-                  if(iframeLoader) iframeLoader.style.display = 'none';
-                  document.getElementById('comparison-docx').innerHTML = `
-                    <div style="padding: 2rem; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--text-main);">
-                        <i class="fas fa-file-code" style="font-size: 3rem; color: var(--gray-400); margin-bottom: 1rem;"></i>
-                        <h3 style="margin-bottom: 0.5rem; color: var(--text-brand);">Extraction Setup Required</h3>
-                        <p style="color: var(--text-muted); font-size: 0.95rem; max-width: 400px; line-height: 1.5;">
-                            The SharePoint Flow found the file <b>${fileName}</b>, but the file contents were not returned.
-                        </p>
-                        <div style="background: var(--bg-accent); padding: 1rem; border-radius: var(--radius-sm); border: 1px dashed var(--border-accent); margin-top: 1rem; text-align: left; font-size: 0.85rem; width: 100%;">
-                            <strong style="color: var(--brand-dark);"><i class="fas fa-wrench"></i> Flow Setup Check:</strong>
-                            <ol style="margin-top: 0.5rem; padding-left: 1.5rem; color: var(--gray-800); line-height: 1.6; margin-bottom: 0;">
-                                <li style="margin-bottom: 0.25rem;">Add a <b>"Get file content"</b> action in Power Automate.</li>
-                                <li style="margin-bottom: 0.25rem;">In your final Response, add a key called <code>fileContentBase64</code>.</li>
-                                <li>Set its value exactly to:<br><code style="background:var(--bg-card); padding:2px 4px; display:inline-block; margin-top:4px;">@outputs('Get_file_content')?['body/$content']</code></li>
-                            </ol>
-                        </div>
-                    </div>`;
-                  document.getElementById('comparison-docx').style.display = 'block';
+                  // If base64 is missing, fallback entirely to SharePoint Embed viewer
+                  if (compIframe) {
+                      let embedLink = newestFile['{Link}'];
+                      embedLink += embedLink.includes('?') ? '&action=embedview' : '?action=embedview';
+                      compIframe.src = embedLink;
+                  }
               }
 
               linksBox.innerHTML = '';
@@ -2653,7 +2638,6 @@
         if (document.getElementById('comparison-iframe')) {
             document.getElementById('comparison-iframe').src = '';
         }
-        document.getElementById('comparison-docx').innerHTML = '';
         return;
     }
     
