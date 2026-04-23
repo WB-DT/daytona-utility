@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Performance Review Portal</title>
   
+  <!-- Document Parsers (DOCX and PDF) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  <script>
+      // Configure PDF.js worker
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+  </script>
+
   <!-- Authentication & UI -->
   <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -1094,8 +1102,17 @@
         <button onclick="toggleComparisonModal(false)" class="btn btn-secondary" style="padding: 0.4rem 0.6rem;"><i class="fas fa-times"></i></button>
     </div>
   </div>
-  <div id="comparison-modal-body" style="padding: 0; overflow: hidden; display: flex; flex-direction: column;">
-    <iframe id="comparison-iframe" src="" style="width: 100%; height: 100%; border: none; flex: 1; display:block;"></iframe>
+  <div id="comparison-modal-body" style="padding: 0; overflow: hidden; display: flex; flex-direction: column; position: relative; background: var(--gray-100);">
+    
+    <!-- Hidden div strictly to prevent script errors from the background regex parser, but not displayed to user -->
+    <div id="comparison-metrics-list" style="display: none;"></div>
+    
+    <div id="iframe-loader" style="display:none; position: absolute; top: 0; left: 0; right: 0; bottom: 0; flex-direction: column; align-items: center; justify-content: center; z-index: 1;">
+        <div class="spinner" style="width: 40px; height: 40px; border-width: 4px; margin-bottom: 15px;"></div>
+        <div style="color: var(--text-muted); font-weight: 600;">Connecting to SharePoint...</div>
+    </div>
+    
+    <iframe id="comparison-iframe" src="" onload="document.getElementById('iframe-loader').style.display='none';" style="width: 100%; height: 100%; border: none; flex: 1; display:block; position: relative; z-index: 2; background: transparent;"></iframe>
   </div>
 </div>
 
@@ -2379,6 +2396,39 @@
     }
   }
 
+  // ── Parse Raw Text from SharePoint ────────────────────────────────────────
+  window.parseLastMonthMetrics = function(rawText, fileName) {
+      if (!rawText) return;
+
+      // Clean the text: remove newlines and extra spaces to make it one searchable stream
+      const cleanText = rawText.replace(/\r?\n|\r/g, " ").replace(/\s{2,}/g, " ");
+
+      // Regex Patterns based on your uploaded templates and UI labels
+      const patterns = {
+          'Outbound Calls': /(?:Outbound Calls|Outbound 50\+).*?(\d+\.?\d*)/i,
+          'Avg. Talk Time': /(?:Avg\.? Talk Time).*?(\d+:\d+|\d+\.\d+)/i,
+          'AUX Accuracy': /AUX Accuracy.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
+          'Handle Time': /Handle Time.*?(\d+:\d+|\d+\.\d+)/i,
+          'Avg. Lunch': /Average Lunch.*?(\d+:\d+|\d+\.\d+)/i,
+          'Avg. Break': /Average Break.*?(\d+:\d+|\d+\.\d+)/i,
+          'Lunch Adherence': /Lunch Adherence.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
+          'Break Adherence': /Break Adherence.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
+          'Reporting Accuracy': /Reporting Accuracy.*?(\d+(?:\.\d+)?%?|EE|ME|BE)/i,
+          'Working Days Present': /Working Days Present.*?(\d+)/i
+      };
+
+      let foundMetrics = false;
+      
+      // We keep this running silently to not lose the parsed data, but it won't be displayed in the modal
+      Object.keys(patterns).forEach(label => {
+          const match = cleanText.match(patterns[label]);
+          if (match) {
+              foundMetrics = true;
+          }
+      });
+      if(!foundMetrics) console.log("No regex metric matches found in document: ", fileName);
+  }
+
   // ── Power Automate Tunnel: Fetch SharePoint Historical Reviews ──────────────
   async function fetchSharePointHistory(empName) {
       const summaryBox = document.getElementById('sp-history-summary');
@@ -2438,6 +2488,7 @@
               const newestFile = reviewFiles[0];
               const newestDate = new Date(newestFile.Created);
               const fileName = newestFile['{FilenameWithExtension}'];
+              const fileNameLower = fileName.toLowerCase();
               
               if (!isNaN(newestDate.getTime()) && (!lastReviewEl.value || lastReviewEl.value.includes('Not Found'))) {
                   lastReviewEl.value = newestDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) + ' (SharePoint)';
@@ -2452,12 +2503,51 @@
                   let embedLink = newestFile['{Link}'];
                   // Force SharePoint to allow the iframe by requesting the embed viewer
                   embedLink += embedLink.includes('?') ? '&action=embedview' : '?action=embedview';
+                  
+                  const iframeLoader = document.getElementById('iframe-loader');
+                  if(iframeLoader) iframeLoader.style.display = 'flex';
+                  
                   document.getElementById('comparison-iframe').src = embedLink;
               }
               
               // Reveal the parsed data banner & modal trigger buttons 
               parsedInfo.style.display = 'flex';
               document.querySelectorAll('.btn-show-comparison').forEach(btn => btn.style.display = 'inline-flex');
+
+              // Handle background text extraction if needed
+              if (rawData.fileContentBase64) {
+                  const binaryString = window.atob(rawData.fileContentBase64);
+                  const len = binaryString.length;
+                  const bytes = new Uint8Array(len);
+                  for (let i = 0; i < len; i++) {
+                      bytes[i] = binaryString.charCodeAt(i);
+                  }
+                  
+                  if (fileNameLower.endsWith('.pdf')) {
+                      // Using PDF.js for PDF files
+                      const loadingTask = pdfjsLib.getDocument({data: bytes});
+                      loadingTask.promise.then(async function(pdf) {
+                          let fullText = '';
+                          for (let i = 1; i <= pdf.numPages; i++) {
+                              const page = await pdf.getPage(i);
+                              const textContent = await page.getTextContent();
+                              fullText += textContent.items.map(s => s.str).join(' ') + ' ';
+                          }
+                          window.parseLastMonthMetrics(fullText, fileName);
+                      }).catch(function(err) {
+                          console.error("PDF Parse Error:", err);
+                      });
+                  } else {
+                      // Using Mammoth for DOCX files
+                      mammoth.extractRawText({ arrayBuffer: bytes.buffer })
+                          .then(function(result) {
+                              window.parseLastMonthMetrics(result.value, fileName);
+                          })
+                          .catch(function(err) {
+                              console.error("DOCX Parse Error:", err);
+                          });
+                  }
+              }
 
               linksBox.innerHTML = '';
               reviewFiles.forEach(file => {
