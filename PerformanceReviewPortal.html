@@ -9,8 +9,11 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
   <script>
-      // Configure PDF.js worker
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+      window.addEventListener('DOMContentLoaded', () => {
+          if (typeof pdfjsLib !== 'undefined') {
+              pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+          }
+      });
   </script>
   
   <!-- Advanced Native DOCX Renderer -->
@@ -2446,6 +2449,9 @@
       const lastReviewEl = document.getElementById('last-review-date');
       const navBtn = document.getElementById('btn-nav-history');
       const parsedInfo = document.getElementById('parsed-file-info');
+      const iframeLoader = document.getElementById('iframe-loader');
+      const compIframe = document.getElementById('comparison-iframe');
+      const docxContainer = document.getElementById('comparison-docx');
       
       // Reset UI
       summaryBox.style.display = 'none';
@@ -2455,13 +2461,13 @@
       linksBox.innerHTML = '';
       
       // Reset raw viewers
-      if (document.getElementById('comparison-iframe')) {
-          document.getElementById('comparison-iframe').src = '';
-          document.getElementById('comparison-iframe').style.display = 'none';
+      if (compIframe) {
+          compIframe.src = '';
+          compIframe.style.display = 'none';
       }
-      if (document.getElementById('comparison-docx')) {
-          document.getElementById('comparison-docx').innerHTML = '';
-          document.getElementById('comparison-docx').style.display = 'none';
+      if (docxContainer) {
+          docxContainer.innerHTML = '';
+          docxContainer.style.display = 'none';
       }
 
       if (!empName) return;
@@ -2486,7 +2492,6 @@
           }
           
           // 2. Strips ALL non-alphanumeric characters (spaces, commas, underscores, hyphens, periods)
-          // E.g. "Bella-Ann O'Connor" becomes "BellaAnnOConnor"
           const cleanSearchName = formattedName.replace(/[^a-zA-Z0-9]/g, '');
 
           const res = await fetch(spTunnelUrl, {
@@ -2497,7 +2502,16 @@
 
           if (!res.ok) throw new Error("SharePoint Tunnel unreachable.");
           
-          let rawData = await res.json();
+          // Fix for empty string response crashes
+          const resText = await res.text();
+          let rawData = {};
+          if (resText && resText.trim() !== "") {
+              try { 
+                  rawData = JSON.parse(resText); 
+              } catch(e) { 
+                  console.warn("Failed to parse Flow response JSON", e); 
+              }
+          }
           
           // Ensure we pull the array of files properly depending on flow's structure
           const files = Array.isArray(rawData) ? rawData : (rawData.value || []);
@@ -2527,15 +2541,16 @@
               parsedInfo.style.display = 'flex';
               document.querySelectorAll('.btn-show-comparison').forEach(btn => btn.style.display = 'inline-flex');
 
-              // Display Native Browsers
-              const iframeLoader = document.getElementById('iframe-loader');
-              const compIframe = document.getElementById('comparison-iframe');
-              const docxContainer = document.getElementById('comparison-docx');
-              
               if(iframeLoader) iframeLoader.style.display = 'flex';
               
               if (rawData.fileContentBase64) {
-                  const binaryString = window.atob(rawData.fileContentBase64);
+                  
+                  // Safely extract base64 string
+                  let b64 = rawData.fileContentBase64;
+                  if (typeof b64 === 'object' && b64.$content) b64 = b64.$content;
+                  b64 = b64.replace(/\s/g, ''); // strip newlines/spaces
+                  
+                  const binaryString = window.atob(b64);
                   const len = binaryString.length;
                   const bytes = new Uint8Array(len);
                   for (let i = 0; i < len; i++) {
@@ -2572,14 +2587,19 @@
                       if (compIframe) compIframe.style.display = 'none';
                       if (docxContainer) docxContainer.style.display = 'block';
                       
-                      const docxBlob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
-                      docx.renderAsync(docxBlob, docxContainer).then(() => {
-                          if(iframeLoader) iframeLoader.style.display = 'none';
-                      }).catch(err => {
-                          console.error("DOCX Render Error:", err);
-                          docxContainer.innerHTML = '<div style="padding:20px; color:var(--danger); text-align:center;">Failed to render DOCX. Please open in a new tab natively.</div>';
-                          if(iframeLoader) iframeLoader.style.display = 'none';
-                      });
+                      if (typeof docx !== 'undefined') {
+                          const docxBlob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+                          docx.renderAsync(docxBlob, docxContainer).then(() => {
+                              if(iframeLoader) iframeLoader.style.display = 'none';
+                          }).catch(err => {
+                              console.error("DOCX Render Error:", err);
+                              docxContainer.innerHTML = '<div style="padding:20px; color:var(--danger); text-align:center;">Failed to render DOCX. Please open in a new tab natively.</div>';
+                              if(iframeLoader) iframeLoader.style.display = 'none';
+                          });
+                      } else {
+                           docxContainer.innerHTML = '<div style="padding:20px; color:var(--danger); text-align:center;">DOCX preview library blocked by network. Please open natively.</div>';
+                           if(iframeLoader) iframeLoader.style.display = 'none';
+                      }
 
                       // Silent Background Parse
                       if (typeof mammoth !== 'undefined') {
@@ -2590,27 +2610,14 @@
                   }
               } else {
                   // Fallback if the user's flow doesn't successfully pass the base64 content
-                  if (compIframe) compIframe.style.display = 'none';
-                  if (iframeLoader) iframeLoader.style.display = 'none';
-                  if (docxContainer) {
-                      docxContainer.innerHTML = `
-                        <div style="padding: 2rem; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--text-main);">
-                            <i class="fas fa-file-code" style="font-size: 3rem; color: var(--gray-400); margin-bottom: 1rem;"></i>
-                            <h3 style="margin-bottom: 0.5rem; color: var(--text-brand);">Extraction Setup Required</h3>
-                            <p style="color: var(--text-muted); font-size: 0.95rem; max-width: 400px; line-height: 1.5;">
-                                The SharePoint Flow found the file <b>${fileName}</b>, but the file contents were not returned.
-                            </p>
-                            <div style="background: var(--bg-accent); padding: 1rem; border-radius: var(--radius-sm); border: 1px dashed var(--border-accent); margin-top: 1rem; text-align: left; font-size: 0.85rem; width: 100%;">
-                                <strong style="color: var(--brand-dark);"><i class="fas fa-wrench"></i> Flow Setup Check:</strong>
-                                <ol style="margin-top: 0.5rem; padding-left: 1.5rem; color: var(--gray-800); line-height: 1.6; margin-bottom: 0;">
-                                    <li style="margin-bottom: 0.25rem;">Add a <b>"Get file content"</b> action in Power Automate.</li>
-                                    <li style="margin-bottom: 0.25rem;">In your final Response, add a key called <code>fileContentBase64</code>.</li>
-                                    <li>Set its value exactly to:<br><code style="background:var(--bg-card); padding:2px 4px; display:inline-block; margin-top:4px;">@outputs('Get_file_content')?['body/$content']</code></li>
-                                </ol>
-                            </div>
-                        </div>`;
-                      docxContainer.style.display = 'block';
+                  if (compIframe) {
+                      let embedLink = newestFile['{Link}'];
+                      embedLink += embedLink.includes('?') ? '&action=embedview' : '?action=embedview';
+                      compIframe.src = embedLink;
+                      compIframe.style.display = 'block';
                   }
+                  if (docxContainer) docxContainer.style.display = 'none';
+                  // Note: iframeLoader will be hidden by the iframe's onload event
               }
 
               linksBox.innerHTML = '';
@@ -2639,6 +2646,8 @@
       } catch (err) {
           linksBox.innerHTML = '<div style="padding:10px; font-size:0.85rem; color:var(--danger);">Error connecting to SharePoint archive.</div>';
           console.error("SharePoint Tunnel Error:", err);
+          const loader = document.getElementById('iframe-loader');
+          if (loader) loader.style.display = 'none';
       }
   }
 
