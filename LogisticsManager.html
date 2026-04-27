@@ -1243,6 +1243,8 @@
             Toastify({text:`Reassigning ${guidsToUpdate.length} record(s)...`, style:{background:"#fbbf24"}}).showToast();
             try {
                 const token = await getToken(ENV_DATA);
+                const oldRep = t.owner; // Save the old rep's name for the email
+                
                 for (let g of guidsToUpdate) {
                     await fetch(`${DATA_API}/${ENTITY_SET}(${g})`, {
                         method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -1251,6 +1253,17 @@
                 }
                 Toastify({text:"Reassigned Successfully", style:{background:"#10b981"}}).showToast(); 
                 refreshData(true); 
+                
+                // Send Single Audit Email
+                sendAuditEmail(
+                    `Audit Log: Single Reassignment (${t.order})`,
+                    `<h3>Reassignment Executed</h3>
+                    <p><b>Performed by:</b> ${userProfile.name}</p>
+                    <p><b>Sales Order:</b> ${t.order}</p>
+                    <p><b>Customer:</b> ${t.company}</p>
+                    <p><b>Changed From:</b> ${oldRep}</p>
+                    <p><b>Changed To:</b> ${newRep}</p>`
+                );
             } catch(e) { Toastify({text:"Reassign Failed", style:{background:"#ef4444"}}).showToast(); }
         }
 
@@ -1698,6 +1711,23 @@
             const guids = Array.from(selectedGuids);
             if(guids.length === 0) return alert("Select records first.");
             
+            // --- NEW IDIOT CHECK & COUNT LOGIC ---
+            let ownerCounts = {};
+            for (const guid of guids) {
+                const t = fullData.find(x => x.guid === guid);
+                if (t) ownerCounts[t.owner] = (ownerCounts[t.owner] || 0) + 1;
+            }
+
+            let confirmMsg = `WARNING: You are about to bulk-reassign ${guids.length} records.\n\nCurrent Owner Breakdown:\n`;
+            for (const [owner, count] of Object.entries(ownerCounts)) {
+                confirmMsg += `• ${owner}: ${count}\n`;
+            }
+            confirmMsg += `\nThese will be distributed among: ${rrTeam.join(', ')}\n\nAre you sure you want to proceed?`;
+
+            // This pops up the browser alert box. If they click Cancel, the function stops.
+            if (!confirm(confirmMsg)) return; 
+            // -------------------------------------
+
             Toastify({text:`Analyzing and updating records...`, style:{background:"#fbbf24"}}).showToast();
             const token = await getToken(ENV_DATA);
             
@@ -1746,6 +1776,12 @@
 
             localStorage.setItem('logileap_rr_index', rrIndex);
             selectedGuids.clear(); Toastify({text:"Bulk Update Complete", style:{background:"#10b981"}}).showToast(); refreshData(true);
+            
+            // Send Bulk Audit Email
+            let auditBody = `<h3>Bulk Reassignment Executed</h3><p><b>Performed by:</b> ${userProfile.name}</p><p><b>Total Selected:</b> ${guids.length}</p><ul>`;
+            for (const [owner, count] of Object.entries(ownerCounts)) { auditBody += `<li>${owner}: ${count}</li>`; }
+            auditBody += `</ul><p><b>Distributed to:</b> ${rrTeam.join(', ')}</p>`;
+            sendAuditEmail("Audit Log: Bulk Reassignment", auditBody);
         }
 
         function renderKanbanCard(t) {
@@ -2883,6 +2919,31 @@
                 const res = await fetch(`${DATA_API}/${ENTITY_SET}(${guid})`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } });
                 if(res.ok) { Toastify({text:"Record Deleted", style:{background:"#ef4444"}}).showToast(); closeDetail(); refreshData(true); }
             } catch(e){}
+        }
+
+        async function sendAuditEmail(subject, bodyHtml) {
+            if (!userProfile.email) return; 
+            try {
+                // Silently grab token
+                const tokenResponse = await msalInstance.acquireTokenSilent({ scopes: ["Mail.Send"], account: msalAccount }).catch(e => null);
+                if (!tokenResponse) return;
+
+                const payload = {
+                    message: {
+                        subject: subject,
+                        body: { contentType: "HTML", content: bodyHtml },
+                        toRecipients: [{ emailAddress: { address: userProfile.email } }] // Sends the audit receipt to whoever clicked the button
+                    },
+                    saveToSentItems: "false" // Set to false so it doesn't clutter their Outbox
+                };
+
+                // Fire and forget (No await so the UI stays fast)
+                fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${tokenResponse.accessToken}`, "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+            } catch(e) { console.warn("Failed to send audit email", e); }
         }
 
         async function triggerFurnitureEmail(t) {
