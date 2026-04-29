@@ -6641,5 +6641,485 @@ if (!window.__actPolishRenderReportsWrapped) {
     };
 }
 </script>
+
+<style id="act-complete-style">
+.act-status-banner{position:sticky;top:0;z-index:80;display:none;padding:10px 14px;font-size:12px;font-weight:800;letter-spacing:.04em;border-bottom:1px solid var(--border-color);backdrop-filter:blur(10px)}
+.act-status-banner[data-tone="info"]{display:block;background:rgba(59,130,246,.10);color:#93c5fd}
+.act-status-banner[data-tone="success"]{display:block;background:rgba(16,185,129,.10);color:#86efac}
+.act-status-banner[data-tone="warning"]{display:block;background:rgba(245,158,11,.10);color:#fde68a}
+.act-status-banner[data-tone="danger"]{display:block;background:rgba(239,68,68,.10);color:#fca5a5}
+.act-empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;margin:12px 0;border:1px dashed var(--border-color);border-radius:16px;background:rgba(255,255,255,.02);text-align:center}
+.act-empty-state h3{margin:0;font-size:14px;font-weight:900;letter-spacing:.04em}
+.act-empty-state p{margin:0;max-width:680px;font-size:12px;color:var(--text-muted)}
+.act-empty-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+.act-debug-toggle{position:fixed;right:14px;bottom:14px;z-index:1100;border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-main);padding:10px 12px;border-radius:999px;box-shadow:0 8px 30px rgba(0,0,0,.25);font-size:12px;font-weight:900;cursor:pointer}
+.act-debug-panel{position:fixed;right:14px;bottom:62px;z-index:1100;width:min(420px,calc(100vw - 28px));max-height:70vh;overflow:auto;border:1px solid var(--border-color);border-radius:18px;background:var(--bg-card);box-shadow:0 18px 60px rgba(0,0,0,.35);padding:14px;display:none}
+.act-debug-panel.open{display:block}
+.act-debug-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}
+.act-debug-card{border:1px solid var(--border-color);border-radius:14px;padding:10px;background:rgba(255,255,255,.02)}
+.act-debug-card .label{font-size:10px;font-weight:900;letter-spacing:.08em;color:var(--text-muted);text-transform:uppercase}
+.act-debug-card .value{font-size:14px;font-weight:900;color:var(--text-main);margin-top:4px;word-break:break-word}
+.act-debug-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.act-debug-log{margin-top:12px;border-top:1px solid var(--border-color);padding-top:12px;display:flex;flex-direction:column;gap:8px}
+.act-debug-log-item{font-size:11px;border:1px solid var(--border-color);border-radius:12px;padding:8px;background:rgba(255,255,255,.02)}
+.act-filter-badge{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border-color);border-radius:999px;padding:3px 8px;font-size:10px;font-weight:900;letter-spacing:.04em;background:rgba(255,255,255,.02);color:var(--text-main)}
+.act-toolbar-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0 10px}
+.act-visually-hidden{position:absolute!important;height:1px;width:1px;overflow:hidden;clip:rect(1px,1px,1px,1px);white-space:nowrap}
+#drilldown-modal[role="dialog"], #mass-filter-modal[role="dialog"]{outline:none}
+</style>
+
+
+<script id="act-complete-script">
+(function(){
+  if (window.__actCompleteEnhancementsLoaded) return;
+  window.__actCompleteEnhancementsLoaded = true;
+  const LS_UI = 'act_mgr_ui_state_v3';
+  const LS_TABLE = 'act_mgr_table_filters_v3';
+  const debugState = { logs: [], smoke: [] };
+  const safeNow = () => new Date().toLocaleTimeString();
+  const norm = (v) => (v === null || v === undefined) ? '' : String(v).trim();
+  const safeDate = (v) => { const d = new Date(v); return isNaN(d.getTime()) ? null : d; };
+  const parseJSON = (v, fallback) => { try { return JSON.parse(v); } catch { return fallback; } };
+  const setLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+  const getLS = (k, fallback) => parseJSON(localStorage.getItem(k), fallback);
+  const addLog = (type, message, extra) => {
+    debugState.logs.unshift({ type, message, extra: extra || '', ts: new Date().toISOString() });
+    debugState.logs = debugState.logs.slice(0, 30);
+    renderDebugPanel();
+  };
+  const byId = (id) => document.getElementById(id);
+
+  function ensureChrome(){
+    if (!byId('act-status-banner')) {
+      const banner = document.createElement('div');
+      banner.id = 'act-status-banner';
+      banner.className = 'act-status-banner';
+      banner.setAttribute('aria-live', 'polite');
+      const root = document.body.firstElementChild || document.body;
+      root.parentNode.insertBefore(banner, root);
+    }
+    if (!byId('act-debug-toggle')) {
+      const btn = document.createElement('button');
+      btn.id = 'act-debug-toggle';
+      btn.className = 'act-debug-toggle';
+      btn.type = 'button';
+      btn.innerHTML = 'A.C.T. Tools';
+      btn.setAttribute('aria-expanded', 'false');
+      btn.onclick = toggleDebugPanel;
+      document.body.appendChild(btn);
+    }
+    if (!byId('act-debug-panel')) {
+      const panel = document.createElement('aside');
+      panel.id = 'act-debug-panel';
+      panel.className = 'act-debug-panel';
+      panel.setAttribute('role', 'dialog');
+      panel.setAttribute('aria-modal', 'false');
+      document.body.appendChild(panel);
+      renderDebugPanel();
+    }
+    const dd = byId('drilldown-modal');
+    if (dd) { dd.setAttribute('role','dialog'); dd.setAttribute('aria-modal','true'); dd.setAttribute('tabindex','-1'); }
+    const mm = byId('mass-filter-modal');
+    if (mm) { mm.setAttribute('role','dialog'); mm.setAttribute('aria-modal','true'); mm.setAttribute('tabindex','-1'); }
+  }
+
+  function showStatus(message, tone='info', sticky=false){
+    ensureChrome();
+    const banner = byId('act-status-banner');
+    if (!banner) return;
+    banner.dataset.tone = tone;
+    banner.textContent = message;
+    if (!sticky) {
+      clearTimeout(window.__actStatusTimeout);
+      window.__actStatusTimeout = setTimeout(() => {
+        if (banner && banner.textContent === message) { banner.textContent = ''; banner.style.display='none'; banner.removeAttribute('data-tone'); }
+      }, tone === 'danger' ? 8000 : 4200);
+    }
+    banner.style.display = 'block';
+    addLog(tone, message);
+  }
+
+  function getUiState(){
+    return {
+      activeTab: document.querySelector('.tab-btn.active')?.getAttribute('data-tab') || '',
+      activeReportTab: window.activeReportTab || 'overview',
+      quickFilter: window.activeQuickFilter || 'all',
+      listSearch: byId('list-search') ? byId('list-search').value : '',
+      listSort: byId('list-sort') ? byId('list-sort').value : 'date-desc',
+      activeAccountId: window.activeAccountId || '',
+      hasDrilldownLock: !!window.drilldownActive,
+      drilldownContext: window.drilldownRepContext || '',
+      drilldownMetric: window._lastDrilldownMetric || ''
+    };
+  }
+
+  function saveUiState(){
+    try {
+      setLS(LS_UI, getUiState());
+    } catch(e) { addLog('warning','Failed to persist UI state', e?.message || ''); }
+  }
+
+  function saveTableFilterState(){
+    try {
+      const payload = {};
+      const src = window.activeTableFilters || {};
+      Object.keys(src).forEach(tableId => {
+        payload[tableId] = {};
+        Object.keys(src[tableId] || {}).forEach(col => payload[tableId][col] = Array.from(src[tableId][col] || []));
+      });
+      setLS(LS_TABLE, payload);
+      refreshTableFilterBadges();
+    } catch(e) { addLog('warning','Failed to persist table filters', e?.message || ''); }
+  }
+
+  function restoreTableFilterState(){
+    const saved = getLS(LS_TABLE, {});
+    if (!saved || typeof saved !== 'object') return;
+    window.activeTableFilters = window.activeTableFilters || {};
+    Object.keys(saved).forEach(tableId => {
+      window.activeTableFilters[tableId] = window.activeTableFilters[tableId] || {};
+      Object.keys(saved[tableId] || {}).forEach(col => {
+        window.activeTableFilters[tableId][col] = new Set((saved[tableId][col] || []).map(norm));
+      });
+    });
+    if (typeof window.reapplyAllTableFilters === 'function') window.reapplyAllTableFilters();
+    refreshTableFilterBadges();
+  }
+
+  function clearAllReportTableFilters(){
+    window.activeTableFilters = window.activeTableFilters || {};
+    ['scorecard-table','actions-table','engagement-table','monthly-table','dd-table'].forEach(id => delete window.activeTableFilters[id]);
+    try { localStorage.removeItem(LS_TABLE); } catch {}
+    if (typeof window.reapplyAllTableFilters === 'function') window.reapplyAllTableFilters();
+    refreshTableFilterBadges();
+    showStatus('Cleared all report table filters.', 'success');
+  }
+
+  function ensureReportToolbarEnhancements(){
+    const reportTab = byId('tab-reports');
+    if (!reportTab) return;
+    let host = byId('act-report-enhancements');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'act-report-enhancements';
+      host.className = 'act-toolbar-row';
+      host.innerHTML = `
+        <button type="button" class="btn-secondary text-[10px] px-2 py-1 uppercase" id="act-clear-report-table-filters">Clear Table Filters</button>
+        <button type="button" class="btn-secondary text-[10px] px-2 py-1 uppercase" id="act-run-smoke-check">Run Smoke Check</button>
+        <span class="act-filter-badge" id="act-report-filter-summary">No report column filters</span>
+      `;
+      const anchor = reportTab.querySelector('.horizontal-filters, .report-toolbar, .p-3') || reportTab.firstElementChild;
+      if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(host, anchor.nextSibling);
+      byId('act-clear-report-table-filters').onclick = clearAllReportTableFilters;
+      byId('act-run-smoke-check').onclick = runSmokeCheck;
+    }
+  }
+
+  function refreshTableFilterBadges(){
+    ensureReportToolbarEnhancements();
+    const summary = byId('act-report-filter-summary');
+    let active = [];
+    const src = window.activeTableFilters || {};
+    Object.keys(src).forEach(tableId => {
+      const cols = Object.keys(src[tableId] || {}).filter(c => (src[tableId][c] || new Set()).size > 0);
+      if (cols.length) active.push(`${tableId.replace('-table','')}: ${cols.length}`);
+      let badge = byId(`badge-${tableId}`);
+      const table = byId(tableId);
+      if (!table) return;
+      const card = table.closest('.report-card, .table-card, .rounded-2xl, .border') || table.parentElement;
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.id = `badge-${tableId}`;
+        badge.className = 'act-filter-badge';
+        const insertion = card?.querySelector('.table-container') || card?.firstElementChild || table.parentElement;
+        if (insertion && insertion.parentNode) insertion.parentNode.insertBefore(badge, insertion);
+      }
+      badge.textContent = cols.length ? `${cols.length} column filter${cols.length===1?'':'s'} active` : 'No column filters';
+    });
+    if (summary) summary.textContent = active.length ? `Report column filters • ${active.join(' • ')}` : 'No report column filters';
+  }
+
+  function ensureAccountListEmptyState(){
+    const container = byId('account-list-container');
+    if (!container) return;
+    const current = byId('act-account-empty-state');
+    const count = Array.isArray(window.listDisplayAccounts) ? window.listDisplayAccounts.length : 0;
+    const message = window.drilldownActive ? 'The dashboard is currently locked to a drilldown dataset. Clear the drilldown lock or broaden the active filters to see more accounts.' : 'No accounts match the current filter, search, and quick-filter combination.';
+    if (count === 0) {
+      if (!current) {
+        const box = document.createElement('div');
+        box.id = 'act-account-empty-state';
+        box.className = 'act-empty-state';
+        box.innerHTML = `
+          <h3>NO ACCOUNTS MATCH THE CURRENT VIEW</h3>
+          <p>${message}</p>
+          <div class="act-empty-actions">
+            <button type="button" class="btn-secondary text-[10px] px-2 py-1 uppercase" id="act-clear-all-filters-btn">Clear All Filters</button>
+            <button type="button" class="btn-secondary text-[10px] px-2 py-1 uppercase" id="act-clear-drilldown-lock-btn">Clear Drilldown Lock</button>
+          </div>`;
+        container.appendChild(box);
+        const clearBtn = byId('act-clear-all-filters-btn');
+        if (clearBtn) clearBtn.onclick = () => window.clearAllFilters && window.clearAllFilters();
+        const ddBtn = byId('act-clear-drilldown-lock-btn');
+        if (ddBtn) ddBtn.onclick = () => window.clearDrilldownLock && window.clearDrilldownLock();
+      } else {
+        current.querySelector('p').textContent = message;
+      }
+    } else if (current) {
+      current.remove();
+    }
+  }
+
+  function updateReportEmptyStates(){
+    const reportTables = ['scorecard-table','actions-table','engagement-table','monthly-table','dd-table'];
+    reportTables.forEach(tableId => {
+      const table = byId(tableId);
+      if (!table) return;
+      const holder = table.closest('.table-container') || table.parentElement;
+      if (!holder) return;
+      holder.querySelectorAll(`.act-empty-state[data-for="${tableId}"]`).forEach(el => el.remove());
+      const rows = Array.from(table.querySelectorAll('tbody tr'));
+      const visible = rows.filter(r => r.style.display !== 'none' && !r.classList.contains('hidden-force'));
+      if (rows.length === 0 || visible.length === 0) {
+        const box = document.createElement('div');
+        box.className = 'act-empty-state';
+        box.dataset.for = tableId;
+        box.innerHTML = `
+          <h3>${tableId === 'dd-table' ? 'DRILLDOWN DATASET IS EMPTY' : 'NO ROWS MATCH THIS REPORT VIEW'}</h3>
+          <p>${tableId === 'dd-table' ? 'Try a different drilldown metric or broaden the active filters.' : 'Try clearing a table column filter, expanding the date range, or including unassigned reps.'}</p>
+          <div class="act-empty-actions">
+            <button type="button" class="btn-secondary text-[10px] px-2 py-1 uppercase" data-clear-table="${tableId}">Clear This Table Filter</button>
+          </div>`;
+        holder.appendChild(box);
+        box.querySelector('[data-clear-table]')?.addEventListener('click', () => {
+          if (window.activeTableFilters) delete window.activeTableFilters[tableId];
+          saveTableFilterState();
+          if (typeof window.renderTableFilters === 'function') window.renderTableFilters(tableId);
+          if (typeof window.renderReports === 'function' && tableId !== 'dd-table') window.renderReports();
+        });
+      }
+    });
+  }
+
+  function renderDebugPanel(){
+    ensureChrome();
+    const panel = byId('act-debug-panel');
+    if (!panel) return;
+    const ui = getUiState();
+    const filters = window.activeFilters || {};
+    const filterCount = Object.keys(filters).reduce((acc, key) => acc + ((filters[key]?.size || 0) > 0 ? 1 : 0), 0);
+    const visibleRows = ['scorecard-table','actions-table','engagement-table','monthly-table','dd-table'].map(id => `${id.replace('-table','')}:${(window.getVisibleTableRowCount ? window.getVisibleTableRowCount(id) : 0)}`).join(' • ');
+    panel.innerHTML = `
+      <div class="flex items-center justify-between gap-2">
+        <div>
+          <div class="text-[10px] font-black uppercase tracking-widest text-muted">A.C.T. Diagnostics</div>
+          <div class="text-sm font-black">Runtime + filter health</div>
+        </div>
+        <button type="button" class="btn-secondary text-[10px] px-2 py-1 uppercase" id="act-debug-close">Close</button>
+      </div>
+      <div class="act-debug-grid">
+        <div class="act-debug-card"><div class="label">Accounts</div><div class="value">${(window.teamFilteredAccounts||[]).length}</div></div>
+        <div class="act-debug-card"><div class="label">Visible Dashboard Rows</div><div class="value">${(window.listDisplayAccounts||[]).length}</div></div>
+        <div class="act-debug-card"><div class="label">Employee Filters Active</div><div class="value">${filterCount}</div></div>
+        <div class="act-debug-card"><div class="label">Active Report Tab</div><div class="value">${ui.activeReportTab}</div></div>
+        <div class="act-debug-card"><div class="label">Drilldown Lock</div><div class="value">${ui.hasDrilldownLock ? `${ui.drilldownContext} • ${ui.drilldownMetric}` : 'None'}</div></div>
+        <div class="act-debug-card"><div class="label">Table Rows</div><div class="value">${visibleRows || 'n/a'}</div></div>
+      </div>
+      <div class="act-debug-actions">
+        <button type="button" class="btn-secondary text-[10px] px-2 py-1 uppercase" id="act-refresh-diagnostics">Refresh</button>
+        <button type="button" class="btn-secondary text-[10px] px-2 py-1 uppercase" id="act-diagnostics-smoke">Run Smoke Check</button>
+        <button type="button" class="btn-secondary text-[10px] px-2 py-1 uppercase" id="act-clear-ui-state">Clear Saved UI State</button>
+      </div>
+      <div class="act-debug-log">
+        ${(debugState.logs.length ? debugState.logs : [{type:'info', message:'No runtime warnings recorded yet.', ts:new Date().toISOString()}]).map(item => `<div class="act-debug-log-item"><div class="font-black uppercase text-[10px]">${item.type} • ${new Date(item.ts).toLocaleString()}</div><div>${item.message}</div>${item.extra ? `<div class="text-muted mt-1">${item.extra}</div>` : ''}</div>`).join('')}
+      </div>`;
+    byId('act-debug-close').onclick = toggleDebugPanel;
+    byId('act-refresh-diagnostics').onclick = renderDebugPanel;
+    byId('act-diagnostics-smoke').onclick = runSmokeCheck;
+    byId('act-clear-ui-state').onclick = () => {
+      try { localStorage.removeItem(LS_UI); localStorage.removeItem(LS_TABLE); } catch {}
+      showStatus('Cleared saved UI and table-filter state.', 'success');
+    };
+  }
+
+  function toggleDebugPanel(){
+    ensureChrome();
+    const panel = byId('act-debug-panel');
+    const btn = byId('act-debug-toggle');
+    if (!panel || !btn) return;
+    const open = !panel.classList.contains('open');
+    panel.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', String(open));
+    if (open) renderDebugPanel();
+  }
+
+  function runSmokeCheck(){
+    const checks = [
+      ['employeesData loaded', Array.isArray(window.employeesData) && window.employeesData.length >= 0],
+      ['mergedAccounts loaded', Array.isArray(window.mergedAccounts)],
+      ['teamFilteredAccounts ready', Array.isArray(window.teamFilteredAccounts)],
+      ['reportingFacts ready', Array.isArray(window.reportingFacts)],
+      ['filter config ready', Array.isArray(window.FILTER_CONFIG) && window.FILTER_CONFIG.length > 0],
+      ['applyFilters exists', typeof window.applyFilters === 'function'],
+      ['renderReports exists', typeof window.renderReports === 'function'],
+      ['drilldown helpers ready', typeof window.openDrilldown === 'function' && typeof window.restoreDrilldown === 'function']
+    ];
+    const failed = checks.filter(x => !x[1]);
+    const message = failed.length ? `Smoke check found ${failed.length} issue${failed.length===1?'':'s'}: ${failed.map(f=>f[0]).join(', ')}` : 'Smoke check passed. Core runtime hooks look ready.';
+    showStatus(message, failed.length ? 'warning' : 'success', failed.length > 0);
+    addLog(failed.length ? 'warning' : 'success', message);
+    renderDebugPanel();
+  }
+
+  function restoreUiStateHard(){
+    ensureChrome();
+    const state = getLS(LS_UI, null);
+    if (!state) return false;
+    try {
+      if (state.listSearch && byId('list-search')) byId('list-search').value = state.listSearch;
+      if (state.listSort && byId('list-sort')) byId('list-sort').value = state.listSort;
+      if (state.quickFilter && typeof window.setQuickFilter === 'function' && state.quickFilter !== window.activeQuickFilter) window.setQuickFilter(state.quickFilter);
+      if (state.activeReportTab && typeof window.switchReportTab === 'function' && state.activeReportTab !== window.activeReportTab) window.switchReportTab(state.activeReportTab);
+      if (Array.isArray(window.FILTER_CONFIG) && window.FILTER_CONFIG.length && typeof window.refreshFilterHeader === 'function') {
+        window.FILTER_CONFIG.forEach(col => {
+          const active = window.activeFilters?.[col.id];
+          document.querySelectorAll(`.ms-opt-${col.id} input[type="checkbox"]`).forEach(chk => chk.checked = !!(active && active.has(chk.value)));
+          window.refreshFilterHeader(col.id);
+        });
+      }
+      if (typeof window.updateFilterVisibility === 'function') window.updateFilterVisibility();
+      if (typeof window.updateFilterSubtitle === 'function') window.updateFilterSubtitle();
+      if (typeof window.applyFilters === 'function') window.applyFilters(true);
+      restoreTableFilterState();
+      if (state.activeTab && typeof window._executeSwitchTab === 'function') window._executeSwitchTab(state.activeTab);
+      if (state.hasDrilldownLock && state.drilldownContext && state.drilldownMetric && typeof window.openDrilldown === 'function') {
+        showStatus(`Saved session detected for drilldown context ${state.drilldownContext}. Use Return to Drilldown after the dashboard loads if needed.`, 'info');
+      }
+      addLog('success', 'Restored saved UI state.');
+      return true;
+    } catch (e) {
+      addLog('warning', 'UI state restore encountered an issue.', e?.message || '');
+      return false;
+    }
+  }
+
+  function withPostRefresh(){
+    ensureChrome();
+    ensureReportToolbarEnhancements();
+    refreshTableFilterBadges();
+    ensureAccountListEmptyState();
+    updateReportEmptyStates();
+    renderDebugPanel();
+  }
+
+  function patchFunctions(){
+    if (window.__actCompletePatched) return;
+    window.__actCompletePatched = true;
+
+    const wrap = (name, after) => {
+      const original = window[name];
+      if (typeof original !== 'function') return;
+      window[`__orig_${name}`] = original;
+      window[name] = function(){
+        const result = original.apply(this, arguments);
+        try { after.apply(this, arguments); } catch (e) { addLog('warning', `Post-hook failed for ${name}`, e?.message || ''); }
+        return result;
+      };
+    };
+
+    wrap('applyFilters', function(){ saveUiState(); withPostRefresh(); });
+    wrap('renderAccountList', function(){ withPostRefresh(); });
+    wrap('renderReports', function(){ ensureReportToolbarEnhancements(); restoreTableFilterState(); withPostRefresh(); saveUiState(); });
+    wrap('renderTableFilters', function(tableId){ saveTableFilterState(); refreshTableFilterBadges(); if (tableId === 'dd-table') updateReportEmptyStates(); });
+    wrap('applyExcelFilter', function(){ saveTableFilterState(); });
+    wrap('clearExcelFilter', function(){ saveTableFilterState(); });
+    wrap('switchReportTab', function(){ saveUiState(); withPostRefresh(); });
+    wrap('_executeSwitchTab', function(){ saveUiState(); withPostRefresh(); });
+    wrap('setQuickFilter', function(){ saveUiState(); });
+    wrap('syncDashboardToActiveRep', function(){ saveUiState(); withPostRefresh(); });
+    wrap('clearDrilldownLock', function(){ saveUiState(); withPostRefresh(); });
+    wrap('restoreDrilldown', function(){ saveUiState(); withPostRefresh(); });
+    wrap('openDrilldown', function(){ saveUiState(); withPostRefresh(); const dd = byId('drilldown-modal'); if (dd) dd.focus(); });
+    wrap('clearAllFilters', function(){ try { localStorage.removeItem(LS_TABLE); } catch {} saveUiState(); withPostRefresh(); });
+
+    if (typeof window.showToast === 'function' && !window.__actToastWrapped) {
+      window.__actToastWrapped = true;
+      const origToast = window.showToast;
+      window.showToast = function(msg, tone){ addLog(tone || 'info', msg); return origToast.apply(this, arguments); };
+    }
+
+    if (typeof window.openDrilldown === 'function' && !window.__actDrilldownMemoized) {
+      window.__actDrilldownMemoized = true;
+      const origOpen = window.openDrilldown;
+      window.__drilldownMemo = new Map();
+      window.openDrilldown = function(contextKey, metric){
+        const key = JSON.stringify({ c: contextKey, m: metric, s: window.reportStartDate ? window.reportStartDate.toISOString() : '', e: window.reportEndDate ? window.reportEndDate.toISOString() : '', ids: (window.teamFilteredAccounts||[]).length, repTab: window.activeReportTab });
+        if (window.__drilldownMemo.has(key)) {
+          const cached = window.__drilldownMemo.get(key);
+          window.currentDrilldownData = cached.slice();
+          addLog('info', `Reused cached drilldown dataset for ${contextKey} • ${metric}`);
+        }
+        const result = origOpen.apply(this, arguments);
+        if (Array.isArray(window.currentDrilldownData)) {
+          window.__drilldownMemo.set(key, window.currentDrilldownData.slice());
+          if (window.__drilldownMemo.size > 12) window.__drilldownMemo.delete(window.__drilldownMemo.keys().next().value);
+        }
+        return result;
+      };
+    }
+  }
+
+  function setupKeyboardAndA11y(){
+    document.addEventListener('keydown', function(e){
+      if (e.key === 'Escape') {
+        const dd = byId('drilldown-modal');
+        const mass = byId('mass-filter-modal');
+        const menu = byId('excel-filter-menu');
+        if (menu && menu.style.display === 'block') { menu.style.display = 'none'; e.preventDefault(); return; }
+        if (dd && dd.style.display !== 'none' && !dd.classList.contains('hidden-force')) { dd.classList.add('hidden-force'); dd.style.display='none'; e.preventDefault(); return; }
+        if (mass && mass.style.display !== 'none' && !mass.classList.contains('hidden-force')) { mass.classList.add('hidden-force'); mass.style.display='none'; e.preventDefault(); return; }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') { e.preventDefault(); toggleDebugPanel(); }
+    }, true);
+    document.addEventListener('click', function(e){
+      const panel = byId('act-debug-panel');
+      const btn = byId('act-debug-toggle');
+      if (panel?.classList.contains('open') && !panel.contains(e.target) && !btn?.contains(e.target)) toggleDebugPanel();
+    }, true);
+  }
+
+  function startRestoreLoop(){
+    let attempts = 0;
+    const timer = setInterval(() => {
+      attempts += 1;
+      ensureChrome();
+      patchFunctions();
+      if (Array.isArray(window.FILTER_CONFIG) && window.FILTER_CONFIG.length && typeof window.applyFilters === 'function') {
+        restoreUiStateHard();
+        withPostRefresh();
+        clearInterval(timer);
+        return;
+      }
+      if (attempts >= 40) {
+        clearInterval(timer);
+        showStatus('The app is still initializing. Some saved state may need a manual refresh after data loads.', 'warning', true);
+      }
+    }, 350);
+  }
+
+  window.addEventListener('error', function(e){ showStatus(`Runtime error captured: ${e.message}`, 'danger', true); addLog('danger', e.message, `${e.filename || ''}:${e.lineno || ''}`); });
+  window.addEventListener('unhandledrejection', function(e){ const reason = e.reason?.message || String(e.reason || 'Unknown async error'); showStatus(`Unhandled promise rejection: ${reason}`, 'danger', true); addLog('danger', reason); });
+
+  document.addEventListener('DOMContentLoaded', function(){
+    ensureChrome();
+    setupKeyboardAndA11y();
+    ensureReportToolbarEnhancements();
+    startRestoreLoop();
+    setTimeout(withPostRefresh, 800);
+    setTimeout(runSmokeCheck, 1400);
+  });
+})();
+</script>
+
 </body>
 </html>
