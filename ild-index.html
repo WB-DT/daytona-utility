@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. v4.29.26.1151</title>
+    <title>A.C.T. v4.34 D365</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -4138,6 +4138,237 @@ window.renderSavedFilterViews = function () {
   document.addEventListener('DOMContentLoaded', function(){
     ensureSavedViewsUI();
     setTimeout(function(){ decorateGalleryCards(); priorityAndSLASortGallery(); }, 800);
+  });
+})();
+</script>
+
+
+<!-- ============================================================
+     ACT v4.34 – D365 Last Order Mapping + Dynamics History Panel
+     Integrated add-on: mss_lastorderdate fallback to mss_lastinvoicedate
+=============================================================== -->
+<style id="act-v434-d365-style">
+  .act-d365-open-btn {
+    display:inline-flex; align-items:center; gap:6px;
+    height:28px; padding:0 10px; border-radius:8px;
+    border:1px solid var(--border-color, rgba(255,255,255,.14));
+    background:linear-gradient(135deg, rgba(99,102,241,.18), rgba(14,165,233,.10));
+    color:var(--text-main, #f9fafb); font-size:11px; font-weight:800;
+    cursor:pointer; margin-left:auto;
+  }
+  .act-d365-open-btn:hover { filter:brightness(1.08); transform:translateY(-1px); }
+  .act-last-order-fallback-note { font-size:9px; color:var(--text-muted, #9ca3af); margin-left:4px; }
+  #act-d365-history-panel {
+    display:none; height:100%; min-height:0; overflow:hidden;
+    background:var(--bg-card, #111827); color:var(--text-main, #f9fafb);
+  }
+  #act-d365-history-panel.open { display:flex; flex-direction:column; }
+  #act-d365-history-panel .act-d365-panel-header {
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:10px 12px; border-bottom:1px solid var(--border-color, rgba(255,255,255,.12));
+    background:linear-gradient(135deg, rgba(99,102,241,.16), rgba(14,165,233,.08));
+    flex-shrink:0;
+  }
+  #act-d365-history-panel .act-d365-panel-body { padding:10px 12px; overflow:auto; flex:1; min-height:0; }
+  #act-d365-field-search {
+    width:100%; margin-bottom:10px; padding:8px 10px; border-radius:8px;
+    border:1px solid var(--border-color, rgba(255,255,255,.12));
+    background:var(--bg-input, rgba(255,255,255,.05)); color:var(--text-main, #f9fafb);
+    font-size:12px;
+  }
+  .act-d365-row {
+    display:grid; grid-template-columns: minmax(115px, 42%) 1fr; gap:10px;
+    padding:7px 0; border-bottom:1px solid var(--border-color, rgba(255,255,255,.08));
+    font-size:11px; line-height:1.35;
+  }
+  .act-d365-key { font-weight:900; color:var(--primary, #818cf8); overflow-wrap:anywhere; }
+  .act-d365-value { color:var(--text-main, #f9fafb); overflow-wrap:anywhere; white-space:pre-wrap; }
+</style>
+<script id="act-v434-d365-script">
+(function(){
+  if (window.__ACT_V434_D365_INSTALLED) return;
+  window.__ACT_V434_D365_INSTALLED = true;
+
+  window.ACT_D365_RAW_BY_ACCOUNTNUMBER = window.ACT_D365_RAW_BY_ACCOUNTNUMBER || {};
+  window.ACT_D365_RAW_BY_ACCOUNTID = window.ACT_D365_RAW_BY_ACCOUNTID || {};
+  window.ACT_CURRENT_D365_ACCOUNT = window.ACT_CURRENT_D365_ACCOUNT || null;
+
+  function formatD365Date(value) {
+    if (!value) return 'N/A';
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return 'N/A';
+    return d.toLocaleDateString('en-US', { month:'numeric', day:'numeric', year:'numeric' });
+  }
+  window.formatD365Date = window.formatD365Date || formatD365Date;
+
+  window.getLastOrderInfo = function(account) {
+    if (!account) return { value:'N/A', source:'None', raw:null };
+    const orderFormatted = account['mss_lastorderdate@OData.Community.Display.V1.FormattedValue'];
+    if (orderFormatted || account.mss_lastorderdate) {
+      return { value: orderFormatted || formatD365Date(account.mss_lastorderdate), source:'Last Order', raw: account.mss_lastorderdate || orderFormatted };
+    }
+    const invoiceFormatted = account['mss_lastinvoicedate@OData.Community.Display.V1.FormattedValue'];
+    if (invoiceFormatted || account.mss_lastinvoicedate) {
+      return { value: invoiceFormatted || formatD365Date(account.mss_lastinvoicedate), source:'Last Invoice fallback', raw: account.mss_lastinvoicedate || invoiceFormatted };
+    }
+    return { value:'N/A', source:'None', raw:null };
+  };
+
+  function indexD365Account(account) {
+    if (!account) return;
+    window.ACT_CURRENT_D365_ACCOUNT = account;
+    if (account.accountid) window.ACT_D365_RAW_BY_ACCOUNTID[String(account.accountid)] = account;
+    if (account.accountnumber) window.ACT_D365_RAW_BY_ACCOUNTNUMBER[String(account.accountnumber)] = account;
+  }
+
+  function getCurrentAccountNumber() {
+    try {
+      if (window.currentSelectedRecord?.cr714_id) return String(window.currentSelectedRecord.cr714_id);
+      if (typeof currentSelectedRecord !== 'undefined' && currentSelectedRecord?.cr714_id) return String(currentSelectedRecord.cr714_id);
+      if (typeof currentRecordId !== 'undefined' && currentRecordId) return String(currentRecordId);
+      if (window.currentRecordId) return String(window.currentRecordId);
+    } catch(e) {}
+    return '';
+  }
+
+  function getCurrentD365Account() {
+    const acctNum = getCurrentAccountNumber();
+    return (acctNum && window.ACT_D365_RAW_BY_ACCOUNTNUMBER[acctNum]) || window.ACT_CURRENT_D365_ACCOUNT || null;
+  }
+
+  window.applyLastOrderMapping = function(account) {
+    const acct = account || getCurrentD365Account();
+    if (!acct) return false;
+    indexD365Account(acct);
+    const info = window.getLastOrderInfo(acct);
+    const el = document.getElementById('last-order-date') || document.querySelector('[data-act-field="last-order"], [data-field="last-order"]');
+    if (!el) return false;
+    if ('value' in el && /input|textarea|select/i.test(el.tagName)) el.value = info.value;
+    else el.textContent = info.value;
+    el.title = `Source: ${info.source}`;
+    el.dataset.lastOrderSource = info.source;
+    if (info.source === 'Last Invoice fallback') {
+      const parent = el.parentElement;
+      if (parent && !parent.querySelector('.act-last-order-fallback-note')) {
+        const note = document.createElement('span');
+        note.className = 'act-last-order-fallback-note';
+        note.textContent = '(invoice)';
+        note.title = 'mss_lastorderdate was blank; using mss_lastinvoicedate.';
+        parent.appendChild(note);
+      }
+    }
+    return true;
+  };
+
+  // Wrap the existing D365 lookup so the raw response is retained and Last Order is mapped immediately.
+  const originalFetchD365Account = window.fetchD365Account;
+  if (typeof originalFetchD365Account === 'function' && !originalFetchD365Account.__actV434Wrapped) {
+    const wrapped = async function(accountId) {
+      const account = await originalFetchD365Account.apply(this, arguments);
+      if (account) {
+        indexD365Account(account);
+        setTimeout(() => {
+          window.applyLastOrderMapping(account);
+          if (document.getElementById('act-d365-history-panel')?.classList.contains('open')) window.refreshDynamicsFieldsPanel();
+        }, 0);
+      }
+      return account;
+    };
+    wrapped.__actV434Wrapped = true;
+    window.fetchD365Account = wrapped;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  }
+  function formatValue(v) {
+    if (typeof v === 'object') return JSON.stringify(v, null, 2);
+    return String(v);
+  }
+  function nonNullEntries(obj) {
+    return Object.entries(obj || {})
+      .filter(([k,v]) => v !== null && v !== undefined && v !== '')
+      .filter(([k]) => !k.startsWith('@odata.context'))
+      .sort(([a],[b]) => a.localeCompare(b));
+  }
+
+  function ensureDynamicsPanel() {
+    const historyContainer = document.getElementById('history-container');
+    if (!historyContainer) return null;
+    let panel = document.getElementById('act-d365-history-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'act-d365-history-panel';
+      panel.innerHTML = `
+        <div class="act-d365-panel-header">
+          <div>
+            <div class="text-sm font-black" style="color:var(--primary,#818cf8);"><i class="fas fa-database mr-1"></i>Dynamics Fields</div>
+            <div class="text-xs text-muted">Non-null values from wbmasonco account response</div>
+          </div>
+          <button class="btn-secondary text-xs" onclick="window.closeDynamicsFieldsPanel()">History</button>
+        </div>
+        <div class="act-d365-panel-body">
+          <input id="act-d365-field-search" placeholder="Search fields or values..." oninput="window.refreshDynamicsFieldsPanel()">
+          <div id="act-d365-fields-body"></div>
+        </div>`;
+      historyContainer.appendChild(panel);
+    }
+    return panel;
+  }
+
+  window.refreshDynamicsFieldsPanel = function() {
+    const body = document.getElementById('act-d365-fields-body');
+    const search = document.getElementById('act-d365-field-search');
+    if (!body) return;
+    const account = getCurrentD365Account();
+    const q = (search?.value || '').toLowerCase();
+    if (!account) {
+      body.innerHTML = '<div class="text-muted text-sm italic">No Dynamics response captured for this account yet. Select the account again to refresh the D365 lookup.</div>';
+      return;
+    }
+    const entries = nonNullEntries(account).filter(([k,v]) => !q || k.toLowerCase().includes(q) || String(v).toLowerCase().includes(q));
+    body.innerHTML = entries.length
+      ? entries.map(([k,v]) => `<div class="act-d365-row"><div class="act-d365-key">${escapeHtml(k)}</div><div class="act-d365-value">${escapeHtml(formatValue(v))}</div></div>`).join('')
+      : '<div class="text-muted text-sm italic">No matching non-null fields.</div>';
+  };
+
+  window.openDynamicsFieldsPanel = function() {
+    const panel = ensureDynamicsPanel();
+    if (!panel) return;
+    const preview = document.getElementById('qb-notes-preview');
+    if (preview) preview.style.display = 'none';
+    panel.classList.add('open');
+    window.refreshDynamicsFieldsPanel();
+  };
+
+  window.closeDynamicsFieldsPanel = function() {
+    const panel = document.getElementById('act-d365-history-panel');
+    if (panel) panel.classList.remove('open');
+    const preview = document.getElementById('qb-notes-preview');
+    if (preview) preview.style.display = '';
+  };
+
+  function ensureDynamicsButton() {
+    if (document.getElementById('act-open-d365-fields-btn')) return;
+    const historyContainer = document.getElementById('history-container');
+    const historyCard = historyContainer?.closest('.card');
+    const header = historyCard?.querySelector('.card-header');
+    if (!header) return;
+    header.classList.add('flex','items-center','gap-2');
+    const btn = document.createElement('button');
+    btn.id = 'act-open-d365-fields-btn';
+    btn.type = 'button';
+    btn.className = 'act-d365-open-btn';
+    btn.innerHTML = '<i class="fas fa-database"></i> Dynamics';
+    btn.title = 'Show all non-null Dynamics fields for the selected account';
+    btn.onclick = window.openDynamicsFieldsPanel;
+    header.appendChild(btn);
+    ensureDynamicsPanel();
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    ensureDynamicsButton();
+    setTimeout(() => window.applyLastOrderMapping(), 1200);
   });
 })();
 </script>
