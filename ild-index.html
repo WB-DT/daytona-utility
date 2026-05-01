@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. v4.36 Sales Tunnel</title>
+    <title>A.C.T. v4.37 Click Fix</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -4385,6 +4385,250 @@ window.renderSavedFilterViews = function () {
     });
   }
   document.addEventListener('DOMContentLoaded',()=>{ ensureDynamicsButton(); patchSalesButtons(); setTimeout(()=>{ window.applyLastOrderMapping(); window.polishGalleryBadges(); patchSalesButtons(); },1000); });
+})();
+</script>
+
+
+<!-- ============================================================
+     ACT v4.37 – Emergency Click-Unblock + Safe Badge/Sales Patch
+     Purpose: fixes v4.36 click-lock risk from overlays/loaders and replaces
+     gallery badge polishing with a throttled, non-recursive safe version.
+=============================================================== -->
+<style id="act-v437-click-unblock-style">
+  /* Hidden overlays must never intercept clicks, even if an inline display:flex was left behind. */
+  .modal-overlay.hidden,
+  .modal-overlay[aria-hidden="true"] {
+    display: none !important;
+    pointer-events: none !important;
+  }
+
+  /* The loader is useful while loading, but once hidden/faded it must not block the app. */
+  #global-loader.act-force-unblock,
+  #global-loader[style*="display: none"] {
+    display: none !important;
+    pointer-events: none !important;
+  }
+
+  /* Badge layout cleanup: prevent SLA/OK badge from sitting over follow-up/date text. */
+  .gallery-item .act-v433-badge-row,
+  .gallery-item .act-v436-badge-row,
+  .gallery-item .act-v437-badge-row {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 4px !important;
+    margin-top: 4px !important;
+    padding-right: 4px !important;
+  }
+
+  .gallery-item .badge-priority {
+    position: static !important;
+    max-width: 100% !important;
+    white-space: nowrap !important;
+    font-size: 9px !important;
+    line-height: 1.25 !important;
+    padding: 2px 7px !important;
+  }
+
+  .gallery-item .sla-badge {
+    position: static !important;
+    inset: auto !important;
+    top: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+    left: auto !important;
+    z-index: auto !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    margin: 0 !important;
+    max-width: 100% !important;
+    white-space: nowrap !important;
+    line-height: 1.25 !important;
+    pointer-events: auto !important;
+  }
+
+  .gallery-item.is-selected .badge-priority,
+  .gallery-item.is-selected .sla-badge {
+    color: var(--primary-fg) !important;
+    border-color: rgba(255,255,255,.36) !important;
+    background: rgba(255,255,255,.14) !important;
+  }
+</style>
+<script id="act-v437-click-unblock-script">
+(function(){
+  if (window.__ACT_V437_CLICK_UNBLOCK_INSTALLED) return;
+  window.__ACT_V437_CLICK_UNBLOCK_INSTALLED = true;
+
+  function isVisible(el) {
+    if (!el) return false;
+    const cs = window.getComputedStyle(el);
+    return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
+  }
+
+  function forceHide(el) {
+    if (!el) return;
+    el.classList.add('hidden');
+    el.style.display = 'none';
+    el.style.pointerEvents = 'none';
+  }
+
+  window.actEmergencyUnblockClicks = function(reason) {
+    try {
+      // Hidden modal overlays should never sit over the app.
+      document.querySelectorAll('.modal-overlay.hidden, .modal-overlay[aria-hidden="true"]').forEach(forceHide);
+
+      const loader = document.getElementById('global-loader');
+      const login = document.getElementById('login-container');
+      const main = document.getElementById('main-app-container');
+
+      // If either login or main UI is visible, the loader should not intercept clicks.
+      if (loader && (isVisible(login) || isVisible(main))) {
+        loader.classList.add('act-force-unblock');
+        loader.style.display = 'none';
+        loader.style.pointerEvents = 'none';
+      }
+
+      // Safety: if the loader has been up too long, release click control.
+      if (loader && reason === 'timeout') {
+        loader.classList.add('act-force-unblock');
+        loader.style.display = 'none';
+        loader.style.pointerEvents = 'none';
+      }
+    } catch (e) {
+      console.warn('[ACT v4.37] click unblock failed:', e);
+    }
+  };
+
+  function priorityTextFrom(el) {
+    const txt = String(el?.textContent || '').toLowerCase();
+    const cls = String(el?.className || '').toLowerCase();
+    if (txt.includes('high') || cls.includes('high')) return 'Priority - High';
+    if (txt.includes('medium') || txt.includes('med') || cls.includes('medium') || cls.includes('med')) return 'Priority - Medium';
+    return 'Priority - Low';
+  }
+
+  function normalizeSla(el) {
+    const rawTitle = el.getAttribute('title') || el.dataset.fullText || el.textContent || '';
+    const t = String(el.textContent || rawTitle).toLowerCase();
+    el.dataset.fullText = rawTitle || el.textContent || '';
+    el.title = rawTitle || el.textContent || '';
+    if (t.includes('overdue')) el.textContent = '⏰ Overdue';
+    else if (t.includes('due')) el.textContent = '⏳ Due Soon';
+    else el.textContent = '✓ OK';
+  }
+
+  // Safe replacement for the v4.36 badge polisher. It does not run recursively.
+  let polishing = false;
+  window.polishGalleryBadges = function safePolishGalleryBadges() {
+    if (polishing) return;
+    polishing = true;
+    try {
+      document.querySelectorAll('.gallery-item').forEach(item => {
+        let row = item.querySelector('.act-v433-badge-row, .act-v436-badge-row, .act-v437-badge-row');
+        if (!row) {
+          row = document.createElement('div');
+          row.className = 'act-v437-badge-row';
+          const anchor = item.querySelector('.gallery-item-company') || item.querySelector('.gallery-item-id');
+          if (anchor) anchor.insertAdjacentElement('afterend', row);
+          else item.appendChild(row);
+        }
+
+        const pBadge = item.querySelector('.badge-priority');
+        if (pBadge) {
+          const desired = priorityTextFrom(pBadge);
+          if (pBadge.textContent !== desired) pBadge.textContent = desired;
+          pBadge.title = desired;
+          if (pBadge.parentElement !== row) row.appendChild(pBadge);
+        }
+
+        const sBadge = item.querySelector('.sla-badge');
+        if (sBadge) {
+          normalizeSla(sBadge);
+          if (sBadge.parentElement !== row) row.appendChild(sBadge);
+        }
+      });
+    } catch (e) {
+      console.warn('[ACT v4.37] safe badge polish failed:', e);
+    } finally {
+      polishing = false;
+    }
+  };
+
+  let badgeTimer = null;
+  function scheduleBadgePolish() {
+    if (badgeTimer) return;
+    badgeTimer = setTimeout(() => {
+      badgeTimer = null;
+      window.polishGalleryBadges();
+      window.actEmergencyUnblockClicks('badge-polish');
+    }, 80);
+  }
+
+  // Make Sales button route through Masonville app route, not direct crmsrws fetch.
+  window.getCurrentACTAccountNumber = window.getCurrentACTAccountNumber || function(fallback) {
+    try {
+      return String(fallback || window.currentSelectedRecord?.cr714_id || currentSelectedRecord?.cr714_id || currentRecordId || window.currentRecordId || '').trim();
+    } catch(e) {
+      return String(fallback || window.currentRecordId || '').trim();
+    }
+  };
+
+  window.buildMasonvilleFourMonthSalesUrl = window.buildMasonvilleFourMonthSalesUrl || function(accountNumber) {
+    return `https://go.masonville.com/#/report/${encodeURIComponent(accountNumber)}/Four%20Month%20Sales`;
+  };
+
+  window.openSalesReportTunnel = function(accountNumber) {
+    const acct = window.getCurrentACTAccountNumber(accountNumber);
+    if (!acct) {
+      if (typeof window.showToast === 'function') window.showToast('Select an account first.', 'error');
+      return;
+    }
+    const url = window.buildMasonvilleFourMonthSalesUrl(acct);
+    if (typeof window.openSidebarTab === 'function') window.openSidebarTab('sales', 'Sales', url);
+    else window.open(url, '_blank');
+  };
+
+  function patchSalesButtons() {
+    document.querySelectorAll('button').forEach(btn => {
+      const looksLikeSales = /^\s*Sales\s*$/i.test(btn.textContent || '') || /fa-file-invoice-dollar/.test(btn.innerHTML || '');
+      if (!looksLikeSales) return;
+      btn.onclick = function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        window.openSalesReportTunnel();
+      };
+      btn.title = 'Open Four Month Sales through Masonville tunnel';
+    });
+  }
+
+  const priorContextButton = window.handleContextButton;
+  if (typeof priorContextButton === 'function' && !priorContextButton.__actV437SalesWrapped) {
+    const wrapped = function(type) {
+      if (type === 'sales') return window.openSalesReportTunnel();
+      return priorContextButton.apply(this, arguments);
+    };
+    wrapped.__actV437SalesWrapped = true;
+    window.handleContextButton = wrapped;
+  }
+
+  document.addEventListener('DOMContentLoaded', function(){
+    window.actEmergencyUnblockClicks('dom-ready');
+    patchSalesButtons();
+    scheduleBadgePolish();
+
+    const list = document.getElementById('record-gallery-list');
+    if (list && !list.__actV437Observer) {
+      list.__actV437Observer = true;
+      new MutationObserver(scheduleBadgePolish).observe(list, { childList: true, subtree: true });
+    }
+
+    setTimeout(() => window.actEmergencyUnblockClicks('short-timeout'), 1500);
+    setTimeout(() => window.actEmergencyUnblockClicks('timeout'), 9000);
+    setTimeout(() => { patchSalesButtons(); scheduleBadgePolish(); }, 1200);
+  });
+
+  // Also run once immediately in case this block loads after the app is already visible.
+  setTimeout(() => window.actEmergencyUnblockClicks('immediate'), 0);
 })();
 </script>
 
