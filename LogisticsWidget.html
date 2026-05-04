@@ -92,7 +92,7 @@
         // MSAL Authentication config
         const msalConfig = { 
             auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: window.location.href }, 
-            cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false } 
+            cache: { cacheLocation: "localStorage", storeAuthStateInCookie: true } 
         };
         const msalInstance = new msal.PublicClientApplication(msalConfig);
         let msalAccount = null;
@@ -156,21 +156,29 @@
                 const token = await getToken();
                 const cleanQuery = query.replace(/'/g, "''"); // prevent SQL injection breaks
                 
-                // Search both Order Number OR Account Number
-                const filter = `$filter=contains(cr714_salesordernumber, '${cleanQuery}') or contains(cr714_accountnumber, '${cleanQuery}') or contains(cr714_accountnum, '${cleanQuery}')`;
-                const queryUrl = `${DATA_API}/${ENTITY_SET}?${filter}&$orderby=createdon desc&$top=50`;
+                const headers = { 
+                    'Authorization': `Bearer ${token}`, 
+                    'Accept': 'application/json', 
+                    'OData-MaxVersion': '4.0', 
+                    'OData-Version': '4.0',
+                    'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
+                };
 
-                const res = await fetch(queryUrl, {
-                    headers: { 
-                        'Authorization': `Bearer ${token}`, 
-                        'Accept': 'application/json', 
-                        'OData-MaxVersion': '4.0', 
-                        'OData-Version': '4.0',
-                        'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
-                    }
-                });
+                let res;
+                // Attempt 1: Try Order Number and the first Account column
+                res = await fetch(`${DATA_API}/${ENTITY_SET}?$filter=contains(cr714_salesordernumber, '${cleanQuery}') or contains(cr714_accountnum, '${cleanQuery}')&$orderby=createdon desc&$top=50`, { headers });
+                
+                // Attempt 2: If Dataverse threw a 400, try the other Account column
+                if (!res.ok) {
+                    res = await fetch(`${DATA_API}/${ENTITY_SET}?$filter=contains(cr714_salesordernumber, '${cleanQuery}') or contains(cr714_accountnumber, '${cleanQuery}')&$orderby=createdon desc&$top=50`, { headers });
+                }
 
-                if (!res.ok) throw new Error("Dataverse API rejected request");
+                // Attempt 3: If it STILL throws a 400, the Account columns are likely numeric and cannot be searched with "contains". Fallback to Order # and Company Name.
+                if (!res.ok) {
+                    res = await fetch(`${DATA_API}/${ENTITY_SET}?$filter=contains(cr714_salesordernumber, '${cleanQuery}') or contains(cr714_companyordeliveryname, '${cleanQuery}')&$orderby=createdon desc&$top=50`, { headers });
+                }
+
+                if (!res.ok) throw new Error("Dataverse API rejected request after all fallback attempts.");
                 const data = await res.json();
                 
                 loader.style.display = "none";
