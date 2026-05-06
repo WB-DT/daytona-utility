@@ -214,7 +214,16 @@
   <script>
     const CONFIG = {
       dataverseUrl: "https://org23279050.crm.dynamics.com",
+      // Dataverse Web API uses the EntitySetName, which is often pluralized differently than the table logical name.
+      // The app will auto-resolve the correct EntitySetName using EntityDefinitions, then fall back to candidates below.
+      tableLogicalName: "cr714_dailyaxdaytonaaccountassignmensnapshot",
       tableSetName: "cr714_dailyaxdaytonaaccountassignmensnapshot",
+      tableSetNameCandidates: [
+        "cr714_dailyaxdaytonaaccountassignmensnapshot",
+        "cr714_dailyaxdaytonaaccountassignmensnapshots",
+        "cr714_dailyaxdaytonaaccountassignmentsnapshot",
+        "cr714_dailyaxdaytonaaccountassignmentsnapshots"
+      ],
       // Update field names here if the Dataverse logical names differ.
       fields: {
         snapshotDate: "cr714_snapshotdate",
@@ -251,7 +260,8 @@
       newRows: [],
       missingRows: [],
       currentReportRows: [],
-      repChangedRows: []
+      repChangedRows: [],
+      resolvedTableSetName: null
     };
 
     const authScreen = document.getElementById("authScreen");
@@ -383,11 +393,59 @@
       const f = CONFIG.fields.snapshotDate;
       return `${f} ge ${dateIso}T00:00:00Z and ${f} lt ${next}T00:00:00Z`;
     }
+    async function dataverseFetchJson(url, token, extraHeaders = {}) {
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+          "OData-MaxVersion": "4.0",
+          "OData-Version": "4.0",
+          ...extraHeaders
+        }
+      });
+      const text = await res.text();
+      let json = null;
+      try { json = text ? JSON.parse(text) : null; } catch (_) { json = null; }
+      return { ok: res.ok, status: res.status, text, json };
+    }
+
+    async function resolveTableSetName(token) {
+      if (state.resolvedTableSetName) return state.resolvedTableSetName;
+
+      // Best option: ask Dataverse metadata for the entity-set name for the logical table name.
+      if (CONFIG.tableLogicalName) {
+        const metaUrl = `${DATAVERSE_API}/EntityDefinitions(LogicalName='${CONFIG.tableLogicalName}')?$select=EntitySetName,LogicalName`;
+        const meta = await dataverseFetchJson(metaUrl, token);
+        if (meta.ok && meta.json && meta.json.EntitySetName) {
+          state.resolvedTableSetName = meta.json.EntitySetName;
+          console.info("Resolved Dataverse table set from metadata:", state.resolvedTableSetName);
+          return state.resolvedTableSetName;
+        }
+        console.warn("Could not resolve EntitySetName from metadata; trying candidates.", meta.status, meta.text);
+      }
+
+      // Fallback: try likely entity-set names until one responds.
+      const candidates = [...new Set([CONFIG.tableSetName, ...(CONFIG.tableSetNameCandidates || [])].filter(Boolean))];
+      for (const candidate of candidates) {
+        const probeUrl = `${DATAVERSE_API}/${candidate}?$select=${encodeURIComponent(CONFIG.fields.accountNumber)}&$top=1`;
+        const probe = await dataverseFetchJson(probeUrl, token, { Prefer: "odata.maxpagesize=1" });
+        if (probe.ok) {
+          state.resolvedTableSetName = candidate;
+          console.info("Resolved Dataverse table set from candidate:", state.resolvedTableSetName);
+          return state.resolvedTableSetName;
+        }
+        console.warn("Entity-set candidate failed:", candidate, probe.status, probe.text);
+      }
+
+      throw new Error(`Could not resolve Dataverse EntitySetName for logical table '${CONFIG.tableLogicalName || CONFIG.tableSetName}'. Open the table in Power Apps > Tools > Copy set name, then update CONFIG.tableSetNameCandidates.`);
+    }
+
     async function fetchDataverseRows(dateIso) {
       const token = await getToken(DATAVERSE_SCOPE);
+      const tableSetName = await resolveTableSetName(token);
       const select = encodeURIComponent(buildSelect());
       const filter = encodeURIComponent(dayRangeFilter(dateIso));
-      let url = `${DATAVERSE_API}/${CONFIG.tableSetName}?$select=${select}&$filter=${filter}`;
+      let url = `${DATAVERSE_API}/${tableSetName}?$select=${select}&$filter=${filter}`;
       const rows = [];
       while (url) {
         const res = await fetch(url, {
@@ -401,7 +459,7 @@
         });
         if (!res.ok) {
           const text = await res.text();
-          throw new Error(`Dataverse request failed (${res.status}): ${text}`);
+          throw new Error(`Dataverse request failed (${res.status}) using entity set '${tableSetName}': ${text}`);
         }
         const data = await res.json();
         rows.push(...(data.value || []));
