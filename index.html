@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. Manager Console V2.0</title>
+    <title>A.C.T. Manager Console V2.2</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -6726,528 +6726,539 @@ window.openDrilldown = function(contextKey, metric) {
 
 
 /* ==========================================================
-   ACT Manager Console - Source-of-Truth Filter Sync V3
+   ACT Manager Console - Reporting Uses ACT Fact Table Only V1
    Generated for Matt Bleakley
 
-   What this fixes:
-   - The initial Scoped Data Load prompt and the main Multi-Filter bar
-     now use the same option builder and the same selected values.
-   - Selections made in the initial prompt persist immediately.
-   - After scoped data load, the main dropdowns are rebuilt with the same
-     values/selections from the prompt, instead of drifting.
-   - Reporting page, Reporting Rep Filter, dashboard account list, and
-     main multi-filters all use the same activeFilters scope.
-   - Selected values are retained even if a later cascading pass would
-     otherwise hide them, so the UI always shows what is actively selected.
+   Reporting-only replacement:
+   - Dashboard/main tab remains on normal merged datasets.
+   - Reassign tab remains on normal merged datasets.
+   - Reporting tab fetches Dataverse table: cr714_dt_act_fctbl.
+   - Fact table field map based on uploaded export:
+       account    -> cr714_accountnumber
+       rep        -> cr714_accountrep / cr714_repfromnote
+       action     -> cr714_effectiveaction / cr714_action / cr714_actionfromnotetag
+       activity   -> cr714_activitydate / cr714_activitydateonly / cr714_activitymonth
+       type       -> cr714_activitytype / cr714_isemailactivity
+       email      -> cr714_emaildate / cr714_emailsubject / cr714_emailtemplate
+       source     -> cr714_sourcetable / cr714_sourcetype / cr714_sourcerecordid
+       account UI -> cr714_companyname / cr714_contactname / cr714_primaryemail / cr714_primaryphone
+       flags      -> cr714_hasintro / cr714_recordstatus / cr714_priority
    ========================================================== */
 (function () {
-  if (window.__ACT_SOURCE_OF_TRUTH_FILTER_SYNC_V3) return;
-  window.__ACT_SOURCE_OF_TRUTH_FILTER_SYNC_V3 = true;
+  if (window.__ACT_FACT_TABLE_REPORTING_V1) return;
+  window.__ACT_FACT_TABLE_REPORTING_V1 = true;
 
-  const EMP_IDS = [
-    'cr714_managerassigned',
-    'cr714_srmanager',
-    'cr714_supervisors',
-    'cr714_departmentname',
-    'cr714_employeename',
-    'statecode'
-  ];
-  const ALL_IDS = EMP_IDS.concat(['action']);
-  const STORAGE_KEY = 'act_mgr_filters';
-  const SNAPSHOT_KEY = 'act_mgr_filter_snapshot_v3';
+  const FACT_ENTITY_SETS = ['cr714_dt_act_fctbls', 'cr714_dt_act_fctbl', 'cr714_dct_act_fctbls', 'cr714_dct_act_fctbl'];
+  const FACT_SELECT = [
+    'cr714_dt_act_fctblid',
+    'createdon',
+    'modifiedon',
+    'cr714_activitynaturalkey',
+    'cr714_accountnumber',
+    'cr714_accountrep',
+    'cr714_repfromnote',
+    'cr714_action',
+    'cr714_effectiveaction',
+    'cr714_actionfromnotetag',
+    'cr714_actionmessage',
+    'cr714_activitydate',
+    'cr714_activitydateonly',
+    'cr714_activitymonth',
+    'cr714_activitytype',
+    'cr714_isemailactivity',
+    'cr714_emaildate',
+    'cr714_actionemailsentdate',
+    'cr714_emailsubject',
+    'cr714_emailtemplate',
+    'cr714_emailaction',
+    'cr714_emailstatus',
+    'cr714_notedate',
+    'cr714_notesequence',
+    'cr714_notetext',
+    'cr714_notetextraw',
+    'cr714_companyname',
+    'cr714_contactname',
+    'cr714_primaryemail',
+    'cr714_primaryphone',
+    'cr714_billingaddress',
+    'cr714_d365accountid',
+    'cr714_d365accountname',
+    'cr714_hasintro',
+    'cr714_hasintroname',
+    'cr714_intro',
+    'cr714_recordstatus',
+    'cr714_priority',
+    'cr714_sourcerecordid',
+    'cr714_sourcetable',
+    'cr714_sourcetype',
+    'statecode',
+    'statuscode'
+  ].join(',');
 
   const OLD = {
-    buildFilters: window.buildFilters,
-    applyFilters: window.applyFilters,
     renderReports: window.renderReports,
-    renderAccountList: window.renderAccountList,
-    clearSelection: window.clearSelection,
-    clearBulkSelection: window.clearBulkSelection,
-    clearDrilldownLock: window.clearDrilldownLock,
-    updateFilterSubtitle: window.updateFilterSubtitle,
-    updateGlobalBells: window.updateGlobalBells,
-    buildScopedPopupFilters: window.buildScopedPopupFilters,
-    scopedPopupUpdateFilterState: window.scopedPopupUpdateFilterState,
-    scopedPopupToggleAll: window.scopedPopupToggleAll,
-    clearScopedPopupFilters: window.clearScopedPopupFilters,
-    openScopedLoadPrompt: window.openScopedLoadPrompt,
-    beginScopedLoad: window.beginScopedLoad,
-    renderNoNotesActionReporting: window.renderNoNotesActionReporting
+    switchTab: window.switchTab,
+    applyFilters: window.applyFilters,
+    renderNoNotesActionReporting: window.renderNoNotesActionReporting,
+    openDrilldown: window.openDrilldown,
+    exportReportCSV: window.exportReportCSV
   };
 
-  let syncing = false;
-  let applying = false;
+  window.actFactRowsRaw = [];
+  window.actFactRows = [];
+  window.actFactLoadedAt = 0;
+  window.actFactEntitySet = null;
+  window.actFactLoading = false;
+  window.actFactLastFilterKey = '';
+  window.actFactCurrentRowsForDrilldown = [];
 
   function clean(v) { return String(v ?? '').replace(/\s+/g, ' ').trim(); }
   function norm(v) { return clean(v).toLowerCase(); }
-  function esc(v) {
-    if (window.escapeHTML) return window.escapeHTML(v);
-    return String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  function esc(v) { return window.escapeHTML ? window.escapeHTML(v) : String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+  function js(v) { return window.escapeJS ? window.escapeJS(v) : String(v ?? '').replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+  function odata(v) { return String(v ?? '').replace(/'/g, "''"); }
+  function asBool(v) { return v === true || v === 1 || String(v).toLowerCase() === 'true' || String(v).toLowerCase() === 'yes'; }
+  function asDate(v) { const d = v ? new Date(v) : null; return d && !isNaN(d.getTime()) ? d : null; }
+  function dateKey(d) { return d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` : null; }
+  function acctId(r) { return clean(r.cr714_accountnumber || r.accountId).toUpperCase(); }
+  function repOf(r) { return clean(r.cr714_accountrep || r.cr714_repfromnote || r.rep || 'Unassigned') || 'Unassigned'; }
+  function actionOf(r) { return clean(r.cr714_effectiveaction || r.cr714_action || r.cr714_actionfromnotetag || 'No Action') || 'No Action'; }
+  function activityTypeOf(r) { return clean(r.cr714_activitytype || 'Note'); }
+  function activityDateOf(r) { return asDate(r.cr714_activitydate || r.cr714_activitydateonly || r.cr714_notedate || r.cr714_emaildate || r.cr714_actionemailsentdate || r.modifiedon || r.createdon); }
+  function monthOf(r) { const d = asDate(r.cr714_activitymonth) || activityDateOf(r); return dateKey(d); }
+  function isEmail(r) { return asBool(r.cr714_isemailactivity) || /email/i.test(activityTypeOf(r)) || !!clean(r.cr714_emailsubject || r.cr714_emailtemplate || r.cr714_emaildate); }
+  function isMasonville(r) { return /masonville|mvgo|link/i.test(clean(r.cr714_activitytype + ' ' + r.cr714_actionmessage + ' ' + r.cr714_notetext + ' ' + r.cr714_notetextraw)); }
+  function isNote(r) { return !isEmail(r) && !isMasonville(r); }
+  function factUniqueKey(r) { return clean(r.cr714_dt_act_fctblid || r.cr714_activitynaturalkey || `${acctId(r)}|${repOf(r)}|${actionOf(r)}|${activityDateOf(r)?.toISOString() || ''}|${clean(r.cr714_notesequence)}`); }
+
+  function activeSet(id) {
+    const af = window.activeFilters || {};
+    const v = af[id];
+    return v instanceof Set ? v : new Set(Array.isArray(v) ? v : []);
   }
 
-  function filterSet(id) {
-    window.activeFilters = window.activeFilters || {};
-    if (!(window.activeFilters[id] instanceof Set)) {
-      window.activeFilters[id] = new Set(Array.isArray(window.activeFilters[id]) ? window.activeFilters[id] : []);
-    }
-    return window.activeFilters[id];
-  }
-
-  function selectedArray(id) { return Array.from(filterSet(id)).map(clean).filter(Boolean); }
-  function has(id) { return filterSet(id).size > 0; }
-
-  function selectedLoose(id, value) {
-    const set = filterSet(id);
-    if (!set.size) return true;
+  function setHasLoose(set, value) {
+    if (!set || !set.size) return true;
     const v = norm(value);
     return Array.from(set).some(x => norm(x) === v);
   }
 
-  function repName(e) { return clean(e.cr714_employeename || e.cr714_repname || e.fullname || e.name || e.cr714_name); }
-  function empState(e) {
-    return clean(e._mappedStatecode || ((e.statecode === 0 || e.cr714_status === 1) ? 'Active' : ((e.statecode === 1 || e.cr714_status === 0) ? 'Inactive' : 'Unknown')));
-  }
-  function empVal(e, id) {
-    if (id === 'cr714_employeename') return repName(e);
-    if (id === 'statecode') return empState(e);
+  function employeeValue(e, id) {
+    if (id === 'cr714_employeename') return clean(e.cr714_employeename || e.cr714_repname || e.fullname || e.name);
+    if (id === 'statecode') return clean(e._mappedStatecode || ((e.statecode === 0 || e.cr714_status === 1) ? 'Active' : ((e.statecode === 1 || e.cr714_status === 0) ? 'Inactive' : 'Unknown')));
     return clean(e[id]);
   }
-  function accountId(a) { return clean(a.cr714_id || a.cr714_accountnum || a.accountnum).toUpperCase(); }
-  function accountRep(a) { return clean(a.rep || a.cr714_rep || a.cr714_retentionrep || a.cr714_repassigned || a.cr714_assignedrep || 'Unassigned'); }
-  function accountAction(a) { return clean(a.action || a.cr714_action || ''); }
 
-  function serializeFilters() {
-    const obj = {};
-    ALL_IDS.forEach(id => obj[id] = selectedArray(id));
-    return obj;
-  }
-
-  function persistFilters() {
-    try {
-      const obj = serializeFilters();
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
-      localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({ savedAt: new Date().toISOString(), filters: obj }));
-    } catch (e) { console.warn('ACT filter persistence skipped:', e); }
-  }
-
-  function hydrateFilters() {
-    window.activeFilters = window.activeFilters || {};
-    ALL_IDS.forEach(id => filterSet(id));
-
-    let parsed = null;
-    try {
-      parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
-    } catch (e) {}
-
-    if (!parsed) {
-      try {
-        const snap = JSON.parse(localStorage.getItem(SNAPSHOT_KEY) || 'null');
-        parsed = snap && snap.filters ? snap.filters : null;
-      } catch (e) {}
-    }
-
-    if (parsed) {
-      ALL_IDS.forEach(id => {
-        filterSet(id).clear();
-        (parsed[id] || []).forEach(v => { if (clean(v)) filterSet(id).add(clean(v)); });
-      });
-    }
-  }
-
-  function employeeMatches(e, exceptId) {
-    for (const id of EMP_IDS) {
-      if (id === exceptId) continue;
-      if (!selectedLoose(id, empVal(e, id))) return false;
-    }
-    return true;
-  }
-
-  function employeesMatching(exceptId) {
-    return (window.employeesData || []).filter(e => repName(e) && employeeMatches(e, exceptId));
-  }
-
-  function repsFromEmployees(exceptId) {
+  function activeEmployeeScopedReps() {
+    const ids = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','statecode'];
+    const any = ids.some(id => activeSet(id).size);
+    if (!any) return null;
     const reps = new Set();
-    employeesMatching(exceptId).forEach(e => { const r = repName(e); if (r) reps.add(r); });
+    (window.employeesData || []).forEach(e => {
+      let ok = true;
+      ids.forEach(id => { if (ok && activeSet(id).size && !setHasLoose(activeSet(id), employeeValue(e, id))) ok = false; });
+      const rep = employeeValue(e, 'cr714_employeename');
+      if (ok && rep) reps.add(rep);
+    });
     return reps;
   }
 
-  function accountMatches(a, exceptId) {
-    const id = accountId(a);
-    const rep = accountRep(a);
-    const action = accountAction(a);
-
-    if (window.massFilteredIds && window.massFilteredIds.size && !window.massFilteredIds.has(id)) return false;
-
-    const employeeFiltersActive = EMP_IDS.some(fid => fid !== exceptId && has(fid));
-    if (employeeFiltersActive) {
-      const validReps = repsFromEmployees(exceptId);
-      if (!validReps.has(rep)) return false;
+  function activeReportingReps() {
+    let reps = activeEmployeeScopedReps();
+    const explicit = activeSet('cr714_employeename');
+    if (explicit.size) {
+      const exp = new Set(Array.from(explicit).map(clean));
+      if (reps) reps = new Set(Array.from(reps).filter(r => setHasLoose(exp, r)));
+      else reps = exp;
     }
+    return reps;
+  }
 
-    if (exceptId !== 'cr714_employeename' && has('cr714_employeename') && !selectedLoose('cr714_employeename', rep)) return false;
-    if (exceptId !== 'action' && has('action') && !selectedLoose('action', action)) return false;
+  function activeFilterSignature() {
+    const af = window.activeFilters || {};
+    const payload = {};
+    ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode','action'].forEach(id => payload[id] = Array.from(activeSet(id)).sort());
+    payload.massIds = window.massFilteredIds ? Array.from(window.massFilteredIds).sort() : [];
+    payload.start = window.reportStartDate ? window.reportStartDate.toISOString() : '';
+    payload.end = window.reportEndDate ? window.reportEndDate.toISOString() : '';
+    payload.includeUnassigned = !!document.getElementById('rep-include-unassigned')?.checked;
+    return JSON.stringify(payload);
+  }
 
+  function buildFactODataFilter() {
+    const parts = [];
+    const reps = activeReportingReps();
+    const ids = window.massFilteredIds ? Array.from(window.massFilteredIds).map(clean).filter(Boolean) : [];
+    const actions = Array.from(activeSet('action')).map(clean).filter(Boolean);
+
+    // Keep OData filters conservative to avoid URL length errors; JS applies the final exact scope.
+    if (ids.length && ids.length <= 80) {
+      parts.push('(' + ids.map(x => `cr714_accountnumber eq '${odata(x)}'`).join(' or ') + ')');
+    }
+    if (reps && reps.size && reps.size <= 80) {
+      parts.push('(' + Array.from(reps).map(x => `cr714_accountrep eq '${odata(x)}'`).join(' or ') + ')');
+    }
+    if (actions.length && actions.length <= 40) {
+      parts.push('(' + actions.map(x => `(cr714_effectiveaction eq '${odata(x)}' or cr714_action eq '${odata(x)}')`).join(' or ') + ')');
+    }
+    if (window.reportStartDate) {
+      const d = new Date(window.reportStartDate); d.setHours(0,0,0,0);
+      parts.push(`cr714_activitydate ge ${d.toISOString()}`);
+    }
+    if (window.reportEndDate) {
+      const d = new Date(window.reportEndDate); d.setHours(23,59,59,999);
+      parts.push(`cr714_activitydate le ${d.toISOString()}`);
+    }
+    return parts.join(' and ');
+  }
+
+  async function getDataverseToken() {
+    if (window.getToken) return await window.getToken();
+    throw new Error('Dataverse token function unavailable.');
+  }
+
+  async function fetchFromEntitySet(entitySet, token, filter) {
+    let url = `${window.DATAVERSE_URL}/${entitySet}?$select=${FACT_SELECT}&$orderby=cr714_activitydate desc`;
+    if (filter) url += `&$filter=${encodeURIComponent(filter)}`;
+    const out = [];
+    while (url) {
+      const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.maxpagesize=5000, odata.include-annotations="OData.Community.Display.V1.FormattedValue"' } });
+      if (!res.ok) throw new Error(`${entitySet} fetch failed (${res.status})`);
+      const data = await res.json();
+      out.push(...(data.value || []));
+      url = data['@odata.nextLink'] || null;
+      await new Promise(requestAnimationFrame);
+    }
+    return out;
+  }
+
+  async function fetchFactTableRows(force = false) {
+    const sig = activeFilterSignature();
+    const maxAgeMs = 5 * 60 * 1000;
+    if (!force && window.actFactRowsRaw.length && window.actFactLastFilterKey === sig && Date.now() - window.actFactLoadedAt < maxAgeMs) return window.actFactRowsRaw;
+    if (window.actFactLoading) return window.actFactRowsRaw;
+
+    window.actFactLoading = true;
+    const filter = buildFactODataFilter();
+    try {
+      const token = await getDataverseToken();
+      let lastError = null;
+      const entitySets = window.actFactEntitySet ? [window.actFactEntitySet] : FACT_ENTITY_SETS;
+      for (const entitySet of entitySets) {
+        try {
+          const rows = await fetchFromEntitySet(entitySet, token, filter);
+          window.actFactEntitySet = entitySet;
+          window.actFactRowsRaw = rows;
+          window.actFactLoadedAt = Date.now();
+          window.actFactLastFilterKey = sig;
+          return rows;
+        } catch (e) { lastError = e; }
+      }
+      throw lastError || new Error('ACT Fact Table fetch failed.');
+    } finally {
+      window.actFactLoading = false;
+    }
+  }
+
+  function factRowPassesClientScope(r) {
+    const rep = repOf(r);
+    const action = actionOf(r);
+    const acct = acctId(r);
+    const reps = activeReportingReps();
+    const actions = activeSet('action');
+    const includeUnassigned = !!document.getElementById('rep-include-unassigned')?.checked;
+
+    if (!includeUnassigned && rep === 'Unassigned') return false;
+    if (reps && reps.size && !setHasLoose(reps, rep)) return false;
+    if (actions.size && !setHasLoose(actions, action)) return false;
+    if (window.massFilteredIds && window.massFilteredIds.size && !window.massFilteredIds.has(acct)) return false;
+
+    const d = activityDateOf(r);
+    if (window.reportStartDate && (!d || d < window.reportStartDate)) return false;
+    if (window.reportEndDate && (!d || d > window.reportEndDate)) return false;
     return true;
   }
 
-  function filteredAccounts(exceptId) { return (window.mergedAccounts || []).filter(a => accountMatches(a, exceptId || null)); }
-  function currentScopedAccounts() { return filteredAccounts(null); }
+  function normalizeFactRows(rows) {
+    const seen = new Set();
+    const out = [];
+    rows.forEach(r => {
+      const key = factUniqueKey(r);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      if (factRowPassesClientScope(r)) out.push(r);
+    });
+    return out;
+  }
 
-  function optionValues(id) {
-    const out = new Set();
+  function ensureStat(map, key) {
+    if (!map.has(key)) map.set(key, { totalRecords: 0, touches: 0, emails: 0, notes: 0, masonville: 0, requests: 0, intro: 0, stale: 0, _accounts: new Set(), _introAccounts: new Set(), _requestAccounts: new Set(), _lastDates: new Map() });
+    return map.get(key);
+  }
 
-    if (id === 'action') {
-      filteredAccounts('action').forEach(a => { const v = accountAction(a); if (v) out.add(v); });
-      // If an action was selected before this data slice loaded, keep it visible/checked.
-      selectedArray('action').forEach(v => out.add(v));
-      return Array.from(out).sort((a,b) => a.localeCompare(b));
-    }
+  function buildFactAggregates(rows) {
+    const now = new Date();
+    const repMap = new Map();
+    const actionMap = new Map();
+    const monthlyData = {};
+    const accountLastDate = new Map();
 
-    if (id === 'cr714_employeename') {
-      const accountReps = new Set(filteredAccounts('cr714_employeename').map(accountRep).filter(Boolean));
-      const otherEmployeeFilters = EMP_IDS.some(fid => fid !== 'cr714_employeename' && has(fid));
+    rows.forEach(r => {
+      const acct = acctId(r);
+      const rep = repOf(r);
+      const action = actionOf(r);
+      const d = activityDateOf(r);
+      const m = monthOf(r);
+      const type = activityTypeOf(r);
+      const repStats = ensureStat(repMap, rep);
+      const actionStats = ensureStat(actionMap, action);
 
-      if (!otherEmployeeFilters) {
-        accountReps.forEach(r => out.add(r));
-      } else {
-        repsFromEmployees('cr714_employeename').forEach(r => { if (accountReps.has(r)) out.add(r); });
+      if (acct) {
+        repStats._accounts.add(acct);
+        actionStats._accounts.add(acct);
+        if (!accountLastDate.has(acct) || (d && d > accountLastDate.get(acct))) accountLastDate.set(acct, d || new Date(0));
       }
 
-      // Preserve selected reps from the initial prompt/main filters even if no loaded account currently shows them.
-      selectedArray('cr714_employeename').forEach(v => out.add(v));
-      return Array.from(out).sort((a,b) => a.localeCompare(b));
-    }
+      repStats.touches += 1;
+      actionStats.touches += 1;
 
-    const accountReps = new Set(filteredAccounts(id).map(accountRep).filter(Boolean));
-    employeesMatching(id).forEach(e => {
-      const r = repName(e);
-      // Before account data exists, show prompt values from employeesData. After load, keep values related to scoped accounts.
-      if ((window.mergedAccounts || []).length && !accountReps.has(r)) return;
-      const v = empVal(e, id);
-      if (v) out.add(v);
+      if (isEmail(r)) { repStats.emails += 1; actionStats.emails += 1; }
+      else if (isMasonville(r)) { repStats.masonville += 1; actionStats.masonville += 1; }
+      else { repStats.notes += 1; actionStats.notes += 1; }
+
+      if (asBool(r.cr714_hasintro) || /intro/i.test(clean(r.cr714_intro || r.cr714_hasintroname))) {
+        repStats._introAccounts.add(acct || factUniqueKey(r));
+      }
+      if (/help requested|close requested/i.test(clean(r.cr714_recordstatus))) {
+        repStats._requestAccounts.add(acct || factUniqueKey(r));
+      }
+
+      if (!monthlyData[rep]) monthlyData[rep] = {};
+      if (m) {
+        if (!monthlyData[rep][m]) monthlyData[rep][m] = { records: new Set(), touches: 0, emails: 0 };
+        if (acct) monthlyData[rep][m].records.add(acct);
+        monthlyData[rep][m].touches += 1;
+        if (isEmail(r)) monthlyData[rep][m].emails += 1;
+      }
     });
 
-    // Always keep currently selected prompt/main values visible so UI matches active scope.
-    selectedArray(id).forEach(v => out.add(v));
-    return Array.from(out).sort((a,b) => a.localeCompare(b));
-  }
-
-  function countForOption(id, value) {
-    if (id === 'action') return filteredAccounts('action').filter(a => norm(accountAction(a)) === norm(value)).length;
-    if (id === 'cr714_employeename') return filteredAccounts('cr714_employeename').filter(a => norm(accountRep(a)) === norm(value)).length;
-    return employeesMatching(id).filter(e => norm(empVal(e, id)) === norm(value)).length;
-  }
-
-  function setHeader(id) {
-    const cfg = (window.FILTER_CONFIG || []).find(x => x.id === id);
-    const h = document.querySelector(`#ms-wrap-${id} .multiselect-header span`);
-    if (!cfg || !h) return;
-    const c = filterSet(id).size;
-    h.innerText = c === 0 ? cfg.label : (c === 1 ? `${cfg.label} (1)` : `${cfg.label} (${c})`);
-  }
-
-  function visibleMainChecks(id) {
-    return Array.from(document.querySelectorAll(`#ms-drop-${id} .ms-opt-${id} input[type="checkbox"]`))
-      .filter(cb => cb.closest(`.ms-opt-${id}`)?.style.display !== 'none');
-  }
-
-  function setMainSelectAll(id) {
-    const all = document.querySelector(`#ms-drop-${id} .select-all-opt input[type="checkbox"]`);
-    if (!all) return;
-    const checks = visibleMainChecks(id);
-    const checked = checks.filter(x => x.checked);
-    all.checked = checks.length > 0 && checked.length === checks.length;
-    all.indeterminate = checked.length > 0 && checked.length < checks.length;
-  }
-
-  function rebuildMainDropdown(id) {
-    const drop = document.getElementById(`ms-drop-${id}`);
-    if (!drop) return;
-
-    const selected = filterSet(id);
-    const search = norm(drop.querySelector('.multiselect-search input')?.value || '');
-    const selectAll = drop.querySelector('.select-all-opt');
-
-    drop.querySelectorAll(`.ms-opt-${id}`).forEach(x => x.remove());
-
-    const html = optionValues(id).map(v => {
-      const checked = Array.from(selected).some(s => norm(s) === norm(v)) ? 'checked' : '';
-      const visible = !search || norm(v).includes(search);
-      return `<label class="multiselect-option ms-opt-${id}" data-val="${esc(v)}" style="display:${visible ? 'flex' : 'none'}"><input type="checkbox" value="${esc(v)}" ${checked} onchange="window.updateFilterState('${id}', this)"><span class="truncate">${esc(v)}</span></label>`;
-    }).join('');
-
-    if (selectAll) selectAll.insertAdjacentHTML('afterend', html);
-    else drop.insertAdjacentHTML('beforeend', html);
-
-    setHeader(id);
-    setMainSelectAll(id);
-  }
-
-  function rebuildMainFiltersFromSource() {
-    ALL_IDS.forEach(rebuildMainDropdown);
-  }
-
-  window.buildScopedPopupFilters = function () {
-    hydrateFilters();
-    const panel = document.getElementById('scoped-popup-filter-panel');
-    if (!panel) return;
-
-    const cfg = (window.FILTER_CONFIG || []).filter(x => EMP_IDS.includes(x.id));
-    panel.innerHTML = `<div class="sf-grid">${cfg.map(col => {
-      const values = optionValues(col.id);
-      const selected = filterSet(col.id);
-      return `<div class="sf-card">
-        <button type="button" class="sf-head" onclick="document.getElementById('sf-drop-${col.id}').classList.toggle('hidden-force')">
-          <span>${esc(col.label)}${selected.size ? ' (' + selected.size + ')' : ''}</span>
-          <span>${values.length} options</span>
-        </button>
-        <div id="sf-drop-${col.id}" class="sf-body">
-          <input class="sf-search" placeholder="Search ${esc(col.label)}..." oninput="window.scopedPopupFilterSearch('${col.id}', this.value)">
-          <div class="sf-list">
-            <label class="sf-row" style="color:var(--primary)"><input type="checkbox" onchange="window.scopedPopupToggleAll('${col.id}', this)"><span>Select visible</span><span></span></label>
-            ${values.map(v => `<label class="sf-row sf-opt-${col.id}" data-val="${esc(v)}"><input type="checkbox" value="${esc(v)}" ${Array.from(selected).some(s => norm(s) === norm(v)) ? 'checked' : ''} onchange="window.scopedPopupUpdateFilterState('${col.id}', this.value, this.checked)"><span title="${esc(v)}">${esc(v)}</span><span class="sf-count-badge">${countForOption(col.id, v)}</span></label>`).join('')}
-          </div>
-        </div>
-      </div>`;
-    }).join('')}</div>`;
-
-    if (window.updateScopedPopupSummary) window.updateScopedPopupSummary();
-    if (window.updateSniperEstimate) window.updateSniperEstimate();
-    rebuildMainFiltersFromSource();
-    persistFilters();
-  };
-
-  window.scopedPopupUpdateFilterState = function (id, value, checked) {
-    const set = filterSet(id);
-    if (checked) set.add(clean(value));
-    else {
-      Array.from(set).forEach(v => { if (norm(v) === norm(value)) set.delete(v); });
-    }
-    persistFilters();
-    window.buildScopedPopupFilters();
-    window.syncEveryFilterComponent({ preserveSelections: true });
-  };
-
-  window.scopedPopupToggleAll = function (id, checkbox) {
-    const set = filterSet(id);
-    document.querySelectorAll(`#scoped-popup-filter-panel .sf-opt-${id}`).forEach(row => {
-      if (row.style.display === 'none') return;
-      const cb = row.querySelector('input[type="checkbox"]');
-      if (!cb) return;
-      cb.checked = checkbox.checked;
-      if (checkbox.checked) set.add(clean(cb.value));
-      else Array.from(set).forEach(v => { if (norm(v) === norm(cb.value)) set.delete(v); });
+    repMap.forEach(stats => {
+      stats.totalRecords = stats._accounts.size;
+      stats.intro = stats._introAccounts.size;
+      stats.requests = stats._requestAccounts.size;
+      stats.stale = Array.from(stats._accounts).filter(acct => {
+        const d = accountLastDate.get(acct);
+        return !d || ((now - d) / (1000 * 60 * 60 * 24) > 30);
+      }).length;
     });
-    persistFilters();
-    window.buildScopedPopupFilters();
-    window.syncEveryFilterComponent({ preserveSelections: true });
-  };
+    actionMap.forEach(stats => stats.totalRecords = stats._accounts.size);
 
-  window.clearScopedPopupFilters = function () {
-    ALL_IDS.forEach(id => filterSet(id).clear());
-    window.massFilteredIds = new Set();
-    persistFilters();
-    window.buildScopedPopupFilters();
-    window.syncEveryFilterComponent({ preserveSelections: true });
-    if (window.showToast) window.showToast('Popup filters cleared.', 'info');
-  };
+    const sortedReps = Array.from(repMap.entries()).sort((a,b) => b[1].totalRecords - a[1].totalRecords || a[0].localeCompare(b[0]));
+    const sortedActions = Array.from(actionMap.entries()).sort((a,b) => b[1].totalRecords - a[1].totalRecords || a[0].localeCompare(b[0]));
+    const allMonths = Array.from(new Set(rows.map(monthOf).filter(Boolean))).sort().reverse();
 
-  window.openScopedLoadPrompt = function () {
-    hydrateFilters();
-    if (OLD.openScopedLoadPrompt) OLD.openScopedLoadPrompt.call(window);
-    setTimeout(() => window.buildScopedPopupFilters(), 0);
-  };
+    return { sortedReps, sortedActions, monthlyData, allMonths };
+  }
 
-  window.syncEveryFilterComponent = function (opts = {}) {
-    if (syncing) return;
-    syncing = true;
-    try {
-      hydrateFilters();
-      rebuildMainFiltersFromSource();
-      if (window.renderScopedRepFilter) window.renderScopedRepFilter();
-      if (OLD.updateFilterSubtitle) OLD.updateFilterSubtitle.call(window);
-      if (window.updateScopedPopupSummary) window.updateScopedPopupSummary();
-      if (window.updateSniperEstimate) window.updateSniperEstimate();
-      persistFilters();
-    } finally {
-      syncing = false;
-    }
-  };
+  function tableBodies() {
+    return {
+      scorecard: document.getElementById('scorecard-body'),
+      actions: document.getElementById('actions-body'),
+      engagement: document.getElementById('engagement-body'),
+      monthly: document.getElementById('monthly-body')
+    };
+  }
 
-  window.updateFilterState = function (id, checkbox) {
-    const set = filterSet(id);
-    if (checkbox.checked) set.add(clean(checkbox.value));
-    else Array.from(set).forEach(v => { if (norm(v) === norm(checkbox.value)) set.delete(v); });
+  function setLoadingReport(msg) {
+    const b = tableBodies();
+    Object.values(b).forEach(body => { if (body) body.innerHTML = `<tr><td colspan="20" class="text-center py-8 text-muted font-bold">${esc(msg)}</td></tr>`; });
+  }
 
-    persistFilters();
-    window.syncEveryFilterComponent({ preserveSelections: true });
-    window.applyFilters(false);
-  };
-
-  window.toggleAllFilter = function (id, checkbox) {
-    const set = filterSet(id);
-    visibleMainChecks(id).forEach(cb => {
-      cb.checked = checkbox.checked;
-      if (checkbox.checked) set.add(clean(cb.value));
-      else Array.from(set).forEach(v => { if (norm(v) === norm(cb.value)) set.delete(v); });
-    });
-    persistFilters();
-    window.syncEveryFilterComponent({ preserveSelections: true });
-    window.applyFilters(false);
-  };
-
-  window.filterDropdown = function (id, term) {
-    const q = norm(term);
-    document.querySelectorAll(`#ms-drop-${id} .ms-opt-${id}`).forEach(opt => {
-      const v = opt.getAttribute('data-val') || '';
-      opt.style.display = !q || norm(v).includes(q) ? 'flex' : 'none';
-    });
-    setMainSelectAll(id);
-  };
-
-  window.debouncedFilterDropdown = function (id, term) {
-    clearTimeout(window.searchTimeout);
-    window.searchTimeout = setTimeout(() => window.filterDropdown(id, term), 120);
-  };
-
-  window.computeFilteredAccountsFromActiveFilters = function () { hydrateFilters(); return currentScopedAccounts(); };
-  window.getTrueScopedAccounts = function () { hydrateFilters(); return currentScopedAccounts(); };
-  window.getTrueScopedIds = function () { return new Set(window.getTrueScopedAccounts().map(accountId).filter(Boolean)); };
-  window.getTrueScopedReps = function () { return Array.from(new Set(window.getTrueScopedAccounts().map(accountRep).filter(Boolean))).sort((a,b) => a.localeCompare(b)); };
-
-  window.renderScopedRepFilter = function () {
+  function updateReportingRepListFromFacts(rows) {
     const list = document.getElementById('pbi-rep-filter-list');
     if (!list) return;
-    const reps = optionValues('cr714_employeename');
-    const selected = filterSet('cr714_employeename');
-    const q = norm(window.ACTReportScope?.search || '');
-    const shown = reps.filter(r => !q || norm(r).includes(q));
-
-    list.innerHTML = `<label class="pbi-rep-item select-all-opt" style="color: var(--primary);"><span>Select visible reps</span><input type="checkbox" onchange="window.toggleAllFilter('cr714_employeename', this)"></label><div class="scope-summary">${reps.length} reps match the main multi-filter scope</div>`;
+    const selected = activeSet('cr714_employeename');
+    const reps = Array.from(new Set(rows.map(repOf).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+    const search = norm(window.ACTReportScope?.search || '');
+    const shown = reps.filter(r => !search || norm(r).includes(search));
+    list.innerHTML = `<label class="pbi-rep-item select-all-opt" style="color: var(--primary);"><span>Select visible reps</span><input type="checkbox" onchange="window.toggleAllFilter && window.toggleAllFilter('cr714_employeename', this)"></label><div class="scope-summary">${reps.length} reps from ACT Fact Table</div>`;
     shown.forEach(rep => {
-      const checked = Array.from(selected).some(v => norm(v) === norm(rep));
+      const checked = selected.size === 0 || setHasLoose(selected, rep);
       const row = document.createElement('label');
       row.className = 'pbi-rep-item ms-opt-cr714_employeename';
       row.setAttribute('data-val', rep);
-      row.setAttribute('data-rep', rep);
       row.innerHTML = `<span class="truncate">${esc(rep)}</span><input type="checkbox" value="${esc(rep)}" ${checked ? 'checked' : ''}>`;
-      row.querySelector('input').onchange = e => window.updateFilterState('cr714_employeename', e.target);
+      row.querySelector('input').onchange = e => {
+        if (window.updateFilterState) window.updateFilterState('cr714_employeename', e.target);
+        else {
+          if (e.target.checked) selected.add(rep); else selected.delete(rep);
+          window.renderReports();
+        }
+      };
       list.appendChild(row);
     });
-  };
+  }
 
-  window.debouncedFilterPbiReps = function (value) {
-    clearTimeout(window.__repSearch);
-    window.__repSearch = setTimeout(() => {
-      window.ACTReportScope = window.ACTReportScope || { selectedReps: new Set(), search: '' };
-      window.ACTReportScope.search = value || '';
-      window.renderScopedRepFilter();
-    }, 120);
-  };
+  function fillReportTables(aggs, rows) {
+    const b = tableBodies();
+    if (!b.scorecard || !b.actions || !b.engagement || !b.monthly) return;
+    b.scorecard.innerHTML = '';
+    b.actions.innerHTML = '';
+    b.engagement.innerHTML = '';
+    b.monthly.innerHTML = '';
 
-  window.filterPbiReps = function (value) {
-    window.ACTReportScope = window.ACTReportScope || { selectedReps: new Set(), search: '' };
-    window.ACTReportScope.search = value || '';
-    window.renderScopedRepFilter();
-  };
+    const { sortedReps, sortedActions, monthlyData, allMonths } = aggs;
+    let tAccts = 0, tReq = 0, tStale = 0, tEmails = 0, tIntro = 0, totalActionable = 0;
+    const globalAccounts = new Set();
+    rows.forEach(r => { if (acctId(r)) globalAccounts.add(acctId(r)); if (isEmail(r)) tEmails += 1; });
+    tAccts = globalAccounts.size;
 
-  window.applyFilters = function (preservePage = false) {
-    if (applying) return;
-    applying = true;
+    sortedReps.forEach(([rep, s]) => {
+      tReq += s.requests; tStale += s.stale; tIntro += s.intro;
+      const jr = js(rep), sr = esc(rep);
+      b.scorecard.innerHTML += `
+        <tr class="transition-colors">
+          <td class="font-black drilldown-cell uppercase" onclick="window.openDrilldown('${jr}', 'total')">${sr}</td>
+          <td class="drilldown-cell font-bold" onclick="window.openDrilldown('${jr}', 'total')">${s.totalRecords}</td>
+          <td class="font-black drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jr}', 'touched')">${s.touches}</td>
+          <td class="drilldown-cell font-black" style="color: var(--accent-danger);" onclick="window.openDrilldown('${jr}', 'stale')">${s.stale}</td>
+          <td class="drilldown-cell font-bold" style="color: var(--chart-email);" onclick="window.openDrilldown('${jr}', 'emails')">${s.emails}</td>
+          <td class="drilldown-cell font-black" style="color: var(--accent-warning);" onclick="window.openDrilldown('${jr}', 'requests')">${s.requests}</td>
+          <td class="drilldown-cell font-black" style="color: var(--primary);" onclick="window.openDrilldown('${jr}', 'intro')">${s.intro}</td>
+        </tr>`;
+      const emailPer = s.totalRecords > 0 ? (s.emails / s.totalRecords).toFixed(2) : '0.00';
+      b.engagement.innerHTML += `
+        <tr class="transition-colors">
+          <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jr}', 'total')">${sr}</td>
+          <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jr}', 'total')">${s.totalRecords}</td>
+          <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jr}', 'touched')">${s.touches}</td>
+          <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jr}', 'emails')">${s.emails}</td>
+          <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jr}', 'notes')">${s.notes}</td>
+          <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jr}', 'masonville')">${s.masonville}</td>
+          <td class="font-mono font-bold" style="background-color: rgba(59,130,246,.1); color: var(--accent-info);">${emailPer} / Record</td>
+        </tr>`;
+    });
+
+    sortedActions.forEach(([action, s]) => {
+      if (action && action !== 'No Action') totalActionable += s.totalRecords;
+      const ja = js(action), sa = esc(action);
+      const emailPer = s.totalRecords > 0 ? (s.emails / s.totalRecords).toFixed(2) : '0.00';
+      b.actions.innerHTML += `
+        <tr class="transition-colors">
+          <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${ja}', 'total')">${sa}</td>
+          <td class="font-black drilldown-cell" onclick="window.openDrilldown('${ja}', 'total')">${s.totalRecords}</td>
+          <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${ja}', 'touched')">${s.touches}</td>
+          <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${ja}', 'emails')">${s.emails}</td>
+          <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${ja}', 'notes')">${s.notes}</td>
+          <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${ja}', 'masonville')">${s.masonville}</td>
+          <td class="font-mono font-bold" style="background-color: rgba(59,130,246,.1); color: var(--accent-info);">${emailPer} / Record</td>
+        </tr>`;
+    });
+
+    const mh = document.getElementById('monthly-table')?.querySelector('thead tr');
+    if (mh) {
+      mh.innerHTML = `<th><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', 0)"><span>Rep Name</span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>` +
+        allMonths.map((m, idx) => `<th class="text-center"><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', ${idx+1})"><span>${esc(m)}<br/><span class="text-[9px] font-normal text-muted">Accounts Touched / Total Activities / Emails</span></span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`).join('');
+    }
+
+    sortedReps.forEach(([rep]) => {
+      const jr = js(rep), sr = esc(rep);
+      let rowHtml = `<td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jr}', 'total')">${sr}</td>`;
+      allMonths.forEach(m => {
+        const bucket = monthlyData[rep]?.[m] || { records: new Set(), touches: 0, emails: 0 };
+        rowHtml += `<td class="text-center"><span class="font-black text-[11px]" style="color: var(--primary);">${bucket.records.size}</span><span class="text-muted mx-1">\\</span><span class="font-bold" style="color: var(--accent-success);">${bucket.touches}</span><span class="text-muted mx-1">/</span><span class="font-bold" style="color: var(--chart-email);">${bucket.emails}</span></td>`;
+      });
+      b.monthly.innerHTML += `<tr class="transition-colors">${rowHtml}</tr>`;
+    });
+
+    const setText = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
+    setText('rep-tot-accts', tAccts);
+    setText('rep-tot-req', tReq);
+    setText('rep-tot-stale', tStale);
+    setText('rep-tot-email', tEmails);
+    setText('rep-tot-intro', tIntro);
+    setText('act-tot-actions', totalActionable);
+    setText('act-action-rate', tAccts > 0 ? Math.round((totalActionable / tAccts) * 100) + '%' : '0%');
+
+    if (window.renderCharts) window.renderCharts(sortedReps, sortedActions, monthlyData, allMonths);
+    ['scorecard-table','actions-table','engagement-table','monthly-table'].forEach(id => window.calculateTableTotals && window.calculateTableTotals(id));
+  }
+
+  window.renderReports = async function () {
+    if (!document.getElementById('tab-reports')?.classList.contains('active')) return;
+    setLoadingReport('Loading ACT Fact Table reporting data...');
     try {
-      hydrateFilters();
-      const scoped = currentScopedAccounts();
-      window.teamFilteredAccounts = scoped;
-      window.listDisplayAccounts = scoped;
-      window.reportsDirty = true;
-
-      const fs = document.getElementById('fs-accts');
-      if (fs) fs.innerText = scoped.length;
-      const rc = document.getElementById('reassign-count-display');
-      if (rc) rc.innerText = scoped.length;
-
-      if (window.activeAccountId && !scoped.find(a => accountId(a) === clean(window.activeAccountId).toUpperCase())) {
-        if (OLD.clearSelection) OLD.clearSelection.call(window);
-      }
-
-      if (OLD.clearBulkSelection) OLD.clearBulkSelection.call(window);
-      if (OLD.renderAccountList) OLD.renderAccountList.call(window, true, preservePage);
-
-      window.syncEveryFilterComponent({ preserveSelections: true });
-
-      if (document.getElementById('tab-reports')?.classList.contains('active') && window.renderReports) window.renderReports();
-      if (OLD.updateGlobalBells) OLD.updateGlobalBells.call(window);
-      if (window.updateScopeChip) window.updateScopeChip();
-      if (window.finalizeCardsNoLogistics) setTimeout(window.finalizeCardsNoLogistics, 30);
-
-      return scoped;
-    } finally {
-      applying = false;
+      const raw = await fetchFactTableRows(false);
+      const rows = normalizeFactRows(raw);
+      window.actFactRows = rows;
+      window.actFactCurrentRowsForDrilldown = rows;
+      updateReportingRepListFromFacts(rows);
+      fillReportTables(buildFactAggregates(rows), rows);
+      window.reportsDirty = false;
+      const chip = document.getElementById('act-scope-chip');
+      if (chip) chip.innerHTML = `<i class="fas fa-database"></i><span>Reporting: <strong>ACT Fact Table</strong> • ${rows.length.toLocaleString()} activity rows</span>`;
+    } catch (e) {
+      console.error('ACT Fact Table reporting failed:', e);
+      setLoadingReport('ACT Fact Table reporting failed: ' + e.message);
+      window.showToast && window.showToast('ACT Fact Table reporting failed: ' + e.message, 'error');
     }
   };
 
-  window.renderReports = function () {
-    hydrateFilters();
-    window.teamFilteredAccounts = currentScopedAccounts();
-    window.listDisplayAccounts = window.teamFilteredAccounts;
-    if (window.ensureDateControls) window.ensureDateControls();
-    if (window.hardScopeReportFacts) window.hardScopeReportFacts();
-    const result = OLD.renderReports ? OLD.renderReports.apply(window, arguments) : undefined;
-    setTimeout(() => {
-      window.teamFilteredAccounts = currentScopedAccounts();
-      window.renderScopedRepFilter();
-      if (window.updateScopeChip) window.updateScopeChip();
-      if (OLD.renderNoNotesActionReporting) OLD.renderNoNotesActionReporting.call(window);
-    }, 0);
+  window.renderNoNotesActionReporting = async function () {
+    if (!document.getElementById('tab-reports')?.classList.contains('active')) return;
+    const rows = window.actFactRows && window.actFactRows.length ? window.actFactRows : normalizeFactRows(await fetchFactTableRows(false));
+    fillReportTables(buildFactAggregates(rows), rows);
+  };
+
+  window.openDrilldown = function (contextKey, metric) {
+    const rows = window.actFactCurrentRowsForDrilldown || [];
+    if (document.getElementById('tab-reports')?.classList.contains('active') && rows.length) {
+      const now = new Date();
+      let filtered = rows.filter(r => repOf(r) === contextKey || actionOf(r) === contextKey);
+      if (metric === 'emails') filtered = filtered.filter(isEmail);
+      else if (metric === 'notes') filtered = filtered.filter(isNote);
+      else if (metric === 'masonville') filtered = filtered.filter(isMasonville);
+      else if (metric === 'requests') filtered = filtered.filter(r => /help requested|close requested/i.test(clean(r.cr714_recordstatus)));
+      else if (metric === 'intro') filtered = filtered.filter(r => asBool(r.cr714_hasintro) || /intro/i.test(clean(r.cr714_intro || r.cr714_hasintroname)));
+      else if (metric === 'stale') {
+        const last = new Map();
+        filtered.forEach(r => { const id = acctId(r), d = activityDateOf(r); if (id && (!last.has(id) || (d && d > last.get(id)))) last.set(id, d || new Date(0)); });
+        filtered = filtered.filter(r => { const d = last.get(acctId(r)); return !d || ((now - d) / (1000*60*60*24) > 30); });
+      }
+      const byAcct = new Map();
+      filtered.forEach(r => { const id = acctId(r); if (id && !byAcct.has(id)) byAcct.set(id, r); });
+      const data = Array.from(byAcct.values());
+      window.currentDrilldownData = data.map(r => ({ cr714_id: acctId(r), company: clean(r.cr714_companyname || r.cr714_d365accountname || '--'), rep: repOf(r), action: actionOf(r), modifiedon: activityDateOf(r)?.toISOString() || r.modifiedon }));
+      const title = document.getElementById('dd-title'); if (title) title.innerText = `${String(contextKey).toUpperCase()} - ${String(metric).toUpperCase()} ACT FACT DATA`;
+      const count = document.getElementById('dd-count'); if (count) count.innerText = window.currentDrilldownData.length;
+      const body = document.getElementById('dd-body');
+      if (body) body.innerHTML = window.currentDrilldownData.map(a => `<tr><td class="font-black uppercase font-mono" style="color: var(--primary);">${esc(a.cr714_id)}</td><td class="font-bold">${esc(a.company)}</td><td class="text-muted uppercase text-[10px]">${esc(a.rep)}</td><td><span class="px-2 py-0.5 rounded border text-[9px] font-black uppercase">${esc(a.action || 'Idle')}</span></td><td class="font-bold text-[10px]">${a.modifiedon ? new Date(a.modifiedon).toLocaleDateString() : '--'}</td><td class="text-center"><button onclick="window.jumpToAccount('${esc(a.cr714_id)}')" class="hover:scale-125 transition-transform bg-transparent border-none cursor-pointer" style="color: var(--primary);"><i class="fas fa-crosshairs"></i></button></td></tr>`).join('');
+      const modal = document.getElementById('drilldown-modal'); if (modal) { modal.classList.remove('hidden-force'); modal.style.display = 'flex'; }
+      return;
+    }
+    if (OLD.openDrilldown) return OLD.openDrilldown.apply(window, arguments);
+  };
+
+  const oldApplyFiltersForFactReporting = OLD.applyFilters;
+  window.applyFilters = function () {
+    const result = oldApplyFiltersForFactReporting ? oldApplyFiltersForFactReporting.apply(window, arguments) : undefined;
+    window.actFactLastFilterKey = '';
+    if (document.getElementById('tab-reports')?.classList.contains('active')) setTimeout(() => window.renderReports(), 50);
     return result;
   };
 
-  window.buildFilters = function () {
-    hydrateFilters();
-    if (OLD.buildFilters) OLD.buildFilters.call(window);
-    setTimeout(() => {
-      hydrateFilters();
-      rebuildMainFiltersFromSource();
-      window.syncEveryFilterComponent({ preserveSelections: true });
-      window.applyFilters(true);
-    }, 0);
-  };
-
-  window.clearAllFilters = function () {
-    ALL_IDS.forEach(id => filterSet(id).clear());
-    window.ACTReportScope = window.ACTReportScope || { selectedReps: new Set(), search: '' };
-    window.ACTReportScope.selectedReps = new Set();
-    window.ACTReportScope.search = '';
-    if (window.massFilteredIds) window.massFilteredIds.clear();
-    const mi = document.getElementById('mass-id-input');
-    const mc = document.getElementById('mass-id-count');
-    if (mi) mi.value = '';
-    if (mc) mc.innerText = '0';
-    persistFilters();
-    if (OLD.clearDrilldownLock) OLD.clearDrilldownLock.call(window);
-    window.syncEveryFilterComponent({ preserveSelections: true });
-    window.applyFilters(false);
-  };
-
-  window.beginScopedLoad = async function (wide) {
-    persistFilters();
-    const result = OLD.beginScopedLoad ? await OLD.beginScopedLoad.call(window, wide) : undefined;
-    hydrateFilters();
-    if (window.buildFilters) window.buildFilters();
-    setTimeout(() => {
-      hydrateFilters();
-      window.syncEveryFilterComponent({ preserveSelections: true });
-      window.applyFilters(false);
-      if (document.getElementById('tab-reports')?.classList.contains('active')) window.renderReports();
-    }, 200);
+  const oldSwitchTabForFactReporting = OLD.switchTab;
+  window.switchTab = function (id) {
+    const result = oldSwitchTabForFactReporting ? oldSwitchTabForFactReporting.apply(window, arguments) : undefined;
+    if (id === 'reports') setTimeout(() => window.renderReports(), 150);
     return result;
   };
 
-  // Final delayed rehydration catches saved filters, auto-filter-to-my-team, and scoped prompt selections.
-  setTimeout(() => { hydrateFilters(); window.syncEveryFilterComponent({ preserveSelections: true }); }, 800);
-  setTimeout(() => { hydrateFilters(); window.syncEveryFilterComponent({ preserveSelections: true }); window.applyFilters(true); }, 1800);
-  setTimeout(() => { hydrateFilters(); window.syncEveryFilterComponent({ preserveSelections: true }); if (document.getElementById('tab-reports')?.classList.contains('active')) window.renderReports(); }, 3000);
+  window.forceRefreshFactReporting = async function () {
+    window.actFactLastFilterKey = '';
+    window.actFactRowsRaw = [];
+    await window.renderReports();
+  };
 })();
 
 </script>
