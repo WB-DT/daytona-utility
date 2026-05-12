@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. Manager Console V2.1</title>
+    <title>A.C.T. Manager Console V2.0</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -6726,19 +6726,23 @@ window.openDrilldown = function(contextKey, metric) {
 
 
 /* ==========================================================
-   ACT Manager Console - Unified Filter + Reporting Scope Patch V2
+   ACT Manager Console - Source-of-Truth Filter Sync V3
    Generated for Matt Bleakley
 
-   Fixes:
-   - Main multi-filters cascade together.
-   - Reporting rep filter is tied to the same active filter state.
-   - Report page uses the exact same filtered account set as dashboard.
-   - Final V8 scope helpers are overridden so reporting cannot drift.
-   - Initial saved / auto-selected filters are synchronized after load.
+   What this fixes:
+   - The initial Scoped Data Load prompt and the main Multi-Filter bar
+     now use the same option builder and the same selected values.
+   - Selections made in the initial prompt persist immediately.
+   - After scoped data load, the main dropdowns are rebuilt with the same
+     values/selections from the prompt, instead of drifting.
+   - Reporting page, Reporting Rep Filter, dashboard account list, and
+     main multi-filters all use the same activeFilters scope.
+   - Selected values are retained even if a later cascading pass would
+     otherwise hide them, so the UI always shows what is actively selected.
    ========================================================== */
 (function () {
-  if (window.__ACT_UNIFIED_FILTER_SCOPE_V2) return;
-  window.__ACT_UNIFIED_FILTER_SCOPE_V2 = true;
+  if (window.__ACT_SOURCE_OF_TRUTH_FILTER_SYNC_V3) return;
+  window.__ACT_SOURCE_OF_TRUTH_FILTER_SYNC_V3 = true;
 
   const EMP_IDS = [
     'cr714_managerassigned',
@@ -6748,91 +6752,106 @@ window.openDrilldown = function(contextKey, metric) {
     'cr714_employeename',
     'statecode'
   ];
-
   const ALL_IDS = EMP_IDS.concat(['action']);
+  const STORAGE_KEY = 'act_mgr_filters';
+  const SNAPSHOT_KEY = 'act_mgr_filter_snapshot_v3';
 
   const OLD = {
     buildFilters: window.buildFilters,
     applyFilters: window.applyFilters,
     renderReports: window.renderReports,
-    renderScopedRepFilter: window.renderScopedRepFilter,
-    updateFilterSubtitle: window.updateFilterSubtitle,
-    clearDrilldownLock: window.clearDrilldownLock,
     renderAccountList: window.renderAccountList,
-    clearBulkSelection: window.clearBulkSelection,
     clearSelection: window.clearSelection,
-    renderNoNotesActionReporting: window.renderNoNotesActionReporting,
-    updateGlobalBells: window.updateGlobalBells
+    clearBulkSelection: window.clearBulkSelection,
+    clearDrilldownLock: window.clearDrilldownLock,
+    updateFilterSubtitle: window.updateFilterSubtitle,
+    updateGlobalBells: window.updateGlobalBells,
+    buildScopedPopupFilters: window.buildScopedPopupFilters,
+    scopedPopupUpdateFilterState: window.scopedPopupUpdateFilterState,
+    scopedPopupToggleAll: window.scopedPopupToggleAll,
+    clearScopedPopupFilters: window.clearScopedPopupFilters,
+    openScopedLoadPrompt: window.openScopedLoadPrompt,
+    beginScopedLoad: window.beginScopedLoad,
+    renderNoNotesActionReporting: window.renderNoNotesActionReporting
   };
 
   let syncing = false;
   let applying = false;
 
-  function clean(v) {
-    return String(v ?? '').replace(/\s+/g, ' ').trim();
-  }
-
-  function norm(v) {
-    return clean(v).toLowerCase();
-  }
-
+  function clean(v) { return String(v ?? '').replace(/\s+/g, ' ').trim(); }
+  function norm(v) { return clean(v).toLowerCase(); }
   function esc(v) {
     if (window.escapeHTML) return window.escapeHTML(v);
-    return String(v ?? '').replace(/[&<>"']/g, m => ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;'
-    }[m]));
+    return String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
   }
 
   function filterSet(id) {
     window.activeFilters = window.activeFilters || {};
-    if (!window.activeFilters[id]) window.activeFilters[id] = new Set();
+    if (!(window.activeFilters[id] instanceof Set)) {
+      window.activeFilters[id] = new Set(Array.isArray(window.activeFilters[id]) ? window.activeFilters[id] : []);
+    }
     return window.activeFilters[id];
   }
 
-  function has(id) {
-    return filterSet(id).size > 0;
-  }
+  function selectedArray(id) { return Array.from(filterSet(id)).map(clean).filter(Boolean); }
+  function has(id) { return filterSet(id).size > 0; }
 
   function selectedLoose(id, value) {
     const set = filterSet(id);
     if (!set.size) return true;
-    const n = norm(value);
-    return Array.from(set).some(v => norm(v) === n);
+    const v = norm(value);
+    return Array.from(set).some(x => norm(x) === v);
   }
 
-  function repName(e) {
-    return clean(e.cr714_employeename || e.cr714_repname || e.fullname || e.name || e.cr714_name);
-  }
-
+  function repName(e) { return clean(e.cr714_employeename || e.cr714_repname || e.fullname || e.name || e.cr714_name); }
   function empState(e) {
-    return clean(
-      e._mappedStatecode ||
-      ((e.statecode === 0 || e.cr714_status === 1)
-        ? 'Active'
-        : ((e.statecode === 1 || e.cr714_status === 0) ? 'Inactive' : 'Unknown'))
-    );
+    return clean(e._mappedStatecode || ((e.statecode === 0 || e.cr714_status === 1) ? 'Active' : ((e.statecode === 1 || e.cr714_status === 0) ? 'Inactive' : 'Unknown')));
   }
-
   function empVal(e, id) {
     if (id === 'cr714_employeename') return repName(e);
     if (id === 'statecode') return empState(e);
     return clean(e[id]);
   }
+  function accountId(a) { return clean(a.cr714_id || a.cr714_accountnum || a.accountnum).toUpperCase(); }
+  function accountRep(a) { return clean(a.rep || a.cr714_rep || a.cr714_retentionrep || a.cr714_repassigned || a.cr714_assignedrep || 'Unassigned'); }
+  function accountAction(a) { return clean(a.action || a.cr714_action || ''); }
 
-  function accountId(a) {
-    return clean(a.cr714_id || a.cr714_accountnum || a.accountnum).toUpperCase();
+  function serializeFilters() {
+    const obj = {};
+    ALL_IDS.forEach(id => obj[id] = selectedArray(id));
+    return obj;
   }
 
-  function accountRep(a) {
-    return clean(a.rep || a.cr714_rep || a.cr714_retentionrep || a.cr714_repassigned || a.cr714_assignedrep || 'Unassigned');
+  function persistFilters() {
+    try {
+      const obj = serializeFilters();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+      localStorage.setItem(SNAPSHOT_KEY, JSON.stringify({ savedAt: new Date().toISOString(), filters: obj }));
+    } catch (e) { console.warn('ACT filter persistence skipped:', e); }
   }
 
-  function accountAction(a) {
-    return clean(a.action || a.cr714_action || '');
+  function hydrateFilters() {
+    window.activeFilters = window.activeFilters || {};
+    ALL_IDS.forEach(id => filterSet(id));
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+    } catch (e) {}
+
+    if (!parsed) {
+      try {
+        const snap = JSON.parse(localStorage.getItem(SNAPSHOT_KEY) || 'null');
+        parsed = snap && snap.filters ? snap.filters : null;
+      } catch (e) {}
+    }
+
+    if (parsed) {
+      ALL_IDS.forEach(id => {
+        filterSet(id).clear();
+        (parsed[id] || []).forEach(v => { if (clean(v)) filterSet(id).add(clean(v)); });
+      });
+    }
   }
 
   function employeeMatches(e, exceptId) {
@@ -6847,13 +6866,10 @@ window.openDrilldown = function(contextKey, metric) {
     return (window.employeesData || []).filter(e => repName(e) && employeeMatches(e, exceptId));
   }
 
-  function repsMatchingEmployeeFilters(exceptId) {
-    const s = new Set();
-    employeesMatching(exceptId).forEach(e => {
-      const r = repName(e);
-      if (r) s.add(r);
-    });
-    return s;
+  function repsFromEmployees(exceptId) {
+    const reps = new Set();
+    employeesMatching(exceptId).forEach(e => { const r = repName(e); if (r) reps.add(r); });
+    return reps;
   }
 
   function accountMatches(a, exceptId) {
@@ -6861,183 +6877,233 @@ window.openDrilldown = function(contextKey, metric) {
     const rep = accountRep(a);
     const action = accountAction(a);
 
-    if (window.massFilteredIds && window.massFilteredIds.size && !window.massFilteredIds.has(id)) {
-      return false;
-    }
+    if (window.massFilteredIds && window.massFilteredIds.size && !window.massFilteredIds.has(id)) return false;
 
-    const hasEmployeeFilters = EMP_IDS.some(fid => fid !== exceptId && has(fid));
-    if (hasEmployeeFilters) {
-      const validReps = repsMatchingEmployeeFilters(exceptId);
+    const employeeFiltersActive = EMP_IDS.some(fid => fid !== exceptId && has(fid));
+    if (employeeFiltersActive) {
+      const validReps = repsFromEmployees(exceptId);
       if (!validReps.has(rep)) return false;
     }
 
-    if (exceptId !== 'cr714_employeename' && has('cr714_employeename') && !selectedLoose('cr714_employeename', rep)) {
-      return false;
-    }
-
-    if (exceptId !== 'action' && has('action') && !selectedLoose('action', action)) {
-      return false;
-    }
+    if (exceptId !== 'cr714_employeename' && has('cr714_employeename') && !selectedLoose('cr714_employeename', rep)) return false;
+    if (exceptId !== 'action' && has('action') && !selectedLoose('action', action)) return false;
 
     return true;
   }
 
-  function filteredAccounts(exceptId) {
-    return (window.mergedAccounts || []).filter(a => accountMatches(a, exceptId || null));
-  }
+  function filteredAccounts(exceptId) { return (window.mergedAccounts || []).filter(a => accountMatches(a, exceptId || null)); }
+  function currentScopedAccounts() { return filteredAccounts(null); }
 
-  function currentScopedAccounts() {
-    return filteredAccounts(null);
-  }
-
-  function validOptions(id) {
+  function optionValues(id) {
     const out = new Set();
 
     if (id === 'action') {
-      filteredAccounts('action').forEach(a => {
-        const v = accountAction(a);
-        if (v) out.add(v);
-      });
-      return out;
+      filteredAccounts('action').forEach(a => { const v = accountAction(a); if (v) out.add(v); });
+      // If an action was selected before this data slice loaded, keep it visible/checked.
+      selectedArray('action').forEach(v => out.add(v));
+      return Array.from(out).sort((a,b) => a.localeCompare(b));
     }
 
     if (id === 'cr714_employeename') {
       const accountReps = new Set(filteredAccounts('cr714_employeename').map(accountRep).filter(Boolean));
-      const otherEmployeeFiltersActive = EMP_IDS.some(fid => fid !== 'cr714_employeename' && has(fid));
+      const otherEmployeeFilters = EMP_IDS.some(fid => fid !== 'cr714_employeename' && has(fid));
 
-      // If only Action/Mass ID filters are active, do not require a matching employee row.
-      // This keeps reporting reps from disappearing because HR data is stale or a rep is Unassigned.
-      if (!otherEmployeeFiltersActive) {
-        accountReps.forEach(r => { if (r) out.add(r); });
-        return out;
+      if (!otherEmployeeFilters) {
+        accountReps.forEach(r => out.add(r));
+      } else {
+        repsFromEmployees('cr714_employeename').forEach(r => { if (accountReps.has(r)) out.add(r); });
       }
 
-      repsMatchingEmployeeFilters('cr714_employeename').forEach(r => {
-        if (accountReps.has(r)) out.add(r);
-      });
-      return out;
+      // Preserve selected reps from the initial prompt/main filters even if no loaded account currently shows them.
+      selectedArray('cr714_employeename').forEach(v => out.add(v));
+      return Array.from(out).sort((a,b) => a.localeCompare(b));
     }
 
     const accountReps = new Set(filteredAccounts(id).map(accountRep).filter(Boolean));
     employeesMatching(id).forEach(e => {
       const r = repName(e);
-      if (!accountReps.has(r)) return;
+      // Before account data exists, show prompt values from employeesData. After load, keep values related to scoped accounts.
+      if ((window.mergedAccounts || []).length && !accountReps.has(r)) return;
       const v = empVal(e, id);
       if (v) out.add(v);
     });
 
-    return out;
+    // Always keep currently selected prompt/main values visible so UI matches active scope.
+    selectedArray(id).forEach(v => out.add(v));
+    return Array.from(out).sort((a,b) => a.localeCompare(b));
   }
 
-  function visibleOptionCheckboxes(id) {
-    return Array.from(document.querySelectorAll(`.ms-opt-${id} input[type="checkbox"]`))
-      .filter(cb => cb.closest(`.ms-opt-${id}`)?.style.display !== 'none');
+  function countForOption(id, value) {
+    if (id === 'action') return filteredAccounts('action').filter(a => norm(accountAction(a)) === norm(value)).length;
+    if (id === 'cr714_employeename') return filteredAccounts('cr714_employeename').filter(a => norm(accountRep(a)) === norm(value)).length;
+    return employeesMatching(id).filter(e => norm(empVal(e, id)) === norm(value)).length;
   }
 
   function setHeader(id) {
     const cfg = (window.FILTER_CONFIG || []).find(x => x.id === id);
-    const header = document.querySelector(`#ms-wrap-${id} .multiselect-header span`);
-    if (!cfg || !header) return;
-
-    const count = filterSet(id).size;
-    if (!count) header.innerText = cfg.label;
-    else if (count === 1) header.innerText = `${cfg.label} (1)`;
-    else header.innerText = `${cfg.label} (${count})`;
+    const h = document.querySelector(`#ms-wrap-${id} .multiselect-header span`);
+    if (!cfg || !h) return;
+    const c = filterSet(id).size;
+    h.innerText = c === 0 ? cfg.label : (c === 1 ? `${cfg.label} (1)` : `${cfg.label} (${c})`);
   }
 
-  function setSelectAll(id) {
-    const selectAll = document.querySelector(`#ms-drop-${id} .select-all-opt input[type="checkbox"]`);
-    if (!selectAll) return;
+  function visibleMainChecks(id) {
+    return Array.from(document.querySelectorAll(`#ms-drop-${id} .ms-opt-${id} input[type="checkbox"]`))
+      .filter(cb => cb.closest(`.ms-opt-${id}`)?.style.display !== 'none');
+  }
 
-    const checks = visibleOptionCheckboxes(id);
+  function setMainSelectAll(id) {
+    const all = document.querySelector(`#ms-drop-${id} .select-all-opt input[type="checkbox"]`);
+    if (!all) return;
+    const checks = visibleMainChecks(id);
     const checked = checks.filter(x => x.checked);
-    selectAll.checked = checks.length > 0 && checked.length === checks.length;
-    selectAll.indeterminate = checked.length > 0 && checked.length < checks.length;
+    all.checked = checks.length > 0 && checked.length === checks.length;
+    all.indeterminate = checked.length > 0 && checked.length < checks.length;
   }
 
-  function syncMainDropdown(id, pruneInvalid) {
-    const valid = validOptions(id);
+  function rebuildMainDropdown(id) {
+    const drop = document.getElementById(`ms-drop-${id}`);
+    if (!drop) return;
+
     const selected = filterSet(id);
-    const search = norm(document.querySelector(`#ms-drop-${id} .multiselect-search input`)?.value || '');
+    const search = norm(drop.querySelector('.multiselect-search input')?.value || '');
+    const selectAll = drop.querySelector('.select-all-opt');
 
-    document.querySelectorAll(`#ms-drop-${id} .ms-opt-${id}`).forEach(opt => {
-      const val = opt.getAttribute('data-val') || '';
-      const isValid = valid.has(val);
-      const isSearchMatch = !search || norm(val).includes(search);
-      opt.style.display = isValid && isSearchMatch ? 'flex' : 'none';
+    drop.querySelectorAll(`.ms-opt-${id}`).forEach(x => x.remove());
 
-      const cb = opt.querySelector('input[type="checkbox"]');
-      if (!cb) return;
+    const html = optionValues(id).map(v => {
+      const checked = Array.from(selected).some(s => norm(s) === norm(v)) ? 'checked' : '';
+      const visible = !search || norm(v).includes(search);
+      return `<label class="multiselect-option ms-opt-${id}" data-val="${esc(v)}" style="display:${visible ? 'flex' : 'none'}"><input type="checkbox" value="${esc(v)}" ${checked} onchange="window.updateFilterState('${id}', this)"><span class="truncate">${esc(v)}</span></label>`;
+    }).join('');
 
-      if (pruneInvalid && !isValid) {
-        cb.checked = false;
-        selected.delete(cb.value);
-      } else {
-        cb.checked = Array.from(selected).some(v => norm(v) === norm(cb.value));
-      }
-    });
+    if (selectAll) selectAll.insertAdjacentHTML('afterend', html);
+    else drop.insertAdjacentHTML('beforeend', html);
 
     setHeader(id);
-    setSelectAll(id);
+    setMainSelectAll(id);
   }
 
-  window.syncUnifiedMultiFilters = function syncUnifiedMultiFilters(opts = {}) {
+  function rebuildMainFiltersFromSource() {
+    ALL_IDS.forEach(rebuildMainDropdown);
+  }
+
+  window.buildScopedPopupFilters = function () {
+    hydrateFilters();
+    const panel = document.getElementById('scoped-popup-filter-panel');
+    if (!panel) return;
+
+    const cfg = (window.FILTER_CONFIG || []).filter(x => EMP_IDS.includes(x.id));
+    panel.innerHTML = `<div class="sf-grid">${cfg.map(col => {
+      const values = optionValues(col.id);
+      const selected = filterSet(col.id);
+      return `<div class="sf-card">
+        <button type="button" class="sf-head" onclick="document.getElementById('sf-drop-${col.id}').classList.toggle('hidden-force')">
+          <span>${esc(col.label)}${selected.size ? ' (' + selected.size + ')' : ''}</span>
+          <span>${values.length} options</span>
+        </button>
+        <div id="sf-drop-${col.id}" class="sf-body">
+          <input class="sf-search" placeholder="Search ${esc(col.label)}..." oninput="window.scopedPopupFilterSearch('${col.id}', this.value)">
+          <div class="sf-list">
+            <label class="sf-row" style="color:var(--primary)"><input type="checkbox" onchange="window.scopedPopupToggleAll('${col.id}', this)"><span>Select visible</span><span></span></label>
+            ${values.map(v => `<label class="sf-row sf-opt-${col.id}" data-val="${esc(v)}"><input type="checkbox" value="${esc(v)}" ${Array.from(selected).some(s => norm(s) === norm(v)) ? 'checked' : ''} onchange="window.scopedPopupUpdateFilterState('${col.id}', this.value, this.checked)"><span title="${esc(v)}">${esc(v)}</span><span class="sf-count-badge">${countForOption(col.id, v)}</span></label>`).join('')}
+          </div>
+        </div>
+      </div>`;
+    }).join('')}</div>`;
+
+    if (window.updateScopedPopupSummary) window.updateScopedPopupSummary();
+    if (window.updateSniperEstimate) window.updateSniperEstimate();
+    rebuildMainFiltersFromSource();
+    persistFilters();
+  };
+
+  window.scopedPopupUpdateFilterState = function (id, value, checked) {
+    const set = filterSet(id);
+    if (checked) set.add(clean(value));
+    else {
+      Array.from(set).forEach(v => { if (norm(v) === norm(value)) set.delete(v); });
+    }
+    persistFilters();
+    window.buildScopedPopupFilters();
+    window.syncEveryFilterComponent({ preserveSelections: true });
+  };
+
+  window.scopedPopupToggleAll = function (id, checkbox) {
+    const set = filterSet(id);
+    document.querySelectorAll(`#scoped-popup-filter-panel .sf-opt-${id}`).forEach(row => {
+      if (row.style.display === 'none') return;
+      const cb = row.querySelector('input[type="checkbox"]');
+      if (!cb) return;
+      cb.checked = checkbox.checked;
+      if (checkbox.checked) set.add(clean(cb.value));
+      else Array.from(set).forEach(v => { if (norm(v) === norm(cb.value)) set.delete(v); });
+    });
+    persistFilters();
+    window.buildScopedPopupFilters();
+    window.syncEveryFilterComponent({ preserveSelections: true });
+  };
+
+  window.clearScopedPopupFilters = function () {
+    ALL_IDS.forEach(id => filterSet(id).clear());
+    window.massFilteredIds = new Set();
+    persistFilters();
+    window.buildScopedPopupFilters();
+    window.syncEveryFilterComponent({ preserveSelections: true });
+    if (window.showToast) window.showToast('Popup filters cleared.', 'info');
+  };
+
+  window.openScopedLoadPrompt = function () {
+    hydrateFilters();
+    if (OLD.openScopedLoadPrompt) OLD.openScopedLoadPrompt.call(window);
+    setTimeout(() => window.buildScopedPopupFilters(), 0);
+  };
+
+  window.syncEveryFilterComponent = function (opts = {}) {
     if (syncing) return;
     syncing = true;
     try {
-      const pruneInvalid = opts.pruneInvalid !== false;
-      ALL_IDS.forEach(id => syncMainDropdown(id, pruneInvalid));
+      hydrateFilters();
+      rebuildMainFiltersFromSource();
       if (window.renderScopedRepFilter) window.renderScopedRepFilter();
       if (OLD.updateFilterSubtitle) OLD.updateFilterSubtitle.call(window);
-      try {
-        const payload = {};
-        ALL_IDS.forEach(id => payload[id] = Array.from(filterSet(id)));
-        localStorage.setItem('act_mgr_filters', JSON.stringify(payload));
-      } catch (e) {}
+      if (window.updateScopedPopupSummary) window.updateScopedPopupSummary();
+      if (window.updateSniperEstimate) window.updateSniperEstimate();
+      persistFilters();
     } finally {
       syncing = false;
     }
   };
 
-  window.updateFilterVisibility = function () {
-    window.syncUnifiedMultiFilters({ pruneInvalid: false });
-  };
+  window.updateFilterState = function (id, checkbox) {
+    const set = filterSet(id);
+    if (checkbox.checked) set.add(clean(checkbox.value));
+    else Array.from(set).forEach(v => { if (norm(v) === norm(checkbox.value)) set.delete(v); });
 
-  window.updateFilterState = function (colId, checkbox) {
-    const set = filterSet(colId);
-    if (checkbox.checked) set.add(checkbox.value);
-    else set.delete(checkbox.value);
-
-    document.querySelectorAll(`.ms-opt-${colId} input[type="checkbox"]`).forEach(cb => {
-      if (norm(cb.value) === norm(checkbox.value)) cb.checked = checkbox.checked;
-    });
-
-    window.syncUnifiedMultiFilters({ pruneInvalid: true });
+    persistFilters();
+    window.syncEveryFilterComponent({ preserveSelections: true });
     window.applyFilters(false);
   };
 
-  window.toggleAllFilter = function (colId, checkbox) {
-    const set = filterSet(colId);
-    const checked = checkbox.checked;
-
-    visibleOptionCheckboxes(colId).forEach(cb => {
-      cb.checked = checked;
-      if (checked) set.add(cb.value);
-      else set.delete(cb.value);
+  window.toggleAllFilter = function (id, checkbox) {
+    const set = filterSet(id);
+    visibleMainChecks(id).forEach(cb => {
+      cb.checked = checkbox.checked;
+      if (checkbox.checked) set.add(clean(cb.value));
+      else Array.from(set).forEach(v => { if (norm(v) === norm(cb.value)) set.delete(v); });
     });
-
-    window.syncUnifiedMultiFilters({ pruneInvalid: true });
+    persistFilters();
+    window.syncEveryFilterComponent({ preserveSelections: true });
     window.applyFilters(false);
   };
 
   window.filterDropdown = function (id, term) {
     const q = norm(term);
-    const valid = validOptions(id);
     document.querySelectorAll(`#ms-drop-${id} .ms-opt-${id}`).forEach(opt => {
-      const val = opt.getAttribute('data-val') || '';
-      opt.style.display = valid.has(val) && (!q || norm(val).includes(q)) ? 'flex' : 'none';
+      const v = opt.getAttribute('data-val') || '';
+      opt.style.display = !q || norm(v).includes(q) ? 'flex' : 'none';
     });
-    setSelectAll(id);
+    setMainSelectAll(id);
   };
 
   window.debouncedFilterDropdown = function (id, term) {
@@ -7045,45 +7111,20 @@ window.openDrilldown = function(contextKey, metric) {
     window.searchTimeout = setTimeout(() => window.filterDropdown(id, term), 120);
   };
 
-  window.computeFilteredAccountsFromActiveFilters = function () {
-    return currentScopedAccounts();
-  };
-
-  window.getTrueScopedAccounts = function () {
-    return currentScopedAccounts();
-  };
-
-  window.getTrueScopedIds = function () {
-    return new Set(currentScopedAccounts().map(accountId).filter(Boolean));
-  };
-
-  window.getTrueScopedReps = function () {
-    return Array.from(new Set(currentScopedAccounts().map(accountRep).filter(Boolean))).sort((a, b) => a.localeCompare(b));
-  };
+  window.computeFilteredAccountsFromActiveFilters = function () { hydrateFilters(); return currentScopedAccounts(); };
+  window.getTrueScopedAccounts = function () { hydrateFilters(); return currentScopedAccounts(); };
+  window.getTrueScopedIds = function () { return new Set(window.getTrueScopedAccounts().map(accountId).filter(Boolean)); };
+  window.getTrueScopedReps = function () { return Array.from(new Set(window.getTrueScopedAccounts().map(accountRep).filter(Boolean))).sort((a,b) => a.localeCompare(b)); };
 
   window.renderScopedRepFilter = function () {
     const list = document.getElementById('pbi-rep-filter-list');
     if (!list) return;
-
-    const reps = Array.from(validOptions('cr714_employeename')).sort((a, b) => a.localeCompare(b));
+    const reps = optionValues('cr714_employeename');
     const selected = filterSet('cr714_employeename');
     const q = norm(window.ACTReportScope?.search || '');
     const shown = reps.filter(r => !q || norm(r).includes(q));
 
-    // Prune selected reps that no longer exist in current manager/department/supervisor/status/action scope.
-    const validNorms = new Set(reps.map(norm));
-    Array.from(selected).forEach(r => {
-      if (!validNorms.has(norm(r))) selected.delete(r);
-    });
-
-    list.innerHTML = `
-      <label class="pbi-rep-item select-all-opt" style="color: var(--primary);">
-        <span>Select visible reps</span>
-        <input type="checkbox" onchange="window.toggleAllFilter('cr714_employeename', this)">
-      </label>
-      <div class="scope-summary">${reps.length} reps available in current filter scope</div>
-    `;
-
+    list.innerHTML = `<label class="pbi-rep-item select-all-opt" style="color: var(--primary);"><span>Select visible reps</span><input type="checkbox" onchange="window.toggleAllFilter('cr714_employeename', this)"></label><div class="scope-summary">${reps.length} reps match the main multi-filter scope</div>`;
     shown.forEach(rep => {
       const checked = Array.from(selected).some(v => norm(v) === norm(rep));
       const row = document.createElement('label');
@@ -7094,14 +7135,6 @@ window.openDrilldown = function(contextKey, metric) {
       row.querySelector('input').onchange = e => window.updateFilterState('cr714_employeename', e.target);
       list.appendChild(row);
     });
-
-    const all = list.querySelector('.select-all-opt input[type="checkbox"]');
-    if (all) {
-      const checks = Array.from(list.querySelectorAll('.ms-opt-cr714_employeename input[type="checkbox"]'));
-      const checked = checks.filter(x => x.checked);
-      all.checked = checks.length > 0 && checked.length === checks.length;
-      all.indeterminate = checked.length > 0 && checked.length < checks.length;
-    }
   };
 
   window.debouncedFilterPbiReps = function (value) {
@@ -7119,32 +7152,20 @@ window.openDrilldown = function(contextKey, metric) {
     window.renderScopedRepFilter();
   };
 
-  window.hardScopeReportFacts = function () {
-    const ids = window.getTrueScopedIds();
-    if (Array.isArray(window.reportingFacts)) {
-      window.reportingFacts = window.reportingFacts.filter(f => !f.accountId || ids.has(String(f.accountId).toUpperCase()));
-    }
-    if (Array.isArray(window.emailRangeFacts)) {
-      window.emailRangeFacts = window.emailRangeFacts.filter(f => !f.accountId || ids.has(String(f.accountId).toUpperCase()));
-    }
-  };
-
   window.applyFilters = function (preservePage = false) {
     if (applying) return;
     applying = true;
     try {
-      window.syncUnifiedMultiFilters({ pruneInvalid: true });
-
+      hydrateFilters();
       const scoped = currentScopedAccounts();
       window.teamFilteredAccounts = scoped;
       window.listDisplayAccounts = scoped;
       window.reportsDirty = true;
 
-      const fsAccts = document.getElementById('fs-accts');
-      if (fsAccts) fsAccts.innerText = scoped.length;
-
-      const reass = document.getElementById('reassign-count-display');
-      if (reass) reass.innerText = scoped.length;
+      const fs = document.getElementById('fs-accts');
+      if (fs) fs.innerText = scoped.length;
+      const rc = document.getElementById('reassign-count-display');
+      if (rc) rc.innerText = scoped.length;
 
       if (window.activeAccountId && !scoped.find(a => accountId(a) === clean(window.activeAccountId).toUpperCase())) {
         if (OLD.clearSelection) OLD.clearSelection.call(window);
@@ -7153,17 +7174,12 @@ window.openDrilldown = function(contextKey, metric) {
       if (OLD.clearBulkSelection) OLD.clearBulkSelection.call(window);
       if (OLD.renderAccountList) OLD.renderAccountList.call(window, true, preservePage);
 
-      if (document.getElementById('tab-reports')?.classList.contains('active')) {
-        if (window.renderReports) window.renderReports();
-      }
+      window.syncEveryFilterComponent({ preserveSelections: true });
 
+      if (document.getElementById('tab-reports')?.classList.contains('active') && window.renderReports) window.renderReports();
       if (OLD.updateGlobalBells) OLD.updateGlobalBells.call(window);
       if (window.updateScopeChip) window.updateScopeChip();
-
-      setTimeout(() => {
-        window.syncUnifiedMultiFilters({ pruneInvalid: true });
-        if (window.finalizeCardsNoLogistics) window.finalizeCardsNoLogistics();
-      }, 50);
+      if (window.finalizeCardsNoLogistics) setTimeout(window.finalizeCardsNoLogistics, 30);
 
       return scoped;
     } finally {
@@ -7172,30 +7188,28 @@ window.openDrilldown = function(contextKey, metric) {
   };
 
   window.renderReports = function () {
-    // Before the legacy report renderer runs, force its expected source dataset to the unified scope.
+    hydrateFilters();
     window.teamFilteredAccounts = currentScopedAccounts();
     window.listDisplayAccounts = window.teamFilteredAccounts;
-
     if (window.ensureDateControls) window.ensureDateControls();
     if (window.hardScopeReportFacts) window.hardScopeReportFacts();
-
-    const r = OLD.renderReports ? OLD.renderReports.apply(window, arguments) : undefined;
-
+    const result = OLD.renderReports ? OLD.renderReports.apply(window, arguments) : undefined;
     setTimeout(() => {
       window.teamFilteredAccounts = currentScopedAccounts();
-      if (window.hardScopeReportFacts) window.hardScopeReportFacts();
-      if (window.renderScopedRepFilter) window.renderScopedRepFilter();
+      window.renderScopedRepFilter();
       if (window.updateScopeChip) window.updateScopeChip();
       if (OLD.renderNoNotesActionReporting) OLD.renderNoNotesActionReporting.call(window);
     }, 0);
-
-    return r;
+    return result;
   };
 
   window.buildFilters = function () {
+    hydrateFilters();
     if (OLD.buildFilters) OLD.buildFilters.call(window);
     setTimeout(() => {
-      window.syncUnifiedMultiFilters({ pruneInvalid: true });
+      hydrateFilters();
+      rebuildMainFiltersFromSource();
+      window.syncEveryFilterComponent({ preserveSelections: true });
       window.applyFilters(true);
     }, 0);
   };
@@ -7205,38 +7219,35 @@ window.openDrilldown = function(contextKey, metric) {
     window.ACTReportScope = window.ACTReportScope || { selectedReps: new Set(), search: '' };
     window.ACTReportScope.selectedReps = new Set();
     window.ACTReportScope.search = '';
-
-    document.querySelectorAll('.multiselect-dropdown input, #pbi-rep-filter-list input').forEach(chk => {
-      chk.checked = false;
-      chk.indeterminate = false;
-    });
-
     if (window.massFilteredIds) window.massFilteredIds.clear();
-    const massInput = document.getElementById('mass-id-input');
-    const massCount = document.getElementById('mass-id-count');
-    if (massInput) massInput.value = '';
-    if (massCount) massCount.innerText = '0';
-
+    const mi = document.getElementById('mass-id-input');
+    const mc = document.getElementById('mass-id-count');
+    if (mi) mi.value = '';
+    if (mc) mc.innerText = '0';
+    persistFilters();
     if (OLD.clearDrilldownLock) OLD.clearDrilldownLock.call(window);
-
-    window.syncUnifiedMultiFilters({ pruneInvalid: true });
+    window.syncEveryFilterComponent({ preserveSelections: true });
     window.applyFilters(false);
   };
 
-  // Re-sync any saved filters or auto-filtered team selections after the SPA finishes loading.
-  setTimeout(() => {
-    if (window.activeFilters && window.FILTER_CONFIG) {
-      window.syncUnifiedMultiFilters({ pruneInvalid: true });
-      window.applyFilters(true);
-    }
-  }, 1200);
-
-  setTimeout(() => {
-    if (window.activeFilters && window.FILTER_CONFIG) {
-      window.syncUnifiedMultiFilters({ pruneInvalid: true });
+  window.beginScopedLoad = async function (wide) {
+    persistFilters();
+    const result = OLD.beginScopedLoad ? await OLD.beginScopedLoad.call(window, wide) : undefined;
+    hydrateFilters();
+    if (window.buildFilters) window.buildFilters();
+    setTimeout(() => {
+      hydrateFilters();
+      window.syncEveryFilterComponent({ preserveSelections: true });
+      window.applyFilters(false);
       if (document.getElementById('tab-reports')?.classList.contains('active')) window.renderReports();
-    }
-  }, 2500);
+    }, 200);
+    return result;
+  };
+
+  // Final delayed rehydration catches saved filters, auto-filter-to-my-team, and scoped prompt selections.
+  setTimeout(() => { hydrateFilters(); window.syncEveryFilterComponent({ preserveSelections: true }); }, 800);
+  setTimeout(() => { hydrateFilters(); window.syncEveryFilterComponent({ preserveSelections: true }); window.applyFilters(true); }, 1800);
+  setTimeout(() => { hydrateFilters(); window.syncEveryFilterComponent({ preserveSelections: true }); if (document.getElementById('tab-reports')?.classList.contains('active')) window.renderReports(); }, 3000);
 })();
 
 </script>
