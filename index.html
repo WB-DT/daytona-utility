@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. Manager Console V2.2</title>
+    <title>A.C.T. Manager Console V2.0</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -6726,538 +6726,506 @@ window.openDrilldown = function(contextKey, metric) {
 
 
 /* ==========================================================
-   ACT Manager Console - Reporting Uses ACT Fact Table Only V1
+   ACT Manager Console - Cascading Filter Sync Hotfix
    Generated for Matt Bleakley
-
-   Reporting-only replacement:
-   - Dashboard/main tab remains on normal merged datasets.
-   - Reassign tab remains on normal merged datasets.
-   - Reporting tab fetches Dataverse table: cr714_dt_act_fctbl.
-   - Fact table field map based on uploaded export:
-       account    -> cr714_accountnumber
-       rep        -> cr714_accountrep / cr714_repfromnote
-       action     -> cr714_effectiveaction / cr714_action / cr714_actionfromnotetag
-       activity   -> cr714_activitydate / cr714_activitydateonly / cr714_activitymonth
-       type       -> cr714_activitytype / cr714_isemailactivity
-       email      -> cr714_emaildate / cr714_emailsubject / cr714_emailtemplate
-       source     -> cr714_sourcetable / cr714_sourcetype / cr714_sourcerecordid
-       account UI -> cr714_companyname / cr714_contactname / cr714_primaryemail / cr714_primaryphone
-       flags      -> cr714_hasintro / cr714_recordstatus / cr714_priority
+   Purpose:
+   - Tie Manager / Sr Manager / Supervisor / Department /
+     Rep / Rep Status / Action filters together.
+   - Update dropdown option visibility after every filter change.
+   - Update the Reporting Rep Filter list from the same filter state.
+   - Prune invalid selections when a higher-level filter changes.
+   - Re-sync saved / initial selections on load.
    ========================================================== */
 (function () {
-  if (window.__ACT_FACT_TABLE_REPORTING_V1) return;
-  window.__ACT_FACT_TABLE_REPORTING_V1 = true;
+  if (window.__ACT_CASCADE_FILTER_SYNC_V1) return;
+  window.__ACT_CASCADE_FILTER_SYNC_V1 = true;
 
-  const FACT_ENTITY_SETS = ['cr714_dt_act_fctbls', 'cr714_dt_act_fctbl', 'cr714_dct_act_fctbls', 'cr714_dct_act_fctbl'];
-  const FACT_SELECT = [
-    'cr714_dt_act_fctblid',
-    'createdon',
-    'modifiedon',
-    'cr714_activitynaturalkey',
-    'cr714_accountnumber',
-    'cr714_accountrep',
-    'cr714_repfromnote',
-    'cr714_action',
-    'cr714_effectiveaction',
-    'cr714_actionfromnotetag',
-    'cr714_actionmessage',
-    'cr714_activitydate',
-    'cr714_activitydateonly',
-    'cr714_activitymonth',
-    'cr714_activitytype',
-    'cr714_isemailactivity',
-    'cr714_emaildate',
-    'cr714_actionemailsentdate',
-    'cr714_emailsubject',
-    'cr714_emailtemplate',
-    'cr714_emailaction',
-    'cr714_emailstatus',
-    'cr714_notedate',
-    'cr714_notesequence',
-    'cr714_notetext',
-    'cr714_notetextraw',
-    'cr714_companyname',
-    'cr714_contactname',
-    'cr714_primaryemail',
-    'cr714_primaryphone',
-    'cr714_billingaddress',
-    'cr714_d365accountid',
-    'cr714_d365accountname',
-    'cr714_hasintro',
-    'cr714_intro',
-    'cr714_recordstatus',
-    'cr714_priority',
-    'cr714_sourcerecordid',
-    'cr714_sourcetable',
-    'cr714_sourcetype',
-    'statecode',
-    'statuscode'
-  ].join(',');
+  const EMP_FILTER_IDS = [
+    'cr714_managerassigned',
+    'cr714_srmanager',
+    'cr714_supervisors',
+    'cr714_departmentname',
+    'cr714_employeename',
+    'statecode'
+  ];
 
-  const OLD = {
-    renderReports: window.renderReports,
-    switchTab: window.switchTab,
+  const ALL_FILTER_IDS = [
+    ...EMP_FILTER_IDS,
+    'action'
+  ];
+
+  const ORIGINAL = {
     applyFilters: window.applyFilters,
-    renderNoNotesActionReporting: window.renderNoNotesActionReporting,
-    openDrilldown: window.openDrilldown,
-    exportReportCSV: window.exportReportCSV
+    buildFilters: window.buildFilters,
+    clearAllFilters: window.clearAllFilters,
+    updateFilterVisibility: window.updateFilterVisibility
   };
 
-  window.actFactRowsRaw = [];
-  window.actFactRows = [];
-  window.actFactLoadedAt = 0;
-  window.actFactEntitySet = null;
-  window.actFactLoading = false;
-  window.actFactLastFilterKey = '';
-  window.actFactCurrentRowsForDrilldown = [];
+  let syncLock = false;
 
-  function clean(v) { return String(v ?? '').replace(/\s+/g, ' ').trim(); }
-  function norm(v) { return clean(v).toLowerCase(); }
-  function esc(v) { return window.escapeHTML ? window.escapeHTML(v) : String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-  function js(v) { return window.escapeJS ? window.escapeJS(v) : String(v ?? '').replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
-  function odata(v) { return String(v ?? '').replace(/'/g, "''"); }
-  function asBool(v) { return v === true || v === 1 || String(v).toLowerCase() === 'true' || String(v).toLowerCase() === 'yes'; }
-  function asDate(v) { const d = v ? new Date(v) : null; return d && !isNaN(d.getTime()) ? d : null; }
-  function dateKey(d) { return d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` : null; }
-  function acctId(r) { return clean(r.cr714_accountnumber || r.accountId).toUpperCase(); }
-  function repOf(r) { return clean(r.cr714_accountrep || r.cr714_repfromnote || r.rep || 'Unassigned') || 'Unassigned'; }
-  function actionOf(r) { return clean(r.cr714_effectiveaction || r.cr714_action || r.cr714_actionfromnotetag || 'No Action') || 'No Action'; }
-  function activityTypeOf(r) { return clean(r.cr714_activitytype || 'Note'); }
-  function activityDateOf(r) { return asDate(r.cr714_activitydate || r.cr714_activitydateonly || r.cr714_notedate || r.cr714_emaildate || r.cr714_actionemailsentdate || r.modifiedon || r.createdon); }
-  function monthOf(r) { const d = asDate(r.cr714_activitymonth) || activityDateOf(r); return dateKey(d); }
-  function isEmail(r) { return asBool(r.cr714_isemailactivity) || /email/i.test(activityTypeOf(r)) || !!clean(r.cr714_emailsubject || r.cr714_emailtemplate || r.cr714_emaildate); }
-  function isMasonville(r) { return /masonville|mvgo|link/i.test(clean(r.cr714_activitytype + ' ' + r.cr714_actionmessage + ' ' + r.cr714_notetext + ' ' + r.cr714_notetextraw)); }
-  function isNote(r) { return !isEmail(r) && !isMasonville(r); }
-  function factUniqueKey(r) { return clean(r.cr714_dt_act_fctblid || r.cr714_activitynaturalkey || `${acctId(r)}|${repOf(r)}|${actionOf(r)}|${activityDateOf(r)?.toISOString() || ''}|${clean(r.cr714_notesequence)}`); }
-
-  function activeSet(id) {
-    const af = window.activeFilters || {};
-    const v = af[id];
-    return v instanceof Set ? v : new Set(Array.isArray(v) ? v : []);
+  function clean(v) {
+    return String(v ?? '').replace(/\s+/g, ' ').trim();
   }
 
-  function setHasLoose(set, value) {
-    if (!set || !set.size) return true;
-    const v = norm(value);
-    return Array.from(set).some(x => norm(x) === v);
+  function norm(v) {
+    return clean(v).toLowerCase();
+  }
+
+  function cssEscapeValue(v) {
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(v);
+    return String(v).replace(/(["'\\\]\[])/g, '\\$1');
+  }
+
+  function ensureFilterSet(id) {
+    window.activeFilters = window.activeFilters || {};
+    if (!window.activeFilters[id]) window.activeFilters[id] = new Set();
+    return window.activeFilters[id];
+  }
+
+  function hasFilter(id) {
+    return ensureFilterSet(id).size > 0;
+  }
+
+  function filterConfig(id) {
+    return (window.FILTER_CONFIG || []).find(f => f.id === id);
+  }
+
+  function employeeName(e) {
+    return clean(
+      e.cr714_employeename ||
+      e.cr714_repname ||
+      e.fullname ||
+      e.name ||
+      e.cr714_name
+    );
+  }
+
+  function employeeState(e) {
+    return clean(
+      e._mappedStatecode ||
+      ((e.statecode === 0 || e.cr714_status === 1)
+        ? 'Active'
+        : ((e.statecode === 1 || e.cr714_status === 0)
+          ? 'Inactive'
+          : 'Unknown'))
+    );
   }
 
   function employeeValue(e, id) {
-    if (id === 'cr714_employeename') return clean(e.cr714_employeename || e.cr714_repname || e.fullname || e.name);
-    if (id === 'statecode') return clean(e._mappedStatecode || ((e.statecode === 0 || e.cr714_status === 1) ? 'Active' : ((e.statecode === 1 || e.cr714_status === 0) ? 'Inactive' : 'Unknown')));
+    if (id === 'cr714_employeename') return employeeName(e);
+    if (id === 'statecode') return employeeState(e);
     return clean(e[id]);
   }
 
-  function activeEmployeeScopedReps() {
-    const ids = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','statecode'];
-    const any = ids.some(id => activeSet(id).size);
-    if (!any) return null;
-    const reps = new Set();
-    (window.employeesData || []).forEach(e => {
-      let ok = true;
-      ids.forEach(id => { if (ok && activeSet(id).size && !setHasLoose(activeSet(id), employeeValue(e, id))) ok = false; });
-      const rep = employeeValue(e, 'cr714_employeename');
-      if (ok && rep) reps.add(rep);
-    });
-    return reps;
+  function setContainsLoose(set, actual) {
+    if (!set || !set.size) return true;
+    const a = norm(actual);
+    return Array.from(set).some(v => norm(v) === a);
   }
 
-  function activeReportingReps() {
-    let reps = activeEmployeeScopedReps();
-    const explicit = activeSet('cr714_employeename');
-    if (explicit.size) {
-      const exp = new Set(Array.from(explicit).map(clean));
-      if (reps) reps = new Set(Array.from(reps).filter(r => setHasLoose(exp, r)));
-      else reps = exp;
+  function employeeMatchesFilters(e, exceptId = null) {
+    for (const id of EMP_FILTER_IDS) {
+      if (id === exceptId) continue;
+      const selected = ensureFilterSet(id);
+      if (!selected.size) continue;
+      if (!setContainsLoose(selected, employeeValue(e, id))) return false;
     }
-    return reps;
-  }
-
-  function activeFilterSignature() {
-    const af = window.activeFilters || {};
-    const payload = {};
-    ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode','action'].forEach(id => payload[id] = Array.from(activeSet(id)).sort());
-    payload.massIds = window.massFilteredIds ? Array.from(window.massFilteredIds).sort() : [];
-    payload.start = window.reportStartDate ? window.reportStartDate.toISOString() : '';
-    payload.end = window.reportEndDate ? window.reportEndDate.toISOString() : '';
-    payload.includeUnassigned = !!document.getElementById('rep-include-unassigned')?.checked;
-    return JSON.stringify(payload);
-  }
-
-  function buildFactODataFilter() {
-    const parts = [];
-    const reps = activeReportingReps();
-    const ids = window.massFilteredIds ? Array.from(window.massFilteredIds).map(clean).filter(Boolean) : [];
-    const actions = Array.from(activeSet('action')).map(clean).filter(Boolean);
-
-    // Keep OData filters conservative to avoid URL length errors; JS applies the final exact scope.
-    if (ids.length && ids.length <= 80) {
-      parts.push('(' + ids.map(x => `cr714_accountnumber eq '${odata(x)}'`).join(' or ') + ')');
-    }
-    if (reps && reps.size && reps.size <= 80) {
-      parts.push('(' + Array.from(reps).map(x => `cr714_accountrep eq '${odata(x)}'`).join(' or ') + ')');
-    }
-    if (actions.length && actions.length <= 40) {
-      parts.push('(' + actions.map(x => `(cr714_effectiveaction eq '${odata(x)}' or cr714_action eq '${odata(x)}')`).join(' or ') + ')');
-    }
-    if (window.reportStartDate) {
-      const d = new Date(window.reportStartDate); d.setHours(0,0,0,0);
-      parts.push(`cr714_activitydate ge ${d.toISOString()}`);
-    }
-    if (window.reportEndDate) {
-      const d = new Date(window.reportEndDate); d.setHours(23,59,59,999);
-      parts.push(`cr714_activitydate le ${d.toISOString()}`);
-    }
-    return parts.join(' and ');
-  }
-
-  async function getDataverseToken() {
-    if (window.getToken) return await window.getToken();
-    throw new Error('Dataverse token function unavailable.');
-  }
-
-  async function fetchFromEntitySet(entitySet, token, filter) {
-    let url = `${window.DATAVERSE_URL}/${entitySet}?$select=${FACT_SELECT}&$orderby=cr714_activitydate desc`;
-    if (filter) url += `&$filter=${encodeURIComponent(filter)}`;
-    const out = [];
-    while (url) {
-      const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.maxpagesize=5000, odata.include-annotations="OData.Community.Display.V1.FormattedValue"' } });
-      if (!res.ok) throw new Error(`${entitySet} fetch failed (${res.status})`);
-      const data = await res.json();
-      out.push(...(data.value || []));
-      url = data['@odata.nextLink'] || null;
-      await new Promise(requestAnimationFrame);
-    }
-    return out;
-  }
-
-  async function fetchFactTableRows(force = false) {
-    const sig = activeFilterSignature();
-    const maxAgeMs = 5 * 60 * 1000;
-    if (!force && window.actFactRowsRaw.length && window.actFactLastFilterKey === sig && Date.now() - window.actFactLoadedAt < maxAgeMs) return window.actFactRowsRaw;
-    if (window.actFactLoading) return window.actFactRowsRaw;
-
-    window.actFactLoading = true;
-    const filter = buildFactODataFilter();
-    try {
-      const token = await getDataverseToken();
-      let lastError = null;
-      const entitySets = window.actFactEntitySet ? [window.actFactEntitySet] : FACT_ENTITY_SETS;
-      for (const entitySet of entitySets) {
-        try {
-          const rows = await fetchFromEntitySet(entitySet, token, filter);
-          window.actFactEntitySet = entitySet;
-          window.actFactRowsRaw = rows;
-          window.actFactLoadedAt = Date.now();
-          window.actFactLastFilterKey = sig;
-          return rows;
-        } catch (e) { lastError = e; }
-      }
-      throw lastError || new Error('ACT Fact Table fetch failed.');
-    } finally {
-      window.actFactLoading = false;
-    }
-  }
-
-  function factRowPassesClientScope(r) {
-    const rep = repOf(r);
-    const action = actionOf(r);
-    const acct = acctId(r);
-    const reps = activeReportingReps();
-    const actions = activeSet('action');
-    const includeUnassigned = !!document.getElementById('rep-include-unassigned')?.checked;
-
-    if (!includeUnassigned && rep === 'Unassigned') return false;
-    if (reps && reps.size && !setHasLoose(reps, rep)) return false;
-    if (actions.size && !setHasLoose(actions, action)) return false;
-    if (window.massFilteredIds && window.massFilteredIds.size && !window.massFilteredIds.has(acct)) return false;
-
-    const d = activityDateOf(r);
-    if (window.reportStartDate && (!d || d < window.reportStartDate)) return false;
-    if (window.reportEndDate && (!d || d > window.reportEndDate)) return false;
     return true;
   }
 
-  function normalizeFactRows(rows) {
-    const seen = new Set();
-    const out = [];
-    rows.forEach(r => {
-      const key = factUniqueKey(r);
-      if (!key || seen.has(key)) return;
-      seen.add(key);
-      if (factRowPassesClientScope(r)) out.push(r);
+  function getValidEmployees(exceptId = null) {
+    return (window.employeesData || []).filter(e => {
+      const rep = employeeName(e);
+      return rep && employeeMatchesFilters(e, exceptId);
     });
-    return out;
   }
 
-  function ensureStat(map, key) {
-    if (!map.has(key)) map.set(key, { totalRecords: 0, touches: 0, emails: 0, notes: 0, masonville: 0, requests: 0, intro: 0, stale: 0, _accounts: new Set(), _introAccounts: new Set(), _requestAccounts: new Set(), _lastDates: new Map() });
-    return map.get(key);
+  function getRepUniverse() {
+    return new Set(
+      (window.mergedAccounts || [])
+        .map(a => clean(a.rep))
+        .filter(Boolean)
+    );
   }
 
-  function buildFactAggregates(rows) {
-    const now = new Date();
-    const repMap = new Map();
-    const actionMap = new Map();
-    const monthlyData = {};
-    const accountLastDate = new Map();
+  function getValidRepsFromEmployeeFilters(exceptId = null) {
+    const accountReps = getRepUniverse();
+    const reps = new Set();
+    getValidEmployees(exceptId).forEach(e => {
+      const rep = employeeName(e);
+      if (rep && accountReps.has(rep)) reps.add(rep);
+    });
+    return reps;
+  }
 
-    rows.forEach(r => {
-      const acct = acctId(r);
-      const rep = repOf(r);
-      const action = actionOf(r);
-      const d = activityDateOf(r);
-      const m = monthOf(r);
-      const type = activityTypeOf(r);
-      const repStats = ensureStat(repMap, rep);
-      const actionStats = ensureStat(actionMap, action);
+  function accountPassesAllFiltersExcept(account, exceptId = null) {
+    const actionSet = ensureFilterSet('action');
+    const repSet = ensureFilterSet('cr714_employeename');
+    const employeeScoped = EMP_FILTER_IDS.some(id => id !== exceptId && hasFilter(id));
+    const allowedReps = employeeScoped ? getValidRepsFromEmployeeFilters(exceptId) : null;
+    const acctRep = clean(account.rep);
 
-      if (acct) {
-        repStats._accounts.add(acct);
-        actionStats._accounts.add(acct);
-        if (!accountLastDate.has(acct) || (d && d > accountLastDate.get(acct))) accountLastDate.set(acct, d || new Date(0));
-      }
+    if (exceptId !== 'cr714_employeename' && repSet.size) {
+      if (!setContainsLoose(repSet, acctRep)) return false;
+      if (allowedReps !== null && !allowedReps.has(acctRep)) return false;
+    } else if (allowedReps !== null) {
+      if (!allowedReps.has(acctRep)) return false;
+    }
 
-      repStats.touches += 1;
-      actionStats.touches += 1;
+    if (
+      exceptId !== 'action' &&
+      actionSet.size &&
+      !setContainsLoose(actionSet, account.action)
+    ) {
+      return false;
+    }
 
-      if (isEmail(r)) { repStats.emails += 1; actionStats.emails += 1; }
-      else if (isMasonville(r)) { repStats.masonville += 1; actionStats.masonville += 1; }
-      else { repStats.notes += 1; actionStats.notes += 1; }
+    if (
+      window.massFilteredIds &&
+      window.massFilteredIds.size > 0 &&
+      !window.massFilteredIds.has(clean(account.cr714_id).toUpperCase())
+    ) {
+      return false;
+    }
 
-      if (asBool(r.cr714_hasintro) || /intro/i.test(clean(r.cr714_intro))) {
-        repStats._introAccounts.add(acct || factUniqueKey(r));
-      }
-      if (/help requested|close requested/i.test(clean(r.cr714_recordstatus))) {
-        repStats._requestAccounts.add(acct || factUniqueKey(r));
-      }
+    return true;
+  }
 
-      if (!monthlyData[rep]) monthlyData[rep] = {};
-      if (m) {
-        if (!monthlyData[rep][m]) monthlyData[rep][m] = { records: new Set(), touches: 0, emails: 0 };
-        if (acct) monthlyData[rep][m].records.add(acct);
-        monthlyData[rep][m].touches += 1;
-        if (isEmail(r)) monthlyData[rep][m].emails += 1;
-      }
+  function validOptionsFor(id) {
+    const options = new Set();
+
+    if (id === 'action') {
+      (window.mergedAccounts || [])
+        .filter(a => accountPassesAllFiltersExcept(a, 'action'))
+        .forEach(a => {
+          const action = clean(a.action);
+          if (action) options.add(action);
+        });
+      return options;
+    }
+
+    if (id === 'cr714_employeename') {
+      getValidRepsFromEmployeeFilters('cr714_employeename').forEach(rep => options.add(rep));
+      return options;
+    }
+
+    getValidEmployees(id).forEach(e => {
+      const value = employeeValue(e, id);
+      if (value) options.add(value);
     });
 
-    repMap.forEach(stats => {
-      stats.totalRecords = stats._accounts.size;
-      stats.intro = stats._introAccounts.size;
-      stats.requests = stats._requestAccounts.size;
-      stats.stale = Array.from(stats._accounts).filter(acct => {
-        const d = accountLastDate.get(acct);
-        return !d || ((now - d) / (1000 * 60 * 60 * 24) > 30);
-      }).length;
-    });
-    actionMap.forEach(stats => stats.totalRecords = stats._accounts.size);
-
-    const sortedReps = Array.from(repMap.entries()).sort((a,b) => b[1].totalRecords - a[1].totalRecords || a[0].localeCompare(b[0]));
-    const sortedActions = Array.from(actionMap.entries()).sort((a,b) => b[1].totalRecords - a[1].totalRecords || a[0].localeCompare(b[0]));
-    const allMonths = Array.from(new Set(rows.map(monthOf).filter(Boolean))).sort().reverse();
-
-    return { sortedReps, sortedActions, monthlyData, allMonths };
+    return options;
   }
 
-  function tableBodies() {
-    return {
-      scorecard: document.getElementById('scorecard-body'),
-      actions: document.getElementById('actions-body'),
-      engagement: document.getElementById('engagement-body'),
-      monthly: document.getElementById('monthly-body')
-    };
+  function getSearchTermForDropdown(id) {
+    const input = document.querySelector(`#ms-drop-${id} .multiselect-search input`);
+    return norm(input ? input.value : '');
   }
 
-  function setLoadingReport(msg) {
-    const b = tableBodies();
-    Object.values(b).forEach(body => { if (body) body.innerHTML = `<tr><td colspan="20" class="text-center py-8 text-muted font-bold">${esc(msg)}</td></tr>`; });
+  function getSearchTermForPbiRepList() {
+    const input = document.querySelector('#pbi-rep-filter-list')
+      ?.previousElementSibling
+      ?.querySelector('input');
+    return norm(input ? input.value : '');
   }
 
-  function updateReportingRepListFromFacts(rows) {
-    const list = document.getElementById('pbi-rep-filter-list');
-    if (!list) return;
-    const selected = activeSet('cr714_employeename');
-    const reps = Array.from(new Set(rows.map(repOf).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
-    const search = norm(window.ACTReportScope?.search || '');
-    const shown = reps.filter(r => !search || norm(r).includes(search));
-    list.innerHTML = `<label class="pbi-rep-item select-all-opt" style="color: var(--primary);"><span>Select visible reps</span><input type="checkbox" onchange="window.toggleAllFilter && window.toggleAllFilter('cr714_employeename', this)"></label><div class="scope-summary">${reps.length} reps from ACT Fact Table</div>`;
-    shown.forEach(rep => {
-      const checked = selected.size === 0 || setHasLoose(selected, rep);
-      const row = document.createElement('label');
-      row.className = 'pbi-rep-item ms-opt-cr714_employeename';
-      row.setAttribute('data-val', rep);
-      row.innerHTML = `<span class="truncate">${esc(rep)}</span><input type="checkbox" value="${esc(rep)}" ${checked ? 'checked' : ''}>`;
-      row.querySelector('input').onchange = e => {
-        if (window.updateFilterState) window.updateFilterState('cr714_employeename', e.target);
-        else {
-          if (e.target.checked) selected.add(rep); else selected.delete(rep);
-          window.renderReports();
+  function setOptionVisible(optionEl, visible, displayMode = 'flex') {
+    if (!optionEl) return;
+    optionEl.style.display = visible ? displayMode : 'none';
+  }
+
+  function updateHeader(id) {
+    const col = filterConfig(id);
+    const header = document.querySelector(`#ms-wrap-${id} .multiselect-header span`);
+    if (!col || !header) return;
+
+    const selected = ensureFilterSet(id);
+    const visibleOptions = Array.from(
+      document.querySelectorAll(`#ms-drop-${id} .ms-opt-${id}`)
+    ).filter(o => o.style.display !== 'none');
+
+    let text = col.label;
+
+    if (selected.size === 1) {
+      text = `${col.label} (1)`;
+    } else if (selected.size > 1) {
+      const allVisibleSelected =
+        visibleOptions.length > 0 &&
+        visibleOptions.every(o => selected.has(o.getAttribute('data-val')));
+
+      text = allVisibleSelected
+        ? `${col.label} (All Visible)`
+        : `${col.label} (${selected.size})`;
+    }
+
+    header.innerText = text;
+  }
+
+  function updateSelectAllState(id) {
+    const drop = document.getElementById(`ms-drop-${id}`);
+    if (!drop) return;
+
+    const selectAll = drop.querySelector('.select-all-opt input[type="checkbox"]');
+    if (!selectAll) return;
+
+    const visibleChecks = Array.from(
+      drop.querySelectorAll(`.ms-opt-${id} input[type="checkbox"]`)
+    ).filter(cb => cb.closest(`.ms-opt-${id}`)?.style.display !== 'none');
+
+    const selectedVisible = visibleChecks.filter(cb => cb.checked);
+
+    selectAll.checked =
+      visibleChecks.length > 0 &&
+      selectedVisible.length === visibleChecks.length;
+
+    selectAll.indeterminate =
+      selectedVisible.length > 0 &&
+      selectedVisible.length < visibleChecks.length;
+  }
+
+  function syncOneTopDropdown(id, validSet, pruneInvalid) {
+    const search = getSearchTermForDropdown(id);
+    const selected = ensureFilterSet(id);
+
+    document
+      .querySelectorAll(`#ms-drop-${id} .ms-opt-${id}`)
+      .forEach(opt => {
+        const val = opt.getAttribute('data-val') || '';
+        const isValid = validSet.has(val);
+        const matchesSearch = !search || norm(val).includes(search);
+        const visible = isValid && matchesSearch;
+
+        setOptionVisible(opt, visible, 'flex');
+
+        const cb = opt.querySelector('input[type="checkbox"]');
+        if (!cb) return;
+
+        if (pruneInvalid && !isValid && cb.checked) {
+          cb.checked = false;
+          selected.delete(cb.value);
+        } else {
+          cb.checked = selected.has(cb.value);
         }
-      };
-      list.appendChild(row);
-    });
-  }
-
-  function fillReportTables(aggs, rows) {
-    const b = tableBodies();
-    if (!b.scorecard || !b.actions || !b.engagement || !b.monthly) return;
-    b.scorecard.innerHTML = '';
-    b.actions.innerHTML = '';
-    b.engagement.innerHTML = '';
-    b.monthly.innerHTML = '';
-
-    const { sortedReps, sortedActions, monthlyData, allMonths } = aggs;
-    let tAccts = 0, tReq = 0, tStale = 0, tEmails = 0, tIntro = 0, totalActionable = 0;
-    const globalAccounts = new Set();
-    rows.forEach(r => { if (acctId(r)) globalAccounts.add(acctId(r)); if (isEmail(r)) tEmails += 1; });
-    tAccts = globalAccounts.size;
-
-    sortedReps.forEach(([rep, s]) => {
-      tReq += s.requests; tStale += s.stale; tIntro += s.intro;
-      const jr = js(rep), sr = esc(rep);
-      b.scorecard.innerHTML += `
-        <tr class="transition-colors">
-          <td class="font-black drilldown-cell uppercase" onclick="window.openDrilldown('${jr}', 'total')">${sr}</td>
-          <td class="drilldown-cell font-bold" onclick="window.openDrilldown('${jr}', 'total')">${s.totalRecords}</td>
-          <td class="font-black drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jr}', 'touched')">${s.touches}</td>
-          <td class="drilldown-cell font-black" style="color: var(--accent-danger);" onclick="window.openDrilldown('${jr}', 'stale')">${s.stale}</td>
-          <td class="drilldown-cell font-bold" style="color: var(--chart-email);" onclick="window.openDrilldown('${jr}', 'emails')">${s.emails}</td>
-          <td class="drilldown-cell font-black" style="color: var(--accent-warning);" onclick="window.openDrilldown('${jr}', 'requests')">${s.requests}</td>
-          <td class="drilldown-cell font-black" style="color: var(--primary);" onclick="window.openDrilldown('${jr}', 'intro')">${s.intro}</td>
-        </tr>`;
-      const emailPer = s.totalRecords > 0 ? (s.emails / s.totalRecords).toFixed(2) : '0.00';
-      b.engagement.innerHTML += `
-        <tr class="transition-colors">
-          <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jr}', 'total')">${sr}</td>
-          <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jr}', 'total')">${s.totalRecords}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jr}', 'touched')">${s.touches}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jr}', 'emails')">${s.emails}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jr}', 'notes')">${s.notes}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jr}', 'masonville')">${s.masonville}</td>
-          <td class="font-mono font-bold" style="background-color: rgba(59,130,246,.1); color: var(--accent-info);">${emailPer} / Record</td>
-        </tr>`;
-    });
-
-    sortedActions.forEach(([action, s]) => {
-      if (action && action !== 'No Action') totalActionable += s.totalRecords;
-      const ja = js(action), sa = esc(action);
-      const emailPer = s.totalRecords > 0 ? (s.emails / s.totalRecords).toFixed(2) : '0.00';
-      b.actions.innerHTML += `
-        <tr class="transition-colors">
-          <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${ja}', 'total')">${sa}</td>
-          <td class="font-black drilldown-cell" onclick="window.openDrilldown('${ja}', 'total')">${s.totalRecords}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${ja}', 'touched')">${s.touches}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${ja}', 'emails')">${s.emails}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${ja}', 'notes')">${s.notes}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${ja}', 'masonville')">${s.masonville}</td>
-          <td class="font-mono font-bold" style="background-color: rgba(59,130,246,.1); color: var(--accent-info);">${emailPer} / Record</td>
-        </tr>`;
-    });
-
-    const mh = document.getElementById('monthly-table')?.querySelector('thead tr');
-    if (mh) {
-      mh.innerHTML = `<th><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', 0)"><span>Rep Name</span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>` +
-        allMonths.map((m, idx) => `<th class="text-center"><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', ${idx+1})"><span>${esc(m)}<br/><span class="text-[9px] font-normal text-muted">Accounts Touched / Total Activities / Emails</span></span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`).join('');
-    }
-
-    sortedReps.forEach(([rep]) => {
-      const jr = js(rep), sr = esc(rep);
-      let rowHtml = `<td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jr}', 'total')">${sr}</td>`;
-      allMonths.forEach(m => {
-        const bucket = monthlyData[rep]?.[m] || { records: new Set(), touches: 0, emails: 0 };
-        rowHtml += `<td class="text-center"><span class="font-black text-[11px]" style="color: var(--primary);">${bucket.records.size}</span><span class="text-muted mx-1">\\</span><span class="font-bold" style="color: var(--accent-success);">${bucket.touches}</span><span class="text-muted mx-1">/</span><span class="font-bold" style="color: var(--chart-email);">${bucket.emails}</span></td>`;
       });
-      b.monthly.innerHTML += `<tr class="transition-colors">${rowHtml}</tr>`;
-    });
 
-    const setText = (id, v) => { const el = document.getElementById(id); if (el) el.innerText = v; };
-    setText('rep-tot-accts', tAccts);
-    setText('rep-tot-req', tReq);
-    setText('rep-tot-stale', tStale);
-    setText('rep-tot-email', tEmails);
-    setText('rep-tot-intro', tIntro);
-    setText('act-tot-actions', totalActionable);
-    setText('act-action-rate', tAccts > 0 ? Math.round((totalActionable / tAccts) * 100) + '%' : '0%');
-
-    if (window.renderCharts) window.renderCharts(sortedReps, sortedActions, monthlyData, allMonths);
-    ['scorecard-table','actions-table','engagement-table','monthly-table'].forEach(id => window.calculateTableTotals && window.calculateTableTotals(id));
+    updateHeader(id);
+    updateSelectAllState(id);
   }
 
-  window.renderReports = async function () {
-    if (!document.getElementById('tab-reports')?.classList.contains('active')) return;
-    setLoadingReport('Loading ACT Fact Table reporting data...');
+  function syncReportingRepList(validRepSet, pruneInvalid) {
+    const selected = ensureFilterSet('cr714_employeename');
+    const search = getSearchTermForPbiRepList();
+
+    document
+      .querySelectorAll('#pbi-rep-filter-list .ms-opt-cr714_employeename')
+      .forEach(opt => {
+        const val = opt.getAttribute('data-val') || '';
+        const isValid = validRepSet.has(val);
+        const matchesSearch = !search || norm(val).includes(search);
+        const visible = isValid && matchesSearch;
+
+        setOptionVisible(opt, visible, 'flex');
+
+        const cb = opt.querySelector('input[type="checkbox"]');
+        if (!cb) return;
+
+        if (pruneInvalid && !isValid && cb.checked) {
+          cb.checked = false;
+          selected.delete(cb.value);
+        } else {
+          cb.checked = selected.has(cb.value);
+        }
+      });
+
+    const selectAll = document.querySelector(
+      '#pbi-rep-filter-list .select-all-opt input[type="checkbox"]'
+    );
+
+    if (selectAll) {
+      const visibleChecks = Array.from(
+        document.querySelectorAll(
+          '#pbi-rep-filter-list .ms-opt-cr714_employeename input[type="checkbox"]'
+        )
+      ).filter(cb => cb.closest('.ms-opt-cr714_employeename')?.style.display !== 'none');
+
+      const selectedVisible = visibleChecks.filter(cb => cb.checked);
+
+      selectAll.checked =
+        visibleChecks.length > 0 &&
+        selectedVisible.length === visibleChecks.length;
+
+      selectAll.indeterminate =
+        selectedVisible.length > 0 &&
+        selectedVisible.length < visibleChecks.length;
+    }
+  }
+
+  function saveFiltersToStorage() {
     try {
-      const raw = await fetchFactTableRows(false);
-      const rows = normalizeFactRows(raw);
-      window.actFactRows = rows;
-      window.actFactCurrentRowsForDrilldown = rows;
-      updateReportingRepListFromFacts(rows);
-      fillReportTables(buildFactAggregates(rows), rows);
-      window.reportsDirty = false;
-      const chip = document.getElementById('act-scope-chip');
-      if (chip) chip.innerHTML = `<i class="fas fa-database"></i><span>Reporting: <strong>ACT Fact Table</strong> • ${rows.length.toLocaleString()} activity rows</span>`;
+      const payload = {};
+      ALL_FILTER_IDS.forEach(id => {
+        payload[id] = Array.from(ensureFilterSet(id));
+      });
+      localStorage.setItem('act_mgr_filters', JSON.stringify(payload));
     } catch (e) {
-      console.error('ACT Fact Table reporting failed:', e);
-      setLoadingReport('ACT Fact Table reporting failed: ' + e.message);
-      window.showToast && window.showToast('ACT Fact Table reporting failed: ' + e.message, 'error');
+      console.warn('Filter save skipped:', e);
+    }
+  }
+
+  window.syncCascadingFilters = function syncCascadingFilters(options = {}) {
+    if (syncLock) return;
+    syncLock = true;
+
+    try {
+      const pruneInvalid = options.pruneInvalid !== false;
+
+      ALL_FILTER_IDS.forEach(id => {
+        const validSet = validOptionsFor(id);
+        syncOneTopDropdown(id, validSet, pruneInvalid);
+
+        if (id === 'cr714_employeename') {
+          syncReportingRepList(validSet, pruneInvalid);
+        }
+      });
+
+      if (window.updateFilterSubtitle) window.updateFilterSubtitle();
+      saveFiltersToStorage();
+    } finally {
+      syncLock = false;
     }
   };
 
-  window.renderNoNotesActionReporting = async function () {
-    if (!document.getElementById('tab-reports')?.classList.contains('active')) return;
-    const rows = window.actFactRows && window.actFactRows.length ? window.actFactRows : normalizeFactRows(await fetchFactTableRows(false));
-    fillReportTables(buildFactAggregates(rows), rows);
+  window.updateFilterVisibility = function () {
+    window.syncCascadingFilters({ pruneInvalid: false });
   };
 
-  window.openDrilldown = function (contextKey, metric) {
-    const rows = window.actFactCurrentRowsForDrilldown || [];
-    if (document.getElementById('tab-reports')?.classList.contains('active') && rows.length) {
-      const now = new Date();
-      let filtered = rows.filter(r => repOf(r) === contextKey || actionOf(r) === contextKey);
-      if (metric === 'emails') filtered = filtered.filter(isEmail);
-      else if (metric === 'notes') filtered = filtered.filter(isNote);
-      else if (metric === 'masonville') filtered = filtered.filter(isMasonville);
-      else if (metric === 'requests') filtered = filtered.filter(r => /help requested|close requested/i.test(clean(r.cr714_recordstatus)));
-      else if (metric === 'intro') filtered = filtered.filter(r => asBool(r.cr714_hasintro) || /intro/i.test(clean(r.cr714_intro)));
-      else if (metric === 'stale') {
-        const last = new Map();
-        filtered.forEach(r => { const id = acctId(r), d = activityDateOf(r); if (id && (!last.has(id) || (d && d > last.get(id)))) last.set(id, d || new Date(0)); });
-        filtered = filtered.filter(r => { const d = last.get(acctId(r)); return !d || ((now - d) / (1000*60*60*24) > 30); });
+  window.updateFilterState = function (colId, checkbox) {
+    const set = ensureFilterSet(colId);
+
+    if (checkbox.checked) set.add(checkbox.value);
+    else set.delete(checkbox.value);
+
+    document
+      .querySelectorAll(`.ms-opt-${colId} input[type="checkbox"]`)
+      .forEach(cb => {
+        if (cb.value === checkbox.value) cb.checked = checkbox.checked;
+      });
+
+    window.syncCascadingFilters({ pruneInvalid: true });
+
+    if (window.debouncedApplyFilters) {
+      window.debouncedApplyFilters(false);
+    } else if (window.applyFilters) {
+      window.applyFilters(false);
+    }
+  };
+
+  window.toggleAllFilter = function (colId, checkbox) {
+    const set = ensureFilterSet(colId);
+    const isChecked = checkbox.checked;
+
+    const visibleChecks = Array.from(
+      document.querySelectorAll(`.ms-opt-${colId} input[type="checkbox"]`)
+    ).filter(cb => cb.closest(`.ms-opt-${colId}`)?.style.display !== 'none');
+
+    visibleChecks.forEach(cb => {
+      cb.checked = isChecked;
+      if (isChecked) set.add(cb.value);
+      else set.delete(cb.value);
+    });
+
+    window.syncCascadingFilters({ pruneInvalid: true });
+
+    if (window.debouncedApplyFilters) {
+      window.debouncedApplyFilters(false);
+    } else if (window.applyFilters) {
+      window.applyFilters(false);
+    }
+  };
+
+  window.filterDropdown = function (id, term) {
+    const q = norm(term);
+    const validSet = validOptionsFor(id);
+
+    document.querySelectorAll(`#ms-drop-${id} .ms-opt-${id}`).forEach(opt => {
+      const val = opt.getAttribute('data-val') || '';
+      setOptionVisible(opt, validSet.has(val) && norm(val).includes(q), 'flex');
+    });
+
+    updateSelectAllState(id);
+  };
+
+  window.filterPbiReps = function (term) {
+    const q = norm(term);
+    const validReps = validOptionsFor('cr714_employeename');
+
+    document
+      .querySelectorAll('#pbi-rep-filter-list .ms-opt-cr714_employeename')
+      .forEach(opt => {
+        const val = opt.getAttribute('data-val') || '';
+        setOptionVisible(opt, validReps.has(val) && norm(val).includes(q), 'flex');
+      });
+  };
+
+  window.applyFilters = function (preservePage = false) {
+    window.syncCascadingFilters({ pruneInvalid: true });
+
+    if (typeof ORIGINAL.applyFilters === 'function') {
+      return ORIGINAL.applyFilters.call(window, preservePage);
+    }
+  };
+
+  window.buildFilters = function () {
+    if (typeof ORIGINAL.buildFilters === 'function') {
+      ORIGINAL.buildFilters.call(window);
+    }
+
+    setTimeout(() => {
+      window.syncCascadingFilters({ pruneInvalid: true });
+    }, 0);
+  };
+
+  window.clearAllFilters = function () {
+    ALL_FILTER_IDS.forEach(id => ensureFilterSet(id).clear());
+
+    document
+      .querySelectorAll('.multiselect-dropdown input, #pbi-rep-filter-list input')
+      .forEach(chk => {
+        chk.checked = false;
+        chk.indeterminate = false;
+      });
+
+    if (window.massFilteredIds) window.massFilteredIds.clear();
+
+    const massInput = document.getElementById('mass-id-input');
+    const massCount = document.getElementById('mass-id-count');
+
+    if (massInput) massInput.value = '';
+    if (massCount) massCount.innerText = '0';
+
+    if (window.clearDrilldownLock) window.clearDrilldownLock();
+
+    window.syncCascadingFilters({ pruneInvalid: true });
+
+    if (typeof ORIGINAL.applyFilters === 'function') {
+      ORIGINAL.applyFilters.call(window, false);
+    }
+  };
+
+  document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(() => {
+      if (window.activeFilters && window.FILTER_CONFIG) {
+        window.syncCascadingFilters({ pruneInvalid: true });
       }
-      const byAcct = new Map();
-      filtered.forEach(r => { const id = acctId(r); if (id && !byAcct.has(id)) byAcct.set(id, r); });
-      const data = Array.from(byAcct.values());
-      window.currentDrilldownData = data.map(r => ({ cr714_id: acctId(r), company: clean(r.cr714_companyname || r.cr714_d365accountname || '--'), rep: repOf(r), action: actionOf(r), modifiedon: activityDateOf(r)?.toISOString() || r.modifiedon }));
-      const title = document.getElementById('dd-title'); if (title) title.innerText = `${String(contextKey).toUpperCase()} - ${String(metric).toUpperCase()} ACT FACT DATA`;
-      const count = document.getElementById('dd-count'); if (count) count.innerText = window.currentDrilldownData.length;
-      const body = document.getElementById('dd-body');
-      if (body) body.innerHTML = window.currentDrilldownData.map(a => `<tr><td class="font-black uppercase font-mono" style="color: var(--primary);">${esc(a.cr714_id)}</td><td class="font-bold">${esc(a.company)}</td><td class="text-muted uppercase text-[10px]">${esc(a.rep)}</td><td><span class="px-2 py-0.5 rounded border text-[9px] font-black uppercase">${esc(a.action || 'Idle')}</span></td><td class="font-bold text-[10px]">${a.modifiedon ? new Date(a.modifiedon).toLocaleDateString() : '--'}</td><td class="text-center"><button onclick="window.jumpToAccount('${esc(a.cr714_id)}')" class="hover:scale-125 transition-transform bg-transparent border-none cursor-pointer" style="color: var(--primary);"><i class="fas fa-crosshairs"></i></button></td></tr>`).join('');
-      const modal = document.getElementById('drilldown-modal'); if (modal) { modal.classList.remove('hidden-force'); modal.style.display = 'flex'; }
-      return;
+    }, 500);
+  });
+
+  // If this file is loaded after DOMContentLoaded, still run one delayed sync.
+  setTimeout(() => {
+    if (window.activeFilters && window.FILTER_CONFIG) {
+      window.syncCascadingFilters({ pruneInvalid: true });
     }
-    if (OLD.openDrilldown) return OLD.openDrilldown.apply(window, arguments);
-  };
-
-  const oldApplyFiltersForFactReporting = OLD.applyFilters;
-  window.applyFilters = function () {
-    const result = oldApplyFiltersForFactReporting ? oldApplyFiltersForFactReporting.apply(window, arguments) : undefined;
-    window.actFactLastFilterKey = '';
-    if (document.getElementById('tab-reports')?.classList.contains('active')) setTimeout(() => window.renderReports(), 50);
-    return result;
-  };
-
-  const oldSwitchTabForFactReporting = OLD.switchTab;
-  window.switchTab = function (id) {
-    const result = oldSwitchTabForFactReporting ? oldSwitchTabForFactReporting.apply(window, arguments) : undefined;
-    if (id === 'reports') setTimeout(() => window.renderReports(), 150);
-    return result;
-  };
-
-  window.forceRefreshFactReporting = async function () {
-    window.actFactLastFilterKey = '';
-    window.actFactRowsRaw = [];
-    await window.renderReports();
-  };
+  }, 1000);
 })();
 
 </script>
