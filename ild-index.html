@@ -969,8 +969,8 @@
     window.dynamicActionSet = []; 
     window.bulkSelectedIds = new Set();
     window.lastPollTime = new Date().toISOString();
-    window.gridPageSize = 100;
-    window.loadedCount = 100;
+    window.gridPageSize = 50;
+    window.loadedCount = 50;
     window.allowedReassign = ["Matt Bleakley", "Anslee Erickson", "Taylor Whitaker", "Vanessa Parette", "Jenny Seltzer", "Bailey Lewis"];
 
     window.reportsDirty = true;
@@ -1621,7 +1621,7 @@ window.resetDateSlider = function() {
         document.getElementById('account-list-container').addEventListener('scroll', function() {
             if (this.scrollTop + this.clientHeight >= this.scrollHeight - 150) {
                 if (window.loadedCount < window.listDisplayAccounts.length) {
-                    window.loadedCount += 100;
+                    window.loadedCount += 50;
                     window.renderAccountList(false, true); 
                 }
             }
@@ -2393,14 +2393,14 @@ window.updateFilterState = function(colId, checkbox) {
             });
             
             if (!appendMode) {
-                window.loadedCount = 100;
+                window.loadedCount = 50;
                 if(container) container.scrollTop = 0;
             } else {
                 appendMode = false;
             }
         }
 
-        const toLoad = window.listDisplayAccounts.slice(appendMode ? window.loadedCount - 100 : 0, window.loadedCount);
+        const toLoad = window.listDisplayAccounts.slice(appendMode ? window.loadedCount - 50 : 0, window.loadedCount);
         const total = window.listDisplayAccounts.length;
         const showing = Math.min(window.loadedCount, total);
 
@@ -7430,6 +7430,482 @@ input[type="date"]::-webkit-calendar-picker-indicator{opacity:1!important;cursor
 }
 </style>
 <!-- === END HOTFIX === -->
+
+
+
+<!-- === COPILOT HOTFIX 2026-05-13: Scope-driven filters, 50-row virtualized tables, live dataset counts === -->
+<style id="copilot-manager-console-hotfix-css">
+  /* Remove the old multi-filter feel while keeping Rep Name + Action functional. */
+  #horizontal-filters .filters-top-row > .flex.items-center.gap-2.text-\[10px\] {
+    font-size: 0 !important;
+    margin-right: .25rem !important;
+  }
+  #horizontal-filters .filters-top-row > .flex.items-center.gap-2.text-\[10px\] i { font-size: 10px !important; }
+  #horizontal-filters .filters-top-row > .flex.items-center.gap-2.text-\[10px\]::after {
+    content: "Filters";
+    font-size: 10px;
+    margin-left: .35rem;
+  }
+  #ms-wrap-cr714_managerassigned,
+  #ms-wrap-cr714_srmanager,
+  #ms-wrap-cr714_supervisors,
+  #ms-wrap-cr714_departmentname,
+  #ms-wrap-statecode { display:none !important; }
+  #active-filter-subtitle { display:none !important; }
+  #loader-dataset-counts {
+    margin-top: .75rem;
+    width: min(520px, 92vw);
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0,1fr));
+    gap: .4rem;
+  }
+  .loader-dataset-pill {
+    display:flex; align-items:center; justify-content:space-between; gap:.5rem;
+    padding:.45rem .65rem; border:1px solid var(--border-color); border-radius:999px;
+    background:var(--bg-card); color:var(--text-main); font-size:10px; font-weight:900;
+    text-transform:uppercase; letter-spacing:.04em;
+  }
+  .loader-dataset-pill span:last-child { color:var(--primary); font-variant-numeric: tabular-nums; }
+  .act-card-source-rail {
+    position:absolute; left:.45rem; top:2.05rem; display:flex; flex-direction:column; gap:.25rem;
+    max-width:42px; z-index:9; pointer-events:none;
+  }
+  .act-card-source-rail .badge-ds { text-align:center; min-width:34px; padding:2px 4px; }
+  .list-item .pl-6 { padding-left:3.15rem !important; }
+  .act-virtual-more-row td {
+    text-align:center !important; color:var(--text-muted); font-weight:900; text-transform:uppercase;
+    letter-spacing:.08em; font-size:10px; background:var(--bg-header) !important;
+  }
+</style>
+<script id="copilot-manager-console-hotfix-js">
+(function(){
+  if (window.__COPILOT_MANAGER_CONSOLE_HOTFIX_20260513__) return;
+  window.__COPILOT_MANAGER_CONSOLE_HOTFIX_20260513__ = true;
+  window.ACT_PAGE_SIZE = 50;
+  window.gridPageSize = 50;
+  window.loadedCount = 50;
+
+  const DATASET_META = {
+    cr714_accountmanagementdatasets: { label: 'Account Management', abbr: 'AM', cls: 'badge-am' },
+    cr714_cadencedatasets: { label: 'Cadence', abbr: 'CAD', cls: 'badge-cad' },
+    cr714_prospectingdatasets: { label: 'Prospecting', abbr: 'PRO', cls: 'badge-pro' },
+    cr714_louisebrowndatasets: { label: 'Louise Brown', abbr: 'LB', cls: 'badge-lb' },
+    AM: { label: 'Account Management', abbr: 'AM', cls: 'badge-am' },
+    Cadence: { label: 'Cadence', abbr: 'CAD', cls: 'badge-cad' },
+    Prospecting: { label: 'Prospecting', abbr: 'PRO', cls: 'badge-pro' },
+    'Louise Brown': { label: 'Louise Brown', abbr: 'LB', cls: 'badge-lb' }
+  };
+  window.__datasetLoadCounts = window.__datasetLoadCounts || {};
+
+  function esc(v){ return String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+  function metaFor(src){ return DATASET_META[src.table] || DATASET_META[src.type] || { label: src.type || src.table || 'Dataset', abbr: String(src.type || 'DS').slice(0,3).toUpperCase(), cls: 'badge-cad' }; }
+  function ensureLoaderDatasetPanel(){
+    const loader = document.getElementById('global-loader');
+    if (!loader) return null;
+    let panel = document.getElementById('loader-dataset-counts');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'loader-dataset-counts';
+      const count = document.getElementById('loader-count');
+      if (count && count.parentNode) count.parentNode.insertBefore(panel, count.nextSibling);
+      else loader.appendChild(panel);
+    }
+    return panel;
+  }
+  function renderDatasetCounts(){
+    const panel = ensureLoaderDatasetPanel();
+    if (!panel) return;
+    const order = ['cr714_accountmanagementdatasets','cr714_cadencedatasets','cr714_prospectingdatasets','cr714_louisebrowndatasets'];
+    panel.innerHTML = order.map(t => {
+      const m = DATASET_META[t];
+      const n = window.__datasetLoadCounts[t] || 0;
+      return `<div class="loader-dataset-pill"><span>${esc(m.label)}</span><span>${n.toLocaleString()} resolved</span></div>`;
+    }).join('');
+  }
+
+  const originalUpdateLoader = window.updateLoader;
+  window.updateLoader = function(pct, text, count){
+    if (originalUpdateLoader) originalUpdateLoader.call(this, pct, text, count);
+    renderDatasetCounts();
+  };
+
+  function dedupeMergedSources(){
+    (window.mergedAccounts || []).forEach(a => {
+      const seen = new Set();
+      a.sources = (a.sources || []).filter(s => {
+        const m = metaFor(s);
+        const key = `${m.abbr}|${s.id || ''}|${s.table || ''}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    });
+  }
+  window.dedupeMergedSources = dedupeMergedSources;
+
+  const originalFetchPaginatedData = window.fetchPaginatedData;
+  if (originalFetchPaginatedData) {
+    window.fetchPaginatedData = async function(table, selectStr, token, globalAccountMap, typeLabel){
+      window.__datasetLoadCounts[table] = 0;
+      renderDatasetCounts();
+      const before = window.totalLoadedRecords || 0;
+      const result = await originalFetchPaginatedData.apply(this, arguments);
+      const after = window.totalLoadedRecords || 0;
+      // The original loader updates per page; this summarizes resolved rows per display table.
+      window.__datasetLoadCounts[table] = Math.max(window.__datasetLoadCounts[table] || 0, after - before);
+      renderDatasetCounts();
+      return result;
+    };
+  }
+
+  const originalFetchAllData = window.fetchAllData;
+  if (originalFetchAllData) {
+    window.fetchAllData = async function(){
+      window.__datasetLoadCounts = {};
+      renderDatasetCounts();
+      const result = await originalFetchAllData.apply(this, arguments);
+      dedupeMergedSources();
+      renderDatasetCounts();
+      return result;
+    };
+  }
+
+  // Keep the full scope/home filter model intact, but remove old bar controls except Rep Name + Action + Reset.
+  const originalBuildFilters = window.buildFilters;
+  if (originalBuildFilters) {
+    window.buildFilters = function(){
+      originalBuildFilters.apply(this, arguments);
+      ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','statecode'].forEach(id => {
+        const el = document.getElementById(`ms-wrap-${id}`);
+        if (el) el.style.display = 'none';
+      });
+      ['cr714_employeename','action'].forEach(id => {
+        const el = document.getElementById(`ms-wrap-${id}`);
+        if (el) el.style.display = '';
+      });
+      const subtitle = document.getElementById('active-filter-subtitle');
+      if (subtitle) subtitle.style.display = 'none';
+    };
+  }
+
+  // Dataset abbreviations on the left card rail, with one badge per dataset abbreviation.
+  function hydrateCardBadges(){
+    const accounts = new Map((window.listDisplayAccounts || []).map(a => [String(a.cr714_id), a]));
+    document.querySelectorAll('#account-list-container .list-item[id^="card-"]').forEach(card => {
+      const accountId = card.id.replace(/^card-/, '');
+      const acct = accounts.get(accountId);
+      if (!acct) return;
+      card.querySelectorAll('.act-card-source-rail').forEach(x => x.remove());
+      const unique = new Map();
+      (acct.sources || []).forEach(s => { const m = metaFor(s); if (!unique.has(m.abbr)) unique.set(m.abbr, m); });
+      if (!unique.size) return;
+      const rail = document.createElement('div');
+      rail.className = 'act-card-source-rail';
+      rail.innerHTML = Array.from(unique.values()).map(m => `<span class="badge-ds ${m.cls}" title="${esc(m.label)}">${esc(m.abbr)}</span>`).join('');
+      card.appendChild(rail);
+      // Remove old right-side duplicates from the generated markup.
+      const oldBadgeWraps = Array.from(card.querySelectorAll('.badge-ds')).filter(b => !rail.contains(b)).map(b => b.parentElement);
+      oldBadgeWraps.forEach(w => { if (w && w.querySelectorAll('.badge-ds').length) w.remove(); });
+    });
+  }
+
+  const originalRenderAccountList = window.renderAccountList;
+  if (originalRenderAccountList) {
+    window.renderAccountList = function(fullRefresh = true, appendMode = false){
+      window.gridPageSize = 50;
+      if (!appendMode && window.loadedCount > 50 && fullRefresh) window.loadedCount = 50;
+      const out = originalRenderAccountList.apply(this, arguments);
+      dedupeMergedSources();
+      hydrateCardBadges();
+      const total = (window.listDisplayAccounts || []).length;
+      const showing = Math.min(window.loadedCount || 50, total);
+      const scrollInfo = document.getElementById('grid-page-text');
+      if (scrollInfo) scrollInfo.innerHTML = showing < total ? `Showing ${showing} of ${total} <span class="opacity-50 lowercase ml-1">(scroll for more)</span>` : `Showing all ${total}`;
+      return out;
+    };
+  }
+
+  // 50-row virtualizer for reporting/drilldown/reassign tables. It keeps all rows in the DOM, revealing more on scroll.
+  function virtualizeTable(tableId, reset = false){
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    const tbody = table.tBodies && table.tBodies[0];
+    if (!tbody) return;
+    const rows = Array.from(tbody.querySelectorAll('tr')).filter(r => !r.classList.contains('act-virtual-more-row'));
+    if (reset || !table.dataset.actVisibleRows) table.dataset.actVisibleRows = String(window.ACT_PAGE_SIZE);
+    let visible = parseInt(table.dataset.actVisibleRows || window.ACT_PAGE_SIZE, 10);
+    if (Number.isNaN(visible) || visible < window.ACT_PAGE_SIZE) visible = window.ACT_PAGE_SIZE;
+    rows.forEach((r, i) => { r.style.display = i < visible ? '' : 'none'; });
+    tbody.querySelectorAll('.act-virtual-more-row').forEach(r => r.remove());
+    if (visible < rows.length) {
+      const colspan = Math.max(1, (table.tHead && table.tHead.rows[0] ? table.tHead.rows[0].cells.length : (rows[0] ? rows[0].cells.length : 1)));
+      const more = document.createElement('tr');
+      more.className = 'act-virtual-more-row';
+      more.innerHTML = `<td colspan="${colspan}">Showing ${visible.toLocaleString()} of ${rows.length.toLocaleString()} — scroll for more</td>`;
+      tbody.appendChild(more);
+    }
+  }
+  window.applyACTTableVirtualization = function(reset = false){
+    ['scorecard-table','actions-table','engagement-table','monthly-table','dd-table','reassign-preview-table'].forEach(id => virtualizeTable(id, reset));
+  };
+  function loadMoreForContainer(container){
+    const table = container.querySelector && container.querySelector('table');
+    if (!table) return;
+    const tbody = table.tBodies && table.tBodies[0];
+    if (!tbody) return;
+    const rows = Array.from(tbody.querySelectorAll('tr')).filter(r => !r.classList.contains('act-virtual-more-row'));
+    let visible = parseInt(table.dataset.actVisibleRows || window.ACT_PAGE_SIZE, 10);
+    if (visible >= rows.length) return;
+    table.dataset.actVisibleRows = String(Math.min(visible + window.ACT_PAGE_SIZE, rows.length));
+    virtualizeTable(table.id, false);
+  }
+  document.addEventListener('scroll', function(e){
+    const el = e.target;
+    if (!el || !el.classList) return;
+    if ((el.classList.contains('table-container') || el.id === 'report-scroll-container') && el.scrollTop + el.clientHeight >= el.scrollHeight - 120) {
+      if (el.id === 'report-scroll-container') el.querySelectorAll('.table-container').forEach(loadMoreForContainer);
+      else loadMoreForContainer(el);
+    }
+  }, true);
+
+  const originalRenderReports = window.renderReports;
+  if (originalRenderReports) {
+    window.renderReports = function(){
+      const out = originalRenderReports.apply(this, arguments);
+      window.applyACTTableVirtualization(true);
+      return out;
+    };
+  }
+  const originalOpenDrilldown = window.openDrilldown;
+  if (originalOpenDrilldown) {
+    window.openDrilldown = function(){
+      const out = originalOpenDrilldown.apply(this, arguments);
+      window.applyACTTableVirtualization(true);
+      return out;
+    };
+  }
+
+  // Add Action dropdown column to the reassignment preview.
+  function hydrateReassignActionColumn(){
+    const table = document.getElementById('reassign-preview-table');
+    if (!table) return;
+    const headRow = table.tHead && table.tHead.rows[0];
+    if (headRow && !headRow.querySelector('[data-act-reassign-action-head]')) {
+      const th = document.createElement('th');
+      th.className = 'py-2 px-3';
+      th.dataset.actReassignActionHead = '1';
+      th.textContent = 'Action';
+      headRow.insertBefore(th, headRow.cells[3] || null);
+    }
+    const actions = [''].concat(window.dynamicActionSet || []);
+    const body = table.tBodies && table.tBodies[0];
+    if (!body) return;
+    Array.from(body.rows).forEach(row => {
+      if (!row.querySelector('.reassign-row-cb')) {
+        const td = row.cells[0];
+        if (td && td.colSpan && td.colSpan < 6) td.colSpan = 6;
+        return;
+      }
+      if (row.querySelector('[data-act-reassign-action-cell]')) return;
+      const cb = row.querySelector('.reassign-row-cb');
+      const accountId = cb && cb.getAttribute('data-id');
+      const acct = (window.teamFilteredAccounts || []).find(a => String(a.cr714_id) === String(accountId));
+      const currentAction = acct ? (acct.action || '') : '';
+      const td = document.createElement('td');
+      td.className = 'py-2 px-3';
+      td.dataset.actReassignActionCell = '1';
+      td.innerHTML = `<select class="reassign-action-select text-[10px] font-black" data-id="${esc(accountId)}">${actions.map(a => `<option value="${esc(a)}" ${a===currentAction?'selected':''}>${a ? esc(a) : '-- Leave Action --'}</option>`).join('')}</select>`;
+      row.insertBefore(td, row.cells[3] || null);
+    });
+    virtualizeTable('reassign-preview-table', true);
+  }
+  const originalPreviewReassignment = window.previewReassignment;
+  if (originalPreviewReassignment) {
+    window.previewReassignment = function(){
+      const out = originalPreviewReassignment.apply(this, arguments);
+      hydrateReassignActionColumn();
+      return out;
+    };
+  }
+
+  // Initial hydration if this hotfix loads after controls already exist.
+  setTimeout(() => {
+    renderDatasetCounts();
+    hydrateCardBadges();
+    window.applyACTTableVirtualization(true);
+  }, 250);
+})();
+</script>
+<!-- === END COPILOT HOTFIX 2026-05-13 === -->
+
+
+
+<!-- === COPILOT HOTFIX 2026-05-13B: true live per-dataset counts + reassign action patch === -->
+<script id="copilot-manager-console-hotfix-js-2">
+(function(){
+  if (window.__COPILOT_MANAGER_CONSOLE_HOTFIX_20260513B__) return;
+  window.__COPILOT_MANAGER_CONSOLE_HOTFIX_20260513B__ = true;
+
+  const DATASET_DISPLAY = {
+    cr714_accountmanagementdatasets: 'Account Management',
+    cr714_cadencedatasets: 'Cadence',
+    cr714_prospectingdatasets: 'Prospecting',
+    cr714_louisebrowndatasets: 'Louise Brown'
+  };
+  function strip(v){ return window.stripJson ? window.stripJson(v) : String(v || ''); }
+  function fmtPhone(v){ return window.formatPhone ? window.formatPhone(v) : (v || '--'); }
+  function setDatasetCount(table, add){
+    window.__datasetLoadCounts = window.__datasetLoadCounts || {};
+    window.__datasetLoadCounts[table] = (window.__datasetLoadCounts[table] || 0) + (add || 0);
+    if (window.updateLoader) window.updateLoader(null, `${DATASET_DISPLAY[table] || table}: ${window.__datasetLoadCounts[table].toLocaleString()} resolved`, window.totalLoadedRecords || 0);
+  }
+
+  // Replace paginated loader so the loader can show each display table count live as each page resolves.
+  window.fetchPaginatedData = async function(table, selectStr, token, globalAccountMap, typeLabel) {
+    window.__datasetLoadCounts = window.__datasetLoadCounts || {};
+    window.__datasetLoadCounts[table] = 0;
+    let url = `${window.DATAVERSE_URL}/${table}?$select=${selectStr},statecode`;
+    const scopedFilter = (window.getScopedODataFilter && window.__ACT_QUERY_SNIPER && window.__ACT_QUERY_SNIPER.active) ? window.getScopedODataFilter(table) : '';
+    if (scopedFilter) url += `&$filter=${encodeURIComponent(scopedFilter)}`;
+    while (url) {
+      const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}`, 'Prefer': 'odata.maxpagesize=5000, odata.include-annotations="OData.Community.Display.V1.FormattedValue"' }});
+      if (!res.ok) break;
+      const data = await res.json();
+      (data.value || []).forEach(r => {
+        const id = r.cr714_accountnum;
+        if (!id) return;
+        const company = r.cr714_accountname || r.cr714_company || r.cr714_acctname || 'Unknown Company';
+        const localRep = r.cr714_rep || r.cr714_retentionrep || r.cr714_repassigned || r.cr714_assignedrep || 'Unassigned';
+        const emailDate = r.cr714_actionemailsent || r.cr714_emailsenttimestamp;
+        const recordId = r.cr714_accountmanagementdatasetid || r.cr714_cadencedatasetid || r.cr714_prospectingdatasetid || r.cr714_louisebrowndatasetid;
+        const contact = r.cr714_namemost || r.cr714_namelatest || '--';
+        const phone = fmtPhone(r.cr714_primaryphone || r.cr714_phone);
+        const email = r.cr714_emailmost || r.cr714_email_latest || r.cr714_emaillatest || '--';
+        const address = r.cr714_billingaddress || r.cr714_address || '--';
+        const createDate = new Date(r.createdon || r.modifiedon || 0);
+        const cleanActionMsg = strip(r.cr714_actionmessage);
+        const cleanManagerNote = strip(r.cr714_managernotes || '');
+        const stCode = r.statecode === 1 ? 'Inactive' : 'Active';
+        if (!globalAccountMap.has(id)) {
+          globalAccountMap.set(id, {
+            cr714_id: id, company,
+            rep: localRep,
+            _latestRepDate: createDate,
+            action: r.cr714_action,
+            message: cleanActionMsg,
+            managerNotes: cleanManagerNote,
+            modifiedon: r.modifiedon,
+            emailDate,
+            contact, phone, email, address,
+            sources: [], isHelp: false, isClose: false, intro: r.cr714_intro || false,
+            helpStatus: '', statecode: stCode, importantInfo: '',
+            _historyLoaded: false, _d365Loaded: false, _introAcknowledged: false
+          });
+        }
+        const existing = globalAccountMap.get(id);
+        if (createDate > existing._latestRepDate) {
+          existing._latestRepDate = createDate;
+          existing.rep = localRep;
+          existing.statecode = stCode;
+        }
+        const srcKey = `${table}|${recordId || ''}|${typeLabel}`;
+        if (!(existing._sourceKeys instanceof Set)) existing._sourceKeys = new Set((existing.sources || []).map(s => `${s.table}|${s.id || ''}|${s.type}`));
+        if (!existing._sourceKeys.has(srcKey)) {
+          existing.sources.push({
+            type: typeLabel, table, id: recordId,
+            rawNotes: r.cr714_notesfr || r.cr714_accountmanagementnotes || r.cr714_qbnotes || r.cr714_prospectingnotes || '',
+            managerNotesRaw: r.cr714_managernotes || '',
+            message: cleanActionMsg,
+            rep: localRep
+          });
+          existing._sourceKeys.add(srcKey);
+        }
+        if (r.modifiedon > existing.modifiedon) existing.modifiedon = r.modifiedon;
+        if (emailDate > existing.emailDate) existing.emailDate = emailDate;
+        if (contact !== '--' && existing.contact === '--') existing.contact = contact;
+        if (phone !== '--' && existing.phone === '--') existing.phone = phone;
+        if (email !== '--' && existing.email === '--') existing.email = email;
+        if (address !== '--' && existing.address === '--') existing.address = address;
+        const rHelp = r['cr714_help@OData.Community.Display.V1.FormattedValue'] || r.cr714_help || r['cr714_recordstatus@OData.Community.Display.V1.FormattedValue'] || r.cr714_recordstatus || '';
+        if (rHelp && rHelp !== 'Clear' && rHelp !== 'Resolved') existing.helpStatus = rHelp;
+        const msgUpper = String(cleanActionMsg || '').toUpperCase();
+        const helpUpper = String(rHelp || '').toUpperCase();
+        if (msgUpper.includes('[HELP REQUEST]') || helpUpper === 'HELP REQUESTED') existing.isHelp = true;
+        if (msgUpper.includes('[CLOSED]') || helpUpper === 'CLOSE REQUESTED') existing.isClose = true;
+        if (r.cr714_action && r.cr714_action !== existing.action) existing.action = r.cr714_action;
+        if (r.cr714_intro) existing.intro = true;
+      });
+      window.totalLoadedRecords += (data.value || []).length;
+      setDatasetCount(table, (data.value || []).length);
+      await new Promise(requestAnimationFrame);
+      url = data['@odata.nextLink'] || null;
+    }
+  };
+
+  // Apply the optional Reassign Action dropdown value during the same batch patch.
+  window.executeBulkReassign = async function() {
+    const execBtn = document.getElementById('btn-execute-reassign');
+    execBtn.disabled = true;
+    execBtn.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-2"></i> Executing Patch...';
+    const targetRep = document.getElementById('reassign-target-rep').value;
+    const checkboxes = document.querySelectorAll('.reassign-row-cb:checked');
+    if (checkboxes.length === 0) {
+      window.showToast && window.showToast('No records selected for reassignment.', 'error');
+      execBtn.disabled = false;
+      execBtn.innerHTML = 'Commit Batch Reassignment';
+      return;
+    }
+    try {
+      const token = await window.getToken();
+      const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'return=representation' };
+      let successCount = 0, failCount = 0, processedCount = 0;
+      const totalToProcess = checkboxes.length;
+      for (let checkbox of checkboxes) {
+        processedCount++;
+        execBtn.innerHTML = `<i class="fas fa-circle-notch fa-spin mr-2"></i> Patching ${processedCount} of ${totalToProcess}...`;
+        const accountId = checkbox.getAttribute('data-id');
+        const datasetType = checkbox.getAttribute('data-type');
+        const account = (window.teamFilteredAccounts || []).find(a => a.cr714_id === accountId);
+        if (!account) { failCount++; continue; }
+        const src = (account.sources || []).find(s => s.type === datasetType);
+        if (!src || !src.id) { failCount++; continue; }
+        const payload = {};
+        if (datasetType === 'AM') payload.cr714_rep = targetRep;
+        else if (datasetType === 'Cadence') payload.cr714_retentionrep = targetRep;
+        else if (datasetType === 'Prospecting') payload.cr714_repassigned = targetRep;
+        else if (datasetType === 'Louise Brown') payload.cr714_assignedrep = targetRep;
+        const actionSelect = document.querySelector(`.reassign-action-select[data-id="${CSS.escape(accountId)}"]`);
+        const newAction = actionSelect ? actionSelect.value : '';
+        if (newAction && newAction !== account.action) payload.cr714_action = newAction;
+        try {
+          const res = await fetch(`${window.DATAVERSE_URL}/${src.table}(${src.id})`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
+          if (res.ok) {
+            successCount++;
+            src.rep = targetRep;
+            if (newAction) account.action = newAction;
+          } else failCount++;
+        } catch (e) { console.error('Fetch error for account', accountId, e); failCount++; }
+      }
+      if (successCount > 0) {
+        window.showToast && window.showToast(`Successfully reassigned ${successCount} records.`, 'success');
+        window.forceRefreshData && window.forceRefreshData();
+      }
+      if (failCount > 0) window.showToast && window.showToast(`Failed to reassign ${failCount} records.`, 'error');
+    } catch (e) {
+      console.error('Reassign Error:', e);
+      window.showToast && window.showToast('An error occurred during reassignment.', 'error');
+    } finally {
+      execBtn.innerHTML = 'Commit Batch Reassignment';
+      execBtn.classList.remove('pulse-multi');
+      const body = document.getElementById('reassign-preview-body');
+      if (body) body.innerHTML = '<tr><td colspan="6" class="text-center py-16 text-muted italic font-bold">Configure parameters and click "Generate Preview" to verify the exact scope of the impact before executing.</td></tr>';
+      const preview = document.getElementById('preview-count');
+      if (preview) preview.innerText = '0 Records';
+    }
+  };
+})();
+</script>
+<!-- === END COPILOT HOTFIX 2026-05-13B === -->
 
 </body>
 </html>
