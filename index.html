@@ -1054,6 +1054,47 @@ window.preloadTemplateImages = async function() {
         return [];
     }
 
+
+    window.fetchD365AccountGuidMap = async function(accountNumbers) {
+        const guidMap = new Map();
+        const ids = Array.from(new Set((accountNumbers || []).map(x => String(x || '').trim()).filter(Boolean)));
+        if (ids.length === 0) return guidMap;
+        let token;
+        try {
+            token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+        } catch (tokenErr) {
+            console.warn("D365 GUID merge lookup skipped; falling back to account number merge.", tokenErr);
+            return guidMap;
+        }
+        const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
+        const chunkSize = 40;
+        for (let i = 0; i < ids.length; i += chunkSize) {
+            const chunk = ids.slice(i, i + chunkSize);
+            try {
+                const values = chunk.map(id => `'${String(id).replace(/'/g, "''")}'`).join(',');
+                const filter = `Microsoft.Dynamics.CRM.In(PropertyName='accountnumber',PropertyValues=[${values}])`;
+                const res = await fetch(`${PRIMARY_CRM_URL}/accounts?$select=accountid,accountnumber&$filter=${encodeURIComponent(filter)}`, { headers });
+                if (!res.ok) throw new Error(`D365 batch GUID lookup failed: ${res.status}`);
+                const data = await res.json();
+                (data.value || []).forEach(acct => {
+                    if (acct.accountnumber && acct.accountid) guidMap.set(String(acct.accountnumber).trim(), String(acct.accountid).toLowerCase());
+                });
+            } catch (batchErr) {
+                console.warn("D365 batch GUID lookup failed; trying individual lookups for this chunk.", batchErr);
+                for (const id of chunk) {
+                    if (guidMap.has(id)) continue;
+                    try {
+                        const escaped = String(id).replace(/'/g, "''");
+                        const res = await fetch(`${PRIMARY_CRM_URL}/accounts?$select=accountid,accountnumber&$filter=accountnumber eq '${escaped}'`, { headers });
+                        if (!res.ok) continue;
+                        const data = await res.json();
+                        if (data.value && data.value.length > 0 && data.value[0].accountid) guidMap.set(String(id).trim(), String(data.value[0].accountid).toLowerCase());
+                    } catch (singleErr) { console.warn(`D365 GUID lookup failed for account ${id}`, singleErr); }
+                }
+            }
+        }
+        return guidMap;
+    };
     window.fetchD365Account = async function(accountId) {
         try {
             let token;
@@ -1110,11 +1151,19 @@ window.preloadTemplateImages = async function() {
             // Sort so we build recordsMap prioritizing AM -> Cadence -> Prospecting -> LB
             allRaw.sort((a,b) => a._priority - b._priority);
 
+
+            // Merge source-list rows by the true D365 account GUID when available.
+            // If the GUID lookup is unavailable, we safely fall back to the existing account-number merge.
+            const uniqueAccountNumbersForGuidMerge = Array.from(new Set(allRaw.map(r => String(r.cr714_accountnum || '').trim()).filter(Boolean)));
+            const d365GuidByAccountNum = await window.fetchD365AccountGuidMap(uniqueAccountNumbersForGuidMerge);
+
             let recordsMap = new Map();
 allRaw.forEach(r => {
                 let type = r._dsType;
-                let id = r.cr714_accountnum;
+                let id = String(r.cr714_accountnum || '').trim();
                 if(!id) return;
+                const d365MergeGuid = d365GuidByAccountNum.get(id) || null;
+                const mergeKey = d365MergeGuid || id;
 
                 let qbNotes = type === 'AM' ? r.cr714_accountmanagementnotes : (type === 'Cadence' ? r.cr714_qbnotes : (type === 'LB' ? r.cr714_notesfr : r.cr714_prospectingnotes));
                 let sTable = type === 'AM' ? 'cr714_accountmanagementdatasets' : (type === 'Cadence' ? 'cr714_cadencedatasets' : (type === 'LB' ? 'cr714_louisebrowndatasets' : 'cr714_prospectingdatasets'));
@@ -1129,7 +1178,7 @@ allRaw.forEach(r => {
                 }
                 // ----------------------------------------
                 
-                let sourceObj = { type: type, table: sTable, id: sId, action: displayAction, rawNotes: qbNotes, message: r.cr714_actionmessage };
+                let sourceObj = { type: type, table: sTable, id: sId, accountNum: id, d365AccountGuid: d365MergeGuid, action: displayAction, rawNotes: qbNotes, message: r.cr714_actionmessage };
 
                
                 // 1. Ignore Dataverse columns completely. Parse the raw note string to find email dates.
@@ -1148,9 +1197,13 @@ allRaw.forEach(r => {
                     }
                 }
 
-                if(recordsMap.has(id)) {
-                    let existing = recordsMap.get(id);
+                if(recordsMap.has(mergeKey)) {
+                    let existing = recordsMap.get(mergeKey);
                     existing.sources.push(sourceObj);
+                    if (!existing.cr714_linkedaccountnums) existing.cr714_linkedaccountnums = [String(existing.cr714_id)];
+                    if (!existing.cr714_linkedaccountnums.includes(String(id))) existing.cr714_linkedaccountnums.push(String(id));
+                    if (d365MergeGuid && !existing.cr714_d365accountid) existing.cr714_d365accountid = d365MergeGuid;
+                    duplicateRecordIds.add(String(existing.cr714_id));
                     duplicateRecordIds.add(String(id)); 
                     
                     // 2. If this duplicate list has an even newer email note, overwrite the old one
@@ -1177,11 +1230,14 @@ allRaw.forEach(r => {
                         cr714_followup: r.cr714_followup || r.cr714_followupdate,
                         cr714_actionemailsent: newestEmailDate, // 3. Push the mined date into the gallery card
                         cr714_intro: r.cr714_intro || '',
+                        cr714_d365accountid: d365MergeGuid,
+                        cr714_mergekey: mergeKey,
+                        cr714_linkedaccountnums: [String(id)],
                         sources: [sourceObj],
                         primaryType: type,
                         source_dataset_type: type
                     };
-                    recordsMap.set(id, mapped);
+                    recordsMap.set(mergeKey, mapped);
                 }
             });
 
@@ -2262,7 +2318,7 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
             currentAccountGuid = null; // Reset for new account
             const d365Acct = await window.fetchD365Account(id);
             if (d365Acct) {
-                currentAccountGuid = d365Acct.accountid; // Capture the hidden D365 GUID
+                currentAccountGuid = d365Acct.accountid || currentSelectedRecord.cr714_d365accountid; // Capture the hidden D365 GUID
                 const pc = d365Acct.primarycontactid || {};
                 const setVal = (elId, val) => { const el=document.getElementById(elId); if(el && val) el.value = val; };
                 
