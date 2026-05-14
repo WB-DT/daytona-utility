@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. v5.14.26.1157</title>
+    <title>A.C.T. v4.29.26.1151</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -1054,47 +1054,6 @@ window.preloadTemplateImages = async function() {
         return [];
     }
 
-
-    window.fetchD365AccountGuidMap = async function(accountNumbers) {
-        const guidMap = new Map();
-        const ids = Array.from(new Set((accountNumbers || []).map(x => String(x || '').trim()).filter(Boolean)));
-        if (ids.length === 0) return guidMap;
-        let token;
-        try {
-            token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
-        } catch (tokenErr) {
-            console.warn("D365 GUID merge lookup skipped; falling back to account number merge.", tokenErr);
-            return guidMap;
-        }
-        const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
-        const chunkSize = 40;
-        for (let i = 0; i < ids.length; i += chunkSize) {
-            const chunk = ids.slice(i, i + chunkSize);
-            try {
-                const values = chunk.map(id => `'${String(id).replace(/'/g, "''")}'`).join(',');
-                const filter = `Microsoft.Dynamics.CRM.In(PropertyName='accountnumber',PropertyValues=[${values}])`;
-                const res = await fetch(`${PRIMARY_CRM_URL}/accounts?$select=accountid,accountnumber&$filter=${encodeURIComponent(filter)}`, { headers });
-                if (!res.ok) throw new Error(`D365 batch GUID lookup failed: ${res.status}`);
-                const data = await res.json();
-                (data.value || []).forEach(acct => {
-                    if (acct.accountnumber && acct.accountid) guidMap.set(String(acct.accountnumber).trim(), String(acct.accountid).toLowerCase());
-                });
-            } catch (batchErr) {
-                console.warn("D365 batch GUID lookup failed; trying individual lookups for this chunk.", batchErr);
-                for (const id of chunk) {
-                    if (guidMap.has(id)) continue;
-                    try {
-                        const escaped = String(id).replace(/'/g, "''");
-                        const res = await fetch(`${PRIMARY_CRM_URL}/accounts?$select=accountid,accountnumber&$filter=accountnumber eq '${escaped}'`, { headers });
-                        if (!res.ok) continue;
-                        const data = await res.json();
-                        if (data.value && data.value.length > 0 && data.value[0].accountid) guidMap.set(String(id).trim(), String(data.value[0].accountid).toLowerCase());
-                    } catch (singleErr) { console.warn(`D365 GUID lookup failed for account ${id}`, singleErr); }
-                }
-            }
-        }
-        return guidMap;
-    };
     window.fetchD365Account = async function(accountId) {
         try {
             let token;
@@ -1151,19 +1110,11 @@ window.preloadTemplateImages = async function() {
             // Sort so we build recordsMap prioritizing AM -> Cadence -> Prospecting -> LB
             allRaw.sort((a,b) => a._priority - b._priority);
 
-
-            // Merge source-list rows by the true D365 account GUID when available.
-            // If the GUID lookup is unavailable, we safely fall back to the existing account-number merge.
-            const uniqueAccountNumbersForGuidMerge = Array.from(new Set(allRaw.map(r => String(r.cr714_accountnum || '').trim()).filter(Boolean)));
-            const d365GuidByAccountNum = await window.fetchD365AccountGuidMap(uniqueAccountNumbersForGuidMerge);
-
             let recordsMap = new Map();
 allRaw.forEach(r => {
                 let type = r._dsType;
-                let id = String(r.cr714_accountnum || '').trim();
+                let id = r.cr714_accountnum;
                 if(!id) return;
-                const d365MergeGuid = d365GuidByAccountNum.get(id) || null;
-                const mergeKey = d365MergeGuid || id;
 
                 let qbNotes = type === 'AM' ? r.cr714_accountmanagementnotes : (type === 'Cadence' ? r.cr714_qbnotes : (type === 'LB' ? r.cr714_notesfr : r.cr714_prospectingnotes));
                 let sTable = type === 'AM' ? 'cr714_accountmanagementdatasets' : (type === 'Cadence' ? 'cr714_cadencedatasets' : (type === 'LB' ? 'cr714_louisebrowndatasets' : 'cr714_prospectingdatasets'));
@@ -1178,7 +1129,7 @@ allRaw.forEach(r => {
                 }
                 // ----------------------------------------
                 
-                let sourceObj = { type: type, table: sTable, id: sId, accountNum: id, d365AccountGuid: d365MergeGuid, action: displayAction, rawNotes: qbNotes, message: r.cr714_actionmessage };
+                let sourceObj = { type: type, table: sTable, id: sId, action: displayAction, rawNotes: qbNotes, message: r.cr714_actionmessage };
 
                
                 // 1. Ignore Dataverse columns completely. Parse the raw note string to find email dates.
@@ -1197,13 +1148,9 @@ allRaw.forEach(r => {
                     }
                 }
 
-                if(recordsMap.has(mergeKey)) {
-                    let existing = recordsMap.get(mergeKey);
+                if(recordsMap.has(id)) {
+                    let existing = recordsMap.get(id);
                     existing.sources.push(sourceObj);
-                    if (!existing.cr714_linkedaccountnums) existing.cr714_linkedaccountnums = [String(existing.cr714_id)];
-                    if (!existing.cr714_linkedaccountnums.includes(String(id))) existing.cr714_linkedaccountnums.push(String(id));
-                    if (d365MergeGuid && !existing.cr714_d365accountid) existing.cr714_d365accountid = d365MergeGuid;
-                    duplicateRecordIds.add(String(existing.cr714_id));
                     duplicateRecordIds.add(String(id)); 
                     
                     // 2. If this duplicate list has an even newer email note, overwrite the old one
@@ -1230,14 +1177,11 @@ allRaw.forEach(r => {
                         cr714_followup: r.cr714_followup || r.cr714_followupdate,
                         cr714_actionemailsent: newestEmailDate, // 3. Push the mined date into the gallery card
                         cr714_intro: r.cr714_intro || '',
-                        cr714_d365accountid: d365MergeGuid,
-                        cr714_mergekey: mergeKey,
-                        cr714_linkedaccountnums: [String(id)],
                         sources: [sourceObj],
                         primaryType: type,
                         source_dataset_type: type
                     };
-                    recordsMap.set(mergeKey, mapped);
+                    recordsMap.set(id, mapped);
                 }
             });
 
@@ -1618,7 +1562,7 @@ window.launchEmailLogic = async function() {
         const cachedScholarCraftTopImg = localStorage.getItem('daytona_img_scholarcraft_top') || "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/Scholarcraft%202026%20Two%20Page%20Promo-images-0.jpg";
     const cachedScholarCraftBottomImg = localStorage.getItem('daytona_img_scholarcraft_bottom') || "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/Scholarcraft%202026%20Two%20Page%20Promo-images-1.jpg";
     const cachedAutoDealerImg = localStorage.getItem('daytona_img_auto_10pct') || "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/WBM%20AUTO%2010PCT%20Off.jpg";
-        const cachedMay10OffImg = localStorage.getItem('daytona_img_may_10off') || "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/10offmaywb.png";
+        const cachedMay10OffImg = localStorage.getItem('daytona_img_may_10off') || "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/wbmay26save10.JPG";
     // Backward-compatible alias so older/leftover references cannot throw ReferenceError.
     const cachedScholarCraftImg = cachedScholarCraftTopImg;
 
@@ -1653,8 +1597,23 @@ window.launchEmailLogic = async function() {
             const firstName = (contactName || "Customer").split(' ')[0] || "Customer";
             const subjectAccountId = currentSelectedRecord?.cr714_id || currentRecordId || "";
             const mayBenefitsList = `<div style="${pStyle}"><strong>Here are some things that you can always expect from us at WB Mason:</strong></div><ul style="margin: 0 0 16px 20px; padding: 0;"><li><strong>Customized pricing</strong> on the products your business actually uses</li><li><strong>Free business delivery</strong>, with no order minimums</li><li><strong>Personal driver, customer service representative, and inside sales representative</strong></li><li><strong>One-stop shopping</strong> for all your workplace products</li></ul>`;
-            subject = `${subjectAccountId} May You Benefit from these Savings!`;
-            body = `${wrapperStart}<div style="${pStyle}">Hi ${firstName},</div><div style="${pStyle}">I’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed so far, I know time can slip by and then you realize you’re out of something you meant to order. What are you in need of today that I can order for you?</div><div style="${pStyle}">I just received a coupon you can use through the end of the month when you checkout online. Are you finding lower prices elsewhere?</div>${mayBenefitsList}${customNotesPlaceholder}<div style="${pStyle} text-align:center; max-width:640px; margin-left:auto; margin-right:auto;"><img src="${cachedMay10OffImg}" width="640" alt="May Savings Coupon" style="display:block; width:640px; max-width:100%; height:auto; border-radius:8px; margin:0 auto;"></div>${signature}${wrapperEnd}`;
+subject = `${subjectAccountId} May You Benefit from these Savings!`;
+body = `${wrapperStart}
+&lt;div style="${pStyle}"&gt;Hi ${firstName},&lt;/div&gt;
+&lt;div style="${pStyle}"&gt;I’m reaching out to see if there’s anything you need before the end of the month. When I was looking at your account recently, I didn’t see any orders placed so far, I know time can slip by and then you realize you’re out of something you meant to order. What are you in need of today that I can order for you?&lt;/div&gt;
+&lt;div style="${pStyle}"&gt;I just received a coupon you can use through the end of the month when you checkout online. Are you finding lower prices elsewhere?&lt;/div&gt;
+
+${mayBenefitsList}
+${customNotesPlaceholder}
+
+&lt;div style="${pStyle} text-align:center; max-width:640px; margin-left:auto; margin-right:auto;"&gt;
+  &lt;a href="https://www.wbmason.com" target="_blank"&gt;
+    &lt;img src="${cachedMay10OffImg}" width="640" alt="May Savings Coupon"
+      style="display:block; width:640px; max-width:100%; height:auto; border-radius:8px; margin:0 auto;"&gt;
+  &lt;/a&gt;
+&lt;/div&gt;
+
+${signature}${wrapperEnd}`;
 
         } else if (template === "Louise Brown 15% Off") { 
             subject = `WB Mason - 15% Off - ${currentSelectedRecord.cr714_id}`; body = `${wrapperStart}<div style="${pStyle}">Hi ${contactName.split(' ')[0]},</div><div style="${pStyle}">My name is ${repName} with W.B. Mason. I am reaching out about the open account your company has with W.B. It looks as though we lost your business. Was it due to price?</div>${benefitsList}<div style="${pStyle}">I have a coupon for 15% off &ndash; is there anything that I can order or price out for you today?</div><div style="${pStyle}">Let me know when you're ready to order and I can get the coupon code over to you or even help place the order for you.</div>${customNotesPlaceholder}${signature}${wrapperEnd}`;
@@ -2318,7 +2277,7 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
             currentAccountGuid = null; // Reset for new account
             const d365Acct = await window.fetchD365Account(id);
             if (d365Acct) {
-                currentAccountGuid = d365Acct.accountid || currentSelectedRecord.cr714_d365accountid; // Capture the hidden D365 GUID
+                currentAccountGuid = d365Acct.accountid; // Capture the hidden D365 GUID
                 const pc = d365Acct.primarycontactid || {};
                 const setVal = (elId, val) => { const el=document.getElementById(elId); if(el && val) el.value = val; };
                 
