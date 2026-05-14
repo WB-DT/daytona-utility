@@ -95,7 +95,7 @@ function today(){const d=new Date();d.setMinutes(d.getMinutes()-d.getTimezoneOff
     .replace(/</g,"&lt;")
     .replace(/>/g,"&gt;")
     .replace(/"/g,"&quot;")
-    .replace(/'/g,"&#39;"));
+    .replace(/'/g,"&#39;");
 }[c]))}function normAcct(v){return String(v??'').trim().toUpperCase()}function normName(v){return String(v??'').trim().toUpperCase().replace(/\s+/g,' ')}function clean(v){const s=String(v??'').trim();return s||null}function rowId(i){return (i.current||i.previous||i).accountNumber||i.accountNumber}function guid(){return crypto.randomUUID?crypto.randomUUID():`batch-${Date.now()}-${Math.random().toString(16).slice(2)}`}function field(r,k){return r?.[CONFIG.fields[k]]??null}function logError(operation,message,dataset='',recordId=''){state.errors.unshift({time:new Date().toISOString(),operation,message,dataset,recordId});state.errors=state.errors.slice(0,200);localStorage.setItem('assignmentErrorLog',JSON.stringify(state.errors));renderErrors()}function renderErrors(){$('errorBody').innerHTML=state.errors.map(e=>`<tr><td>${esc(new Date(e.time).toLocaleString())}</td><td>${esc(e.operation)}</td><td>${esc(e.dataset)}</td><td>${esc(e.recordId)}</td><td>${esc(e.message)}</td></tr>`).join('')||'<tr><td colspan="5" class="small">No errors logged.</td></tr>'}
 function toast(m){$('toast').textContent=m;$('toast').classList.add('show');clearTimeout(toast.t);toast.t=setTimeout(()=>$('toast').classList.remove('show'),3000)}function session(t){$('status').textContent=t}function showScreen(id){['auth','appScreen'].forEach(x=>$(x).classList.remove('active'));$(id).classList.add('active')}function fmt(ms){const s=Math.floor(ms/1000),m=Math.floor(s/60),r=s%60;return`${String(m).padStart(2,'0')}:${String(r).padStart(2,'0')}`}function loadStart(m){state.start=Date.now();$('loadMsg').textContent=m;$('fill').style.width='8%';$('progressPct').textContent='8%';$('progressStage').textContent=m;$('loadList').innerHTML='';$('loading').classList.add('show');state.timer=setInterval(()=>$('elapsed').textContent=`Elapsed: ${fmt(Date.now()-state.start)}`,1000)}function loadStep(m,p){const pct=Math.max(8,Math.min(100,p));$('loadMsg').textContent=m;$('progressStage').textContent=m;$('progressPct').textContent=`${pct}%`;$('fill').style.width=`${pct}%`}function setLoadItem(id,label,count,status='Loaded'){let el=document.getElementById('li_'+id);if(!el){el=document.createElement('div');el.id='li_'+id;el.className='loadItem';$('loadList').appendChild(el)}el.innerHTML=`<span>${label}</span><strong>${count===null?status:Number(count).toLocaleString()+' rows'}</strong>`}function loadStop(){clearInterval(state.timer);$('loading').classList.remove('show')}
 async function token(scope,silent=false){let a=acct;if(!a){const arr=msalInstance.getAllAccounts();if(arr.length)a=arr[0]}try{const r=await msalInstance.acquireTokenSilent({scopes:scope.split(' '),account:a,authority:CONFIG.msal.auth.authority});session('✅ Session OK');return r.accessToken}catch(e){if(silent){session('⚠ Session needs refresh');throw e}const r=await msalInstance.acquireTokenPopup({scopes:scope.split(' '),account:a,authority:CONFIG.msal.auth.authority});session('✅ Session OK');return r.accessToken}}
@@ -296,5 +296,151 @@ renderAll = function(){
   _renderAll();
   setTimeout(showSuggestions,300);
 }
+
+
+// ===== FINAL SMART SYSTEM =====
+let suggestionList=[];
+let suggestionIndex=new Set();
+
+function computeSuggestions(){
+  const rows=filtered(state.queue);
+  const suggestions=[];
+
+  rows.forEach(i=>{
+    const current=d365Rep(i);
+    (i.actRows||[]).forEach(a=>{
+      if(!current) return;
+
+      const mismatch=!a.rep||normName(a.rep)!==normName(current);
+      if(mismatch){
+        const confidence=a.rep?0.9:0.6;
+
+        suggestions.push({
+          acct:rowId(i),
+          item:i,
+          row:a,
+          from:a.rep||'—',
+          to:current,
+          confidence
+        });
+      }
+    });
+  });
+
+  suggestionList=suggestions;
+  suggestionIndex=new Set(suggestions.filter(s=>s.confidence>=0.9).map(s=>s.acct));
+  return suggestions;
+}
+
+function applyHighConfidence(){
+  computeSuggestions();
+  const high=suggestionList.filter(s=>s.confidence>=0.9);
+
+  high.forEach(s=>{
+    const body={};
+    body[s.row.repField]=s.to;
+    patchAct(s.row,body,null).catch(()=>{});
+  });
+
+  toast(`Applied ${high.length} high-confidence suggestions`);
+}
+
+function applySuggestionByAcct(acct){
+  const item=byAcct(acct);
+  if(!item) return;
+
+  const rep=d365Rep(item);
+
+  (item.actRows||[]).forEach(a=>{
+    const mismatch=!a.rep||normName(a.rep)!==normName(rep);
+    if(!mismatch) return;
+
+    const body={};
+    body[a.repField]=rep;
+    patchAct(a,body,null).catch(()=>{});
+  });
+
+  toast(`Applied ${acct}`);
+}
+
+function previewImpact(){
+  computeSuggestions();
+  const grouped={};
+
+  suggestionList.forEach(s=>{
+    if(!grouped[s.to]) grouped[s.to]=0;
+    grouped[s.to]++;
+  });
+
+  const html=Object.entries(grouped).map(([rep,count])=>
+    `<div><strong>${rep}</strong>: ${count}</div>`
+  ).join('');
+
+  let modal=document.getElementById('previewModal');
+  if(!modal){
+    modal=document.createElement('div');
+    modal.id='previewModal';
+    modal.className='modal show';
+    modal.innerHTML=`<div class='modalCard'><div class='modalHead'><h2>Impact Preview</h2></div><div class='modalBody'>${html}</div></div>`;
+    document.body.appendChild(modal);
+    modal.onclick=()=>modal.remove();
+  }
+}
+
+function showSuggestions(){
+  const list=computeSuggestions();
+  let box=document.getElementById('suggestPanel');
+
+  if(!list.length){ if(box)box.remove(); return; }
+
+  if(!box){
+    box=document.createElement('div');
+    box.id='suggestPanel';
+    box.style.position='fixed';
+    box.style.right='16px';
+    box.style.top='100px';
+    box.style.width='300px';
+    box.style.background='var(--panel)';
+    box.style.border='1px solid var(--line)';
+    box.style.borderRadius='14px';
+    box.style.padding='12px';
+    box.style.zIndex='200';
+    box.style.maxHeight='55vh';
+    box.style.overflow='auto';
+    document.body.appendChild(box);
+  }
+
+  const grouped={};
+  list.forEach(s=>{
+    if(!grouped[s.to]) grouped[s.to]=[];
+    grouped[s.to].push(s);
+  });
+
+  box.innerHTML=`
+    <div style="display:flex;justify-content:space-between">
+      <strong>Suggestions (${list.length})</strong>
+    </div>
+    <div style="display:flex;gap:6px;margin:8px 0">
+      <button onclick="applyHighConfidence()">Apply High</button>
+      <button onclick="previewImpact()">Preview</button>
+    </div>
+    ${Object.entries(grouped).map(([rep,items])=>`
+      <div style="margin-top:8px">
+        <strong>${rep}</strong> (${items.length})
+        ${items.slice(0,5).map(s=>`
+          <div class='small'>${s.acct} (${Math.round(s.confidence*100)}%)
+          <button onclick="applySuggestionByAcct('${s.acct}')">Apply</button>
+          </div>
+        `).join('')}
+      </div>
+    `).join('')}
+  `;
+}
+
+const __oldRenderAll=renderAll;
+renderAll=function(){
+  __oldRenderAll();
+  requestAnimationFrame(showSuggestions);
+};
 
 </script></body></html>
