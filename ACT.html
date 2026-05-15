@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. v5.14.26.1446</title>
+    <title>A.C.T. v5.15.26.818</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -375,8 +375,69 @@
         let log = []; try { log = JSON.parse(localStorage.getItem('daytona_audit_log') || '[]'); } catch(e) {} 
         let compName = currentSelectedRecord ? currentSelectedRecord.cr714_company : 'Unknown Company';
         log.push({ timestamp: new Date().toISOString(), recordId: currentRecordId || 'N/A', companyName: compName, type: type, details: details }); 
-        localStorage.setItem('daytona_audit_log', JSON.stringify(log)); window.updateStats(); 
+        localStorage.setItem('daytona_audit_log', JSON.stringify(log)); window.updateStats(); if (window.recordActFactActivity && !/\[Email Sent\]|\[Email Drafted/i.test(String(details || ''))) { window.recordActFactActivity(type, { details: details, noteText: details }); } 
     }
+
+    
+
+    // --- ACT FACT TABLE SILENT ACTIVITY + LINK LOGGING ---
+    const ACT_FACT_ENTITY_SET = "cr714_dt_act_fctbls";
+    window.factBoolString = function(v){ return v ? 'True' : 'False'; };
+    window.stripForFactTable = function(v){ if(!v) return ''; try{ const d=document.createElement('div'); d.innerHTML=String(v).replace(/<br\s*[\/]?>/gi,'\n').replace(/<\/p>/gi,'\n'); return (d.textContent||d.innerText||'').replace(/[\r\t]+/g,' ').replace(/\n\s*\n+/g,'\n').trim(); }catch(e){ return String(v).replace(/<[^>]+>/g,' ').replace(/\s\s+/g,' ').trim(); } };
+    window.getFactDateParts = function(dateValue=new Date()){ const d=new Date(dateValue); const x=!isNaN(d.getTime())?d:new Date(); const yyyy=x.getFullYear(), mm=String(x.getMonth()+1).padStart(2,'0'), dd=String(x.getDate()).padStart(2,'0'); return {iso:x.toISOString(), dateOnly:`${yyyy}-${mm}-${dd}`, month:`${yyyy}-${mm}`, text:x.toLocaleString()}; };
+    window.getPrimarySourceForFact = function(){ return (currentSelectedRecord?.sources && currentSelectedRecord.sources.length>0) ? currentSelectedRecord.sources[0] : {}; };
+    window.parseFactTags = function(raw){ const t=String(raw||''); const m=t.match(/{{METADATA:([\s\S]*?)}}/i); const meta={raw:m?m[0]:'',loc:'',dm:'',comp:'',opp:'',intro:''}; if(m&&m[1]) m[1].split(/\n|\r/).forEach(p=>{ const i=p.indexOf('='); if(i<0)return; const k=p.slice(0,i).trim().toLowerCase(), v=p.slice(i+1).trim(); if(k==='loc')meta.loc=v; if(k==='dm')meta.dm=v; if(k==='comp')meta.comp=v; if(k==='opp')meta.opp=v; if(k==='intro')meta.intro=v; }); return {list:(t.match(/\[List:\s*([^|\]]+)/i)||[])[1]||'', acct:(t.match(/Account:\s*([^|\]]+)/i)||[])[1]||'', action:(t.match(/Action:\s*([^\]]+)/i)||[])[1]||'', meta}; };
+    window.buildActFactPayload = function(activityType, options={}){
+        const rec=currentSelectedRecord||{}, src=options.source||window.getPrimarySourceForFact(), parts=window.getFactDateParts(options.activityDate||new Date());
+        const raw=options.noteRaw||options.noteText||options.details||'', tags=window.parseFactTags(raw), meta=tags.meta;
+        const isEmail=!!(options.isEmailActivity||/email/i.test(activityType||'')||/\[Email/i.test(raw||''));
+        const hasMgr=!!String(rec.cr714_managernotes||'').trim(), hasImp=!!String(rec.cr714_importantaccountinformation||'').trim();
+        const intro=rec.cr714_intro||meta.intro||'', hasIntro=!!String(intro).trim();
+        const account=String(options.accountNumber||rec.cr714_id||currentRecordId||tags.acct||'');
+        const effectiveAction=options.effectiveAction||tags.action||rec.cr714_action||src.action||'No Action';
+        const opp=options.effectiveOpportunityType||meta.opp||document.getElementById('opp-type-select')?.value||'';
+        const subject=options.emailSubject||document.getElementById('email-modal-subject')?.value||'';
+        const emailBody=options.emailBody||document.getElementById('email-modal-body')?.innerHTML||'';
+        const template=options.emailTemplate||document.getElementById('email-template-dropdown')?.value||'';
+        const sourceType=options.sourceType||rec.primaryType||src.type||rec.source_dataset_type||'';
+        return {
+            cr714_activitynaturalkey: options.activityNaturalKey||[account,activityType||'Activity',parts.iso,Math.random().toString(36).slice(2,8)].filter(Boolean).join('|'),
+            cr714_accountfromnotetag: tags.acct||account, cr714_accountnumber: account, cr714_accountrep: options.accountRep||rec.cr714_rep||currentUserRepName||'',
+            cr714_action: rec.cr714_action||src.action||'No Action', cr714_actionemailsentdate: rec.cr714_actionemailsent||(isEmail?parts.iso:null), cr714_actionfromnotetag: tags.action||effectiveAction, cr714_actionmessage: options.actionMessage||rec.cr714_actionmessage||src.message||'',
+            cr714_activitydate: parts.iso, cr714_activitydateonly: parts.dateOnly, cr714_activitymonth: parts.month, cr714_activitytype: activityType||'Activity',
+            cr714_billingaddress: options.billingAddress||rec.cr714_billingaddress||document.getElementById('d365-address-display')?.innerText||'', cr714_companyname: options.companyName||rec.cr714_company||'', cr714_contactname: options.contactName||document.getElementById('contact-name-most')?.value||rec.cr714_namemost||'',
+            cr714_d365accountid: options.d365AccountId||currentAccountGuid||'', cr714_d365accountname: options.d365AccountName||rec.cr714_company||'', cr714_d365accountnotes: options.d365AccountNotes||'', cr714_d365statecode: options.d365StateCode??null, cr714_d365statuscode: options.d365StatusCode??null,
+            cr714_effectiveaction: effectiveAction, cr714_effectiveopportunitytype: opp, cr714_emailaction: isEmail?(options.emailAction||activityType||'Email'):'', cr714_emailbody: isEmail?window.stripForFactTable(emailBody):'', cr714_emaildate: isEmail?parts.iso:null, cr714_emailstatus: isEmail?(options.emailStatus||(/draft/i.test(activityType||raw)?'Drafted':'Sent')):'', cr714_emailsubject: isEmail?subject:'', cr714_emailtemplate: isEmail?template:'',
+            cr714_followupdate: options.followUpDate||rec.cr714_followup||null,
+            cr714_hasimportantaccountinformation: window.factBoolString(hasImp),
+            cr714_hasintro: window.factBoolString(hasIntro),
+            cr714_hasmanagernotes: window.factBoolString(hasMgr),
+            cr714_importantaccountinformation: rec.cr714_importantaccountinformation||'', cr714_intro: intro, cr714_isemailactivity: window.factBoolString(isEmail), cr714_lastorderdate: rec.cr714_lastorderdate&&rec.cr714_lastorderdate!=='--'?rec.cr714_lastorderdate:null, cr714_listfromnote: tags.list||sourceType, cr714_managernotes: rec.cr714_managernotes||'',
+            cr714_metacompetitor: options.metaCompetitor??meta.comp, cr714_metadatablock: options.metadataBlock??meta.raw, cr714_metadecisionmaker: options.metaDecisionMaker??meta.dm, cr714_metaintro: options.metaIntro??meta.intro, cr714_metalocation: options.metaLocation??meta.loc, cr714_metaopportunitytype: (options.metaOpportunityType??meta.opp)||opp,
+            cr714_notedate: parts.iso, cr714_notedatetext: parts.text, cr714_notesequence: String(options.noteSequence||Date.now()), cr714_notetext: window.stripForFactTable(options.noteText||options.details||raw), cr714_notetextraw: String(raw||''),
+            cr714_primaryemail: options.primaryEmail||document.getElementById('contact-email-most')?.value||rec.cr714_emailmost||'', cr714_primaryphone: options.primaryPhone||document.getElementById('contact-phone-primary')?.value||rec.cr714_primaryphone||'', cr714_priority: options.priority||(hasMgr?'Manager Note':(hasIntro?'Intro':'Normal')), cr714_recordstatus: options.recordStatus||'Active', cr714_repfromnote: options.repFromNote||currentUserRepName||'', cr714_sourcerecordid: options.sourceRecordId||src.id||'', cr714_sourcetable: options.sourceTable||src.table||'', cr714_sourcetype: sourceType,
+            cr714_statecode: String(options.stateCode??0), cr714_statuscode: String(options.statusCode??1)
+        };
+    };
+    window.postActFactPayload = async function(payload){
+        const token=await window.getToken('https://org23279050.crm.dynamics.com//user_impersonation', true);
+        const headers={'Authorization':`Bearer ${token}`,'Content-Type':'application/json'};
+        let working={...payload};
+        const removeReadOnlyAndDisplay=()=>['cr714_dt_act_fctblid','createdon','modifiedon','createdbyname','modifiedbyname','cr714_hasimportantaccountinformationname','cr714_hasintroname','cr714_hasmanagernotesname'].forEach(k=>delete working[k]);
+        removeReadOnlyAndDisplay();
+        for(let attempt=0; attempt<5; attempt++){
+            const res=await fetch(`${DATAVERSE_URL}/${ACT_FACT_ENTITY_SET}`,{method:'POST',headers,body:JSON.stringify(working)});
+            if(res.ok) return true;
+            let errText=''; try{errText=await res.text();}catch(e){}
+            const badProp=(errText.match(/Invalid property '([^']+)'/)||[])[1];
+            if(badProp && working.hasOwnProperty(badProp)){ console.warn('ACT fact table dropping invalid property and retrying:', badProp); delete working[badProp]; continue; }
+            console.warn('ACT fact table silent create failed:',res.status,errText); return false;
+        }
+        return false;
+    };
+    window.recordActFactActivity = async function(activityType, options={}){ try{ if(!currentSelectedRecord&&!currentRecordId&&!options.accountNumber)return false; return await window.postActFactPayload(window.buildActFactPayload(activityType, options)); }catch(e){ console.warn('ACT fact table silent logging error:', e); return false; } };
+    window.logLinkGeneration = function(linkType, url, extraDetails = '') { try { const safeType = linkType || 'External'; const detailText = `${safeType} link generated${extraDetails ? ' | ' + extraDetails : ''} | URL: ${url}`; if (window.saveToAuditLog) window.saveToAuditLog(`${safeType} Link Generated`, detailText); } catch(e) { console.warn('ACT link generation logging failed:', e); } };
+    window.logAndOpenLink = function(linkType, url, target = '_blank', extraDetails = '') { window.logLinkGeneration(linkType, url, extraDetails); window.open(url, target); };
 
     window.fetchWithPolling = async function(url, options) {
         let res = await fetch(url, options);
@@ -604,6 +665,7 @@
         
         // Deep link correctly requests Outlook Online event creation without background Graph scopes
         const url = `https://outlook.office.com/calendar/0/deeplink/compose?subject=${subject}&startdt=${dtStart.toISOString()}&enddt=${dtEnd.toISOString()}&body=${body}`;
+        if (window.saveToAuditLog) window.saveToAuditLog('Calendar Event Link Generated', `Subject: ${decodeURIComponent(subject)} | Start: ${dtStart.toISOString()} | End: ${dtEnd.toISOString()} | URL: ${url}`);
         window.open(url, '_blank');
     };
 
@@ -1011,6 +1073,7 @@ window.preloadTemplateImages = async function() {
     }
 
     window.openSidebarTab = function(id, title, targetUrl) {
+        if (targetUrl && window.logLinkGeneration) window.logLinkGeneration(title || id || 'Sidebar', targetUrl, `Sidebar tab: ${id}`);
         document.getElementById('unified-sidebar').classList.add('active');
         document.body.classList.add('split-screen');
         
@@ -1703,10 +1766,14 @@ ${signature}${wrapperEnd}`;
         let url = `https://outlook.office.com/mail/deeplink/compose?to=${to}&subject=${subject}&body=${body}`;
         if (cc) url += `&cc=${cc}`;
 
+        if (window.logLinkGeneration) window.logLinkGeneration('Outlook Draft', url, `Subject: ${decodeURIComponent(subject)}`);
         window.open(url, '_blank');
 
         const currentActionStamp = currentSelectedRecord && currentSelectedRecord.cr714_action ? currentSelectedRecord.cr714_action : 'No Action';
         const templateStamp = document.getElementById('email-template-dropdown') ? document.getElementById('email-template-dropdown').value : 'Custom';
+        if (window.recordActFactActivity) {
+            window.recordActFactActivity('Email Drafted via Outlook Web', { noteText: `[Email Drafted via Outlook Web] [Action: ${currentActionStamp} | Template: ${templateStamp}] Subject: ${document.getElementById('email-modal-subject').value}`, emailSubject: document.getElementById('email-modal-subject').value, emailBody: document.getElementById('email-modal-body').innerHTML, emailTemplate: templateStamp, emailStatus: 'Drafted', emailAction: currentActionStamp, isEmailActivity: true });
+        }
         window.handleCustomSave(`[Email Drafted via Outlook Web] [Action: ${currentActionStamp} | Template: ${templateStamp}] Subject: ${document.getElementById('email-modal-subject').value}`, true);
         
         document.getElementById('large-attachment-modal').style.display = 'none';
@@ -1856,7 +1923,10 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
             // Cleanup & Tracking             
             const currentActionStamp = currentSelectedRecord && currentSelectedRecord.cr714_action ? currentSelectedRecord.cr714_action : 'No Action';             
             const templateStamp = document.getElementById('email-template-dropdown') ? document.getElementById('email-template-dropdown').value : 'Custom';             
-            await window.handleCustomSave(`[Email Sent] [Action: ${currentActionStamp} | Template: ${templateStamp}] Subject: ${subject}`, true);
+            if (window.recordActFactActivity) {
+            window.recordActFactActivity('Email Sent', { noteText: `[Email Sent] [Action: ${currentActionStamp} | Template: ${templateStamp}] Subject: ${subject}`, emailSubject: subject, emailBody: finalContent, emailTemplate: templateStamp, emailStatus: 'Sent', emailAction: currentActionStamp, isEmailActivity: true });
+        }
+        await window.handleCustomSave(`[Email Sent] [Action: ${currentActionStamp} | Template: ${templateStamp}] Subject: ${subject}`, true);
 
             pendingAttachments = [];
             window.renderAttachmentUI();
@@ -2769,7 +2839,7 @@ window.populateForm = function(rec) {
         KB_ARTICLES.filter(a => a.n.toLowerCase().includes(q) || a.c.toLowerCase().includes(q) || a.d.toLowerCase().includes(q)).forEach(a => {
             const btn = document.createElement('button'); btn.className = 'w-full text-left p-2 border-b hover:bg-black/5 text-sm flex justify-between items-center'; 
             btn.innerHTML = `<div><span class="font-bold text-blue-500 block">${a.n}</span><span class="text-[10px] text-gray-500 truncate block max-w-sm" title="${a.d}">${a.d}</span></div> <span class="text-[9px] px-2 py-1 bg-gray-100 text-gray-600 rounded-full border">${a.c}</span>`;
-            btn.onclick = () => { window.open(`https://wbmasonco.sharepoint.com/sites/WBMasonDaytonaQA/_layouts/15/search.aspx?q=${encodeURIComponent(a.n)}`, '_blank'); document.getElementById('kb-modal').style.display='none'; }; 
+            btn.onclick = () => { window.logAndOpenLink('Knowledge Base Search', `https://wbmasonco.sharepoint.com/sites/WBMasonDaytonaQA/_layouts/15/search.aspx?q=${encodeURIComponent(a.n)}`, '_blank', `Article: ${a.n}`); document.getElementById('kb-modal').style.display='none'; }; 
             list.appendChild(btn);
         });
     }
@@ -2826,6 +2896,9 @@ window.populateForm = function(rec) {
             qbInput.value = historyStamp + (userNotes ? ` | Note: ${userNotes}` : '') + (qbInput.value ? '\n\n' + qbInput.value : '');
             
             // AWAIT the save so it fully processes the note before wiping it
+            if (window.recordActFactActivity) {
+                window.recordActFactActivity('MVGO Link Generated', { noteText: historyStamp + (userNotes ? ` | Note: ${userNotes}` : ''), details: details, effectiveOpportunityType: 'MVGO', priority: 'MVGO' });
+            }
             await window.handleCustomSave(null, true); 
             
             // Clear immediately after saving to reset UI correctly
@@ -3149,11 +3222,11 @@ document.getElementById('script-modal').style.display='flex';
             <span class="font-bold mr-2 uppercase text-muted" style="font-size: 0.65rem;">View:</span>
             
             <select id="sort-dropdown" name="sort" onchange="window.filterAndSortGallery()" class="text-xs w-32 border-none bg-transparent h-8">
-                <option value="company-asc">Sort: Company (A-Z)</option>
-                <option value="company-desc">Sort: Company (Z-A)</option>
-                <option value="followup-asc">Sort: Follow Up (Oldest)</option>
-                <option value="followup-desc">Sort: Follow Up (Newest)</option>
-                <option value="rep-asc">Sort: Rep (A-Z)</option>
+                <option value="company-asc">Company (A-Z)</option>
+                <option value="company-desc">Company (Z-A)</option>
+                <option value="followup-asc">Follow Up (Oldest)</option>
+                <option value="followup-desc">Follow Up (Newest)</option>
+                <option value="rep-asc">Rep (A-Z)</option>
             </select>
 
             <div class="relative custom-dropdown" id="action-filter-container">
@@ -3379,14 +3452,14 @@ document.getElementById('script-modal').style.display='flex';
                             </div>
                             
                             <div class="grid grid-cols-2 gap-2 flex-shrink-0">
-                                <button onclick="window.open('https://go.masonville.com/#/customer/' + currentRecordId, '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-clipboard-list text-status-info"></i> Summary</button>
-                                <button onclick="window.open('https://go.masonville.com/#/report/' + currentRecordId + '/Four%20Month%20Sales', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-file-invoice-dollar text-status-success"></i> Sales</button>
-                                <button onclick="window.open('https://wbmasonco.crm.dynamics.com/main.aspx?appid=9e06e7d4-8616-eb11-a817-000d3a8b6b20&pagetype=search&searchText=' + currentRecordId, '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-headset" style="color: #a855f7;"></i> CSW</button>
-                                <button onclick="window.open('https://www.wbmason.com/', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-shopping-cart text-status-danger"></i> WB Site</button>
-                                <button onclick="window.open('https://www.spradvantage.com/Login/Index?ReturnUrl=%2F', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-truck text-orange-600"></i> SPR</button>
-                                <button onclick="window.open('https://www.iteminfo.com', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-info-circle text-teal-600"></i> ItemInfo</button>
-                                <button onclick="window.open('https://wbmasonco.sharepoint.com/sites/WBMasonDaytonaQA/Knowledge%20Base/Forms/AllItems.aspx', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-book text-cyan-600"></i> KB</button>
-                                <button onclick="window.open('https://e42.ultipro.com/Login.aspx?ReturnUrl=%2f', '_blank')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-id-card text-indigo-600"></i> UltiPro</button>
+                                <button onclick="window.logAndOpenLink('Summary', 'https://go.masonville.com/#/customer/' + currentRecordId)" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-clipboard-list text-status-info"></i> Summary</button>
+                                <button onclick="window.logAndOpenLink('Sales', 'https://go.masonville.com/#/report/' + currentRecordId + '/Four%20Month%20Sales')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-file-invoice-dollar text-status-success"></i> Sales</button>
+                                <button onclick="window.logAndOpenLink('CSW', 'https://wbmasonco.crm.dynamics.com/main.aspx?appid=9e06e7d4-8616-eb11-a817-000d3a8b6b20&pagetype=search&searchText=' + currentRecordId)" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-headset" style="color: #a855f7;"></i> CSW</button>
+                                <button onclick="window.logAndOpenLink('WB Site', 'https://www.wbmason.com/')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-shopping-cart text-status-danger"></i> WB Site</button>
+                                <button onclick="window.logAndOpenLink('SPR', 'https://www.spradvantage.com/Login/Index?ReturnUrl=%2F')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-truck text-orange-600"></i> SPR</button>
+                                <button onclick="window.logAndOpenLink('ItemInfo', 'https://www.iteminfo.com')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-info-circle text-teal-600"></i> ItemInfo</button>
+                                <button onclick="window.logAndOpenLink('Knowledge Base', 'https://wbmasonco.sharepoint.com/sites/WBMasonDaytonaQA/Knowledge%20Base/Forms/AllItems.aspx')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-book text-cyan-600"></i> KB</button>
+                                <button onclick="window.logAndOpenLink('UltiPro', 'https://e42.ultipro.com/Login.aspx?ReturnUrl=%2f')" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate"><i class="fas fa-id-card text-indigo-600"></i> UltiPro</button>
                                 <div class="col-span-2 flex flex-col mt-2">
                                     <button onclick="window.openCallScript()" id="btn-script" class="quick-action-btn py-1 h-8 text-[9px] w-full truncate flex justify-center items-center gap-2 rounded-b-none border-b-0"><i class="fas fa-comment-dots text-pink-500"></i> Call Script</button>
                                 </div>
