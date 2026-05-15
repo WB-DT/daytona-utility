@@ -287,10 +287,80 @@ function renderAll(){renderViewMode();if($('reviewTable').innerHTML==='')tableSh
 function selectedItems(){return [...state.selected].map(byAcct).filter(Boolean)}function isActMoveTarget(a){return !!a&&((a.datasetKey==='am'&&a.repField==='cr714_rep')||(a.datasetKey==='cad'&&a.repField==='cr714_accountrep'))}
 function targetFieldLabel(a){return a?.datasetKey==='cad'?'cr714_accountrep':a?.repField||'rep'}
 
-// ================= MOVE WIZARD UI FLOW (Stepper) + D365 CONTACTS =================
+// ================= MOVE WIZARD UI FLOW (Stepper) + D365 CONTACTS + RESTORE AFTER EDIT (Option B) =================
 const EXCL_KEY = 'actReassignExclusionsV2';
 const INTRO_ACTION = 'Intro';
 const INTRO_MESSAGE = 'This account was move to you automatically, please review the account and introduce yourself';
+
+// --- Restore plumbing (Option B: always restore to Review) ---
+window.__mwRestore = window.__mwRestore || {pending:false, state:null};
+function mwCaptureState(){
+  return {
+    selectedAccounts: [...(state.selected||[])],
+    targetRep: document.getElementById('mwRep')?.value||'',
+    onlyDiff: !!document.getElementById('mwOnlyDiff')?.checked,
+    autoAdd: !!document.getElementById('mwAutoAddIntro')?.checked,
+    overrideAction: document.getElementById('mwOverrideAction')?.value||'',
+    overrideMsg: document.getElementById('mwOverrideMessage')?.value||'',
+    actionSearch: document.getElementById('mwActionSearch')?.value||'',
+    repSearch: document.getElementById('mwRepSearch')?.value||'',
+    acctSearch: document.getElementById('mwAcctSearch')?.value||'',
+    selectedActions: [...(__mw?.selected||[])],
+    hadPreview: !!(__mw?.plan)
+  };
+}
+function mwRestoreState(s){
+  if(!s) return;
+  if(Array.isArray(s.selectedAccounts)) state.selected = new Set(s.selectedAccounts);
+
+  openMoveWizard();
+
+  if(document.getElementById('mwOnlyDiff')) document.getElementById('mwOnlyDiff').checked = !!s.onlyDiff;
+  if(document.getElementById('mwAutoAddIntro')) document.getElementById('mwAutoAddIntro').checked = !!s.autoAdd;
+  if(document.getElementById('mwOverrideAction')) document.getElementById('mwOverrideAction').value = s.overrideAction||'';
+  if(document.getElementById('mwOverrideMessage')) document.getElementById('mwOverrideMessage').value = s.overrideMsg||'';
+
+  if(document.getElementById('mwAcctSearch')){ document.getElementById('mwAcctSearch').value = s.acctSearch||''; renderSelectedAccountsPreview(__mw.items); }
+  if(document.getElementById('mwActionSearch')) document.getElementById('mwActionSearch').value = s.actionSearch||'';
+
+  // Restore actions (intersect with current available)
+  __mw.selected = new Set((s.selectedActions||[]).filter(a=>(__mw.actions||[]).includes(a)));
+  renderActionChecklist(__mw.actions, __mw.selected);
+
+  if(document.getElementById('mwRep')) document.getElementById('mwRep').value = s.targetRep||'';
+  if(document.getElementById('mwRepSearch')){ document.getElementById('mwRepSearch').value = s.repSearch||''; filterRepDropdown(s.repSearch||''); }
+  if(document.getElementById('mwRepMeta')) document.getElementById('mwRepMeta').textContent = (s.targetRep?`Target: ${s.targetRep}`:'—');
+
+  // Always return to Review
+  setMwStep(4);
+  if(s.targetRep){
+    setTimeout(()=>{ try{ buildPreview(); }catch{} }, 80);
+  }
+}
+function mwArmRestoreAndOpenEdit(acct){
+  window.__mwRestore.state = mwCaptureState();
+  window.__mwRestore.pending = true;
+  closeModal('moveWizardModal');
+  openEditor(encodeURIComponent(acct));
+}
+
+// Hook closeModal to restore when Edit closes
+(function(){
+  const orig = window.closeModal;
+  if(typeof orig === 'function' && !orig.__mwWrapped){
+    const wrapped = function(id){
+      orig(id);
+      if(id==='editModal' && window.__mwRestore?.pending){
+        const s = window.__mwRestore.state;
+        window.__mwRestore.pending = false;
+        window.__mwRestore.state = null;
+        setTimeout(()=>mwRestoreState(s), 80);
+      }
+    };
+    wrapped.__mwWrapped = true;
+    window.closeModal = wrapped;
+  }
+})();
 
 function loadExclusions(){
   try{const x=JSON.parse(localStorage.getItem(EXCL_KEY)||'{}')||{};return{actions:(x.actions||[]).map(s=>String(s||'').trim()).filter(Boolean),reps:(x.reps||[]).map(s=>String(s||'').trim()).filter(Boolean)};}catch{return{actions:[],reps:[]};}
@@ -330,7 +400,6 @@ function resetExclusions(){
 }
 
 function listActionsInScope(items){
-  // (2) grouped actions by dataset + count
   const byDataset = {};
   const global = new Map();
   items.forEach(i=>{
@@ -348,7 +417,7 @@ function listActionsInScope(items){
     grouped[ds] = [...map.entries()].map(([action,count])=>({action,count}))
       .sort((x,y)=>y.count-x.count || x.action.localeCompare(y.action,undefined,{sensitivity:'base'}));
   });
-  return {actions, grouped, totals: Object.fromEntries([...global.entries()])};
+  return {actions, grouped};
 }
 
 function datasetBadge(ds){
@@ -363,7 +432,6 @@ function renderActionsGrouped(grouped, selected){
   const host=document.getElementById('mwActionsGrouped');
   if(!host) return;
   const q=(document.getElementById('mwActionSearch')?.value||'').trim().toLowerCase();
-
   const blocks = Object.keys(grouped).sort((a,b)=>a.localeCompare(b,undefined,{sensitivity:'base'})).map(ds=>{
     const rows = grouped[ds].filter(x=>!q || x.action.toLowerCase().includes(q));
     if(!rows.length) return '';
@@ -389,7 +457,6 @@ function renderActionsGrouped(grouped, selected){
         </div>
       </div>`;
   }).join('');
-
   host.innerHTML = blocks || '<div class="small">No actions found for the selected accounts.</div>';
 
   host.querySelectorAll('button[data-ds]').forEach(b=>b.onclick=()=>{
@@ -436,7 +503,6 @@ function filterRepDropdown(q){
   [...mw.options].forEach((o,ix)=>{ if(ix===0) return; o.hidden = query && !o.textContent.toLowerCase().includes(query); });
 }
 
-// (1) Inline account preview helper
 function renderSelectedAccountsPreview(items){
   const q=(document.getElementById('mwAcctSearch')?.value||'').trim().toUpperCase();
   const rows = (items||[]).filter(i=>!q || [rowId(i), cellVal(i,'company'), (i.actRows||[]).map(r=>r.dataset).join(' '), (i.actRows||[]).map(r=>r.action).join(' ')].join(' ').toUpperCase().includes(q));
@@ -449,7 +515,7 @@ function renderSelectedAccountsPreview(items){
       const ds = [...new Set((i.actRows||[]).map(r=>r.dataset))];
       const acts = [...new Set((i.actRows||[]).filter(isActMoveTarget).map(r=>String(r.action||'(blank)')))].slice(0,4);
       const missing = !(i.actRows||[]).length;
-      return `<tr>
+      return `<tr data-acct="${esc(acct)}" style="cursor:pointer">
         <td>${esc(acct)}</td>
         <td title="${esc(company)}">${esc(company)}</td>
         <td>${ds.length?ds.map(datasetBadge).join(' '):'<span class="small">—</span>'}</td>
@@ -457,9 +523,10 @@ function renderSelectedAccountsPreview(items){
         <td class="small">${missing?'Eligible for Intro add':''}</td>
       </tr>`;
     }).join('') || '<tr><td colspan="5" class="small">No matches.</td></tr>';
+    body.querySelectorAll('tr[data-acct]').forEach(tr=>tr.onclick=()=>mwArmRestoreAndOpenEdit(tr.dataset.acct));
   }
   const meta=document.getElementById('mwAcctMeta');
-  if(meta) meta.textContent = `${show.length} shown of ${rows.length} matching (max 50 shown).`;
+  if(meta) meta.textContent = `${show.length} shown of ${rows.length} matching (max 50 shown). Click a row to open Edit (returns to Review).`;
 }
 
 function odataQuote(s){ return "'" + String(s||'').replace(/'/g,"''") + "'"; }
@@ -535,31 +602,6 @@ async function createIntroAMRecord(t, acctNum, targetRep, overrideAction, overri
   }
 }
 
-async function buildMovePlan(items, selectedActions, targetRep, opts){
-  const plan={updates:[], adds:[], skipped:[]};
-  const onlyDiff=!!opts.onlyDiff;
-  const autoAdd=!!opts.autoAdd;
-
-  items.forEach(item=>{
-    const acct=rowId(item);
-    if(!(item.actRows||[]).length){
-      if(autoAdd) plan.adds.push({acct, dataset:'AM', action:INTRO_ACTION, from:'—', to:targetRep, status:'Will add Intro'});
-      else plan.skipped.push({acct, dataset:'—', action:'—', from:'—', to:'—', status:'No ACT rows (auto-add off)'});
-      return;
-    }
-
-    const targets=(item.actRows||[]).filter(isActMoveTarget);
-    targets.forEach(row=>{
-      const actionVal=String(row.action||'(blank)');
-      if(!selectedActions.has(actionVal)) { plan.skipped.push({acct,dataset:row.dataset,action:actionVal,from:row.rep||'—',to:targetRep,status:'Action not selected'}); return; }
-      const exReason=exclusionReason(row);
-      if(exReason){ plan.skipped.push({acct,dataset:row.dataset,action:actionVal,from:row.rep||'—',to:targetRep,status:exReason}); return; }
-      if(onlyDiff && String(row.rep||'')===targetRep){ plan.skipped.push({acct,dataset:row.dataset,action:actionVal,from:row.rep||'—',to:targetRep,status:'Already matching'}); return; }
-      plan.updates.push({acct,dataset:row.dataset,action:actionVal,from:row.rep||'—',to:targetRep,row});
-    });
-  });
-  return plan;
-}
 
 let __mw = {step:1, actions:[], selected:new Set(), grouped:{}, plan:null, items:[]};
 function setMwStep(n){
@@ -568,38 +610,48 @@ function setMwStep(n){
                {id:'mwStepActions',t:'Actions',h:'Select which ACT actions are eligible to move.'},
                {id:'mwStepTarget',t:'Target',h:'Pick the target rep for the move.'},
                {id:'mwStepReview',t:'Review',h:'Generate a preview, then run the move.'}];
-  steps.forEach((s,ix)=>{
-    const el=document.getElementById(s.id);
-    if(!el) return;
-    el.style.display = (ix+1===n) ? 'block' : 'none';
-    if(s.id==='mwStepScope' && ix+1===n) el.style.display='grid';
-  });
+  steps.forEach((s,ix)=>{const el=document.getElementById(s.id); if(!el) return; el.style.display=(ix+1===n)?'block':'none'; if(s.id==='mwStepScope' && ix+1===n) el.style.display='grid';});
   document.getElementById('mwStepNum').textContent=String(n);
   document.getElementById('mwStepTitle').textContent=steps[n-1].t;
   document.getElementById('mwStepHint').textContent=steps[n-1].h;
-  document.getElementById('mwBack').disabled = (n===1);
-  document.getElementById('mwNext').style.display = (n<4)?'inline-flex':'none';
-  document.getElementById('mwRun').style.display = (n===4 && __mw.plan)?'inline-flex':'none';
+  document.getElementById('mwBack').disabled=(n===1);
+  document.getElementById('mwNext').style.display=(n<4)?'inline-flex':'none';
+  document.getElementById('mwRun').style.display=(n===4 && __mw.plan)?'inline-flex':'none';
+}
+
+function renderDatasetTotals(plan){
+  const host=document.getElementById('mwDsTotals');
+  if(!host) return;
+  const updBy={};
+  (plan.updates||[]).forEach(u=>{ const k=u.datasetKey || (String(u.dataset||'').toLowerCase().includes('cad')?'cad':(String(u.dataset||'').toLowerCase().includes('account')?'am':'other')); updBy[k]=(updBy[k]||0)+1; });
+  const addBy={am:(plan.adds||[]).length};
+  const cards=[];
+  const push=(label,val,badge)=>cards.push(`<div class="summaryItem"><span>${badge||''}${label}</span><strong>${Number(val||0).toLocaleString()}</strong></div>`);
+  push('AM updates', updBy.am||0, '<span class="badge bOk">AM</span> ');
+  push('CAD updates', updBy.cad||0, '<span class="badge bCurrent">CAD</span> ');
+  const other = Object.keys(updBy).filter(k=>k!=='am' && k!=='cad').reduce((n,k)=>n+updBy[k],0);
+  if(other) push('Other updates', other, '<span class="badge">DS</span> ');
+  push('AM Intro adds', addBy.am||0, '<span class="badge bNew">Intro</span> ');
+  host.innerHTML = `<div class="grid2" style="grid-template-columns:repeat(2,1fr);gap:12px">${cards.join('')}</div>`;
 }
 
 function renderPreview(plan){
   document.getElementById('mwUpd').textContent=String(plan.updates.length);
   document.getElementById('mwAdd').textContent=String(plan.adds.length);
-  const rows=[...plan.updates.map(x=>({acct:x.acct,dataset:x.dataset,action:x.action,from:x.from,to:x.to,status:'Will update'})),
-              ...plan.adds.map(x=>({acct:x.acct,dataset:x.dataset,action:x.action,from:x.from,to:x.to,status:x.status})),
-              ...plan.skipped.slice(0,60)];
-  document.getElementById('mwPreviewBody').innerHTML = rows.slice(0,120).map(r=>`<tr><td>${esc(r.acct)}</td><td>${esc(r.dataset)}</td><td>${esc(r.action)}</td><td>${esc(r.from)}</td><td>${esc(r.to)}</td><td class="small">${esc(r.status)}</td></tr>`).join('') || '<tr><td colspan="6" class="small">No rows.</td></tr>';
-  document.getElementById('mwStatus').textContent = `Preview: ${plan.updates.length} update(s), ${plan.adds.length} intro add(s), ${plan.skipped.length} skipped.`;
+  renderDatasetTotals(plan);
+  const rows=[...plan.updates.map(x=>({acct:x.acct,dataset:x.dataset,action:x.action,from:x.from,to:x.to,status:'Will update'})),...plan.adds.map(x=>({acct:x.acct,dataset:x.dataset,action:x.action,from:x.from,to:x.to,status:x.status})),...plan.skipped.slice(0,60)];
+  document.getElementById('mwPreviewBody').innerHTML = rows.slice(0,160).map(r=>`<tr data-acct="${esc(r.acct)}" style="cursor:pointer"><td>${esc(r.acct)}</td><td>${esc(r.dataset)}</td><td>${esc(r.action)}</td><td>${esc(r.from)}</td><td>${esc(r.to)}</td><td class="small">${esc(r.status)}</td></tr>`).join('') || '<tr><td colspan="6" class="small">No rows.</td></tr>';
+  document.querySelectorAll('#mwPreviewBody tr[data-acct]').forEach(tr=>tr.onclick=()=>mwArmRestoreAndOpenEdit(tr.dataset.acct));
+  document.getElementById('mwStatus').textContent = `Preview: ${plan.updates.length} update(s), ${plan.adds.length} intro add(s), ${plan.skipped.length} skipped. Click any row to open Edit (returns to Review).`;
 }
 
 async function buildPreview(){
   const items=__mw.items || selectedItems();
   const targetRep=document.getElementById('mwRep').value.trim();
-  if(!targetRep) return alert('Select a target rep first.');
+  if(!targetRep) return;
   const selActions=new Set(__mw.selected);
   const autoAddOnly = (__mw.actions.length===1 && __mw.actions[0].includes('auto-add only'));
-  if(!selActions.size && !autoAddOnly) return alert('Select at least one action.');
-
+  if(!selActions.size && !autoAddOnly) return;
   const opts={onlyDiff:document.getElementById('mwOnlyDiff').checked, autoAdd:document.getElementById('mwAutoAddIntro').checked};
   __mw.plan = await buildMovePlan(items, selActions, targetRep, opts);
   renderPreview(__mw.plan);
@@ -612,40 +664,19 @@ async function executePlan(){
   const targetRep=document.getElementById('mwRep').value.trim();
   const overrideAction=document.getElementById('mwOverrideAction').value;
   const overrideMsg=document.getElementById('mwOverrideMessage').value;
-
   const total = plan.updates.length + plan.adds.length;
-  const okConfirm = (total>25)
-    ? (prompt(`You are about to apply ${total} change(s). Type REASSIGN to continue.`)==='REASSIGN')
-    : confirm(`Apply ${total} change(s)?`);
+  const okConfirm = (total>25)?(prompt(`You are about to apply ${total} change(s). Type REASSIGN to continue.`)==='REASSIGN'):confirm(`Apply ${total} change(s)?`);
   if(!okConfirm) return;
-
   loadStart('Move wizard running…');
   let updated=0, added=0, skipped=0, batchId=guid(), auditOk=0, verifyOk=0;
   const undoItems=[];
-
   try{
     const t=await token(SCOPE);
-
     const msgColCache={};
-    const getMsgCol=async(datasetKey)=>{
-      if(msgColCache[datasetKey]!==undefined) return msgColCache[datasetKey];
-      const logical=CONFIG.act[datasetKey]?.logical;
-      if(!logical) return (msgColCache[datasetKey]=null);
-      const have=await tableAttributeNames(t, logical);
-      const candidates=['cr714_actionmessage','cr714_action_message','cr714_actionmsg','cr714_actionnotes'];
-      msgColCache[datasetKey]=candidates.find(c=>have.has(c))||null;
-      return msgColCache[datasetKey];
-    };
+    const getMsgCol=async(datasetKey)=>{ if(msgColCache[datasetKey]!==undefined) return msgColCache[datasetKey]; const logical=CONFIG.act[datasetKey]?.logical; if(!logical) return (msgColCache[datasetKey]=null); const have=await tableAttributeNames(t, logical); const cands=['cr714_actionmessage','cr714_action_message','cr714_actionmsg','cr714_actionnotes']; msgColCache[datasetKey]=cands.find(c=>have.has(c))||null; return msgColCache[datasetKey]; };
 
     for(const a of plan.adds){
-      try{
-        await createIntroAMRecord(t, a.acct, targetRep, overrideAction, overrideMsg);
-        added++;
-        await writeAudit(t,{dataset:'Account Management',datasetKey:'am',set:CONFIG.act.am.setResolved||CONFIG.act.am.set,recordId:'(new)',accountNumber:a.acct,repField:'cr714_rep',actionField:'cr714_action',oldRep:null,newRep:targetRep,oldAction:null,newAction:(overrideAction&&overrideAction.trim())?overrideAction.trim():INTRO_ACTION,operation:'Auto Add Intro',batchId,status:'Success'});
-      }catch(e){
-        logError('Auto Add Intro', e.message||String(e), 'Account Management', a.acct);
-        skipped++;
-      }
+      try{ await createIntroAMRecord(t, a.acct, targetRep, overrideAction, overrideMsg); added++; await writeAudit(t,{dataset:'Account Management',datasetKey:'am',set:CONFIG.act.am.setResolved||CONFIG.act.am.set,recordId:'(new)',accountNumber:a.acct,repField:'cr714_rep',actionField:'cr714_action',oldRep:null,newRep:targetRep,oldAction:null,newAction:(overrideAction&&overrideAction.trim())?overrideAction.trim():INTRO_ACTION,operation:'Auto Add Intro',batchId,status:'Success'});}catch(e){ logError('Auto Add Intro', e.message||String(e), 'Account Management', a.acct); skipped++; }
     }
 
     for(let i=0;i<plan.updates.length;i++){
@@ -660,53 +691,31 @@ async function executePlan(){
         if(msgCol) body[msgCol]=overrideMsg.trim();
       }
       const oldRep=row.rep, oldAction=row.action;
-      try{
-        await patchAct(row, body, t);
-        await verifyAct(row, t, {rep:targetRep});
-        verifyOk++;
-        row.rep=targetRep;
-        if(overrideAction && overrideAction.trim()) row.action=overrideAction.trim();
-        updated++;
-
-        const undo=undoItem(row, oldRep, oldAction, row.rep, row.action, 'Move Wizard', batchId);
-        undoItems.push(undo);
-        if(await writeAudit(t,{...undo,row,accountNumber:u.acct,recordId:row.recordId,status:'Success'})) auditOk++;
-      }catch(e){
-        logError('Move Wizard Update', e.message||String(e), row.dataset, row.recordId);
-        skipped++;
-      }
+      try{ await patchAct(row, body, t); await verifyAct(row, t, {rep:targetRep}); verifyOk++; row.rep=targetRep; if(overrideAction && overrideAction.trim()) row.action=overrideAction.trim(); updated++; const undo=undoItem(row, oldRep, oldAction, row.rep, row.action, 'Move Wizard', batchId); undoItems.push(undo); if(await writeAudit(t,{...undo,row,accountNumber:u.acct,recordId:row.recordId,status:'Success'})) auditOk++; }catch(e){ logError('Move Wizard Update', e.message||String(e), row.dataset, row.recordId); skipped++; }
     }
 
-    if(undoItems.length){
-      pushUndo({id:batchId,type:'Move Wizard',when:new Date().toISOString(),items:undoItems,auditStatus:`${auditOk}/${updated} logged; ${verifyOk}/${updated} verified`});
-    }
-
+    if(undoItems.length){ pushUndo({id:batchId,type:'Move Wizard',when:new Date().toISOString(),items:undoItems,auditStatus:`${auditOk}/${updated} logged; ${verifyOk}/${updated} verified`}); }
     if(added) await reloadActOnly(); else build();
     toast(`Move complete: ${updated} updated, ${added} added, ${skipped} skipped.`);
     closeModal('moveWizardModal');
-
-  }catch(e){
-    logError('Move Wizard', e.message||String(e));
-    alert(e.message||e);
-  }finally{ loadStop(); }
+  }catch(e){ logError('Move Wizard', e.message||String(e)); alert(e.message||e); }
+  finally{ loadStop(); }
 }
+
 
 function openMoveWizard(){
   const items=selectedItems();
   if(!items.length) return toast('Select rows first.');
   __mw.items = items;
-
   document.getElementById('mwSelCount').textContent = `${items.length} account(s)`;
   const missing = items.filter(i=>(i.actRows||[]).length===0).length;
   const withAct = items.length-missing;
   document.getElementById('mwSelMeta').textContent = `${withAct} with ACT row(s) • ${missing} missing (eligible for Intro add)`;
 
-  // Inline preview
   const acctSearch=document.getElementById('mwAcctSearch');
   if(acctSearch){ acctSearch.value=''; acctSearch.oninput=()=>renderSelectedAccountsPreview(__mw.items); }
   renderSelectedAccountsPreview(__mw.items);
 
-  // Build action groups
   let ag=listActionsInScope(items);
   let actions=ag.actions;
   __mw.grouped=ag.grouped;
@@ -722,26 +731,27 @@ function openMoveWizard(){
   populateRepDropdown();
   document.getElementById('mwRepSearch').value='';
   document.getElementById('mwRep').value='';
-  document.getElementById('mwRepMeta').textContent='';
+  document.getElementById('mwRepMeta').textContent='—';
 
   document.getElementById('mwSelectAll').onclick=()=>{__mw.selected=new Set(__mw.actions.filter(a=>a!=='(no actions found — auto-add only)'));renderActionChecklist(__mw.actions,__mw.selected);};
   document.getElementById('mwSelectNone').onclick=()=>{__mw.selected=new Set();renderActionChecklist(__mw.actions,__mw.selected);};
   document.getElementById('mwActionSearch').oninput=()=>renderActionChecklist(__mw.actions,__mw.selected);
-
   document.getElementById('mwRepSearch').oninput=e=>filterRepDropdown(e.target.value);
   document.getElementById('mwRep').onchange=()=>{document.getElementById('mwRepMeta').textContent=document.getElementById('mwRep').value?`Target: ${document.getElementById('mwRep').value}`:'—';};
 
   document.getElementById('mwBuild').onclick=buildPreview;
   document.getElementById('mwRun').onclick=executePlan;
-
   document.getElementById('mwBack').onclick=()=>setMwStep(Math.max(1,__mw.step-1));
   document.getElementById('mwNext').onclick=()=>setMwStep(Math.min(4,__mw.step+1));
-
   setMwStep(1);
+
+  document.getElementById('mwDsTotals').innerHTML='';
+  document.getElementById('mwPreviewBody').innerHTML='';
+  document.getElementById('mwStatus').textContent='';
   document.getElementById('moveWizardModal').classList.add('show');
 }
 
-const actMoveWizardUIFlowV1 = true;
+const actMoveWizardUIFlowV4 = true;
 
 function bulkAnalysis(){const rows=selectedItems();let updatable=0,already=0,noRep=0,noAct=0,am=0,cad=0;const skipped=[];const onlyDiff=$('updateOnlyDiff')?.checked!==false;rows.forEach(i=>{const rep=d365Rep(i);if(!rep){noRep++;skipped.push({acct:rowId(i),company:cellVal(i,'company'),reason:'No Current D365 Rep'});return}const targets=(i.actRows||[]).filter(isActMoveTarget);if(!targets.length){noAct++;skipped.push({acct:rowId(i),company:cellVal(i,'company'),reason:'No eligible AM/Cadence target rep row'});return}targets.forEach(a=>{const differs=(a.rep||'')!==rep;if(!onlyDiff||differs){updatable++;if(a.datasetKey==='am')am++;if(a.datasetKey==='cad')cad++;}else{already++;skipped.push({acct:rowId(i),company:cellVal(i,'company'),dataset:a.dataset,reason:'Already matching'})}})});return{updatable,already,noRep,noAct,am,cad,skipped}}function renderBulkSummary(){if(!$('bulkSummary'))return;const s=bulkAnalysis();$('bulkSummary').innerHTML=[['Rows to update',s.updatable],['Account Management',s.am],['Cadence',s.cad],['Already matching / skipped',s.already],['No Current D365 Rep',s.noRep],['No eligible AM/Cadence target rep row',s.noAct]].map(([l,v])=>`<div class="summaryItem"><span>${l}</span><strong>${Number(v).toLocaleString()}</strong></div>`).join('')}function showSkippedDetails(){const s=bulkAnalysis().skipped;$('skippedBody').innerHTML=s.length?`<table><thead><tr><th>Account</th><th>Company</th><th>Dataset</th><th>Reason</th></tr></thead><tbody>${s.map(x=>`<tr><td>${esc(x.acct)}</td><td>${esc(x.company)}</td><td>${esc(x.dataset||'')}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table>`:'<p class="small">No skipped rows.</p>';$('skippedModal').classList.add('show')}function selectRows(mode){const rows=mode==='visible'?tableRows().slice(0,state.visible.review):tableRows();rows.forEach(i=>state.selected.add(rowId(i)));renderTable();renderBulkPreview();renderDashboard();metrics();toast(`${rows.length.toLocaleString()} row(s) selected.`)}function exportSelectedCsv(){const rows=selectedItems();if(!rows.length)return toast('No selected rows to export.');const cols=visibleCols('bulk'),headers=cols.map(([,l])=>l),out=rows.map(i=>cols.map(([k])=>cellVal(i,k)));downloadCsv(`selected-assignment-rows-${$('currentDate').value}.csv`,[headers,...out])}function downloadCsv(name,rows){const csv=rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\r\n'),blob=new Blob([csv],{type:'text/csv'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();URL.revokeObjectURL(url)}
 async function loadReport(){const cd=$('currentDate').value,pd=$('previousDate').value;if(!cd||!pd)return toast('Select both dates');$('load').disabled=true;loadStart('Authenticating…');try{const t=await token(SCOPE);loadStep('Resolving entity sets…',10);await entitySet(t,CONFIG.tableLogicalName,CONFIG.tableSetName,CONFIG.tableSetNameCandidates);for(const k of Object.keys(CONFIG.act))await entitySet(t,CONFIG.act[k].logical,CONFIG.act[k].set,[CONFIG.act[k].set]);await resolveAuditSet(t);loadStep('Loading current and previous snapshots…',25);const [cur,prev]=await Promise.all([snapshots(cd,t),snapshots(pd,t)]);state.cur=cur;state.prev=prev;setLoadItem('cur','Current D365 snapshot',cur.length);setLoadItem('prev','Previous D365 snapshot',prev.length);if(!cur.length||!prev.length)logError('Load Report',`Snapshot rows missing. Current ${cd}: ${cur.length}; Previous ${pd}: ${prev.length}`);loadStep('Loading ACT datasets…',55);const [am,cad,lb]=await Promise.all([actDataset('am',t),actDataset('cad',t),actDataset('lb',t)]);setLoadItem('am','Account Management ACT',am.length);setLoadItem('cad','Cadence ACT',cad.length);setLoadItem('lb','Louise Brown ACT',lb.length);state.actRows=[...am,...cad,...lb];setLoadItem('total','Total ACT loaded',state.actRows.length);await loadD365LiveRepsForActRows();loadStep('Building move review workspace…',88);state.visible={review:100,act:100};build();$('loadState').textContent=`Loaded ${new Date().toLocaleTimeString()}`;loadStep('Done',100);setTimeout(loadStop,700);toast(`Loaded ${cur.length.toLocaleString()} current, ${prev.length.toLocaleString()} previous, ${state.actRows.length.toLocaleString()} ACT rows.`)}catch(e){logError('Load Report',e.message);loadStop();alert(e.message||e)}finally{$('load').disabled=false}}
@@ -1056,7 +1066,6 @@ John Smith
         <div class="small" id="mwSelMeta" style="margin-top:6px">—</div>
       </div>
 
-      <!-- (1) Inline account preview (search + first 50) -->
       <div class="panel" style="padding:12px">
         <div class="row" style="justify-content:space-between;align-items:center">
           <strong>Selected account preview</strong>
@@ -1089,7 +1098,6 @@ John Smith
         </div>
       </div>
 
-      <!-- (2) Grouped actions by dataset + count -->
       <div id="mwStepActions" class="panel" style="padding:12px;display:none">
         <div class="row" style="justify-content:space-between">
           <strong>Actions in scope (grouped by dataset)</strong>
@@ -1100,6 +1108,7 @@ John Smith
         </div>
         <input id="mwActionSearch" class="search" placeholder="Search actions…" style="margin-top:10px">
         <div class="small" id="mwActionMeta" style="margin-top:8px"></div>
+        <div class="small" style="margin-top:4px">Selections apply across all datasets; grouping shows where actions exist and how many rows they affect.</div>
         <div id="mwActionsGrouped" style="display:grid;gap:10px;margin-top:10px"></div>
       </div>
 
@@ -1120,6 +1129,8 @@ John Smith
           <div class="summaryItem"><span>Will update</span><strong id="mwUpd">0</strong></div>
           <div class="summaryItem"><span>Will add Intro</span><strong id="mwAdd">0</strong></div>
         </div>
+        <div id="mwDsTotals" style="display:grid;gap:8px;margin-top:12px"></div>
+
         <div class="scrollBox" style="margin-top:10px;max-height:260px">
           <table>
             <thead><tr><th>Account</th><th>Dataset</th><th>Action</th><th>From</th><th>To</th><th>Status</th></tr></thead>
