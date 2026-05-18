@@ -8216,5 +8216,322 @@ window.selectAccount=async function(id){
 </script>
 <!-- === COPILOT SUMMARY EMAIL ENGAGEMENT MONTHLY FACT FIX 2026-05-18 END === -->
 
+
+
+<!-- === COPILOT ACCOUNTNUMBER-ONLY FACT FETCH + HOME RETURN FREEZE FIX 2026-05-18 START === -->
+<script>
+(function(){
+  if (window.__ACT_ACCOUNTNUMBER_ONLY_FACT_FETCH_HOME_RETURN_FIX_20260518) return;
+  window.__ACT_ACCOUNTNUMBER_ONLY_FACT_FETCH_HOME_RETURN_FIX_20260518 = true;
+
+  const FACT_SET = 'cr714_dt_act_fctbls';
+  const FACT_ID = 'cr714_dt_act_fctblid';
+  const ACCOUNT_CHUNK = 70;
+  const PARALLEL = 4;
+  const DEBOUNCE = 450;
+
+  const $ = id => document.getElementById(id);
+  const str = v => String(v ?? '').trim();
+  const uniq = arr => Array.from(new Set((arr || []).map(str).filter(Boolean)));
+  const apiRoot = () => String(window.DATAVERSE_URL || 'https://org23279050.crm.dynamics.com/api/data/v9.2').replace(/\/$/, '');
+  const escapeOData = v => String(v ?? '').replace(/'/g, "''");
+  const safeDate = v => { const d = new Date(v); return isNaN(d.getTime()) ? null : d; };
+  const startIso = v => { const d = safeDate(v); if(!d) return null; d.setHours(0,0,0,0); return d.toISOString(); };
+  const endIso = v => { const d = safeDate(v); if(!d) return null; d.setHours(23,59,59,999); return d.toISOString(); };
+  const monthKey = v => {
+    if(!v) return '';
+    const m = String(v).match(/^(\d{4})-(\d{2})/);
+    if(m) return `${m[1]}-${m[2]}`;
+    const d = safeDate(v);
+    return d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` : '';
+  };
+
+  function normalizeAction(v){
+    if (typeof window.normalizeActionStrict === 'function') return window.normalizeActionStrict(v);
+    return str(v).replace(/[^a-zA-Z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
+  }
+
+  function normalizeTouchType(row){
+    const raw = str(row.cr714_activitytype || row.activityType || row.touchType);
+    const action = str(row.cr714_effectiveaction || row.cr714_action || row.action);
+    if (/email/i.test(raw)) return 'Email';
+    if (/mason|mvgo/i.test(raw)) return 'Masonville';
+    if (/call|phone/i.test(raw)) return 'Call';
+    if (/email/i.test(action) && !/template/i.test(action)) return 'Email';
+    return raw || 'Note';
+  }
+
+  function scopedAccountIdsForFact(){
+    // Hard rule: fact table reporting only filters cr714_accountnumber.
+    // Do not fall back to rep-name chunks; the HAR showed those are the expensive queries.
+    if (window.massFilteredIds && window.massFilteredIds.size) {
+      return uniq(Array.from(window.massFilteredIds).map(x => String(x).toUpperCase()));
+    }
+    if (window.__ACT_QUERY_SNIPER && window.__ACT_QUERY_SNIPER.selectedMassIds && window.__ACT_QUERY_SNIPER.selectedMassIds.size) {
+      return uniq(Array.from(window.__ACT_QUERY_SNIPER.selectedMassIds).map(x => String(x).toUpperCase()));
+    }
+    const filtered = window.teamFilteredAccounts || [];
+    const merged = window.mergedAccounts || [];
+    if (filtered.length && (!merged.length || filtered.length < merged.length)) {
+      return uniq(filtered.map(a => a.cr714_id || a.accountNumber || a.accountnum || a.accountId).filter(Boolean).map(x => String(x).toUpperCase()));
+    }
+    return [];
+  }
+
+  window.hasFactReportingScope = function(){
+    if (window.__ACT_QUERY_SNIPER && window.__ACT_QUERY_SNIPER.allowWideOpen) return false;
+    return scopedAccountIdsForFact().length > 0;
+  };
+
+  function clearNoScopeFactCache(){
+    window.__actFactReportingLoaded = true;
+    window.__actFactReportingRows = [];
+    window.reportingFacts = [];
+    window.reportingDims = { reps: [], actions: [], months: [] };
+    window.__actFactPrefetchKey = 'NO_ACCOUNTNUMBER_SCOPE';
+    window.__actFactPrefetchPromise = null;
+    window.reportsDirty = false;
+  }
+
+  function factFilterKey(){
+    const ids = scopedAccountIdsForFact().sort();
+    const actionVals = window.activeFilters?.action?.size ? Array.from(window.activeFilters.action).map(normalizeAction).filter(Boolean).sort() : [];
+    const start = startIso(window.reportStartDate || $('date-box-min')?.value) || '';
+    const end = endIso(window.reportEndDate || $('date-box-max')?.value) || '';
+    return JSON.stringify({ mode:'accountnumber-only', idCount:ids.length, ids:ids.slice(0,500), actionVals, start, end });
+  }
+
+  function orEquals(field, values){
+    return '(' + values.map(v => `${field} eq '${escapeOData(v)}'`).join(' or ') + ')';
+  }
+
+  function buildAccountNumberFactUrls(){
+    const ids = scopedAccountIdsForFact();
+    if (!ids.length) return [];
+    const select = [
+      FACT_ID,
+      'cr714_activitynaturalkey',
+      'cr714_accountnumber',
+      'cr714_accountrep',
+      'cr714_repfromnote',
+      'cr714_effectiveaction',
+      'cr714_action',
+      'cr714_activitydate',
+      'cr714_activitydateonly',
+      'cr714_activitymonth',
+      'cr714_activitytype'
+    ].join(',');
+    const base = `${apiRoot()}/${FACT_SET}?$select=${select}&$orderby=cr714_activitydate desc`;
+    const common = [];
+    const start = startIso(window.reportStartDate || $('date-box-min')?.value);
+    const end = endIso(window.reportEndDate || $('date-box-max')?.value);
+    if (start) common.push(`cr714_activitydate ge ${start}`);
+    if (end) common.push(`cr714_activitydate le ${end}`);
+    const actionVals = window.activeFilters?.action?.size ? Array.from(window.activeFilters.action).map(normalizeAction).filter(Boolean) : [];
+    if (actionVals.length) common.push(orEquals('cr714_effectiveaction', actionVals));
+
+    const urls = [];
+    for (let i = 0; i < ids.length; i += ACCOUNT_CHUNK) {
+      const filter = [orEquals('cr714_accountnumber', ids.slice(i, i + ACCOUNT_CHUNK))].concat(common).filter(Boolean).join(' and ');
+      urls.push(`${base}&$filter=${encodeURIComponent(filter)}`);
+    }
+    return urls;
+  }
+
+  async function getTokenSafe(){
+    if (typeof window.getToken === 'function') return await window.getToken();
+    if (window.accessToken) return window.accessToken;
+    throw new Error('No Dataverse token available');
+  }
+
+  window.cancelFactReportingPreload = function(reason='cancel'){
+    clearTimeout(window.__actFactPreloadTimer);
+    window.__actFactFetchGeneration = (window.__actFactFetchGeneration || 0) + 1;
+    if (window.__actFactAbortController) {
+      try { window.__actFactAbortController.abort(reason); } catch(e) {}
+    }
+    window.__actFactAbortController = null;
+    window.__actFactPrefetchPromise = null;
+  };
+
+  async function fetchJson(url, signal){
+    const token = await getTokenSafe();
+    const res = await fetch(url, {
+      signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        'OData-Version': '4.0',
+        'OData-MaxVersion': '4.0',
+        Prefer: 'odata.maxpagesize=5000'
+      }
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }
+
+  async function fetchAllPages(url, signal){
+    let out = [];
+    while (url) {
+      const j = await fetchJson(url, signal);
+      out = out.concat(j.value || []);
+      url = j['@odata.nextLink'] || null;
+      // Yield between pages so returning to Dashboard/Home remains responsive.
+      await new Promise(r => setTimeout(r, 0));
+    }
+    return out;
+  }
+
+  async function pool(items, worker, limit){
+    const out = [];
+    let i = 0;
+    async function run(){
+      while (i < items.length) {
+        const idx = i++;
+        out[idx] = await worker(items[idx], idx);
+      }
+    }
+    await Promise.all(Array.from({length: Math.min(limit, items.length)}, run));
+    return out;
+  }
+
+  function normalizeFactRows(rows){
+    const seen = new Set();
+    return (rows || []).map(r => {
+      const date = r.cr714_activitydate || r.cr714_activitydateonly || r.createdon || r.modifiedon;
+      const accountId = str(r.cr714_accountnumber || r.accountId).toUpperCase();
+      const rep = str(r.cr714_accountrep || r.cr714_repfromnote || r.rep || 'Unassigned') || 'Unassigned';
+      const action = normalizeAction(r.cr714_effectiveaction || r.cr714_action || r.action || '');
+      const touchType = normalizeTouchType(r);
+      return {
+        factType: 'event',
+        factId: r[FACT_ID] || r.factId || '',
+        naturalKey: r.cr714_activitynaturalkey || r.naturalKey || '',
+        accountId,
+        rep,
+        action,
+        noteDate: date,
+        monthKey: monthKey(r.cr714_activitymonth || date),
+        touchType,
+        count: 1
+      };
+    }).filter(f => f.accountId && f.action).filter(f => {
+      const key = f.factId || f.naturalKey || [f.accountId, f.rep, f.action, f.touchType, f.noteDate].join('|').toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  window.prefetchFactReportingForCurrentScope = async function(reason='scope'){
+    if (!window.hasFactReportingScope()) {
+      console.info('ACT fact fetch skipped: no filtered accountnumber scope yet.', reason);
+      clearNoScopeFactCache();
+      return [];
+    }
+    const key = factFilterKey();
+    if (window.__actFactPrefetchPromise && window.__actFactPrefetchKey === key) return window.__actFactPrefetchPromise;
+
+    window.cancelFactReportingPreload('new-accountnumber-scope');
+    const generation = window.__actFactFetchGeneration;
+    const controller = new AbortController();
+    window.__actFactAbortController = controller;
+    window.__actFactPrefetchKey = key;
+    const urls = buildAccountNumberFactUrls();
+    window.__actFactLastUrlCount = urls.length;
+    window.__actFactLastAccountCount = scopedAccountIdsForFact().length;
+
+    window.__actFactPrefetchPromise = (async () => {
+      try {
+        const chunks = await pool(urls, u => fetchAllPages(u, controller.signal), PARALLEL);
+        if (generation !== window.__actFactFetchGeneration) return window.reportingFacts || [];
+        const facts = normalizeFactRows(chunks.flat());
+        window.__actFactReportingRows = facts;
+        window.reportingFacts = facts;
+        window.reportingDims = {
+          reps: Array.from(new Set(facts.map(f => f.rep).filter(Boolean))).sort(),
+          actions: Array.from(new Set(facts.map(f => f.action).filter(Boolean))).sort(),
+          months: Array.from(new Set(facts.map(f => f.monthKey).filter(Boolean))).sort().reverse()
+        };
+        window.__actFactReportingLoaded = true;
+        window.reportsDirty = false;
+        window.__actFactAbortController = null;
+        if ($('tab-reports')?.classList.contains('active') && typeof window.renderReports === 'function') window.renderReports();
+        return facts;
+      } catch(e) {
+        if (e && e.name === 'AbortError') {
+          console.info('ACT fact fetch aborted:', reason);
+          return window.reportingFacts || [];
+        }
+        console.warn('Accountnumber-only fact preload failed', e);
+        window.__actFactReportingLoaded = false;
+        window.reportsDirty = true;
+        throw e;
+      }
+    })();
+    return window.__actFactPrefetchPromise;
+  };
+
+  window.scheduleFactReportingPreload = function(reason='filter'){
+    clearTimeout(window.__actFactPreloadTimer);
+    if (!window.hasFactReportingScope()) { clearNoScopeFactCache(); return; }
+    window.__actFactPreloadTimer = setTimeout(() => {
+      window.prefetchFactReportingForCurrentScope(reason).catch(() => {});
+    }, DEBOUNCE);
+  };
+
+  window.loadReportingFromFactTable = async function(force=false){
+    if (!window.hasFactReportingScope()) { clearNoScopeFactCache(); return []; }
+    return await window.prefetchFactReportingForCurrentScope(force ? 'forced-report' : 'report');
+  };
+
+  // Home/Scope return freeze guard: stop background reporting work as soon as user returns to Dashboard.
+  const previousSwitchTab = window.switchTab;
+  if (typeof previousSwitchTab === 'function') {
+    window.switchTab = function(id){
+      if (id === 'dashboard') {
+        window.cancelFactReportingPreload('dashboard-return');
+        window.__actDashboardReturnInProgress = true;
+        const result = previousSwitchTab.apply(this, arguments);
+        requestAnimationFrame(() => {
+          window.__actDashboardReturnInProgress = false;
+          const list = $('account-list-container');
+          // Only repaint if the list is empty/stale; avoid a full synchronous list rebuild on every return.
+          if (list && !list.children.length && typeof window.renderAccountList === 'function') {
+            try { window.renderAccountList(false); } catch(e) { console.warn('Deferred account list repaint skipped', e); }
+          }
+        });
+        return result;
+      }
+      return previousSwitchTab.apply(this, arguments);
+    };
+  }
+
+  // Do not let hidden Reporting views trigger heavy report rendering during Dashboard/Home interactions.
+  const previousRenderReports = window.renderReports;
+  if (typeof previousRenderReports === 'function') {
+    window.renderReports = function(){
+      if (!$('tab-reports')?.classList.contains('active')) return;
+      return previousRenderReports.apply(this, arguments);
+    };
+  }
+
+  // If filters change, the next fact load must use accountnumber scope only.
+  const previousApplyFilters = window.applyFilters;
+  if (typeof previousApplyFilters === 'function') {
+    window.applyFilters = function(){
+      const result = previousApplyFilters.apply(this, arguments);
+      try {
+        window.__actFactReportingLoaded = false;
+        if (window.hasFactReportingScope()) window.scheduleFactReportingPreload('accountnumber-filter-scope');
+        else clearNoScopeFactCache();
+      } catch(e) {}
+      return result;
+    };
+  }
+})();
+</script>
+<!-- === COPILOT ACCOUNTNUMBER-ONLY FACT FETCH + HOME RETURN FREEZE FIX 2026-05-18 END === -->
+
 </body>
 </html>
