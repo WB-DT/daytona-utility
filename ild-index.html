@@ -506,7 +506,7 @@
                     </div>
                 </div>
 
-                <div class="flex flex-col overflow-hidden relative flex-shrink-0" id="history-column" style="width: var(--history-width); border-color: var(--border-color); background-color: var(--bg-card);">
+                <div class="flex flex-col overflow-hidden relative flex-shrink-0" id="history-column" style="width: var(--history-width); min-width:320px; max-width:50vw; border-color: var(--border-color); background-color: var(--bg-card);">
                     <div id="history-resizer" class="absolute top-0 bottom-0 left-0 w-2 cursor-col-resize z-50 flex items-center justify-center group transition-colors" title="Drag to resize">
                         <div class="w-0.5 h-8 rounded transition-colors shadow-sm" style="background-color: var(--border-color);"></div>
                     </div>
@@ -1613,7 +1613,7 @@ window.resetDateSlider = function() {
             const savedWidth = localStorage.getItem('act_mgr_history_width'); 
             if (savedWidth) grid.style.setProperty('--history-width', savedWidth);
             const onDown = (e) => { isResizing = true; startX = e.clientX; startWidth = historyCol.offsetWidth; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; resizer.classList.add('bg-blue-500/20'); };
-            const onMove = (e) => { if (!isResizing) return; const deltaX = startX - e.clientX; let newWidth = startWidth + deltaX; if (newWidth < 250) newWidth = 250; if (newWidth > 800) newWidth = 800; grid.style.setProperty('--history-width', `${newWidth}px`); };
+            const onMove = (e) => { if (!isResizing) return; const deltaX = startX - e.clientX; let newWidth = startWidth + deltaX; const maxWidth = Math.floor(window.innerWidth * 0.5); if (newWidth < 320) newWidth = 320; if (newWidth > maxWidth) newWidth = maxWidth; grid.style.setProperty('--history-width', `${newWidth}px`); };
             const onUp = () => { if (isResizing) { isResizing = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; resizer.classList.remove('bg-blue-500/20'); localStorage.setItem('act_mgr_history_width', getComputedStyle(grid).getPropertyValue('--history-width')); } };
             resizer.addEventListener('mousedown', onDown); document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
         }
@@ -7892,434 +7892,84 @@ window.selectAccount=async function(id){
 
 
 
-<!-- === COPILOT FACT TABLE SCOPED PREFETCH PERFORMANCE PATCH 2026-05-18 START === -->
+<!-- === COPILOT FINAL FILTER-GATED FACT REPORTING PATCH 2026-05-18 START === -->
+<style>#history-column{min-width:320px!important;max-width:50vw!important;}</style>
 <script>
 (function(){
-  if (window.__ACT_FACT_SCOPED_PREFETCH_PERF_20260518) return;
-  window.__ACT_FACT_SCOPED_PREFETCH_PERF_20260518 = true;
+  if(window.__ACT_FINAL_FILTER_GATED_FACT_REPORTING_20260518) return;
+  window.__ACT_FINAL_FILTER_GATED_FACT_REPORTING_20260518=true;
 
-  const FACT_ENTITY_SET = 'cr714_dt_act_fctbls';
-  const FACT_ID_FIELD = 'cr714_dt_act_fctblid';
-  const MAX_PARALLEL_FACT_REQUESTS = 6;
-  const ACCOUNT_FILTER_CHUNK = 70;
-  const REP_FILTER_CHUNK = 35;
-  const PRELOAD_DEBOUNCE_MS = 450;
+  const FACT_SET='cr714_dt_act_fctbls';
+  const FACT_ID='cr714_dt_act_fctblid';
+  const ACCT_CHUNK=70;
+  const REP_CHUNK=35;
+  const PARALLEL=6;
+  const DEBOUNCE=500;
+  const DAY=86400000;
 
-  function root(){ return (window.DATAVERSE_URL || '').replace(/\/$/, ''); }
-  function txt(v){ return String(v ?? '').trim(); }
-  function od(v){ return String(v ?? '').replace(/'/g, "''"); }
-  function dateObj(v){ const d = new Date(v); return isNaN(d.getTime()) ? null : d; }
-  function mk(v){ const d = dateObj(v); return d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` : null; }
-  function isoDateStart(d){ if (!d) return null; const x = new Date(d); if (isNaN(x.getTime())) return null; x.setHours(0,0,0,0); return x.toISOString(); }
-  function isoDateEnd(d){ if (!d) return null; const x = new Date(d); if (isNaN(x.getTime())) return null; x.setHours(23,59,59,999); return x.toISOString(); }
-  function uniq(arr){ return Array.from(new Set((arr || []).map(txt).filter(Boolean))); }
+  function root(){return String(window.DATAVERSE_URL||'https://org23279050.crm.dynamics.com/api/data/v9.2').replace(/\/$/,'');}
+  function s(v){return String(v??'').trim();}
+  function od(v){return String(v??'').replace(/'/g,"''");}
+  function uniq(a){return Array.from(new Set((a||[]).map(s).filter(Boolean)));}
+  function d(v){const x=new Date(v);return isNaN(x.getTime())?null:x;}
+  function month(v){const x=d(v);return x?`${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,'0')}`:null;}
+  function html(v){return window.escapeHTML?window.escapeHTML(v):String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+  function js(v){return window.escapeJS?window.escapeJS(v):String(v??'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"');}
+  function startIso(v){if(!v)return null;const x=new Date(v);if(isNaN(x))return null;x.setHours(0,0,0,0);return x.toISOString();}
+  function endIso(v){if(!v)return null;const x=new Date(v);if(isNaN(x))return null;x.setHours(23,59,59,999);return x.toISOString();}
+  function hasVals(set){return !!(set&&set.size);}
 
-  function normalizeAction(v){
-    return (typeof window.normalizeActionStrict === 'function') ? window.normalizeActionStrict(v) : txt(v).replace(/[^a-zA-Z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
-  }
-
-  async function token(){
-    if (typeof window.getToken === 'function') return window.getToken();
-    if (window.accessToken) return window.accessToken;
-    throw new Error('No Dataverse token available for fact prefetch.');
-  }
-
-  async function fetchJson(url){
-    const t = await token();
-    const res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${t}`,
-        'Accept': 'application/json',
-        'OData-Version': '4.0',
-        'OData-MaxVersion': '4.0',
-        'Prefer': 'odata.maxpagesize=5000'
-      }
-    });
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
-  }
-
-  async function fetchAllPages(url){
-    let rows = [];
-    while (url) {
-      const data = await fetchJson(url);
-      rows = rows.concat(data.value || []);
-      url = data['@odata.nextLink'] || null;
-    }
-    return rows;
-  }
-
-  async function runPool(items, worker, limit){
-    const out = [];
-    let i = 0;
-    async function runner(){
-      while (i < items.length) {
-        const idx = i++;
-        out[idx] = await worker(items[idx], idx);
-      }
-    }
-    const runners = Array.from({length: Math.min(limit, items.length)}, runner);
-    await Promise.all(runners);
-    return out;
-  }
-
-  function currentDateFilter(){
-    const parts = [];
-    const start = isoDateStart(window.reportStartDate || document.getElementById('date-box-min')?.value);
-    const end = isoDateEnd(window.reportEndDate || document.getElementById('date-box-max')?.value);
-    if (start) parts.push(`cr714_activitydate ge ${start}`);
-    if (end) parts.push(`cr714_activitydate le ${end}`);
-    return parts;
-  }
-
-  function selectedRepNamesFromFilters(){
-    const set = window.activeFilters && window.activeFilters.cr714_employeename;
-    if (set && set.size) return Array.from(set).map(txt).filter(Boolean);
-    const scoped = window.__ACT_QUERY_SNIPER && window.__ACT_QUERY_SNIPER.selectedRepSet;
-    if (scoped && scoped.size) return Array.from(scoped).map(txt).filter(Boolean);
-    return [];
-  }
-
-  function repsFromOrgFilters(){
-    // When the scoped screen has manager/supervisor/department filters selected but no explicit reps yet,
-    // infer reps from employeesData so the fact table can be preloaded before the full dataset finishes.
-    try {
-      if (typeof window.getScopedRepsFromPreFilters === 'function') return Array.from(window.getScopedRepsFromPreFilters()).map(txt).filter(Boolean);
-      const filters = window.activeFilters || {};
-      const orgIds = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','statecode'];
-      const any = orgIds.some(id => filters[id] && filters[id].size);
-      if (!any) return [];
-      return (window.employeesData || []).filter(e => {
-        return orgIds.every(id => {
-          const set = filters[id];
-          if (!set || !set.size) return true;
-          const val = id === 'statecode' ? (e._mappedStatecode || ((e.statecode === 0 || e.cr714_status === 1) ? 'Active' : 'Inactive')) : e[id];
-          return set.has(val);
-        });
-      }).map(e => e.cr714_employeename || e.cr714_repname || e.fullname || e.name).filter(Boolean);
-    } catch(e){ return []; }
-  }
-
-  function getScopedAccountIds(){
-    const mass = window.massFilteredIds && window.massFilteredIds.size ? Array.from(window.massFilteredIds) : [];
-    if (mass.length) return uniq(mass.map(x => String(x).toUpperCase()));
-    const scopedIds = window.__ACT_QUERY_SNIPER && window.__ACT_QUERY_SNIPER.selectedMassIds;
-    if (scopedIds && scopedIds.size) return uniq(Array.from(scopedIds).map(x => String(x).toUpperCase()));
-    const accounts = (window.teamFilteredAccounts && window.teamFilteredAccounts.length ? window.teamFilteredAccounts : []);
-    return uniq(accounts.map(a => a.cr714_id || a.accountNumber));
-  }
-
-  function filterKeyForScope(){
-    const accountIds = getScopedAccountIds().sort();
-    const reps = uniq(selectedRepNamesFromFilters().concat(repsFromOrgFilters())).sort();
-    const actionSet = window.activeFilters && window.activeFilters.action ? Array.from(window.activeFilters.action).map(normalizeAction).filter(Boolean).sort() : [];
-    const start = isoDateStart(window.reportStartDate || document.getElementById('date-box-min')?.value) || '';
-    const end = isoDateEnd(window.reportEndDate || document.getElementById('date-box-max')?.value) || '';
-    return JSON.stringify({ accountIds: accountIds.slice(0, 500), accountCount: accountIds.length, reps, actionSet, start, end });
-  }
-
-  function buildOr(field, values){
-    return '(' + values.map(v => `${field} eq '${od(v)}'`).join(' or ') + ')';
-  }
-
-  function buildFactUrlsForCurrentScope(){
-    const select = [
-      FACT_ID_FIELD,
-      'cr714_activitynaturalkey',
-      'cr714_accountnumber',
-      'cr714_accountrep',
-      'cr714_repfromnote',
-      'cr714_effectiveaction',
-      'cr714_action',
-      'cr714_activitydate',
-      'cr714_activitydateonly',
-      'cr714_activitymonth',
-      'cr714_activitytype'
-    ].join(',');
-
-    const base = `${root()}/${FACT_ENTITY_SET}?$select=${select}&$orderby=cr714_activitydate desc`;
-    const dateParts = currentDateFilter();
-    const actionVals = window.activeFilters && window.activeFilters.action ? Array.from(window.activeFilters.action).map(normalizeAction).filter(Boolean) : [];
-    const actionParts = actionVals.length ? [buildOr('cr714_effectiveaction', actionVals)] : [];
-
-    const ids = getScopedAccountIds();
-    const explicitReps = selectedRepNamesFromFilters();
-    const inferredReps = repsFromOrgFilters();
-    const reps = uniq(explicitReps.concat(inferredReps));
-
-    let chunks = [];
-
-    // If the current home/scope filter produces a manageable account list, account-number chunks are the most selective.
-    if (ids.length && ids.length <= 1200) {
-      for (let i=0; i<ids.length; i+=ACCOUNT_FILTER_CHUNK) {
-        const values = ids.slice(i, i+ACCOUNT_FILTER_CHUNK);
-        chunks.push([buildOr('cr714_accountnumber', values)].concat(dateParts, actionParts));
-      }
-    }
-    // If account scope is huge, rep chunks keep URLs smaller and preload earlier from the scope screen.
-    else if (reps.length) {
-      for (let i=0; i<reps.length; i+=REP_FILTER_CHUNK) {
-        const values = reps.slice(i, i+REP_FILTER_CHUNK);
-        chunks.push([buildOr('cr714_accountrep', values)].concat(dateParts, actionParts));
-      }
-    }
-    // Last resort: date/action-only. This is still much faster than pulling note/message columns.
-    else {
-      chunks.push([].concat(dateParts, actionParts));
-    }
-
-    return chunks.map(parts => {
-      const filter = parts.filter(Boolean).join(' and ');
-      return filter ? `${base}&$filter=${encodeURIComponent(filter)}` : base;
-    });
-  }
-
-  function normalizeFactRows(rows){
-    const seen = new Set();
-    return (rows || []).map(r => {
-      const action = normalizeAction(r.cr714_effectiveaction || r.cr714_action || '');
-      const d = r.cr714_activitydate || r.cr714_activitydateonly || r.createdon || r.modifiedon;
-      const touchRaw = txt(r.cr714_activitytype || 'Note');
-      const touchType = /email/i.test(touchRaw) ? 'Email' : (/mason/i.test(touchRaw) ? 'Masonville' : (/call/i.test(touchRaw) ? 'Call' : 'Note'));
-      const accountId = txt(r.cr714_accountnumber || r.cr714_d365accountid || r.cr714_accountid);
-      const rep = txt(r.cr714_accountrep || r.cr714_repfromnote || 'Unassigned') || 'Unassigned';
-      return {
-        factType: 'event',
-        factId: r[FACT_ID_FIELD],
-        naturalKey: r.cr714_activitynaturalkey || '',
-        accountId,
-        rep,
-        action,
-        noteDate: d,
-        monthKey: r.cr714_activitymonth || mk(d),
-        touchType,
-        count: 1
-      };
-    }).filter(f => f.accountId && f.action).filter(f => {
-      const d = dateObj(f.noteDate);
-      const key = f.naturalKey || [f.accountId, f.rep, f.action, f.touchType, d ? d.toISOString() : txt(f.noteDate)].join('|').toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  }
-
-  window.prefetchFactReportingForCurrentScope = async function(reason='scope'){
-    const key = filterKeyForScope();
-    if (window.__actFactPrefetchPromise && window.__actFactPrefetchKey === key) return window.__actFactPrefetchPromise;
-    window.__actFactPrefetchKey = key;
-    window.__actFactPrefetchReason = reason;
-    const urls = buildFactUrlsForCurrentScope();
-    const started = performance.now();
-
-    window.__actFactPrefetchPromise = (async () => {
-      try {
-        if (window.updateLoader && reason === 'scope-load') window.updateLoader(72, 'Preloading reporting fact table...', 0);
-        const pages = await runPool(urls, url => fetchAllPages(url), MAX_PARALLEL_FACT_REQUESTS);
-        const raw = pages.flat();
-        const normalized = normalizeFactRows(raw);
-        window.__actFactReportingRows = normalized;
-        window.reportingFacts = normalized;
-        window.reportingDims = {
-          reps: Array.from(new Set(normalized.map(f => f.rep).filter(Boolean))).sort(),
-          actions: Array.from(new Set(normalized.map(f => f.action).filter(Boolean))).sort(),
-          months: Array.from(new Set(normalized.map(f => f.monthKey).filter(Boolean))).sort().reverse()
-        };
-        window.__actFactReportingLoaded = true;
-        window.__actFactPrefetchLoadedAt = new Date().toISOString();
-        window.__actFactPrefetchMs = Math.round(performance.now() - started);
-        window.__actFactPrefetchUrlCount = urls.length;
-        window.reportsDirty = false;
-        if (document.getElementById('tab-reports')?.classList.contains('active') && typeof window.renderReports === 'function') window.renderReports();
-        return normalized;
-      } catch(e) {
-        console.error('Scoped fact-table prefetch failed', e);
-        window.__actFactReportingLoaded = false;
-        window.reportsDirty = true;
-        throw e;
-      }
-    })();
-    return window.__actFactPrefetchPromise;
+  window.normalizeActionStrict=function(v){
+    if(!v)return'';let raw=String(v).trim();if(!raw)return'';
+    const lr=raw.toLowerCase();
+    if(/\bf\s*[\/\\.-]?\s*u\b|follow\s*[\/-]?\s*up|followup/.test(lr))return'Follow Up';
+    raw=raw.replace(/[^a-zA-Z0-9\s]/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+    if(!raw||raw==='-'||raw==='.')return'';
+    if(/intro|introduction/.test(raw))return'Intro';
+    if(/quote|pricing/.test(raw))return'Quote';
+    if(/meeting/.test(raw))return'Meeting';
+    if(/call|phone/.test(raw))return'Call';
+    if(/email|e mail/.test(raw))return'Email';
+    if(/no\s*action|none|idle/.test(raw))return'None';
+    if(/metadata\s*update/.test(raw))return'Metadata Update';
+    return raw.split(' ').map(w=>w?w[0].toUpperCase()+w.slice(1):'').join(' ');
   };
 
-  window.scheduleFactReportingPreload = function(reason='filter'){
-    clearTimeout(window.__actFactPreloadTimer);
-    window.__actFactPreloadTimer = setTimeout(() => {
-      window.prefetchFactReportingForCurrentScope(reason).catch(() => {});
-    }, PRELOAD_DEBOUNCE_MS);
-  };
+  async function token(){if(typeof window.getToken==='function')return await window.getToken();if(window.accessToken)return window.accessToken;throw new Error('No Dataverse token available');}
+  async function getJson(url){const t=await token();const r=await fetch(url,{headers:{Authorization:`Bearer ${t}`,Accept:'application/json','OData-Version':'4.0','OData-MaxVersion':'4.0',Prefer:'odata.maxpagesize=5000'}});if(!r.ok)throw new Error(await r.text());return r.json();}
+  async function pages(url){let out=[];while(url){const j=await getJson(url);out=out.concat(j.value||[]);url=j['@odata.nextLink']||null;}return out;}
+  async function pool(items,worker,limit){let i=0,out=[];async function run(){while(i<items.length){const n=i++;out[n]=await worker(items[n]);}}await Promise.all(Array.from({length:Math.min(limit,items.length)},run));return out;}
 
-  // Override the previous fact-table loader: reports should consume the scoped/preloaded cache first.
-  const previousLoadReportingFromFactTable = window.loadReportingFromFactTable;
-  window.loadReportingFromFactTable = async function(force=false){
-    const key = filterKeyForScope();
-    if (!force && window.__actFactReportingLoaded && window.__actFactPrefetchKey === key) return window.reportingFacts || [];
-    try {
-      return await window.prefetchFactReportingForCurrentScope(force ? 'forced-report' : 'report');
-    } catch(e) {
-      // Safety fallback to older loader if present.
-      if (previousLoadReportingFromFactTable) return previousLoadReportingFromFactTable.call(this, true);
-      throw e;
-    }
-  };
+  function explicitReps(){const f=window.activeFilters||{};const reps=[];if(hasVals(f.cr714_employeename))reps.push(...Array.from(f.cr714_employeename));if(window.__ACT_QUERY_SNIPER&&hasVals(window.__ACT_QUERY_SNIPER.selectedRepSet))reps.push(...Array.from(window.__ACT_QUERY_SNIPER.selectedRepSet));return uniq(reps);}
+  function inferredReps(){try{if(typeof window.getScopedRepsFromPreFilters==='function')return uniq(Array.from(window.getScopedRepsFromPreFilters()));const f=window.activeFilters||{};const org=['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','statecode'];if(!org.some(id=>hasVals(f[id])))return[];return uniq((window.employeesData||[]).filter(e=>org.every(id=>{if(!hasVals(f[id]))return true;let val=id==='statecode'?(e._mappedStatecode||((e.statecode===0||e.cr714_status===1)?'Active':'Inactive')):e[id];return f[id].has(val);})).map(e=>e.cr714_employeename||e.cr714_repname||e.fullname||e.name));}catch(e){return[];}}
+  function scopedIds(){if(window.massFilteredIds&&window.massFilteredIds.size)return uniq(Array.from(window.massFilteredIds).map(x=>String(x).toUpperCase()));if(window.__ACT_QUERY_SNIPER&&hasVals(window.__ACT_QUERY_SNIPER.selectedMassIds))return uniq(Array.from(window.__ACT_QUERY_SNIPER.selectedMassIds).map(x=>String(x).toUpperCase()));const merged=window.mergedAccounts||[], filtered=window.teamFilteredAccounts||[];if(merged.length&&filtered.length&&filtered.length<merged.length)return uniq(filtered.map(a=>a.cr714_id||a.accountNumber));return[];}
+  function hasRepOrAccountScope(){if(scopedIds().length)return true;if(explicitReps().length)return true;if(inferredReps().length)return true;return false;}
+  window.hasFactReportingScope=function(){if(window.__ACT_QUERY_SNIPER&&window.__ACT_QUERY_SNIPER.allowWideOpen)return false;return hasRepOrAccountScope();};
 
-  // Trigger preload as soon as home filters resolve into teamFilteredAccounts.
-  const previousApplyFilters = window.applyFilters;
-  window.applyFilters = function(){
-    const result = previousApplyFilters ? previousApplyFilters.apply(this, arguments) : undefined;
-    try { window.__actFactReportingLoaded = false; window.scheduleFactReportingPreload('home-filter'); } catch(e) {}
-    return result;
-  };
+  function noScope(){window.__actFactReportingLoaded=true;window.__actFactReportingRows=[];window.reportingFacts=[];window.reportingDims={reps:[],actions:[],months:[]};window.__actFactPrefetchKey='NO_FILTER_SCOPE';window.__actFactPrefetchPromise=null;window.reportsDirty=false;}
+  function noScopeUi(){const msg='Apply a Home or Scope filter first. Fact reporting will not load wide-open.';['scorecard-body','actions-body','engagement-body','monthly-body'].forEach(id=>{const el=document.getElementById(id);if(el)el.innerHTML=`<tr><td colspan="20" class="text-center py-12 text-muted italic font-bold">${msg}</td></tr>`;});['rep-tot-accts','rep-tot-req','rep-tot-stale','rep-tot-email','rep-tot-intro','act-tot-actions'].forEach(id=>{const el=document.getElementById(id);if(el)el.innerText='0';});const r=document.getElementById('act-action-rate');if(r)r.innerText='0%';}
+  function filterKey(){return JSON.stringify({ids:scopedIds().sort().slice(0,500),idCount:scopedIds().length,reps:uniq(explicitReps().concat(inferredReps())).sort(),start:startIso(window.reportStartDate||document.getElementById('date-box-min')?.value)||'',end:endIso(window.reportEndDate||document.getElementById('date-box-max')?.value)||''});}
+  function or(field,vals){return '('+vals.map(v=>`${field} eq '${od(v)}'`).join(' or ')+')';}
+  function factUrls(){if(!window.hasFactReportingScope())return[];const select=[FACT_ID,'cr714_activitynaturalkey','cr714_accountnumber','cr714_accountrep','cr714_repfromnote','cr714_effectiveaction','cr714_action','cr714_activitydate','cr714_activitydateonly','cr714_activitymonth','cr714_activitytype'].join(',');const base=`${root()}/${FACT_SET}?$select=${select}&$orderby=cr714_activitydate desc`;const parts=[];const st=startIso(window.reportStartDate||document.getElementById('date-box-min')?.value);const en=endIso(window.reportEndDate||document.getElementById('date-box-max')?.value);if(st)parts.push(`cr714_activitydate ge ${st}`);if(en)parts.push(`cr714_activitydate le ${en}`);const actions=window.activeFilters&&window.activeFilters.action?Array.from(window.activeFilters.action).map(window.normalizeActionStrict).filter(Boolean):[];if(actions.length)parts.push(or('cr714_effectiveaction',actions));const ids=scopedIds();const reps=uniq(explicitReps().concat(inferredReps()));let chunks=[];if(ids.length&&ids.length<=1200){for(let i=0;i<ids.length;i+=ACCT_CHUNK)chunks.push([or('cr714_accountnumber',ids.slice(i,i+ACCT_CHUNK))].concat(parts));}else if(reps.length){for(let i=0;i<reps.length;i+=REP_CHUNK)chunks.push([or('cr714_accountrep',reps.slice(i,i+REP_CHUNK))].concat(parts));}else{return[];}return chunks.map(p=>`${base}&$filter=${encodeURIComponent(p.filter(Boolean).join(' and '))}`);}
+  function normalize(rows){const seen=new Set();return(rows||[]).map(r=>{const act=window.normalizeActionStrict(r.cr714_effectiveaction||r.cr714_action||'');const dt=r.cr714_activitydate||r.cr714_activitydateonly||r.createdon||r.modifiedon;const raw=s(r.cr714_activitytype||'Note');const tt=/email/i.test(raw)?'Email':(/mason/i.test(raw)?'Masonville':(/call/i.test(raw)?'Call':'Note'));const acct=s(r.cr714_accountnumber||r.cr714_d365accountid||r.cr714_accountid);const rep=s(r.cr714_accountrep||r.cr714_repfromnote||'Unassigned')||'Unassigned';return{factType:'event',factId:r[FACT_ID],naturalKey:r.cr714_activitynaturalkey||'',accountId:acct,rep,action:act,noteDate:dt,monthKey:r.cr714_activitymonth||month(dt),touchType:tt,count:1};}).filter(f=>f.accountId&&f.action).filter(f=>{const dd=d(f.noteDate);const k=f.naturalKey||[f.accountId,f.rep,f.action,f.touchType,dd?dd.toISOString():s(f.noteDate)].join('|').toLowerCase();if(seen.has(k))return false;seen.add(k);return true;});}
 
-  // Trigger preload directly from scope-popup interactions too, before the user switches to Reporting.
-  ['scopedPopupUpdateFilterState','scopedPopupToggleAll','clearScopedPopupFilters'].forEach(fnName => {
-    const previous = window[fnName];
-    if (typeof previous === 'function') {
-      window[fnName] = function(){
-        const result = previous.apply(this, arguments);
-        try { window.__actFactReportingLoaded = false; window.scheduleFactReportingPreload('scope-filter'); } catch(e) {}
-        return result;
-      };
-    }
-  });
+  window.prefetchFactReportingForCurrentScope=async function(reason='scope'){if(!window.hasFactReportingScope()){console.info('ACT fact fetch skipped: no filtered home/scope data yet.',reason);noScope();return[];}const key=filterKey();if(window.__actFactPrefetchPromise&&window.__actFactPrefetchKey===key)return window.__actFactPrefetchPromise;window.__actFactPrefetchKey=key;const urls=factUrls();if(!urls.length){noScope();return[];}window.__actFactPrefetchPromise=(async()=>{const bundles=await pool(urls,u=>pages(u),PARALLEL);const facts=normalize(bundles.flat());window.__actFactReportingRows=facts;window.reportingFacts=facts;window.reportingDims={reps:Array.from(new Set(facts.map(f=>f.rep))).sort(),actions:Array.from(new Set(facts.map(f=>f.action))).sort(),months:Array.from(new Set(facts.map(f=>f.monthKey).filter(Boolean))).sort().reverse()};window.__actFactReportingLoaded=true;window.reportsDirty=false;if(document.getElementById('tab-reports')?.classList.contains('active'))window.renderReports();return facts;})();return window.__actFactPrefetchPromise;};
+  window.scheduleFactReportingPreload=function(reason='filter'){clearTimeout(window.__actFactPreloadTimer);if(!window.hasFactReportingScope()){noScope();return;}window.__actFactPreloadTimer=setTimeout(()=>window.prefetchFactReportingForCurrentScope(reason).catch(e=>console.warn('Fact preload skipped/failed',e)),DEBOUNCE);};
+  window.loadReportingFromFactTable=async function(force=false){if(!window.hasFactReportingScope()){noScope();return[];}return await window.prefetchFactReportingForCurrentScope(force?'forced-report':'report');};
 
-  const previousBeginScopedLoad = window.beginScopedLoad;
-  if (typeof previousBeginScopedLoad === 'function') {
-    window.beginScopedLoad = async function(){
-      const result = await previousBeginScopedLoad.apply(this, arguments);
-      try { window.__actFactReportingLoaded = false; window.prefetchFactReportingForCurrentScope('scope-load').catch(()=>{}); } catch(e) {}
-      return result;
-    };
-  }
+  function scopedFacts(){const facts=window.__actFactReportingRows||window.reportingFacts||[];const visible=new Set((window.teamFilteredAccounts||[]).map(a=>a.cr714_id));const hasVisible=visible.size>0;const include=document.getElementById('rep-include-unassigned')?.checked;return facts.filter(f=>{if(hasVisible&&visible.size<(window.mergedAccounts||[]).length&&!visible.has(f.accountId))return false;if(!include&&(f.rep||'Unassigned')==='Unassigned')return false;const dd=d(f.noteDate);if(window.reportStartDate&&(!dd||dd<window.reportStartDate))return false;if(window.reportEndDate&&(!dd||dd>window.reportEndDate))return false;if(window.activeFilters?.cr714_employeename?.size&&!window.activeFilters.cr714_employeename.has(f.rep))return false;if(window.activeFilters?.action?.size&&!window.activeFilters.action.has(f.action))return false;return true;});}
+  window.renderReports=function(){const tab=document.getElementById('tab-reports');if(!tab||!tab.classList.contains('active'))return;if(!window.hasFactReportingScope()){noScope();noScopeUi();return;}if(!window.__actFactReportingLoaded||window.reportsDirty){window.loadReportingFromFactTable(true).then(()=>{window.reportsDirty=false;window.renderReports();}).catch(e=>{console.error(e);noScopeUi();});return;}const facts=scopedFacts();const acctMap=new Map((window.mergedAccounts||[]).map(a=>[a.cr714_id,a]));const reps=new Map(),acts=new Map(),mom={};const req=new Set(),intro=new Set(),stale=new Set(),accts=new Set();let emails=0;function er(r){if(!reps.has(r))reps.set(r,{totalRecords:0,touches:0,emails:0,notes:0,masonville:0,requests:0,intro:0,stale:0,_ids:new Set()});if(!mom[r])mom[r]={};return reps.get(r);}function ea(a){if(!acts.has(a))acts.set(a,{totalRecords:0,touches:0,emails:0,notes:0,masonville:0,_ids:new Set()});return acts.get(a);}facts.forEach(f=>{const r=f.rep||'Unassigned',a=f.action||'None',rs=er(r),as=ea(a);rs.touches++;as.touches++;rs._ids.add(f.accountId);as._ids.add(f.accountId);accts.add(f.accountId);const acct=acctMap.get(f.accountId);if(acct){const hs=String(acct.helpStatus||'').toUpperCase();if((acct.isHelp||acct.isClose||hs==='HELP REQUESTED'||hs==='CLOSE REQUESTED')&&!String(acct.managerNotes||'').toUpperCase().includes('[RESOLVED]')&&hs!=='RESOLVED'&&hs!=='CLEAR')req.add(f.accountId);if(acct.intro)intro.add(f.accountId);const md=acct.modifiedon?new Date(acct.modifiedon):null;if(!md||((new Date()-md)/DAY>30))stale.add(f.accountId);}const m=f.monthKey||month(f.noteDate);if(m){if(!mom[r][m])mom[r][m]={records:new Set(),touches:0,emails:0};mom[r][m].records.add(f.accountId);mom[r][m].touches++;}if(f.touchType==='Email'){rs.emails++;as.emails++;emails++;if(m)mom[r][m].emails++;}else if(f.touchType==='Masonville'){rs.masonville++;as.masonville++;}else{rs.notes++;as.notes++;}});for(const [r,x]of reps){x.totalRecords=x._ids.size;x.requests=[...x._ids].filter(id=>req.has(id)).length;x.intro=[...x._ids].filter(id=>intro.has(id)).length;x.stale=[...x._ids].filter(id=>stale.has(id)).length;}for(const [,x]of acts)x.totalRecords=x._ids.size;const sb=document.getElementById('scorecard-body'),ab=document.getElementById('actions-body'),eb=document.getElementById('engagement-body'),mb=document.getElementById('monthly-body');if(!sb||!ab||!eb||!mb)return;sb.innerHTML=ab.innerHTML=eb.innerHTML=mb.innerHTML='';const sr=[...reps.entries()].sort((a,b)=>b[1].totalRecords-a[1].totalRecords||a[0].localeCompare(b[0]));const sa=[...acts.entries()].sort((a,b)=>b[1].touches-a[1].touches||a[0].localeCompare(b[0]));const months=[...new Set(facts.map(f=>f.monthKey||month(f.noteDate)).filter(Boolean))].sort().reverse();sr.forEach(([r,x])=>{const R=html(r),J=js(r),ep=x.totalRecords?(x.emails/x.totalRecords).toFixed(2):'0.00';sb.innerHTML+=`<tr><td class="font-black drilldown-cell uppercase" onclick="window.openDrilldown('${J}','total')">${R}</td><td>${x.totalRecords}</td><td>${x.touches}</td><td>${x.stale}</td><td>${x.emails}</td><td>${x.requests}</td><td>${x.intro}</td></tr>`;eb.innerHTML+=`<tr><td class="font-black drilldown-cell uppercase" onclick="window.openDrilldown('${J}','total')">${R}</td><td>${x.totalRecords}</td><td>${x.touches}</td><td>${x.emails}</td><td>${x.notes}</td><td>${x.masonville}</td><td>${ep} / Record</td></tr>`;});sa.forEach(([a,x])=>{const A=html(a),J=js(a),ep=x.totalRecords?(x.emails/x.totalRecords).toFixed(2):'0.00';ab.innerHTML+=`<tr><td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${J}','total')">${A}</td><td>${x.totalRecords}</td><td>${x.touches}</td><td>${x.emails}</td><td>${x.notes}</td><td>${x.masonville}</td><td>${ep} / Record</td></tr>`;});const mh=document.getElementById('monthly-table')?.querySelector('thead tr');if(mh)mh.innerHTML='<th>Rep Name</th>'+months.map((m,i)=>`<th>${m}<br/><span class="text-[9px] font-normal text-muted">Accounts Touched / Total Activities / Emails</span></th>`).join('');sr.forEach(([r])=>{let row=`<td class="font-black uppercase">${html(r)}</td>`;months.forEach(m=>{const b=(mom[r]||{})[m]||{records:new Set(),touches:0,emails:0};row+=`<td class="text-center"><span style="color:var(--primary);font-weight:900">${b.records.size}</span> | <span style="color:var(--accent-success);font-weight:700">${b.touches}</span> / <span style="color:var(--chart-email);font-weight:700">${b.emails}</span></td>`;});mb.innerHTML+=`<tr>${row}</tr>`;});Object.entries({'rep-tot-accts':accts.size,'rep-tot-req':req.size,'rep-tot-stale':stale.size,'rep-tot-email':emails,'rep-tot-intro':intro.size,'act-tot-actions':facts.filter(f=>f.action&&f.action!=='None').length}).forEach(([id,val])=>{const el=document.getElementById(id);if(el)el.innerText=val;});const rate=document.getElementById('act-action-rate');if(rate)rate.innerText=facts.length?Math.round((facts.filter(f=>f.action&&f.action!=='None').length/facts.length)*100)+'%':'0%';if(typeof window.renderCharts==='function')window.renderCharts(sr,sa,mom,months);['scorecard-table','actions-table','engagement-table','monthly-table'].forEach(t=>{try{window.calculateTableTotals&&window.calculateTableTotals(t)}catch(e){}});window.reportsDirty=false;};
 
-  // Date controls change the fact-table scope. Start a new prefetch immediately.
-  ['applyDateChange','applyDateBoxChange','resetDateSlider'].forEach(fnName => {
-    const previous = window[fnName];
-    if (typeof previous === 'function') {
-      window[fnName] = function(){
-        const result = previous.apply(this, arguments);
-        try { window.__actFactReportingLoaded = false; window.scheduleFactReportingPreload('date-change'); } catch(e) {}
-        return result;
-      };
-    }
-  });
-
-  // When opening Reports, use the already-running preload instead of starting a full-table fetch.
-  const previousSwitchTab = window.switchTab;
-  if (typeof previousSwitchTab === 'function') {
-    window.switchTab = function(id){
-      if (id === 'reports') {
-        try { window.prefetchFactReportingForCurrentScope('reports-tab').catch(()=>{}); } catch(e) {}
-      }
-      return previousSwitchTab.apply(this, arguments);
-    };
-  }
-
-  setTimeout(() => { try { window.scheduleFactReportingPreload('initial'); } catch(e){} }, 1200);
+  window.loadFactTimeline=async function(acctId){if(!acctId)return[];try{const t=await token();const id=String(acctId).replace(/'/g,"''");const url=`${root()}/${FACT_SET}?$select=cr714_activitydate,cr714_activitytype,cr714_actionmessage,cr714_effectiveaction,cr714_action,cr714_managernotes&$filter=cr714_accountnumber eq '${id}'&$orderby=createdon desc`;const res=await fetch(url,{headers:{Authorization:`Bearer ${t}`,Accept:'application/json',Prefer:'odata.maxpagesize=1000'}});if(!res.ok)throw new Error(await res.text());const j=await res.json();window.__factTimelineCache=window.__factTimelineCache||{};window.__factTimelineCache[acctId]=j.value||[];return j.value||[];}catch(e){console.warn('Fact timeline load skipped',e);return[];}};
+  if(typeof window.patchFactTableActivity!=='function'){window.patchFactTableActivity=async function(){return false;};}
+  window.patchActFactActivity=function(account,options={}){return window.patchFactTableActivity({account,noteText:options.message||options.noteText||'',rawNote:options.rawNote||options.message||'',action:options.action||(account&&account.action)||'Manager Update',activityType:options.type||(options.email?'Email':'Note'),sourceTable:options.sourceTable,sourceId:options.sourceId,email:!!options.email});};
+  const oldApply=window.applyFilters;window.applyFilters=function(){const r=oldApply?oldApply.apply(this,arguments):undefined;try{if(window.hasFactReportingScope()){window.__actFactReportingLoaded=false;window.scheduleFactReportingPreload('filtered-home-scope');}else noScope();}catch(e){}return r;};
+  ['scopedPopupUpdateFilterState','scopedPopupToggleAll','clearScopedPopupFilters','beginScopedLoad','applyDateChange','applyDateBoxChange','resetDateSlider'].forEach(name=>{const old=window[name];if(typeof old==='function')window[name]=function(){const r=old.apply(this,arguments);try{if(window.hasFactReportingScope())window.scheduleFactReportingPreload(name);else noScope();}catch(e){}return r;};});
+  const oldSwitch=window.switchTab;if(typeof oldSwitch==='function')window.switchTab=function(id){if(id==='reports'&&window.hasFactReportingScope())window.prefetchFactReportingForCurrentScope('reports-tab').catch(()=>{});return oldSwitch.apply(this,arguments);};
+  setTimeout(()=>{try{if(window.hasFactReportingScope())window.scheduleFactReportingPreload('initial-filtered-only');else noScope();}catch(e){}},1500);
 })();
 </script>
-<!-- === COPILOT FACT TABLE SCOPED PREFETCH PERFORMANCE PATCH 2026-05-18 END === -->
-
-
-
-<!-- === COPILOT ACCESS TOKEN FACT TIMELINE FIX 2026-05-18 START === -->
-<script>
-(function(){
-  if (window.__ACT_ACCESS_TOKEN_FACT_TIMELINE_FIX_20260518) return;
-  window.__ACT_ACCESS_TOKEN_FACT_TIMELINE_FIX_20260518 = true;
-
-  const FACT_ENTITY_SET = 'cr714_dt_act_fctbls';
-
-  function apiRoot(){
-    return String(window.DATAVERSE_URL || 'https://org23279050.crm.dynamics.com/api/data/v9.2').replace(/\/$/, '');
-  }
-
-  async function getDataverseTokenSafe(){
-    if (typeof window.getToken === 'function') return await window.getToken();
-    if (window.accessToken) return window.accessToken;
-    throw new Error('Dataverse token unavailable. Expected window.getToken() or window.accessToken.');
-  }
-
-  function escapeHtmlSafe(v){
-    return window.escapeHTML ? window.escapeHTML(v) : String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-  }
-
-  // Fixes the older injected timeline loader that referenced a non-existent global accessToken.
-  window.loadFactTimeline = async function(acctId){
-    if (!acctId) return [];
-    try {
-      const token = await getDataverseTokenSafe();
-      const safeId = String(acctId).replace(/'/g, "''");
-      const url = `${apiRoot()}/${FACT_ENTITY_SET}?$select=cr714_activitydate,cr714_activitytype,cr714_actionmessage,cr714_effectiveaction,cr714_action,cr714_managernotes&$filter=cr714_accountnumber eq '${safeId}'&$orderby=createdon desc`;
-      const res = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json',
-          'OData-Version': '4.0',
-          'OData-MaxVersion': '4.0',
-          'Prefer': 'odata.maxpagesize=1000'
-        }
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const json = await res.json();
-      const rows = json.value || [];
-
-      // Cache for unified timeline patch if present, but do not break page if it is not.
-      window.__factTimelineCache = window.__factTimelineCache || {};
-      window.__factTimelineCache[acctId] = rows;
-
-      if (typeof window.renderFactTimeline === 'function') {
-        try { window.renderFactTimeline(rows); } catch(renderErr){ console.warn('Fact timeline render skipped', renderErr); }
-      }
-      return rows;
-    } catch(e) {
-      console.warn('Fact timeline load skipped', e);
-      return [];
-    }
-  };
-
-  // Make the old renderer safe too; it should never throw or rely on external globals.
-  window.renderFactTimeline = function(data){
-    const el = document.getElementById('fv-history');
-    if (!el || !Array.isArray(data) || !data.length) return;
-    const html = data.map(d => {
-      const type = escapeHtmlSafe(d.cr714_activitytype || 'Activity');
-      const when = d.cr714_activitydate ? new Date(d.cr714_activitydate).toLocaleString() : '';
-      const action = escapeHtmlSafe(d.cr714_effectiveaction || d.cr714_action || '');
-      const msg = escapeHtmlSafe(d.cr714_actionmessage || d.cr714_managernotes || '').replace(/\n/g, '<br/>');
-      return `<div class="fact-history-card" data-fact-card="1">
-        <div class="fact-history-head">
-          <div class="fact-history-type"><i class="fa fa-clock"></i> ${type}${action ? ' • ' + action : ''}</div>
-          <div>${escapeHtmlSafe(when)}</div>
-        </div>
-        <div>${msg}</div>
-      </div>`;
-    }).join('');
-
-    // Avoid stacking duplicate fact cards every time selectAccount is called.
-    el.querySelectorAll('[data-fact-card="1"]').forEach(n => n.remove());
-    el.insertAdjacentHTML('afterbegin', html);
-  };
-
-  // Defensive override for any lingering old POST helper that used accessToken.
-  if (typeof window.patchFactTableActivity === 'function') {
-    window.patchActFactActivity = function(account, options={}){
-      return window.patchFactTableActivity({
-        account,
-        noteText: options.message || options.noteText || '',
-        rawNote: options.rawNote || options.message || '',
-        action: options.action || (account && account.action) || 'Manager Update',
-        activityType: options.type || (options.email ? 'Email' : 'Note'),
-        sourceTable: options.sourceTable,
-        sourceId: options.sourceId,
-        email: !!options.email
-      });
-    };
-  }
-})();
-</script>
-<!-- === COPILOT ACCESS TOKEN FACT TIMELINE FIX 2026-05-18 END === -->
+<!-- === COPILOT FINAL FILTER-GATED FACT REPORTING PATCH 2026-05-18 END === -->
 
 </body>
 </html>
