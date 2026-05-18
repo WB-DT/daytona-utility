@@ -506,7 +506,7 @@
                     </div>
                 </div>
 
-                <div class="flex flex-col overflow-hidden relative flex-shrink-0" id="history-column" style="width: var(--history-width); min-width:320px; max-width:50vw; border-color: var(--border-color); background-color: var(--bg-card);">
+                <div class="flex flex-col overflow-hidden relative flex-shrink-0" id="history-column" style="width: var(--history-width); border-color: var(--border-color); background-color: var(--bg-card);">
                     <div id="history-resizer" class="absolute top-0 bottom-0 left-0 w-2 cursor-col-resize z-50 flex items-center justify-center group transition-colors" title="Drag to resize">
                         <div class="w-0.5 h-8 rounded transition-colors shadow-sm" style="background-color: var(--border-color);"></div>
                     </div>
@@ -1613,7 +1613,7 @@ window.resetDateSlider = function() {
             const savedWidth = localStorage.getItem('act_mgr_history_width'); 
             if (savedWidth) grid.style.setProperty('--history-width', savedWidth);
             const onDown = (e) => { isResizing = true; startX = e.clientX; startWidth = historyCol.offsetWidth; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; resizer.classList.add('bg-blue-500/20'); };
-            const onMove = (e) => { if (!isResizing) return; const deltaX = startX - e.clientX; let newWidth = startWidth + deltaX; const maxWidth = Math.floor(window.innerWidth * 0.5); if (newWidth < 320) newWidth = 320; if (newWidth > maxWidth) newWidth = maxWidth; grid.style.setProperty('--history-width', `${newWidth}px`); };
+            const onMove = (e) => { if (!isResizing) return; const deltaX = startX - e.clientX; let newWidth = startWidth + deltaX; if (newWidth < 250) newWidth = 250; if (newWidth > 800) newWidth = 800; grid.style.setProperty('--history-width', `${newWidth}px`); };
             const onUp = () => { if (isResizing) { isResizing = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; resizer.classList.remove('bg-blue-500/20'); localStorage.setItem('act_mgr_history_width', getComputedStyle(grid).getPropertyValue('--history-width')); } };
             resizer.addEventListener('mousedown', onDown); document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
         }
@@ -7892,216 +7892,196 @@ window.selectAccount=async function(id){
 
 
 
-<!-- === COPILOT FACT TABLE REPORTING + UPSERT LOCKDOWN 2026-05-18 START === -->
-<style>
-  #history-column{min-width:320px!important;max-width:50vw!important;}
-</style>
+<!-- === COPILOT FACT TABLE SCOPED PREFETCH PERFORMANCE PATCH 2026-05-18 START === -->
 <script>
 (function(){
-  if (window.__ACT_FACT_TABLE_REPORTING_UPSERT_LOCKDOWN_20260518) return;
-  window.__ACT_FACT_TABLE_REPORTING_UPSERT_LOCKDOWN_20260518 = true;
+  if (window.__ACT_FACT_SCOPED_PREFETCH_PERF_20260518) return;
+  window.__ACT_FACT_SCOPED_PREFETCH_PERF_20260518 = true;
 
   const FACT_ENTITY_SET = 'cr714_dt_act_fctbls';
   const FACT_ID_FIELD = 'cr714_dt_act_fctblid';
-  const API_ROOT = () => (window.DATAVERSE_URL || '').replace(/\/$/, '');
-  const DAY_MS = 24 * 60 * 60 * 1000;
+  const MAX_PARALLEL_FACT_REQUESTS = 6;
+  const ACCOUNT_FILTER_CHUNK = 70;
+  const REP_FILTER_CHUNK = 35;
+  const PRELOAD_DEBOUNCE_MS = 450;
 
+  function root(){ return (window.DATAVERSE_URL || '').replace(/\/$/, ''); }
   function txt(v){ return String(v ?? '').trim(); }
-  function esc(v){ return (window.escapeHTML ? window.escapeHTML(v) : String(v ?? '')); }
-  function escJs(v){ return (window.escapeJS ? window.escapeJS(v) : String(v ?? '').replace(/\\/g,'\\\\').replace(/'/g,"\\'")); }
-  function odataString(v){ return String(v ?? '').replace(/'/g, "''"); }
-  function stableHash(input){
-    const s = String(input ?? '');
-    let h = 2166136261;
-    for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
-    return (h >>> 0).toString(36);
-  }
+  function od(v){ return String(v ?? '').replace(/'/g, "''"); }
   function dateObj(v){ const d = new Date(v); return isNaN(d.getTime()) ? null : d; }
-  function monthKey(v){ const d = dateObj(v); return d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` : null; }
+  function mk(v){ const d = dateObj(v); return d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` : null; }
+  function isoDateStart(d){ if (!d) return null; const x = new Date(d); if (isNaN(x.getTime())) return null; x.setHours(0,0,0,0); return x.toISOString(); }
+  function isoDateEnd(d){ if (!d) return null; const x = new Date(d); if (isNaN(x.getTime())) return null; x.setHours(23,59,59,999); return x.toISOString(); }
+  function uniq(arr){ return Array.from(new Set((arr || []).map(txt).filter(Boolean))); }
 
-  window.normalizeActionStrict = function(val){
-    if (!val) return '';
-    let raw = String(val).trim();
-    if (!raw) return '';
-    // Fix common abbreviations before symbol stripping.
-    const lowerRaw = raw.toLowerCase();
-    if (/\bf\s*[\/\\.-]?\s*u\b|follow\s*[\/-]?\s*up|followup/.test(lowerRaw)) return 'Follow Up';
-    raw = raw
-      .replace(/[^a-zA-Z0-9\s]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase();
-    if (!raw || raw === '-' || raw === '.') return '';
-    if (/^fu$/.test(raw)) return 'Follow Up';
-    if (/follow\s*up|followup/.test(raw)) return 'Follow Up';
-    if (/intro|introduction/.test(raw)) return 'Intro';
-    if (/quote|pricing/.test(raw)) return 'Quote';
-    if (/meeting/.test(raw)) return 'Meeting';
-    if (/call|phone/.test(raw)) return 'Call';
-    if (/email|e mail/.test(raw)) return 'Email';
-    if (/no\s*action|none|idle/.test(raw)) return 'None';
-    if (/metadata\s*update/.test(raw)) return 'Metadata Update';
-    return raw.split(' ').map(w => w ? w.charAt(0).toUpperCase() + w.slice(1) : '').join(' ');
-  };
+  function normalizeAction(v){
+    return (typeof window.normalizeActionStrict === 'function') ? window.normalizeActionStrict(v) : txt(v).replace(/[^a-zA-Z0-9\s]/g,' ').replace(/\s+/g,' ').trim();
+  }
 
-  function getTokenSafe(){
+  async function token(){
     if (typeof window.getToken === 'function') return window.getToken();
-    if (window.accessToken) return Promise.resolve(window.accessToken);
-    return Promise.reject(new Error('No Dataverse token helper available.'));
+    if (window.accessToken) return window.accessToken;
+    throw new Error('No Dataverse token available for fact prefetch.');
   }
 
-  async function fetchJson(url, options={}){
-    const token = await getTokenSafe();
-    const headers = Object.assign({
-      'Authorization': `Bearer ${token}`,
-      'Accept': 'application/json',
-      'Content-Type': 'application/json',
-      'OData-Version': '4.0',
-      'OData-MaxVersion': '4.0'
-    }, options.headers || {});
-    const res = await fetch(url, Object.assign({}, options, { headers }));
-    return res;
-  }
-
-  function getPrimarySource(account){
-    const src = (account && account.sources && account.sources[0]) || {};
-    return {
-      table: src.table || src.type || 'manager_console',
-      id: src.id || account?.cr714_id || account?.accountNumber || ''
-    };
-  }
-
-  function buildNaturalKey({account, noteText, action, activityType, sourceTable, sourceId, dateOnly}){
-    const acct = txt(account?.cr714_id || account?.accountNumber || account?.accountId || 'UNK');
-    const act = window.normalizeActionStrict(action || account?.action || 'Manager Update') || 'Manager Update';
-    const bodyHash = stableHash(txt(noteText).toLowerCase().replace(/\s+/g,' '));
-    return [acct, sourceTable || 'manager_console', sourceId || acct, activityType || 'Note', act, dateOnly, bodyHash].join('|');
-  }
-
-  window.patchFactTableActivity = async function({account, noteText, rawNote, action, activityType='Note', sourceTable, sourceId, email=false}){
-    if (!account) return false;
-    const now = new Date();
-    const iso = now.toISOString();
-    const dateOnly = iso.split('T')[0];
-    const month = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
-    const src = getPrimarySource(account);
-    sourceTable = sourceTable || src.table || 'manager_console';
-    sourceId = sourceId || src.id || account.cr714_id;
-    const cleanAction = window.normalizeActionStrict(action || account.action || 'Manager Update') || 'Manager Update';
-    const cleanNote = txt(noteText || rawNote || '');
-    const naturalKey = buildNaturalKey({account, noteText: cleanNote, action: cleanAction, activityType, sourceTable, sourceId, dateOnly});
-
-    const payload = {
-      cr714_activitynaturalkey: naturalKey,
-      cr714_accountnumber: txt(account.cr714_id || account.accountNumber || account.accountId),
-      cr714_d365accountid: txt(account.cr714_id || account.accountNumber || account.accountId),
-      cr714_d365accountname: txt(account.company || account.accountName),
-      cr714_companyname: txt(account.company || account.accountName),
-      cr714_accountrep: txt(account.rep || account.accountRep),
-      cr714_repfromnote: txt(account.rep || account.accountRep),
-      cr714_activitydate: iso,
-      cr714_activitydateonly: dateOnly,
-      cr714_activitymonth: month,
-      cr714_activitytype: activityType || (email ? 'Email' : 'Note'),
-      cr714_action: txt(action || account.action || cleanAction),
-      cr714_effectiveaction: cleanAction,
-      cr714_actionmessage: cleanNote,
-      cr714_notetext: cleanNote,
-      cr714_notetextraw: txt(rawNote || noteText || ''),
-      cr714_managernotes: cleanNote,
-      cr714_notedate: iso,
-      cr714_sourcetable: txt(sourceTable),
-      cr714_sourcerecordid: txt(sourceId),
-      cr714_sourcetype: email ? 'ManagerEmail' : 'ManagerEntry'
-    };
-
-    const root = API_ROOT();
-    const altUrl = `${root}/${FACT_ENTITY_SET}(cr714_activitynaturalkey='${encodeURIComponent(naturalKey)}')`;
-    try {
-      let res = await fetchJson(altUrl, { method:'PATCH', headers:{ 'Prefer':'return=representation' }, body: JSON.stringify(payload) });
-      if (res.ok || res.status === 204) {
-        window.__actFactReportingLoaded = false;
-        window.reportsDirty = true;
-        return true;
+  async function fetchJson(url){
+    const t = await token();
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${t}`,
+        'Accept': 'application/json',
+        'OData-Version': '4.0',
+        'OData-MaxVersion': '4.0',
+        'Prefer': 'odata.maxpagesize=5000'
       }
-      // Fallback for environments where alternate key is not active yet: query by natural key, then PATCH/POST.
-      const q = `${root}/${FACT_ENTITY_SET}?$select=${FACT_ID_FIELD}&$filter=cr714_activitynaturalkey eq '${odataString(naturalKey)}'`;
-      const foundRes = await fetchJson(q, { method:'GET' });
-      if (foundRes.ok) {
-        const found = await foundRes.json();
-        const id = found.value && found.value[0] && found.value[0][FACT_ID_FIELD];
-        if (id) {
-          res = await fetchJson(`${root}/${FACT_ENTITY_SET}(${id})`, { method:'PATCH', headers:{ 'Prefer':'return=representation' }, body: JSON.stringify(payload) });
-          if (res.ok || res.status === 204) { window.__actFactReportingLoaded = false; window.reportsDirty = true; return true; }
-        }
-      }
-      res = await fetchJson(`${root}/${FACT_ENTITY_SET}`, { method:'POST', headers:{ 'Prefer':'return=representation' }, body: JSON.stringify(payload) });
-      if (!res.ok) throw new Error(await res.text());
-      window.__actFactReportingLoaded = false;
-      window.reportsDirty = true;
-      return true;
-    } catch(e){
-      console.error('ACT fact upsert failed', e);
-      if (window.showToast) window.showToast('Fact table activity upsert failed.', 'warning');
-      return false;
-    }
-  };
-
-  // Backward compatibility: replace the older POST-only function with the upsert implementation.
-  window.patchActFactActivity = function(account, options={}){
-    return window.patchFactTableActivity({
-      account,
-      noteText: options.message || options.noteText || '',
-      rawNote: options.rawNote || options.message || '',
-      action: options.action || account?.action || 'Manager Update',
-      activityType: options.type || (options.email ? 'Email' : 'Note'),
-      sourceTable: options.sourceTable,
-      sourceId: options.sourceId,
-      email: !!options.email
     });
-  };
-
-  async function fetchFactRowsPage(url){
-    const res = await fetchJson(url, { method:'GET', headers:{ 'Prefer':'odata.maxpagesize=5000' }});
     if (!res.ok) throw new Error(await res.text());
     return res.json();
   }
 
-  window.loadReportingFromFactTable = async function(force=false){
-    if (window.__actFactReportingLoaded && !force) return window.reportingFacts || [];
-    const root = API_ROOT();
-    let select = [
-      FACT_ID_FIELD,
-      'cr714_activitynaturalkey','cr714_accountnumber','cr714_d365accountid','cr714_d365accountname','cr714_companyname',
-      'cr714_accountrep','cr714_repfromnote','cr714_action','cr714_effectiveaction','cr714_actionmessage',
-      'cr714_activitydate','cr714_activitydateonly','cr714_activitymonth','cr714_activitytype','cr714_sourcetable','cr714_sourcerecordid','cr714_sourcetype',
-      'cr714_notetext','cr714_notetextraw','cr714_managernotes','cr714_notedate'
-    ].join(',');
-    let url = `${root}/${FACT_ENTITY_SET}?$select=${select}&$orderby=cr714_activitydate desc`;
+  async function fetchAllPages(url){
     let rows = [];
-    try {
-      while (url) {
-        const data = await fetchFactRowsPage(url);
-        rows = rows.concat(data.value || []);
-        url = data['@odata.nextLink'] || null;
-      }
-    } catch(firstErr) {
-      console.warn('Selected fact-table load failed; retrying without $select.', firstErr);
-      rows = [];
-      url = `${root}/${FACT_ENTITY_SET}?$orderby=createdon desc`;
-      while (url) {
-        const data = await fetchFactRowsPage(url);
-        rows = rows.concat(data.value || []);
-        url = data['@odata.nextLink'] || null;
+    while (url) {
+      const data = await fetchJson(url);
+      rows = rows.concat(data.value || []);
+      url = data['@odata.nextLink'] || null;
+    }
+    return rows;
+  }
+
+  async function runPool(items, worker, limit){
+    const out = [];
+    let i = 0;
+    async function runner(){
+      while (i < items.length) {
+        const idx = i++;
+        out[idx] = await worker(items[idx], idx);
       }
     }
+    const runners = Array.from({length: Math.min(limit, items.length)}, runner);
+    await Promise.all(runners);
+    return out;
+  }
 
+  function currentDateFilter(){
+    const parts = [];
+    const start = isoDateStart(window.reportStartDate || document.getElementById('date-box-min')?.value);
+    const end = isoDateEnd(window.reportEndDate || document.getElementById('date-box-max')?.value);
+    if (start) parts.push(`cr714_activitydate ge ${start}`);
+    if (end) parts.push(`cr714_activitydate le ${end}`);
+    return parts;
+  }
+
+  function selectedRepNamesFromFilters(){
+    const set = window.activeFilters && window.activeFilters.cr714_employeename;
+    if (set && set.size) return Array.from(set).map(txt).filter(Boolean);
+    const scoped = window.__ACT_QUERY_SNIPER && window.__ACT_QUERY_SNIPER.selectedRepSet;
+    if (scoped && scoped.size) return Array.from(scoped).map(txt).filter(Boolean);
+    return [];
+  }
+
+  function repsFromOrgFilters(){
+    // When the scoped screen has manager/supervisor/department filters selected but no explicit reps yet,
+    // infer reps from employeesData so the fact table can be preloaded before the full dataset finishes.
+    try {
+      if (typeof window.getScopedRepsFromPreFilters === 'function') return Array.from(window.getScopedRepsFromPreFilters()).map(txt).filter(Boolean);
+      const filters = window.activeFilters || {};
+      const orgIds = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','statecode'];
+      const any = orgIds.some(id => filters[id] && filters[id].size);
+      if (!any) return [];
+      return (window.employeesData || []).filter(e => {
+        return orgIds.every(id => {
+          const set = filters[id];
+          if (!set || !set.size) return true;
+          const val = id === 'statecode' ? (e._mappedStatecode || ((e.statecode === 0 || e.cr714_status === 1) ? 'Active' : 'Inactive')) : e[id];
+          return set.has(val);
+        });
+      }).map(e => e.cr714_employeename || e.cr714_repname || e.fullname || e.name).filter(Boolean);
+    } catch(e){ return []; }
+  }
+
+  function getScopedAccountIds(){
+    const mass = window.massFilteredIds && window.massFilteredIds.size ? Array.from(window.massFilteredIds) : [];
+    if (mass.length) return uniq(mass.map(x => String(x).toUpperCase()));
+    const scopedIds = window.__ACT_QUERY_SNIPER && window.__ACT_QUERY_SNIPER.selectedMassIds;
+    if (scopedIds && scopedIds.size) return uniq(Array.from(scopedIds).map(x => String(x).toUpperCase()));
+    const accounts = (window.teamFilteredAccounts && window.teamFilteredAccounts.length ? window.teamFilteredAccounts : []);
+    return uniq(accounts.map(a => a.cr714_id || a.accountNumber));
+  }
+
+  function filterKeyForScope(){
+    const accountIds = getScopedAccountIds().sort();
+    const reps = uniq(selectedRepNamesFromFilters().concat(repsFromOrgFilters())).sort();
+    const actionSet = window.activeFilters && window.activeFilters.action ? Array.from(window.activeFilters.action).map(normalizeAction).filter(Boolean).sort() : [];
+    const start = isoDateStart(window.reportStartDate || document.getElementById('date-box-min')?.value) || '';
+    const end = isoDateEnd(window.reportEndDate || document.getElementById('date-box-max')?.value) || '';
+    return JSON.stringify({ accountIds: accountIds.slice(0, 500), accountCount: accountIds.length, reps, actionSet, start, end });
+  }
+
+  function buildOr(field, values){
+    return '(' + values.map(v => `${field} eq '${od(v)}'`).join(' or ') + ')';
+  }
+
+  function buildFactUrlsForCurrentScope(){
+    const select = [
+      FACT_ID_FIELD,
+      'cr714_activitynaturalkey',
+      'cr714_accountnumber',
+      'cr714_accountrep',
+      'cr714_repfromnote',
+      'cr714_effectiveaction',
+      'cr714_action',
+      'cr714_activitydate',
+      'cr714_activitydateonly',
+      'cr714_activitymonth',
+      'cr714_activitytype'
+    ].join(',');
+
+    const base = `${root()}/${FACT_ENTITY_SET}?$select=${select}&$orderby=cr714_activitydate desc`;
+    const dateParts = currentDateFilter();
+    const actionVals = window.activeFilters && window.activeFilters.action ? Array.from(window.activeFilters.action).map(normalizeAction).filter(Boolean) : [];
+    const actionParts = actionVals.length ? [buildOr('cr714_effectiveaction', actionVals)] : [];
+
+    const ids = getScopedAccountIds();
+    const explicitReps = selectedRepNamesFromFilters();
+    const inferredReps = repsFromOrgFilters();
+    const reps = uniq(explicitReps.concat(inferredReps));
+
+    let chunks = [];
+
+    // If the current home/scope filter produces a manageable account list, account-number chunks are the most selective.
+    if (ids.length && ids.length <= 1200) {
+      for (let i=0; i<ids.length; i+=ACCOUNT_FILTER_CHUNK) {
+        const values = ids.slice(i, i+ACCOUNT_FILTER_CHUNK);
+        chunks.push([buildOr('cr714_accountnumber', values)].concat(dateParts, actionParts));
+      }
+    }
+    // If account scope is huge, rep chunks keep URLs smaller and preload earlier from the scope screen.
+    else if (reps.length) {
+      for (let i=0; i<reps.length; i+=REP_FILTER_CHUNK) {
+        const values = reps.slice(i, i+REP_FILTER_CHUNK);
+        chunks.push([buildOr('cr714_accountrep', values)].concat(dateParts, actionParts));
+      }
+    }
+    // Last resort: date/action-only. This is still much faster than pulling note/message columns.
+    else {
+      chunks.push([].concat(dateParts, actionParts));
+    }
+
+    return chunks.map(parts => {
+      const filter = parts.filter(Boolean).join(' and ');
+      return filter ? `${base}&$filter=${encodeURIComponent(filter)}` : base;
+    });
+  }
+
+  function normalizeFactRows(rows){
     const seen = new Set();
-    const normalized = rows.map(r => {
-      const action = window.normalizeActionStrict(r.cr714_effectiveaction || r.cr714_action || '');
-      const activityDate = r.cr714_activitydate || r.cr714_notedate || r.createdon || r.modifiedon || r.cr714_activitydateonly;
-      const touchTypeRaw = txt(r.cr714_activitytype || r.cr714_sourcetype || 'Note');
-      const touchType = /email/i.test(touchTypeRaw) ? 'Email' : (/mason/i.test(touchTypeRaw) ? 'Masonville' : (/call/i.test(touchTypeRaw) ? 'Call' : 'Note'));
+    return (rows || []).map(r => {
+      const action = normalizeAction(r.cr714_effectiveaction || r.cr714_action || '');
+      const d = r.cr714_activitydate || r.cr714_activitydateonly || r.createdon || r.modifiedon;
+      const touchRaw = txt(r.cr714_activitytype || 'Note');
+      const touchType = /email/i.test(touchRaw) ? 'Email' : (/mason/i.test(touchRaw) ? 'Masonville' : (/call/i.test(touchRaw) ? 'Call' : 'Note'));
       const accountId = txt(r.cr714_accountnumber || r.cr714_d365accountid || r.cr714_accountid);
       const rep = txt(r.cr714_accountrep || r.cr714_repfromnote || 'Unassigned') || 'Unassigned';
       return {
@@ -8109,13 +8089,11 @@ window.selectAccount=async function(id){
         factId: r[FACT_ID_FIELD],
         naturalKey: r.cr714_activitynaturalkey || '',
         accountId,
-        accountName: txt(r.cr714_d365accountname || r.cr714_companyname || r.cr714_accountname),
         rep,
         action,
-        noteDate: activityDate,
-        monthKey: monthKey(activityDate),
+        noteDate: d,
+        monthKey: r.cr714_activitymonth || mk(d),
         touchType,
-        sourceDataset: txt(r.cr714_sourcetable || r.cr714_sourcetype || 'Fact'),
         count: 1
       };
     }).filter(f => f.accountId && f.action).filter(f => {
@@ -8125,355 +8103,223 @@ window.selectAccount=async function(id){
       seen.add(key);
       return true;
     });
+  }
 
-    window.__actFactReportingRows = normalized;
-    window.reportingFacts = normalized;
-    window.reportingDims = {
-      reps: Array.from(new Set(normalized.map(f => f.rep).filter(Boolean))).sort(),
-      actions: Array.from(new Set(normalized.map(f => f.action).filter(Boolean))).sort(),
-      months: Array.from(new Set(normalized.map(f => f.monthKey).filter(Boolean))).sort().reverse()
+  window.prefetchFactReportingForCurrentScope = async function(reason='scope'){
+    const key = filterKeyForScope();
+    if (window.__actFactPrefetchPromise && window.__actFactPrefetchKey === key) return window.__actFactPrefetchPromise;
+    window.__actFactPrefetchKey = key;
+    window.__actFactPrefetchReason = reason;
+    const urls = buildFactUrlsForCurrentScope();
+    const started = performance.now();
+
+    window.__actFactPrefetchPromise = (async () => {
+      try {
+        if (window.updateLoader && reason === 'scope-load') window.updateLoader(72, 'Preloading reporting fact table...', 0);
+        const pages = await runPool(urls, url => fetchAllPages(url), MAX_PARALLEL_FACT_REQUESTS);
+        const raw = pages.flat();
+        const normalized = normalizeFactRows(raw);
+        window.__actFactReportingRows = normalized;
+        window.reportingFacts = normalized;
+        window.reportingDims = {
+          reps: Array.from(new Set(normalized.map(f => f.rep).filter(Boolean))).sort(),
+          actions: Array.from(new Set(normalized.map(f => f.action).filter(Boolean))).sort(),
+          months: Array.from(new Set(normalized.map(f => f.monthKey).filter(Boolean))).sort().reverse()
+        };
+        window.__actFactReportingLoaded = true;
+        window.__actFactPrefetchLoadedAt = new Date().toISOString();
+        window.__actFactPrefetchMs = Math.round(performance.now() - started);
+        window.__actFactPrefetchUrlCount = urls.length;
+        window.reportsDirty = false;
+        if (document.getElementById('tab-reports')?.classList.contains('active') && typeof window.renderReports === 'function') window.renderReports();
+        return normalized;
+      } catch(e) {
+        console.error('Scoped fact-table prefetch failed', e);
+        window.__actFactReportingLoaded = false;
+        window.reportsDirty = true;
+        throw e;
+      }
+    })();
+    return window.__actFactPrefetchPromise;
+  };
+
+  window.scheduleFactReportingPreload = function(reason='filter'){
+    clearTimeout(window.__actFactPreloadTimer);
+    window.__actFactPreloadTimer = setTimeout(() => {
+      window.prefetchFactReportingForCurrentScope(reason).catch(() => {});
+    }, PRELOAD_DEBOUNCE_MS);
+  };
+
+  // Override the previous fact-table loader: reports should consume the scoped/preloaded cache first.
+  const previousLoadReportingFromFactTable = window.loadReportingFromFactTable;
+  window.loadReportingFromFactTable = async function(force=false){
+    const key = filterKeyForScope();
+    if (!force && window.__actFactReportingLoaded && window.__actFactPrefetchKey === key) return window.reportingFacts || [];
+    try {
+      return await window.prefetchFactReportingForCurrentScope(force ? 'forced-report' : 'report');
+    } catch(e) {
+      // Safety fallback to older loader if present.
+      if (previousLoadReportingFromFactTable) return previousLoadReportingFromFactTable.call(this, true);
+      throw e;
+    }
+  };
+
+  // Trigger preload as soon as home filters resolve into teamFilteredAccounts.
+  const previousApplyFilters = window.applyFilters;
+  window.applyFilters = function(){
+    const result = previousApplyFilters ? previousApplyFilters.apply(this, arguments) : undefined;
+    try { window.__actFactReportingLoaded = false; window.scheduleFactReportingPreload('home-filter'); } catch(e) {}
+    return result;
+  };
+
+  // Trigger preload directly from scope-popup interactions too, before the user switches to Reporting.
+  ['scopedPopupUpdateFilterState','scopedPopupToggleAll','clearScopedPopupFilters'].forEach(fnName => {
+    const previous = window[fnName];
+    if (typeof previous === 'function') {
+      window[fnName] = function(){
+        const result = previous.apply(this, arguments);
+        try { window.__actFactReportingLoaded = false; window.scheduleFactReportingPreload('scope-filter'); } catch(e) {}
+        return result;
+      };
+    }
+  });
+
+  const previousBeginScopedLoad = window.beginScopedLoad;
+  if (typeof previousBeginScopedLoad === 'function') {
+    window.beginScopedLoad = async function(){
+      const result = await previousBeginScopedLoad.apply(this, arguments);
+      try { window.__actFactReportingLoaded = false; window.prefetchFactReportingForCurrentScope('scope-load').catch(()=>{}); } catch(e) {}
+      return result;
     };
-    window.__actFactReportingLoaded = true;
-    return normalized;
-  };
-
-  function setReportPlaceholders(msg){
-    ['scorecard-body','actions-body','engagement-body','monthly-body'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.innerHTML = `<tr><td colspan="20" class="text-center py-10 text-muted italic font-bold">${esc(msg)}</td></tr>`;
-    });
   }
 
-  function factsForCurrentReportScope(){
-    const allFacts = window.__actFactReportingRows || window.reportingFacts || [];
-    const accountMap = new Map((window.mergedAccounts || []).map(a => [a.cr714_id, a]));
-    const visibleIds = new Set((window.teamFilteredAccounts || []).map(a => a.cr714_id));
-    const hasVisibleScope = visibleIds.size > 0;
-    const includeUnassigned = document.getElementById('rep-include-unassigned') ? document.getElementById('rep-include-unassigned').checked : false;
-    return allFacts.filter(f => {
-      if (hasVisibleScope && !visibleIds.has(f.accountId)) return false;
-      if (!includeUnassigned && (f.rep || 'Unassigned') === 'Unassigned') return false;
-      const d = dateObj(f.noteDate);
-      if (window.reportStartDate && (!d || d < window.reportStartDate)) return false;
-      if (window.reportEndDate && (!d || d > window.reportEndDate)) return false;
-      // Honor active rep/action filters even if an account is missing from the main-page dataset.
-      if (window.activeFilters?.cr714_employeename?.size && !window.activeFilters.cr714_employeename.has(f.rep)) return false;
-      if (window.activeFilters?.action?.size && !window.activeFilters.action.has(f.action)) return false;
-      return true;
-    }).map(f => Object.assign({}, f, { _account: accountMap.get(f.accountId) || null }));
+  // Date controls change the fact-table scope. Start a new prefetch immediately.
+  ['applyDateChange','applyDateBoxChange','resetDateSlider'].forEach(fnName => {
+    const previous = window[fnName];
+    if (typeof previous === 'function') {
+      window[fnName] = function(){
+        const result = previous.apply(this, arguments);
+        try { window.__actFactReportingLoaded = false; window.scheduleFactReportingPreload('date-change'); } catch(e) {}
+        return result;
+      };
+    }
+  });
+
+  // When opening Reports, use the already-running preload instead of starting a full-table fetch.
+  const previousSwitchTab = window.switchTab;
+  if (typeof previousSwitchTab === 'function') {
+    window.switchTab = function(id){
+      if (id === 'reports') {
+        try { window.prefetchFactReportingForCurrentScope('reports-tab').catch(()=>{}); } catch(e) {}
+      }
+      return previousSwitchTab.apply(this, arguments);
+    };
   }
 
-  window.renderReports = function(){
-    const tab = document.getElementById('tab-reports');
-    if (!tab || !tab.classList.contains('active')) return;
-
-    if (!window.__actFactReportingLoaded || window.reportsDirty) {
-      if (!window.__actFactReportingLoading) {
-        window.__actFactReportingLoading = true;
-        setReportPlaceholders('Loading reporting from cr714_dt_act_fctbl...');
-        window.loadReportingFromFactTable(true).then(() => {
-          window.__actFactReportingLoading = false;
-          window.reportsDirty = false;
-          window.renderReports();
-        }).catch(e => {
-          window.__actFactReportingLoading = false;
-          console.error('Fact reporting load failed', e);
-          setReportPlaceholders('Unable to load cr714_dt_act_fctbl reporting data.');
-          if (window.showToast) window.showToast('Fact table reporting load failed.', 'error');
-        });
-      }
-      return;
-    }
-
-    const facts = factsForCurrentReportScope();
-    const accountMap = new Map((window.mergedAccounts || []).map(a => [a.cr714_id, a]));
-    const repMap = new Map();
-    const actionMap = new Map();
-    const monthlyData = {};
-    const now = new Date();
-    let tEmails = 0;
-    const uniqueAccounts = new Set();
-    const requestAccounts = new Set();
-    const introAccounts = new Set();
-    const staleAccounts = new Set();
-
-    function ensureRep(rep){
-      rep = rep || 'Unassigned';
-      if (!repMap.has(rep)) repMap.set(rep, { totalRecords:0, touches:0, emails:0, notes:0, masonville:0, requests:0, intro:0, stale:0, _accountIds:new Set() });
-      if (!monthlyData[rep]) monthlyData[rep] = {};
-      return repMap.get(rep);
-    }
-    function ensureAction(action){
-      action = action || 'None';
-      if (!actionMap.has(action)) actionMap.set(action, { totalRecords:0, touches:0, emails:0, notes:0, masonville:0, _accountIds:new Set() });
-      return actionMap.get(action);
-    }
-
-    facts.forEach(f => {
-      const rep = f.rep || 'Unassigned';
-      const action = f.action || 'None';
-      const repStats = ensureRep(rep);
-      const actionStats = ensureAction(action);
-      repStats.touches++;
-      actionStats.touches++;
-      repStats._accountIds.add(f.accountId);
-      actionStats._accountIds.add(f.accountId);
-      uniqueAccounts.add(f.accountId);
-
-      const acct = f._account || accountMap.get(f.accountId);
-      if (acct) {
-        const hs = String(acct.helpStatus || '').toUpperCase();
-        const isRequest = (acct.isHelp || acct.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') && !String(acct.managerNotes || '').toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR';
-        const modDate = acct.modifiedon ? new Date(acct.modifiedon) : null;
-        const isStale = !modDate || ((now - modDate) / DAY_MS > 30);
-        if (isRequest) requestAccounts.add(f.accountId);
-        if (acct.intro) introAccounts.add(f.accountId);
-        if (isStale) staleAccounts.add(f.accountId);
-      }
-
-      const mk = f.monthKey || monthKey(f.noteDate);
-      if (mk) {
-        if (!monthlyData[rep][mk]) monthlyData[rep][mk] = { records:new Set(), touches:0, emails:0 };
-        monthlyData[rep][mk].records.add(f.accountId);
-        monthlyData[rep][mk].touches++;
-      }
-      if (f.touchType === 'Email') { repStats.emails++; actionStats.emails++; tEmails++; if (mk) monthlyData[rep][mk].emails++; }
-      else if (f.touchType === 'Masonville') { repStats.masonville++; actionStats.masonville++; }
-      else { repStats.notes++; actionStats.notes++; }
-    });
-
-    for (const [rep, stats] of repMap.entries()) {
-      stats.totalRecords = stats._accountIds.size;
-      stats.requests = Array.from(stats._accountIds).filter(id => requestAccounts.has(id)).length;
-      stats.intro = Array.from(stats._accountIds).filter(id => introAccounts.has(id)).length;
-      stats.stale = Array.from(stats._accountIds).filter(id => staleAccounts.has(id)).length;
-    }
-    for (const [, stats] of actionMap.entries()) stats.totalRecords = stats._accountIds.size;
-
-    const scorecardBody = document.getElementById('scorecard-body');
-    const actionsBody = document.getElementById('actions-body');
-    const engagementBody = document.getElementById('engagement-body');
-    const monthlyBody = document.getElementById('monthly-body');
-    if (!scorecardBody || !actionsBody || !engagementBody || !monthlyBody) return;
-    scorecardBody.innerHTML = '';
-    actionsBody.innerHTML = '';
-    engagementBody.innerHTML = '';
-    monthlyBody.innerHTML = '';
-
-    const sortedReps = Array.from(repMap.entries()).sort((a,b)=>b[1].totalRecords-a[1].totalRecords || a[0].localeCompare(b[0]));
-    const sortedActions = Array.from(actionMap.entries()).sort((a,b)=>b[1].touches-a[1].touches || a[0].localeCompare(b[0]));
-    const allMonths = Array.from(new Set(facts.map(f => f.monthKey || monthKey(f.noteDate)).filter(Boolean))).sort().reverse();
-
-    sortedReps.forEach(([rep, stats]) => {
-      const safeRep = esc(rep), jsRep = escJs(rep);
-      scorecardBody.innerHTML += `
-        <tr class="transition-colors">
-          <td class="font-black drilldown-cell uppercase" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
-          <td class="drilldown-cell font-bold" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
-          <td class="font-black drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
-          <td class="drilldown-cell font-black" style="color: var(--accent-danger);" onclick="window.openDrilldown('${jsRep}', 'stale')">${stats.stale}</td>
-          <td class="drilldown-cell font-bold" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
-          <td class="drilldown-cell font-black" style="color: var(--accent-warning);" onclick="window.openDrilldown('${jsRep}', 'requests')">${stats.requests}</td>
-          <td class="drilldown-cell font-black" style="color: var(--primary);" onclick="window.openDrilldown('${jsRep}', 'intro')">${stats.intro}</td>
-        </tr>`;
-      const emailPer = stats.totalRecords > 0 ? (stats.emails / stats.totalRecords).toFixed(2) : '0.00';
-      engagementBody.innerHTML += `
-        <tr class="transition-colors">
-          <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>
-          <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsRep}', 'touched')">${stats.touches}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsRep}', 'emails')">${stats.emails}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsRep}', 'notes')">${stats.notes}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsRep}', 'masonville')">${stats.masonville}</td>
-          <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
-        </tr>`;
-    });
-
-    sortedActions.forEach(([act, stats]) => {
-      const safeAct = esc(act), jsAct = escJs(act);
-      const emailPer = stats.totalRecords > 0 ? (stats.emails / stats.totalRecords).toFixed(2) : '0.00';
-      actionsBody.innerHTML += `
-        <tr class="transition-colors">
-          <td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsAct}', 'total')">${safeAct}</td>
-          <td class="font-black drilldown-cell" onclick="window.openDrilldown('${jsAct}', 'total')" style="color: var(--text-main);">${stats.totalRecords}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--accent-success);" onclick="window.openDrilldown('${jsAct}', 'touched')">${stats.touches}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-email);" onclick="window.openDrilldown('${jsAct}', 'emails')">${stats.emails}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-note);" onclick="window.openDrilldown('${jsAct}', 'notes')">${stats.notes}</td>
-          <td class="font-bold drilldown-cell" style="color: var(--chart-masonville);" onclick="window.openDrilldown('${jsAct}', 'masonville')">${stats.masonville}</td>
-          <td class="font-mono font-bold" style="background-color: rgba(59, 130, 246, 0.1); color: var(--accent-info);">${emailPer} / Record</td>
-        </tr>`;
-    });
-
-    let monthlyHeaderHtml = `<th><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', 0)"><span>Rep Name</span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`;
-    allMonths.forEach((m, idx) => {
-      monthlyHeaderHtml += `<th class="text-center"><div class="flex justify-between items-center group cursor-pointer" onclick="window.openTableFilter(event, 'monthly-table', ${idx+1})"><span>${m}<br/><span class="text-[9px] font-normal text-muted">Accounts Touched / Total Activities / Emails</span></span><i class="fas fa-filter text-[10px] text-muted group-hover:text-[var(--primary)]"></i></div></th>`;
-    });
-    const monthlyHead = document.getElementById('monthly-table')?.querySelector('thead tr');
-    if (monthlyHead) monthlyHead.innerHTML = monthlyHeaderHtml;
-    sortedReps.forEach(([rep]) => {
-      const safeRep = esc(rep), jsRep = escJs(rep);
-      let rowHtml = `<td class="font-black uppercase drilldown-cell" onclick="window.openDrilldown('${jsRep}', 'total')">${safeRep}</td>`;
-      allMonths.forEach(m => {
-        const bucket = (monthlyData[rep] || {})[m] || { records:new Set(), touches:0, emails:0 };
-        rowHtml += `<td class="text-center"><span class="font-black text-[11px]" style="color: var(--primary);" title="Unique Accounts Touched">${bucket.records.size}</span><span class="text-muted mx-1">|</span><span class="font-bold" style="color: var(--accent-success);" title="Total Activities">${bucket.touches}</span><span class="text-muted mx-1">/</span><span class="font-bold" style="color: var(--chart-email);" title="Total Emails Sent">${bucket.emails}</span></td>`;
-      });
-      monthlyBody.innerHTML += `<tr class="transition-colors">${rowHtml}</tr>`;
-    });
-
-    const tAccts = uniqueAccounts.size;
-    const totalActionable = facts.filter(f => f.action && f.action !== 'None').length;
-    const ids = { 'rep-tot-accts':tAccts, 'rep-tot-req':requestAccounts.size, 'rep-tot-stale':staleAccounts.size, 'rep-tot-email':tEmails, 'rep-tot-intro':introAccounts.size, 'act-tot-actions':totalActionable };
-    Object.entries(ids).forEach(([id,val]) => { const el = document.getElementById(id); if (el) el.innerText = val; });
-    const rate = document.getElementById('act-action-rate');
-    if (rate) rate.innerText = facts.length ? Math.round((totalActionable / facts.length) * 100) + '%' : '0%';
-
-    if (typeof window.renderCharts === 'function') window.renderCharts(sortedReps, sortedActions, monthlyData, allMonths);
-    ['scorecard-table','actions-table','engagement-table','monthly-table'].forEach(t => { try{ window.calculateTableTotals && window.calculateTableTotals(t); }catch(e){} });
-    window.reportsDirty = false;
-  };
-
-  window.openDrilldown = function(contextKey, metric){
-    const facts = factsForCurrentReportScope().filter(f => {
-      const isRep = f.rep === contextKey;
-      const isAction = f.action === contextKey;
-      if (!isRep && !isAction) return false;
-      if (metric === 'emails') return f.touchType === 'Email';
-      if (metric === 'notes') return f.touchType !== 'Email' && f.touchType !== 'Masonville';
-      if (metric === 'masonville') return f.touchType === 'Masonville';
-      if (metric === 'touched' || metric === 'total') return true;
-      if (metric === 'requests' || metric === 'intro' || metric === 'stale') {
-        const acct = f._account;
-        if (!acct) return false;
-        const hs = String(acct.helpStatus || '').toUpperCase();
-        if (metric === 'requests') return (acct.isHelp || acct.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') && !String(acct.managerNotes || '').toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR';
-        if (metric === 'intro') return !!acct.intro;
-        if (metric === 'stale') { const d = acct.modifiedon ? new Date(acct.modifiedon) : null; return !d || ((new Date()-d)/DAY_MS > 30); }
-      }
-      return true;
-    });
-    const byAcct = new Map();
-    const accountMap = new Map((window.mergedAccounts || []).map(a => [a.cr714_id, a]));
-    facts.forEach(f => {
-      if (!byAcct.has(f.accountId)) {
-        const acct = accountMap.get(f.accountId) || {};
-        byAcct.set(f.accountId, {
-          cr714_id:f.accountId,
-          company:acct.company || f.accountName || '',
-          rep:f.rep || acct.rep || 'Unassigned',
-          action:f.action || acct.action || 'None',
-          modifiedon:f.noteDate,
-          _factTouches:0,
-          _factEmails:0,
-          _factNotes:0,
-          _factMasonville:0
-        });
-      }
-      const row = byAcct.get(f.accountId);
-      row._factTouches++;
-      if (f.touchType === 'Email') row._factEmails++;
-      else if (f.touchType === 'Masonville') row._factMasonville++;
-      else row._factNotes++;
-      if (dateObj(f.noteDate) && (!row.modifiedon || dateObj(f.noteDate) > dateObj(row.modifiedon))) row.modifiedon = f.noteDate;
-    });
-    window.currentDrilldownData = Array.from(byAcct.values());
-    const title = document.getElementById('dd-title'); if (title) title.innerText = `${String(contextKey).toUpperCase()} - ${String(metric).toUpperCase()} FACT DATASET`;
-    const count = document.getElementById('dd-count'); if (count) count.innerText = window.currentDrilldownData.length;
-    const sync = document.getElementById('dd-sync-btn'); if (sync) { sync.classList.remove('hidden-force'); sync.style.display=''; }
-    const body = document.getElementById('dd-body');
-    if (body) body.innerHTML = window.currentDrilldownData.map(a => `
-      <tr class="hover:bg-gray-100 transition-colors">
-        <td class="font-black uppercase font-mono" style="color: var(--primary);">${esc(a.cr714_id)}</td>
-        <td class="font-bold">${esc(a.company)}</td>
-        <td class="text-muted uppercase text-[10px]">${esc(a.rep)}</td>
-        <td><span class="px-2 py-0.5 rounded border border-gray-200 text-[9px] font-black uppercase" style="color: var(--text-main);">${esc(a.action || 'None')}</span></td>
-        <td class="font-bold text-[10px]">${a.modifiedon ? new Date(a.modifiedon).toLocaleDateString() : '--'}</td>
-        <td class="text-center"><button onclick="window.jumpToAccount('${escJs(a.cr714_id)}')" class="hover:scale-125 transition-transform bg-transparent border-none cursor-pointer" style="color: var(--primary);"><i class="fas fa-crosshairs"></i></button></td>
-      </tr>`).join('');
-    const modal = document.getElementById('drilldown-modal'); if (modal) { modal.classList.remove('hidden-force'); modal.style.display='flex'; }
-  };
-
-  // Wrap manager actions so original datasets remain the main-page source, while cr714_dt_act_fctbl receives upserted reporting rows.
-  const prevSaveManagerNote = window.saveManagerNote;
-  window.saveManagerNote = async function(){
-    const account = (window.teamFilteredAccounts || window.mergedAccounts || []).find(a => a.cr714_id === window.activeAccountId);
-    const noteBox = document.getElementById('fv-manager-note');
-    const rawNote = txt(noteBox ? noteBox.value : '');
-    const noteText = window.cleanManagerNote ? window.cleanManagerNote(rawNote) : rawNote;
-    const markResolved = !!document.getElementById('fv-mark-resolved')?.checked;
-    const notify = !!document.getElementById('fv-notify-email')?.checked;
-    const selectedAction = txt(document.getElementById('fv-action-select')?.value || account?.action || 'Manager Update');
-    const result = prevSaveManagerNote ? await prevSaveManagerNote.apply(this, arguments) : undefined;
-    try{
-      if (account && (noteText || markResolved || selectedAction)) {
-        await window.patchFactTableActivity({
-          account,
-          noteText: noteText || (markResolved ? 'Manager marked request resolved.' : 'Manager action updated.'),
-          rawNote,
-          action: markResolved ? 'Resolve' : (selectedAction || 'Manager Note'),
-          activityType: markResolved ? 'Manager Action' : 'Note'
-        });
-        if (notify) {
-          await window.patchFactTableActivity({ account, noteText:'Manager email notification sent to rep.', rawNote:'Manager email notification sent to rep.', action:'Manager Email', activityType:'Email', email:true });
-        }
-      }
-    }catch(e){ console.warn('Fact upsert after manager note skipped', e); }
-    return result;
-  };
-
-  const prevExecuteBulkNote = window.executeBulkNote;
-  window.executeBulkNote = async function(){
-    const noteBox = document.getElementById('bulk-manager-note');
-    const rawNote = txt(noteBox ? noteBox.value : '');
-    const noteText = window.cleanManagerNote ? window.cleanManagerNote(rawNote) : rawNote;
-    const markResolved = !!document.getElementById('bulk-mark-resolved')?.checked;
-    const notify = !!document.getElementById('bulk-notify-email')?.checked;
-    const selectedIds = Array.from(window.bulkSelectedIds || []);
-    const result = prevExecuteBulkNote ? await prevExecuteBulkNote.apply(this, arguments) : undefined;
-    try{
-      for (const id of selectedIds) {
-        const account = (window.mergedAccounts || []).find(a => a.cr714_id === id);
-        if (!account) continue;
-        await window.patchFactTableActivity({ account, noteText: noteText || (markResolved ? 'Bulk marked request resolved.' : 'Bulk manager update.'), rawNote, action: markResolved ? 'Bulk Resolve' : 'Bulk Manager Note', activityType: markResolved ? 'Manager Action' : 'Note' });
-        if (notify) await window.patchFactTableActivity({ account, noteText:'Bulk manager email notification sent to rep.', rawNote:'Bulk manager email notification sent to rep.', action:'Bulk Manager Email', activityType:'Email', email:true });
-      }
-    }catch(e){ console.warn('Fact upsert after bulk note skipped', e); }
-    return result;
-  };
-
-  const prevPushIntroEmail = window.pushIntroEmail;
-  window.pushIntroEmail = async function(){
-    const account = (window.teamFilteredAccounts || window.mergedAccounts || []).find(a => a.cr714_id === window.activeAccountId);
-    const result = prevPushIntroEmail ? await prevPushIntroEmail.apply(this, arguments) : undefined;
-    try{
-      if (account) await window.patchFactTableActivity({ account, noteText:'Intro email dispatched to rep.', rawNote:'Intro email dispatched to rep.', action:'Intro Email', activityType:'Email', email:true });
-    }catch(e){ console.warn('Fact upsert after intro email skipped', e); }
-    return result;
-  };
-
-  // Keep the historical notes column expandable to 50% of the viewport, even if older saved widths exist.
-  function clampHistoryWidth(){
-    try{
-      const grid = document.getElementById('app-grid');
-      if (!grid) return;
-      const max = Math.floor(window.innerWidth * 0.5);
-      let raw = (getComputedStyle(grid).getPropertyValue('--history-width') || localStorage.getItem('act_mgr_history_width') || '350px').trim();
-      let px = parseInt(raw, 10);
-      if (isNaN(px)) px = 350;
-      px = Math.max(320, Math.min(max, px));
-      grid.style.setProperty('--history-width', `${px}px`);
-      localStorage.setItem('act_mgr_history_width', `${px}px`);
-    }catch(e){}
-  }
-  window.addEventListener('resize', clampHistoryWidth);
-  setTimeout(clampHistoryWidth, 300);
-
-  // If reports tab is already open after this patch loads, force one fact-table render.
-  setTimeout(() => {
-    try { window.__actFactReportingLoaded = false; window.reportsDirty = true; if (document.getElementById('tab-reports')?.classList.contains('active')) window.renderReports(); } catch(e){}
-  }, 800);
+  setTimeout(() => { try { window.scheduleFactReportingPreload('initial'); } catch(e){} }, 1200);
 })();
 </script>
-<!-- === COPILOT FACT TABLE REPORTING + UPSERT LOCKDOWN 2026-05-18 END === -->
+<!-- === COPILOT FACT TABLE SCOPED PREFETCH PERFORMANCE PATCH 2026-05-18 END === -->
+
+
+
+<!-- === COPILOT ACCESS TOKEN FACT TIMELINE FIX 2026-05-18 START === -->
+<script>
+(function(){
+  if (window.__ACT_ACCESS_TOKEN_FACT_TIMELINE_FIX_20260518) return;
+  window.__ACT_ACCESS_TOKEN_FACT_TIMELINE_FIX_20260518 = true;
+
+  const FACT_ENTITY_SET = 'cr714_dt_act_fctbls';
+
+  function apiRoot(){
+    return String(window.DATAVERSE_URL || 'https://org23279050.crm.dynamics.com/api/data/v9.2').replace(/\/$/, '');
+  }
+
+  async function getDataverseTokenSafe(){
+    if (typeof window.getToken === 'function') return await window.getToken();
+    if (window.accessToken) return window.accessToken;
+    throw new Error('Dataverse token unavailable. Expected window.getToken() or window.accessToken.');
+  }
+
+  function escapeHtmlSafe(v){
+    return window.escapeHTML ? window.escapeHTML(v) : String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+
+  // Fixes the older injected timeline loader that referenced a non-existent global accessToken.
+  window.loadFactTimeline = async function(acctId){
+    if (!acctId) return [];
+    try {
+      const token = await getDataverseTokenSafe();
+      const safeId = String(acctId).replace(/'/g, "''");
+      const url = `${apiRoot()}/${FACT_ENTITY_SET}?$select=cr714_activitydate,cr714_activitytype,cr714_actionmessage,cr714_effectiveaction,cr714_action,cr714_managernotes&$filter=cr714_accountnumber eq '${safeId}'&$orderby=createdon desc`;
+      const res = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json',
+          'OData-Version': '4.0',
+          'OData-MaxVersion': '4.0',
+          'Prefer': 'odata.maxpagesize=1000'
+        }
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const json = await res.json();
+      const rows = json.value || [];
+
+      // Cache for unified timeline patch if present, but do not break page if it is not.
+      window.__factTimelineCache = window.__factTimelineCache || {};
+      window.__factTimelineCache[acctId] = rows;
+
+      if (typeof window.renderFactTimeline === 'function') {
+        try { window.renderFactTimeline(rows); } catch(renderErr){ console.warn('Fact timeline render skipped', renderErr); }
+      }
+      return rows;
+    } catch(e) {
+      console.warn('Fact timeline load skipped', e);
+      return [];
+    }
+  };
+
+  // Make the old renderer safe too; it should never throw or rely on external globals.
+  window.renderFactTimeline = function(data){
+    const el = document.getElementById('fv-history');
+    if (!el || !Array.isArray(data) || !data.length) return;
+    const html = data.map(d => {
+      const type = escapeHtmlSafe(d.cr714_activitytype || 'Activity');
+      const when = d.cr714_activitydate ? new Date(d.cr714_activitydate).toLocaleString() : '';
+      const action = escapeHtmlSafe(d.cr714_effectiveaction || d.cr714_action || '');
+      const msg = escapeHtmlSafe(d.cr714_actionmessage || d.cr714_managernotes || '').replace(/\n/g, '<br/>');
+      return `<div class="fact-history-card" data-fact-card="1">
+        <div class="fact-history-head">
+          <div class="fact-history-type"><i class="fa fa-clock"></i> ${type}${action ? ' • ' + action : ''}</div>
+          <div>${escapeHtmlSafe(when)}</div>
+        </div>
+        <div>${msg}</div>
+      </div>`;
+    }).join('');
+
+    // Avoid stacking duplicate fact cards every time selectAccount is called.
+    el.querySelectorAll('[data-fact-card="1"]').forEach(n => n.remove());
+    el.insertAdjacentHTML('afterbegin', html);
+  };
+
+  // Defensive override for any lingering old POST helper that used accessToken.
+  if (typeof window.patchFactTableActivity === 'function') {
+    window.patchActFactActivity = function(account, options={}){
+      return window.patchFactTableActivity({
+        account,
+        noteText: options.message || options.noteText || '',
+        rawNote: options.rawNote || options.message || '',
+        action: options.action || (account && account.action) || 'Manager Update',
+        activityType: options.type || (options.email ? 'Email' : 'Note'),
+        sourceTable: options.sourceTable,
+        sourceId: options.sourceId,
+        email: !!options.email
+      });
+    };
+  }
+})();
+</script>
+<!-- === COPILOT ACCESS TOKEN FACT TIMELINE FIX 2026-05-18 END === -->
 
 </body>
 </html>
