@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>ACT Account Action Lookup</title>
+
+<script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<style>
+body { font-family: Segoe UI; background:#1e1f23; color:#fff; padding:20px; }
+button{ padding:10px; margin:5px; cursor:pointer; }
+table{ width:100%; border-collapse:collapse; margin-top:20px; }
+th,td{ border:1px solid #444; padding:6px; }
+th{ background:#333; }
+</style>
+</head>
+
+<body>
+
+<h1>📊 ACT Account Action Lookup</h1>
+
+<button id="loginBtn">Login</button>
+<input type="file" id="fileInput" accept=".xlsx"/>
+
+<button id="runBtn">Run Lookup</button>
+<button id="exportBtn">Export CSV</button>
+
+<div id="tableContainer"></div>
+
+<script>
+// ===== CONFIG FROM GetDaCubeee =====
+const CONFIG = {
+  dataverseUrl: "https://org23279050.crm.dynamics.com",
+  msal: {
+    auth: {
+      clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee",
+      authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401",
+      redirectUri: window.location.origin
+    }
+  },
+  act: {
+    am:{set:"cr714_accountmanagementdatasets",acct:"cr714_accountnum",rep:"cr714_rep",action:"cr714_action"},
+    cad:{set:"cr714_cadencedatasets",acct:"cr714_accountnum",rep:"cr714_rep",action:"cr714_action"},
+    lb:{set:"cr714_louisebrowndatasets",acct:"cr714_accountnum",rep:"cr714_assignedrep",action:"cr714_action"}
+  }
+};
+
+const DV = `${CONFIG.dataverseUrl}/api/data/v9.2`;
+const msalInstance = new msal.PublicClientApplication(CONFIG.msal);
+
+let accessToken = null;
+let uploadedAccounts = [];
+let results = [];
+
+// ===== AUTH (same style as GetDaCubeee) =====
+async function login(){
+    const res = await msalInstance.loginPopup({ scopes:["User.Read",`${CONFIG.dataverseUrl}/user_impersonation`] });
+    accessToken = (await msalInstance.acquireTokenSilent({
+        scopes:[`${CONFIG.dataverseUrl}/user_impersonation`],
+        account:res.account
+    })).accessToken;
+    alert("✅ Logged in");
+}
+
+// ===== LOAD EXCEL =====
+document.getElementById("fileInput").addEventListener("change", e=>{
+    const file = e.target.files[0];
+    const reader = new FileReader();
+
+    reader.onload = function(evt){
+        const workbook = XLSX.read(evt.target.result, {type:'binary'});
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json(sheet);
+
+        uploadedAccounts = data.map(r => String(r.accountnum).trim().toUpperCase());
+        alert(`Loaded ${uploadedAccounts.length} accounts`);
+    };
+    reader.readAsBinaryString(file);
+});
+
+// ===== DATAVERSE QUERY =====
+async function fetchDataset(key){
+    const cfg = CONFIG.act[key];
+    let rows = [];
+    let url = `${DV}/${cfg.set}?$select=${cfg.acct},${cfg.rep},${cfg.action}`;
+
+    while(url){
+        const res = await fetch(url,{
+            headers:{ Authorization:`Bearer ${accessToken}` }
+        });
+        const json = await res.json();
+        rows.push(...json.value);
+        url = json["@odata.nextLink"];
+    }
+
+    return rows.map(r => ({
+        account: (r[cfg.acct] || "").trim().toUpperCase(),
+        rep: r[cfg.rep],
+        action: r[cfg.action],
+        dataset: key.toUpperCase()
+    }));
+}
+
+// ===== RUN LOOKUP =====
+async function runLookup(){
+    if(!accessToken) return alert("Login first");
+
+    results = [];
+
+    const [am,cad,lb] = await Promise.all([
+        fetchDataset("am"),
+        fetchDataset("cad"),
+        fetchDataset("lb")
+    ]);
+
+    const all = [...am,...cad,...lb];
+
+    uploadedAccounts.forEach(acct=>{
+        const matches = all.filter(r => r.account === acct);
+
+        if(matches.length === 0){
+            results.push({
+                account: acct,
+                dataset: "NONE",
+                rep: "",
+                action: "No Action Found"
+            });
+        } else {
+            matches.forEach(m=>{
+                results.push({
+                    account: acct,
+                    dataset: m.dataset,
+                    rep: m.rep,
+                    action: m.action
+                });
+            });
+        }
+    });
+
+    renderTable();
+}
+
+// ===== TABLE =====
+function renderTable(){
+    let html = `<table>
+    <thead>
+    <tr>
+        <th>Account</th>
+        <th>Dataset</th>
+        <th>Rep</th>
+        <th>Action</th>
+    </tr>
+    </thead><tbody>`;
+
+    results.forEach(r=>{
+        html+=`<tr>
+            <td>${r.account}</td>
+            <td>${r.dataset}</td>
+            <td>${r.rep || ''}</td>
+            <td>${r.action || ''}</td>
+        </tr>`;
+    });
+
+    html += "</tbody></table>";
+
+    document.getElementById("tableContainer").innerHTML = html;
+}
+
+// ===== EXPORT =====
+function exportCSV(){
+    let csv = "Account,Dataset,Rep,Action\n";
+
+    results.forEach(r=>{
+        csv += `"${r.account}","${r.dataset}","${r.rep}","${r.action}"\n`;
+    });
+
+    const blob = new Blob([csv],{type:"text/csv"});
+    const url = URL.createObjectURL(blob);
+
+    let a = document.createElement("a");
+    a.href = url;
+    a.download = "act_results.csv";
+    a.click();
+}
+
+// ===== EVENTS =====
+document.getElementById("loginBtn").onclick = login;
+document.getElementById("runBtn").onclick = runLookup;
+document.getElementById("exportBtn").onclick = exportCSV;
+
+</script>
+
+</body>
+</html>
