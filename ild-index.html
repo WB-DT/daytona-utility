@@ -10698,5 +10698,349 @@ window.selectAccount=async function(id){
 </script>
 <!-- === END COPILOT V30 SAFE BOOT + NON-BLOCKING CACHE HOTFIX === -->
 
+
+
+<!-- === COPILOT V30.1 ASYNC DRILLDOWN + FREEZE GUARDS (2026-05-21) === -->
+<script>
+(function(){
+  if (window.__ACT_COPILOT_V301_ASYNC_DRILLDOWN__) return;
+  window.__ACT_COPILOT_V301_ASYNC_DRILLDOWN__ = true;
+
+  const G = window.ACTFreezeGuardV301 = window.ACTFreezeGuardV301 || {};
+  G.DRILL_CHUNK = 350;
+  G.DRILL_RENDER_PAGE = 250;
+  G.PREVIEW_CHUNK = 250;
+  G.INTRO_CHUNK = 2500;
+  G.isDrilldownRunning = false;
+  G.isPreviewRunning = false;
+  G.isPolling = false;
+  G.renderReportTimer = null;
+
+  const $ = (id) => document.getElementById(id);
+  const arr = (v) => Array.isArray(v) ? v : [];
+  const txt = (v) => String(v ?? '').trim();
+  const esc = (v) => String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const js = (v) => String(v ?? '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"');
+  const yieldFrame = () => new Promise(resolve => requestAnimationFrame(resolve));
+  const idle = () => new Promise(resolve => (window.requestIdleCallback ? requestIdleCallback(resolve, {timeout:2000}) : setTimeout(resolve, 1)));
+
+  function toast(msg, type='info'){ try { window.showToast && window.showToast(msg, type); } catch(_){} }
+  function setLoader(show){ const el=$('global-loader'); if(el) el.style.display = show ? 'flex' : 'none'; }
+  function loader(pct, text, count){ try { window.updateLoader && window.updateLoader(pct, text, count); } catch(_){} }
+  function needsHistoryMetric(metric){ return ['touched','emails','notes','masonville'].includes(String(metric || '').toLowerCase()); }
+  function helpActive(a){ const hs = txt(a.helpStatus).toUpperCase(); return (a.isHelp || a.isClose || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') && !txt(a.managerNotes).toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR'; }
+  function dateInRange(dateStr, sDate, eDate){
+    if (!sDate && !eDate) return true;
+    const d = dateStr ? new Date(dateStr) : null;
+    if (!d || isNaN(d.getTime())) return false;
+    if (sDate && d < sDate) return false;
+    if (eDate && d > eDate) return false;
+    return true;
+  }
+  function accountMatchesContext(a, contextKey){
+    if (a.rep === contextKey) return {match:true, action:false};
+    if (a.action === contextKey) return {match:true, action:true};
+    if (contextKey === 'Other' && (!a.action || a.action === 'None' || a.action === 'Other')) return {match:true, action:true};
+    return {match:false, action:false};
+  }
+
+  G.ensureStyle = function(){
+    if ($('act-v301-style')) return;
+    const st = document.createElement('style');
+    st.id = 'act-v301-style';
+    st.textContent = `
+      .act-v301-progress{display:flex;align-items:center;gap:8px;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);}
+      .act-v301-track{height:7px;width:160px;border:1px solid var(--border-color);background:var(--bg-app);border-radius:999px;overflow:hidden;}
+      .act-v301-fill{height:100%;width:0%;background:linear-gradient(90deg,var(--primary),var(--accent-info));transition:width .18s ease;}
+      .act-v301-more-row td{text-align:center!important;background:var(--bg-header)!important;position:static!important;}
+      .act-v301-note{font-size:10px;font-weight:850;color:var(--text-muted);text-transform:uppercase;letter-spacing:.07em;}
+    `;
+    document.head.appendChild(st);
+  };
+
+  G.progressHtml = function(id, label='Processing'){
+    return `<div class="act-v301-progress" id="${id}"><span>${esc(label)}</span><div class="act-v301-track"><div class="act-v301-fill"></div></div><span class="act-v301-pct">0%</span></div>`;
+  };
+  G.updateProgress = function(id, pct, label){
+    const root = $(id); if (!root) return;
+    pct = Math.max(0, Math.min(100, Math.round(pct || 0)));
+    const fill = root.querySelector('.act-v301-fill'); if(fill) fill.style.width = pct + '%';
+    const p = root.querySelector('.act-v301-pct'); if(p) p.innerText = pct + '%';
+    const s = root.querySelector('span'); if(label && s) s.innerText = label;
+  };
+
+  G.computeDrillStats = function(a, contextKey, isActionContext, metric, sDate, eDate){
+    a._ddEmailCount = 0;
+    a._ddNoteCount = 0;
+    a._ddMasonvilleCount = 0;
+    a._ddTotalTouches = 0;
+    if (!needsHistoryMetric(metric)) return;
+    let accountHistory = [];
+    arr(a.sources).forEach(src => {
+      let combinedNotes = src.rawNotes || '';
+      if (src.message && txt(src.message) !== '') combinedNotes += "\n------------------------------\n" + src.message;
+      try { accountHistory = accountHistory.concat(window.parseNoteHistory ? window.parseNoteHistory(combinedNotes, src.type, a.modifiedon) : []); } catch(e) {}
+    });
+    const emailDatesSet = new Set();
+    accountHistory.forEach(h => {
+      if (!h || h.date === 'Permanent' || h.date === 'Unknown Date') return;
+      const d = new Date(h.date);
+      if (isNaN(d.getTime())) return;
+      if (sDate && d < sDate) return;
+      if (eDate && d > eDate) return;
+      const touchAction = h.historicalAction || a.action;
+      if (isActionContext && touchAction !== contextKey && contextKey !== 'Other') return;
+      let substantive = false;
+      if (h.touchType === 'Email') { a._ddEmailCount++; emailDatesSet.add(d.toDateString()); substantive = true; }
+      else if (h.touchType === 'Masonville') { a._ddMasonvilleCount++; substantive = true; }
+      else if (h.text && txt(h.text) !== '') { a._ddNoteCount++; substantive = true; }
+      if (substantive) a._ddTotalTouches++;
+    });
+    if (a.emailDate) {
+      const ed = new Date(a.emailDate);
+      if (!isNaN(ed.getTime()) && dateInRange(a.emailDate, sDate, eDate) && !emailDatesSet.has(ed.toDateString())) {
+        if (!isActionContext || a.action === contextKey) { a._ddEmailCount++; a._ddTotalTouches++; }
+      }
+    }
+  };
+
+  G.metricPass = function(a, metric, now){
+    if (metric === 'touched') return a._ddTotalTouches > 0;
+    if (metric === 'emails') return a._ddEmailCount > 0;
+    if (metric === 'notes') return a._ddNoteCount > 0;
+    if (metric === 'masonville') return a._ddMasonvilleCount > 0;
+    if (metric === 'stale') { const d = a.modifiedon ? new Date(a.modifiedon) : null; return !d || isNaN(d) || ((now - d) / 86400000 > 30); }
+    if (metric === 'requests') return helpActive(a);
+    if (metric === 'intro') return !!a.intro;
+    return true;
+  };
+
+  G.renderDrilldownRows = function(reset=true){
+    const body = $('dd-body'); if(!body) return;
+    const data = arr(window.currentDrilldownData);
+    if (reset) { body.innerHTML = ''; G.ddRendered = 0; }
+    const start = G.ddRendered || 0;
+    const end = Math.min(start + G.DRILL_RENDER_PAGE, data.length);
+    let html = '';
+    for (let i=start; i<end; i++) {
+      const a = data[i];
+      html += `<tr class="hover:bg-gray-100 transition-colors">
+        <td class="font-black uppercase font-mono" style="color: var(--primary);">${esc(a.cr714_id)}</td>
+        <td class="font-bold">${esc(a.company)}</td>
+        <td class="text-muted uppercase text-[10px]">${esc(a.rep)}</td>
+        <td><span class="px-2 py-0.5 rounded border border-gray-200 text-[9px] font-black uppercase" style="color: var(--text-main);">${esc(a.action || 'Idle')}</span></td>
+        <td class="font-bold text-[10px]">${a.modifiedon ? new Date(a.modifiedon).toLocaleDateString() : '--'}</td>
+        <td class="text-center"><button onclick="window.jumpToAccount('${js(a.cr714_id)}')" class="hover:scale-125 transition-transform bg-transparent border-none cursor-pointer" style="color: var(--primary);"><i class="fas fa-crosshairs"></i></button></td>
+      </tr>`;
+    }
+    G.ddRendered = end;
+    body.insertAdjacentHTML('beforeend', html || `<tr><td colspan="6" class="text-center py-16 text-muted italic font-bold">No records matched this drilldown.</td></tr>`);
+    const oldMore = $('act-v301-drill-more-row'); if (oldMore) oldMore.remove();
+    if (end < data.length) {
+      body.insertAdjacentHTML('beforeend', `<tr id="act-v301-drill-more-row" class="act-v301-more-row"><td colspan="6"><button class="btn-secondary text-xs" onclick="window.ACTFreezeGuardV301.renderDrilldownRows(false)"><i class="fas fa-plus mr-1"></i>Load More (${end.toLocaleString()} of ${data.length.toLocaleString()})</button></td></tr>`);
+    }
+  };
+
+  window.openDrilldown = async function(contextKey, metric){
+    if (G.isDrilldownRunning) { toast('A drilldown is already being prepared. Please wait a moment.', 'warning'); return; }
+    G.isDrilldownRunning = true;
+    G.ensureStyle();
+    try {
+      const modal = $('drilldown-modal');
+      const title = $('dd-title');
+      const count = $('dd-count');
+      const syncBtn = $('dd-sync-btn');
+      const body = $('dd-body');
+      if (title) title.innerHTML = `${esc(String(contextKey).toUpperCase())} - ${esc(String(metric).toUpperCase())} DATASET<br>${G.progressHtml('act-v301-drill-progress','Preparing drilldown')}`;
+      if (count) count.innerText = 'Working...';
+      if (body) body.innerHTML = `<tr><td colspan="6" class="text-center py-16 text-muted italic font-bold"><i class="fas fa-circle-notch fa-spin mr-2"></i>Preparing drilldown without freezing the page...</td></tr>`;
+      if (modal) { modal.classList.remove('hidden-force'); modal.style.display = 'flex'; }
+      if (syncBtn) { syncBtn.classList.remove('hidden-force'); syncBtn.style.display = ''; }
+
+      const now = new Date();
+      const sDate = window.reportStartDate;
+      const eDate = window.reportEndDate;
+      window.drilldownRepContext = contextKey;
+      window._lastDrilldownMetric = metric;
+      const src = arr(window.teamFilteredAccounts);
+      const out = [];
+      const needHistory = needsHistoryMetric(metric);
+      if (needHistory && src.length > 2500) toast('Large drilldown detected. Building results in chunks...', 'warning');
+
+      for (let i=0; i<src.length; i+=G.DRILL_CHUNK) {
+        const slice = src.slice(i, i + G.DRILL_CHUNK);
+        for (const a of slice) {
+          const ctx = accountMatchesContext(a, contextKey);
+          if (!ctx.match) continue;
+          if (!dateInRange(a.modifiedon, sDate, eDate)) continue;
+          G.computeDrillStats(a, contextKey, ctx.action, metric, sDate, eDate);
+          if (G.metricPass(a, metric, now)) out.push(a);
+        }
+        G.updateProgress('act-v301-drill-progress', src.length ? ((i + slice.length) / src.length * 82) : 82, `Scanned ${Math.min(i+slice.length, src.length).toLocaleString()} of ${src.length.toLocaleString()}`);
+        await yieldFrame();
+      }
+      window.currentDrilldownData = out;
+      if (count) count.innerText = out.length.toLocaleString();
+      G.updateProgress('act-v301-drill-progress', 92, `Rendering ${out.length.toLocaleString()} matched rows`);
+      G.renderDrilldownRows(true);
+      G.updateProgress('act-v301-drill-progress', 100, 'Ready');
+      setTimeout(() => { const p=$('act-v301-drill-progress'); if(p) p.style.display='none'; }, 900);
+    } catch(e) {
+      console.error('Async drilldown failed:', e);
+      toast('Drilldown failed: ' + (e.message || e), 'error');
+    } finally {
+      G.isDrilldownRunning = false;
+    }
+  };
+
+  // Keep intro counts, but never render a huge blocking intro popup/list.
+  window.checkNewIntros = async function(accounts, isInitialLoad=false){
+    const modal = $('new-intros-modal'); if (modal) { modal.classList.add('hidden-force'); modal.style.display = 'none'; }
+    const list = $('new-intros-list'); if (list) list.innerHTML = '';
+    let count = 0;
+    const rows = arr(accounts);
+    for (let i=0; i<rows.length; i+=G.INTRO_CHUNK) {
+      rows.slice(i, i+G.INTRO_CHUNK).forEach(a => { if (a && a.intro && !a._introAcknowledged) count++; if (a) a._introAcknowledged = true; });
+      await yieldFrame();
+    }
+    if (count && !isInitialLoad) toast(`${count.toLocaleString()} new intro account(s) are available in the Intros quick filter.`, 'success');
+  };
+
+  // Async, chunked reassignment preview. Keeps the limit but avoids one giant blocking loop/DOM write.
+  const originalPreviewReassignment = window.previewReassignment;
+  window.previewReassignment = async function(){
+    if (G.isPreviewRunning) { toast('Preview is already running.', 'warning'); return; }
+    const targetRep = $('reassign-target-rep') ? $('reassign-target-rep').value.trim() : '';
+    const limit = $('reassign-limit') && parseInt($('reassign-limit').value) > 0 ? parseInt($('reassign-limit').value) : 10000;
+    const noteFilter = $('reassign-note-filter') ? $('reassign-note-filter').value : 'all';
+    const startDate = $('reassign-date-start') ? $('reassign-date-start').value : '';
+    const endDate = $('reassign-date-end') ? $('reassign-date-end').value : '';
+    const chkAm = $('chk-reassign-am') ? $('chk-reassign-am').checked : true;
+    const chkCad = $('chk-reassign-cad') ? $('chk-reassign-cad').checked : true;
+    const chkPro = $('chk-reassign-pro') ? $('chk-reassign-pro').checked : true;
+    const chkLb = $('chk-reassign-lb') ? $('chk-reassign-lb').checked : true;
+    if(!targetRep) { toast('Please select a New Representative to generate a preview.', 'error'); return; }
+    if(!chkAm && !chkCad && !chkPro && !chkLb) { toast('You must select at least one dataset to target.', 'error'); return; }
+    G.isPreviewRunning = true;
+    try {
+      const sDate = startDate ? new Date(startDate + 'T00:00:00') : null;
+      const eDate = endDate ? new Date(endDate + 'T23:59:59') : null;
+      const body = $('reassign-preview-body');
+      if (body) body.innerHTML = `<tr><td colspan="5" class="text-center py-16 text-muted italic font-bold"><i class="fas fa-circle-notch fa-spin mr-2"></i>Generating preview in safe chunks...<div class="mt-3">${G.progressHtml('act-v301-preview-progress','Starting')}</div></td></tr>`;
+      let totalRecordsChanging = 0, accountsProcessed = 0;
+      let htmlParts = [];
+      const accounts = arr(window.teamFilteredAccounts);
+      for (let i=0; i<accounts.length && accountsProcessed < limit; i+=G.PREVIEW_CHUNK) {
+        for (const a of accounts.slice(i, i+G.PREVIEW_CHUNK)) {
+          if (accountsProcessed >= limit) break;
+          if (!dateInRange(a.modifiedon, sDate, eDate)) continue;
+          let hasNotes = false;
+          if (noteFilter !== 'all') {
+            arr(a.sources).forEach(src => {
+              if (hasNotes) return;
+              let combinedNotes = src.rawNotes || '';
+              if (src.message && txt(src.message) !== '') combinedNotes += "\n------------------------------\n" + src.message;
+              let hist = [];
+              try { hist = window.parseNoteHistory ? window.parseNoteHistory(combinedNotes, src.type, a.modifiedon) : []; } catch(e) {}
+              hasNotes = hist.some(h => h && (h.date === 'Permanent' || h.date === 'Unknown Date' || dateInRange(h.date, sDate, eDate)));
+            });
+          }
+          if (noteFilter === 'has_notes' && !hasNotes) continue;
+          if (noteFilter === 'no_notes' && hasNotes) continue;
+          let accountWillChange = false, temp = '';
+          arr(a.sources).forEach(src => {
+            const selected = (src.type === 'AM' && chkAm) || (src.type === 'Cadence' && chkCad) || (src.type === 'Prospecting' && chkPro) || (src.type === 'Louise Brown' && chkLb);
+            if (selected && src.rep !== targetRep) {
+              accountWillChange = true;
+              totalRecordsChanging++;
+              temp += `<tr class="border-b transition-colors hover:bg-gray-100" style="border-color: var(--border-color);">
+                <td class="py-2 px-3 text-center"><input type="checkbox" class="reassign-row-cb cursor-pointer w-4 h-4" style="accent-color: var(--primary);" data-id="${esc(a.cr714_id)}" data-type="${esc(src.type)}" checked></td>
+                <td class="py-2 px-3 font-mono font-bold">${esc(a.cr714_id)}</td>
+                <td class="py-2 px-3 font-bold">${esc(src.type)}</td>
+                <td class="py-2 px-3 font-bold line-through" style="color: var(--accent-danger);">${esc(src.rep)}</td>
+                <td class="py-2 px-3 font-bold" style="color: var(--accent-success);">${esc(targetRep)}</td>
+              </tr>`;
+            }
+          });
+          if (accountWillChange) { htmlParts.push(temp); accountsProcessed++; }
+        }
+        G.updateProgress('act-v301-preview-progress', accounts.length ? ((Math.min(i+G.PREVIEW_CHUNK, accounts.length) / accounts.length) * 95) : 95, `Scanned ${Math.min(i+G.PREVIEW_CHUNK, accounts.length).toLocaleString()} of ${accounts.length.toLocaleString()}`);
+        await yieldFrame();
+      }
+      if (body) body.innerHTML = totalRecordsChanging ? htmlParts.join('') : `<tr><td colspan="5" class="text-center py-16 text-muted italic font-bold">No records found matching these exact parameters that require reassignment.</td></tr>`;
+      const previewCount = $('preview-count'); if (previewCount) previewCount.innerText = `${totalRecordsChanging.toLocaleString()} Records`;
+      const execBtn = $('btn-execute-reassign'), warnIcon = $('btn-execute-warn');
+      if (execBtn) { execBtn.disabled = totalRecordsChanging <= 0; execBtn.classList.toggle('pulse-multi', totalRecordsChanging > 0); }
+      if (warnIcon) warnIcon.classList.toggle('hidden-force', totalRecordsChanging <= 0);
+    } catch(e) {
+      console.error('Chunked preview failed:', e);
+      if (originalPreviewReassignment) return originalPreviewReassignment.apply(this, arguments);
+    } finally {
+      G.isPreviewRunning = false;
+    }
+  };
+
+  // Polling lock: prevents live sync from stacking filter/report refreshes while a prior poll is still processing.
+  const originalPoll = window.pollLiveUpdates;
+  if (typeof originalPoll === 'function') {
+    window.pollLiveUpdates = async function(){
+      if (G.isPolling || G.isDrilldownRunning || G.isPreviewRunning) return;
+      G.isPolling = true;
+      try { return await originalPoll.apply(this, arguments); }
+      finally { G.isPolling = false; }
+    };
+  }
+
+  // Report render guard: debounce repeated report calls and force async fact builder before legacy render when available.
+  const originalRenderReports = window.renderReports;
+  if (typeof originalRenderReports === 'function') {
+    window.renderReports = function(){
+      if (!$('tab-reports') || !$('tab-reports').classList.contains('active')) return;
+      clearTimeout(G.renderReportTimer);
+      G.renderReportTimer = setTimeout(async () => {
+        try {
+          const big = arr(window.teamFilteredAccounts).length > 2500;
+          if (big && window.buildReportingFactsAsync && !arr(window.reportingFacts).length) {
+            loader(35, 'Preparing reporting facts in chunks...', arr(window.teamFilteredAccounts).length);
+            await window.buildReportingFactsAsync();
+            await yieldFrame();
+          }
+          originalRenderReports.apply(window, arguments);
+        } catch(e) {
+          console.error('Guarded report render failed:', e);
+          toast('Report render skipped to protect the browser. Try narrowing the scope.', 'warning');
+        } finally { setLoader(false); }
+      }, 180);
+    };
+  }
+
+  // Cache save guard for ACTProduction/session cache: move heavy cache writes off the immediate UI path.
+  function installProductionCacheGuard(){
+    const P = window.ACTProduction;
+    if (!P || !P.saveCache || P.__V301_CACHE_GUARD__) return;
+    P.__V301_CACHE_GUARD__ = true;
+    const original = P.saveCache.bind(P);
+    let queued = false, running = false;
+    P.saveCache = async function(){
+      if (queued || running) return true;
+      queued = true;
+      setTimeout(async () => {
+        await idle();
+        queued = false; running = true;
+        try { await original(); }
+        catch(e) { console.warn('V30.1 async cache save skipped:', e); }
+        finally { running = false; }
+      }, 1200);
+      return true;
+    };
+  }
+
+  document.addEventListener('DOMContentLoaded', () => { G.ensureStyle(); installProductionCacheGuard(); });
+  setTimeout(() => { G.ensureStyle(); installProductionCacheGuard(); }, 0);
+  console.info('ACT V30.1 async drilldown + freeze guards loaded.');
+})();
+</script>
+<!-- === END COPILOT V30.1 ASYNC DRILLDOWN + FREEZE GUARDS === -->
+
 </body>
 </html>
