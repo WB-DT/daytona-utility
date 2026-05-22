@@ -2445,31 +2445,159 @@
   }
 
   // ── Power Automate Tunnel: Fetch SharePoint Historical Reviews ──────────────
-  // ── SharePoint Flow History Normalizer ───────────────────────────────────
+  
+ // ── Generic Flow / Power BI Response Parser ───────────────────────────────
+ function looksLikeBase64Text(text) {
+   if (!text || typeof text !== 'string') return false;
+   const t = text.trim();
+   return t.length > 40 && t.length % 4 === 0 && /^[A-Za-z0-9+/=\r\n]+$/.test(t);
+ }
+
+
+ function parseMalformedFlowResponseFragment(t) {
+   // Handles Flow Response bodies accidentally returned as text fragments like:
+   // "success": "200, 200)", "statusCode": "200", "body": "{"results":[...]}", "error": "..."
+   if (!t || typeof t !== 'string' || !t.includes('"body"')) return null;
+
+   const bodyProp = /"body"\s*:\s*"/.exec(t);
+   if (!bodyProp) return null;
+
+   const bodyStart = t.indexOf('{', bodyProp.index + bodyProp[0].length);
+   if (bodyStart < 0) return null;
+
+   let depth = 0;
+   let inString = false;
+   let escaped = false;
+   let bodyEnd = -1;
+
+   for (let i = bodyStart; i < t.length; i++) {
+     const ch = t[i];
+     if (escaped) { escaped = false; continue; }
+     if (ch === '\\') { escaped = true; continue; }
+     if (ch === '"') { inString = !inString; continue; }
+     if (!inString) {
+       if (ch === '{') depth++;
+       else if (ch === '}') {
+         depth--;
+         if (depth === 0) { bodyEnd = i + 1; break; }
+       }
+     }
+   }
+
+   if (bodyEnd < 0) return null;
+
+   const bodyText = t.slice(bodyStart, bodyEnd);
+   let parsedBody = null;
+   try { parsedBody = JSON.parse(bodyText); } catch (_) { return null; }
+
+   const statusMatch = /"statusCode"\s*:\s*"?([^",}\n]+)"?/.exec(t);
+   const successMatch = /"success"\s*:\s*"?([^",}\n]+)"?/.exec(t);
+   const errorMatch = /"error"\s*:\s*"([\s\S]*)"\s*$/.exec(t);
+
+   return {
+     success: successMatch ? successMatch[1] : null,
+     statusCode: statusMatch ? statusMatch[1] : null,
+     body: parsedBody,
+     error: errorMatch ? errorMatch[1] : null,
+     _wasMalformedFlowFragment: true
+   };
+ }
+
+ function tryParseJsonText(text) {
+   if (text === null || text === undefined) return null;
+   if (typeof text !== 'string') return text;
+   let t = text.trim();
+   if (!t) return null;
+
+   // Normal JSON first.
+   try { return JSON.parse(t); } catch (_) {}
+
+   // Power Automate Response body can be emitted as a bare object fragment:
+   //   "success": "200, 200)", "statusCode": "200", "body": "{...}"
+   // Wrap it in braces and parse it.
+   if (!t.startsWith('{') && /^"?[A-Za-z0-9_ -]+"?\s*:/.test(t)) {
+     try { return JSON.parse('{' + t + '}'); } catch (_) {}
+   }
+
+   const malformedFlow = parseMalformedFlowResponseFragment(t);
+   if (malformedFlow) return malformedFlow;
+
+   // Some Flow responses in HAR are base64-encoded JSON text.
+   if (looksLikeBase64Text(t)) {
+     try {
+       const decoded = window.atob(t.replace(/\s/g, ''));
+       try { return JSON.parse(decoded); } catch (_) {
+         if (!decoded.trim().startsWith('{') && /^"?[A-Za-z0-9_ -]+"?\s*:/.test(decoded.trim())) {
+           return JSON.parse('{' + decoded.trim() + '}');
+         }
+       }
+     } catch (_) {}
+   }
+
+   return { _rawText: t };
+ }
+
+ function unwrapFlowPayload(payload) {
+   let data = tryParseJsonText(payload);
+   for (let i = 0; i < 8; i++) {
+     if (typeof data === 'string') {
+       data = tryParseJsonText(data);
+       continue;
+     }
+     if (data && typeof data === 'object') {
+       // Handle Response wrappers: {success, statusCode, body: "{...}"}
+       if (data.body !== undefined) {
+         const parsedBody = tryParseJsonText(data.body);
+         if (parsedBody && typeof parsedBody === 'object' && !parsedBody._rawText) {
+           data = parsedBody;
+           continue;
+         }
+       }
+       // Handle HTTP action output shape: {statusCode, headers, body:{...}}
+       if (data.outputs && data.outputs.body !== undefined) {
+         data = tryParseJsonText(data.outputs.body);
+         continue;
+       }
+     }
+     break;
+   }
+   return data || {};
+ }
+
+// ── SharePoint Flow History Normalizer ───────────────────────────────────
     // Handles normal JSON Flow responses AND the flattened/plain-text response shape
     // seen in HAR/body captures: "statusCode 200 body value @odata.etag ... {Link} ...".
     function normalizeSharePointHistoryResponse(rawData, resText) {
-      const asArray = (v) => Array.isArray(v) ? v : [];
-      if (Array.isArray(rawData)) return rawData;
-      if (rawData && Array.isArray(rawData.value)) return rawData.value;
-      if (rawData && rawData.body) {
-        if (Array.isArray(rawData.body)) return rawData.body;
-        if (Array.isArray(rawData.body.value)) return rawData.body.value;
-        if (typeof rawData.body === 'string') {
-          try {
-            const bodyJson = JSON.parse(rawData.body);
-            if (Array.isArray(bodyJson)) return bodyJson;
-            if (Array.isArray(bodyJson.value)) return bodyJson.value;
-          } catch (_) { /* fall through to text parser */ }
-        }
+      const parsed = unwrapFlowPayload(rawData && Object.keys(rawData || {}).length ? rawData : resText);
+
+      const candidateArrays = [
+        parsed,
+        parsed?.value,
+        parsed?.body,
+        parsed?.body?.value,
+        parsed?.d?.results,
+        parsed?.results
+      ];
+
+      for (const candidate of candidateArrays) {
+        if (Array.isArray(candidate)) return candidate;
+        if (candidate && Array.isArray(candidate.value)) return candidate.value;
       }
 
-      const text = (resText || '').trim();
+      const text = typeof resText === 'string' ? resText.trim() : '';
       if (!text) return [];
 
-      // Some Flow/HAR exports are not valid JSON; they flatten objects into label/value text.
-      // Split on each SharePoint item marker while preserving the marker.
-      const itemChunks = text
+      // Final fallback for flattened/plain-text HAR exports.
+      const decodedText = (() => {
+        const parsedText = tryParseJsonText(text);
+        if (parsedText && typeof parsedText === 'object' && Array.isArray(parsedText.value)) return JSON.stringify(parsedText);
+        if (looksLikeBase64Text(text)) {
+          try { return window.atob(text.replace(/\s/g, '')); } catch (_) { return text; }
+        }
+        return text;
+      })();
+
+      const itemChunks = decodedText
         .replace(/\r?\n+/g, ' ')
         .split(/(?=\s*@odata\.etag\s+"?\d+"?\s+ItemInternalId\s+)/g)
         .map(x => x.trim())
@@ -2501,6 +2629,55 @@
           _rawChunk: chunk
         };
       }).filter(f => f['{FilenameWithExtension}'] || f['{Link}']);
+    }
+
+    function getFileContentBase64(rawData, newestFile) {
+      const candidates = [
+        rawData?.fileContentBase64, rawData?.body?.fileContentBase64,
+        rawData?.fileContent, rawData?.body?.fileContent,
+        newestFile?.fileContentBase64, newestFile?.FileContentBase64,
+        newestFile?.fileContent, newestFile?.FileContent,
+        newestFile?.['fileContentBase64'], newestFile?.['FileContentBase64'], newestFile?.['$content']
+      ];
+      for (let value of candidates) {
+        if (!value) continue;
+        if (typeof value === 'object') value = value.$content || value.content || value.Content || value.body || '';
+        if (typeof value !== 'string') continue;
+        value = value.trim();
+        if (value) return value;
+      }
+      return null;
+    }
+
+    function decodeBase64ToBytes(base64Value) {
+      if (!base64Value || typeof base64Value !== 'string') return null;
+      let b64 = base64Value.trim();
+      const commaIndex = b64.indexOf(',');
+      if (/^data:/i.test(b64) && commaIndex >= 0) b64 = b64.slice(commaIndex + 1);
+      b64 = b64.replace(/-/g, '+').replace(/_/g, '/').replace(/\s/g, '');
+      while (b64.length % 4 !== 0) b64 += '=';
+      if (!/^[A-Za-z0-9+/=]+$/.test(b64)) return null;
+      try {
+        const binaryString = window.atob(b64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+        return bytes;
+      } catch (err) {
+        console.warn('Invalid base64 file content from Flow; using SharePoint link fallback.', err);
+        return null;
+      }
+    }
+
+    function showSharePointEmbedPreview(file, compIframe, iframeLoader) {
+      if (compIframe && file?.['{Link}']) {
+        let embedLink = file['{Link}'];
+        embedLink += embedLink.includes('?') ? '&action=embedview' : '?action=embedview';
+        compIframe.src = embedLink;
+        compIframe.style.display = 'block';
+      }
+      const docxContainer = document.getElementById('comparison-docx');
+      if (docxContainer) docxContainer.style.display = 'none';
+      if (iframeLoader) iframeLoader.style.display = 'none';
     }
 
     window.fetchSharePointHistory = async function(empName) {
@@ -2600,20 +2777,11 @@
 
               if(iframeLoader) iframeLoader.style.display = 'flex';
               
-              if (rawData.fileContentBase64) {
-                  
-                  // Safely extract base64 string
-                  let b64 = rawData.fileContentBase64;
-                  if (typeof b64 === 'object' && b64.$content) b64 = b64.$content;
-                  b64 = b64.replace(/\s/g, ''); // strip newlines/spaces
-                  
+              const fileContentBase64 = getFileContentBase64(rawData, newestFile);
+              if (fileContentBase64) {
                   try {
-                      const binaryString = window.atob(b64);
-                      const len = binaryString.length;
-                      const bytes = new Uint8Array(len);
-                      for (let i = 0; i < len; i++) {
-                          bytes[i] = binaryString.charCodeAt(i);
-                      }
+                      const bytes = decodeBase64ToBytes(fileContentBase64);
+                      if (!bytes) throw new Error('Flow returned file content, but it was not valid base64.');
 
                       if (fileNameLower.endsWith('.pdf')) {
                           // Feed raw blob to iframe for PDFs (bypasses SP blocks completely)
@@ -2686,33 +2854,12 @@
                           }
                       }
                   } catch (decodeErr) {
-                      console.error("Base64 Decode Error:", decodeErr);
-                      if (compIframe) compIframe.style.display = 'none';
-                      if (iframeLoader) iframeLoader.style.display = 'none';
-                      
-                      let docxContainer = document.getElementById('comparison-docx');
-                      if (!docxContainer) {
-                          docxContainer = document.createElement('div');
-                          docxContainer.id = 'comparison-docx';
-                          document.getElementById('comparison-modal-body').appendChild(docxContainer);
-                      }
-                      
-                      docxContainer.innerHTML = `<div style="padding: 2rem; text-align: center; color: var(--danger);"><h3>Base64 Extraction Error</h3><p>The flow returned invalid Base64 data. Ensure the <b>Get file content</b> action is correctly configured.</p></div>`;
-                      docxContainer.style.display = 'block';
-                      
+                      console.warn("Base64 preview unavailable; falling back to SharePoint embed link.", decodeErr);
+                      showSharePointEmbedPreview(newestFile, compIframe, iframeLoader);
                   }
               } else {
-                  // Fallback if the user's flow doesn't successfully pass the base64 content
-                  if (compIframe) {
-                      let embedLink = newestFile['{Link}'];
-                      embedLink += embedLink.includes('?') ? '&action=embedview' : '?action=embedview';
-                      compIframe.src = embedLink;
-                      compIframe.style.display = 'block';
-                  }
-                  
-                  let docxContainer = document.getElementById('comparison-docx');
-                  if (docxContainer) docxContainer.style.display = 'none';
-                  // Note: iframeLoader will be hidden by the iframe's onload event
+                  // Fallback if the flow does not return usable base64 content.
+                  showSharePointEmbedPreview(newestFile, compIframe, iframeLoader);
               }
 
               if (linksBox) linksBox.innerHTML = '';
@@ -2857,59 +3004,80 @@
       let pbiToken;
       try {
           pbiToken = await window.getToken("https://analysis.windows.net/powerbi/api/.default");
-      } catch (err) { throw new Error("Azure AD: Token fetch failed."); }
+      } catch (err) { throw new Error("Azure AD: Power BI token fetch failed: " + (err.message || err)); }
 
       const pbiUrl = `https://api.powerbi.com/v1.0/myorg/datasets/${datasetId}/executeQueries`;
-      const tunnelUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/5aad6c2d680a46c1ad66ae301d9e5bdb/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=yh385aT7xv9ZdBhDNxWaea6jVEHaHbHddRrDcX1Zg0w"; 
-      
+      const tunnelUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/5aad6c2d680a46c1ad66ae301d9e5bdb/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=yh385aT7xv9ZdBhDNxWaea6jVEHaHbHddRrDcX1Zg0w";
       const pbiPayload = { queries: [{ query: daxQuery }], serializerSettings: { includeNulls: true } };
 
-      const tunnelPayload = {
-          reqMethod: "POST",           
-          msalToken: pbiToken,         
-          requestBody: pbiPayload,     
-          uri: pbiUrl,                 
-          body: { uri: pbiUrl }
+      const parseRows = (payload) => {
+          const data = unwrapFlowPayload(payload);
+          if (data.error) throw new Error(`Power BI Error: ${data.error.message || JSON.stringify(data.error)}`);
+          if (!data.results || !data.results[0] || !data.results[0].tables) {
+              throw new Error("PBI did not return standard tables. Raw response: " + JSON.stringify(data).slice(0, 700));
+          }
+          const rows = data.results[0].tables[0].rows || [];
+          return rows.map(row => {
+              const cleanRow = {};
+              for (const key in row) {
+                  const cleanKey = key.includes('[') ? key.split('[').slice(1).join('[').replace(']', '') : key;
+                  cleanRow[cleanKey] = row[key];
+              }
+              return cleanRow;
+          });
       };
 
-      const res = await fetch(tunnelUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(tunnelPayload)
-      });
-      
-      if (!res.ok) throw new Error(`Tunnel HTTP Error ${res.status}`);
-      
-      const resText = await res.text();
-      if (!resText || resText.trim() === "") throw new Error("Flow stripped the data.");
-
-      let data = null;
-      try { data = JSON.parse(resText); } 
-      catch (e) {
-          try { data = JSON.parse(atob(resText)); } 
-          catch(e2) { throw new Error(`Output is not JSON`); }
-      }
-
-      if (data.body) data = typeof data.body === 'string' ? JSON.parse(data.body) : data.body;
-      if (data.error) throw new Error(`Power BI Error: ${data.error.message || JSON.stringify(data.error)}`);
-
-      if (!data.results || !data.results[0] || !data.results[0].tables) {
-          if (Object.keys(data).length === 0) throw new Error("Flow stripped the data.");
-          throw new Error("PBI did not return standard tables.");
-      }
-      
-      const rows = data.results[0].tables[0].rows || [];
-      return rows.map(row => {
-          const cleanRow = {};
-          for (const key in row) {
-              const cleanKey = key.includes('[') ? key.split('[')[1].replace(']', '') : key;
-              cleanRow[cleanKey] = row[key];
+      const tunnelPayload = {
+          reqMethod: "POST",
+          method: "POST",
+          msalToken: pbiToken,
+          token: pbiToken,
+          requestBody: pbiPayload,
+          body: pbiPayload,
+          uri: pbiUrl,
+          url: pbiUrl,
+          endpointUrl: pbiUrl,
+          headers: {
+            Authorization: `Bearer ${pbiToken}`,
+            "Content-Type": "application/json"
           }
-          return cleanRow;
-      });
+      };
+
+      let tunnelError = null;
+      try {
+          const res = await fetch(tunnelUrl.replace(/&amp;/g, '&'), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(tunnelPayload)
+          });
+          const resText = await res.text();
+          if (!res.ok) throw new Error(`Tunnel HTTP Error ${res.status}: ${resText.slice(0, 300)}`);
+          if (!resText || resText.trim() === "") throw new Error("Power BI Flow returned HTTP 200 with an empty body.");
+          return parseRows(resText);
+      } catch (err) {
+          tunnelError = err;
+          console.warn("Power BI tunnel response was not directly parseable; trying direct Power BI executeQueries call.", err);
+      }
+
+      try {
+          const direct = await fetch(pbiUrl, {
+              method: 'POST',
+              headers: {
+                  'Authorization': `Bearer ${pbiToken}`,
+                  'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(pbiPayload)
+          });
+          const directText = await direct.text();
+          if (!direct.ok) throw new Error(`Direct Power BI HTTP ${direct.status}: ${directText.slice(0, 500)}`);
+          if (!directText || directText.trim() === "") throw new Error("Direct Power BI returned an empty body.");
+          return parseRows(directText);
+      } catch (directErr) {
+          throw new Error(`Power BI data fetch failed. Tunnel: ${tunnelError?.message || tunnelError}. Direct: ${directErr.message || directErr}`);
+      }
   }
 
-  async function fetchAllPbiDataInBackground(showToasts = false) {
+  async function fetchAllPbiDataInBackground(showToasts = false, forceRefresh = false) {
       const empName = val('employee-name');
       const period = val('review-period');
       const labelEl = document.getElementById('days-present-label');
@@ -2926,7 +3094,7 @@
 
       if (!empName) return; 
 
-      if (!showToasts && window.pbiCache.empName === empName && window.pbiCache.period === period) {
+      if (!forceRefresh && !showToasts && window.pbiCache.empName === empName && window.pbiCache.period === period && (window.pbiCache.loginData || window.pbiCache.avayaData)) {
           return; 
       }
 
@@ -3015,6 +3183,7 @@
           }
       } catch(err) {
           console.warn("Avaya Fetch Error:", err);
+          window.pbiCache.avayaData = [];
           hasErrors = true;
       }
 
@@ -3040,6 +3209,7 @@
           
       } catch (err) {
           console.warn("Login Fetch Error:", err);
+          window.pbiCache.loginData = [];
           inputEl.value = "0";
           hasErrors = true;
       } 
@@ -3051,8 +3221,9 @@
 
       if (showToasts) {
           if (!hasErrors) showError("Successfully refreshed Power BI metrics.");
-          else showError("Refresh completed with missing data.");
+          else showError("Refresh completed with missing Power BI data. Check the browser console for the exact tunnel/direct API error.");
       }
+      return { hasErrors, loginCount: (window.pbiCache.loginData || []).length, avayaCount: (window.pbiCache.avayaData || []).length };
   }
 
   function clearFilters(type) {
@@ -3064,92 +3235,112 @@
       if (table) table.download("csv", `${type}_report.csv`);
   }
 
-  function renderCachedReport(type, isSummary = false) {
+  async function renderCachedReport(type, isSummary = false) {
       const period = val('review-period');
-      if (!period) return;
-
-      const data = type === 'login' ? window.pbiCache.loginData : window.pbiCache.avayaData;
-      
-      if (!data || data.length === 0) {
-          showError(`No ${type} data found for this period.`);
+      const empName = val('employee-name');
+      if (!empName || !period) {
+          showError("Please select an employee and Review Period first.");
           return;
       }
 
-      const containerId = type === 'login' ? 'login-logout-container' : 'lunch-break-container';
-      const container = document.getElementById(containerId);
-      let titleIcon = type === 'login' ? '<i class="fas fa-sign-in-alt"></i> Login / Logout Report' : '<i class="fas fa-coffee"></i> Lunch / Break Adherence';
-      
-      if (isSummary) {
-          const renderHtml = generateAbbreviatedCards(data, type);
-          container.innerHTML = `<div class="section-heading" style="margin-top:0;">${titleIcon} (Abbreviated Cards) (${period})</div>` + renderHtml;
-          container.style.display = 'block';
-          showError(`Cards Generated Successfully!`);
-      } else {
-          const tableId = `tabulator-${type}`;
-          
-          const renderHtml = `
-              <div class="tabulator-toolbar" style="margin-bottom: 1rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+      const buttonId = type === 'login'
+          ? (isSummary ? 'btn-fetch-login-logout-abbrev' : 'btn-fetch-login-logout-full')
+          : (isSummary ? 'btn-fetch-lunch-break-abbrev' : 'btn-fetch-lunch-break-full');
+      const btn = document.getElementById(buttonId);
+      const originalHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+          btn.disabled = true;
+          btn.innerHTML = '<div class="spinner"></div> Loading report data...';
+      }
+
+      try {
+          let data = type === 'login' ? window.pbiCache.loginData : window.pbiCache.avayaData;
+          const cacheMismatch = window.pbiCache.empName !== empName || window.pbiCache.period !== period;
+          if (!Array.isArray(data) || data.length === 0 || cacheMismatch) {
+              showError("No cached report data found yet. Fetching Power BI data now...");
+              await fetchAllPbiDataInBackground(true, true);
+              data = type === 'login' ? window.pbiCache.loginData : window.pbiCache.avayaData;
+          }
+
+          if (!Array.isArray(data) || data.length === 0) {
+              showError(`No ${type === 'login' ? 'Login/Logout' : 'Lunch/Break'} rows returned for ${empName} in ${period}. If this should have data, check the Power BI tunnel/direct API console error.`);
+              return;
+          }
+
+          const containerId = type === 'login' ? 'login-logout-container' : 'lunch-break-container';
+          const container = document.getElementById(containerId);
+          let titleIcon = type === 'login' ? '<i class="fas fa-sign-in-alt"></i> Login / Logout Report' : '<i class="fas fa-coffee"></i> Lunch / Break Adherence';
+
+          if (isSummary) {
+              const renderHtml = generateAbbreviatedCards([...data], type);
+              container.innerHTML = `<div class="section-heading" style="margin-top:0;">${titleIcon} (Abbreviated Cards) (${period})</div>` + renderHtml;
+              container.style.display = 'block';
+              showError(`Cards Generated Successfully! ${data.length} rows attached.`);
+          } else {
+              const tableId = `tabulator-${type}`;
+              const renderHtml = `
+                <div class="tabulator-toolbar" style="margin-bottom: 1rem; display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
                   <button class="btn btn-secondary" style="padding: 0.4rem 0.8rem; font-size: 0.85rem;" onclick="clearFilters('${type}')"><i class="fas fa-filter-slash"></i> Clear Filters</button>
                   <button class="btn btn-success" style="padding: 0.4rem 0.8rem; font-size: 0.85rem;" onclick="downloadData('${type}')"><i class="fas fa-file-excel"></i> Export CSV</button>
-              </div>
-              <div id="${tableId}" style="width: 100%;"></div>
-          `;
-          
-          container.innerHTML = `<div class="section-heading" style="margin-top:0;">${titleIcon} Full Table Data (${period})</div>` + renderHtml;
-          container.style.display = 'block';
+                </div>
+                <div id="${tableId}" style="width: 100%;"></div>
+              `;
+              container.innerHTML = `<div class="section-heading" style="margin-top:0;">${titleIcon} Full Table Data (${period})</div>` + renderHtml;
+              container.style.display = 'block';
 
-          const dataKeys = Object.keys(data[0]);
-          const loginCols = ['Logout Date', 'Short/EXT Shift', 'Login Time', 'Logout Time', 'Worked Hours26', 'Hours Worked'];
-          const avayaCols = ['Row Date', 'Time in Break', 'Time in Lunch', 'Time in OE/Payment Processing', 'Time in Tech Issues', 'Time In Personal Misc', 'Time in Email/Approved', 'Time in Printing/Stamps'];
-          const desiredCols = type === 'login' ? loginCols : avayaCols;
+              const dataKeys = Object.keys(data[0] || {});
+              const loginCols = ['Logout Date', 'Short/EXT Shift', 'Login Time', 'Logout Time', 'Worked Hours26', 'Hours Worked'];
+              const avayaCols = ['Row Date', 'Time in Break', 'Time in Lunch', 'Time in OE/Payment Processing', 'Time in Tech Issues', 'Time In Personal Misc', 'Time in Email/Approved', 'Time in Printing/Stamps'];
+              const desiredCols = type === 'login' ? loginCols : avayaCols;
 
-          let columns = desiredCols.map(desired => {
-              let actualKey = dataKeys.find(k => k.toLowerCase().replace(' (raw)','') === desired.toLowerCase()) || desired;
-              
-              let sorter = "string";
-              if (data.length > 0 && typeof data[0][actualKey] === 'number') sorter = "number";
-              
-              return {
-                  title: desired.replace('26', '').replace(' (raw)', ''), 
-                  field: actualKey,
-                  sorter: sorter,
-                  headerFilter: "input",
-                  formatter: function(cell) {
-                      let v = cell.getValue();
-                      let formatted = formatCellValue(actualKey, v);
-                      if (formatted.styleStr) {
-                          cell.getElement().style.cssText = formatted.styleStr;
+              let columns = desiredCols.map(desired => {
+                  let actualKey = dataKeys.find(k => k.toLowerCase().replace(' (raw)','') === desired.toLowerCase()) || desired;
+                  if (!dataKeys.includes(actualKey)) return null;
+                  let sorter = typeof data[0][actualKey] === 'number' ? "number" : "string";
+                  return {
+                      title: desired.replace('26', '').replace(' (raw)', ''),
+                      field: actualKey,
+                      sorter,
+                      headerFilter: "input",
+                      formatter: function(cell) {
+                          let formatted = formatCellValue(actualKey, cell.getValue());
+                          if (formatted.styleStr) cell.getElement().style.cssText = formatted.styleStr;
+                          return formatted.html;
                       }
-                      return formatted.html;
-                  }
-              };
-          });
+                  };
+              }).filter(Boolean);
 
-          data.forEach(row => {
-              let isTrouble = false;
-              for (let col of columns) {
-                  if (row[col.field] !== undefined) {
-                      let cell = formatCellValue(col.field, row[col.field]);
-                      if (cell.styleStr !== '') isTrouble = true;
-                  }
+              if (columns.length === 0) {
+                  columns = dataKeys.slice(0, 12).map(k => ({ title: k, field: k, headerFilter: "input" }));
               }
-              row['_isTrouble'] = isTrouble ? "⚠️ Needs Review (Exceptions)" : "✅ Standard Records";
-          });
 
-          window[`table_${type}`] = new Tabulator(`#${tableId}`, {
-              data: data,
-              layout: "fitColumns", 
-              columns: columns,
-              groupBy: "_isTrouble",
-              groupStartOpen: function(value){
-                  return value.includes("Needs Review"); 
-              },
-              movableColumns: true,
-              pagination: "local",
-              paginationSize: 15,
-          });
+              data.forEach(row => {
+                  let isTrouble = columns.some(col => row[col.field] !== undefined && formatCellValue(col.field, row[col.field]).styleStr !== '');
+                  row['_isTrouble'] = isTrouble ? "⚠️ Needs Review (Exceptions)" : "✅ Standard Records";
+              });
 
-          showError(`Interactive Table Generated Successfully!`);
+              window[`table_${type}`] = new Tabulator(`#${tableId}`, {
+                  data,
+                  layout: "fitColumns",
+                  columns,
+                  groupBy: "_isTrouble",
+                  groupStartOpen: value => String(value).includes("Needs Review"),
+                  movableColumns: true,
+                  pagination: "local",
+                  paginationSize: 15,
+              });
+              showError(`Interactive Table Generated Successfully! ${data.length} rows attached.`);
+          }
+
+          if (document.getElementById('panel-3')?.style.display === 'block') buildSummaryPreview();
+      } catch (err) {
+          console.error("Report render/fetch error:", err);
+          showError("Failed to generate report: " + (err.message || err));
+      } finally {
+          if (btn) {
+              btn.disabled = false;
+              btn.innerHTML = originalHtml;
+          }
       }
   }
 
