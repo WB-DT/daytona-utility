@@ -2110,21 +2110,80 @@
       period: null
   };
 
+  // ── Restored Connection Status Functions + Corrected Missing-Function Guard (Fixed28) ──
+  window.connectionStatusState = window.connectionStatusState || {
+    auth: { state: 'pending', label: 'Auth: Checking', detail: 'Checking Microsoft sign-in state.' },
+    pbi: { state: 'idle', label: 'PBI: Idle', detail: 'Power BI metrics have not synced yet.' },
+    archive: { state: 'idle', label: 'Archive: Idle', detail: 'SharePoint archive lookup has not started.' }
+  };
 
+  window.setConnectionStatus = function(key, state, label, detail) {
+    const idMap = { auth: 'conn-auth', pbi: 'conn-pbi', archive: 'conn-archive' };
+    const safeKey = idMap[key] ? key : 'auth';
+    const safeState = state || 'idle';
+    const safeLabel = label || `${safeKey}: ${safeState}`;
+    const safeDetail = detail || safeLabel;
 
-  // ── Missing Function Error Handling (Fixed27 hardening) ───────────────────
-  // Prevents one missing helper from taking down the app and surfaces a friendly diagnostic.
-  window.__missingFunctionLog = window.__missingFunctionLog || new Set();
+    window.connectionStatusState[safeKey] = { state: safeState, label: safeLabel, detail: safeDetail };
 
-  window.getFunctionByPath = window.getFunctionByPath || function(path) {
+    const el = document.getElementById(idMap[safeKey]);
+    if (!el) return;
+
+    el.dataset.state = safeState;
+    const labelEl = el.querySelector('.label');
+    if (labelEl) labelEl.textContent = safeLabel;
+    el.title = safeDetail;
+  };
+
+  window.refreshConnectionStatusLegend = function() {
+    const state = window.connectionStatusState || {};
+    ['auth', 'pbi', 'archive'].forEach(key => {
+      const s = state[key];
+      if (s) window.setConnectionStatus(key, s.state, s.label, s.detail);
+    });
+  };
+
+  window.resetLocalCache = function() {
+    const ok = window.confirm(
+      'Reset this browser session?\n\nThis clears the local app cache, Microsoft sign-in cache, and cached Power BI results for this site. The page will reload and you will sign in fresh.'
+    );
+    if (!ok) return;
+
     try {
-      return String(path || '').split('.').reduce((obj, key) => obj && obj[key], window);
-    } catch (_) {
-      return undefined;
+      window.setConnectionStatus('auth', 'loading', 'Auth: Resetting', 'Clearing local Microsoft sign-in cache.');
+      window.setConnectionStatus('pbi', 'loading', 'PBI: Resetting', 'Clearing cached Power BI results.');
+      window.setConnectionStatus('archive', 'idle', 'Archive: Idle', 'Archive lookup reset.');
+
+      const theme = localStorage.getItem('theme');
+      window.pbiCache = { loginData: null, avayaData: null, empName: null, period: null };
+      localStorage.clear();
+      sessionStorage.clear();
+      if (theme) localStorage.setItem('theme', theme);
+
+      if (typeof showError === 'function') showError('Local app cache cleared. Reloading for a fresh sign-in...');
+      setTimeout(() => window.location.reload(), 450);
+    } catch (err) {
+      console.error('Local cache reset failed:', err);
+      if (typeof showError === 'function') showError('Unable to clear local cache automatically. Try clearing site data from your browser settings.');
+      else alert('Unable to clear local cache automatically. Try clearing site data from your browser settings.');
     }
   };
 
-  window.notifyMissingFunction = window.notifyMissingFunction || function(functionName, context, rawError) {
+  window.__missingFunctionLog = window.__missingFunctionLog || new Set();
+
+  window.getFunctionByPath = function(path) {
+    const parts = String(path || '').split('.').filter(Boolean);
+    if (!parts.length) return undefined;
+    let obj = window;
+    let index = parts[0] === 'window' ? 1 : 0;
+    for (; index < parts.length; index++) {
+      if (!obj) return undefined;
+      obj = obj[parts[index]];
+    }
+    return obj;
+  };
+
+  window.notifyMissingFunction = function(functionName, context, rawError) {
     const cleanName = String(functionName || 'unknown function').replace(/^window\./, '');
     const key = `${cleanName}|${context || ''}`;
     if (window.__missingFunctionLog.has(key)) return;
@@ -2141,43 +2200,41 @@
 
     try {
       if (typeof showError === 'function') showError(message);
-      else {
-        const container = document.getElementById('toast-container') || document.body;
-        const toast = document.createElement('div');
-        toast.className = 'toast';
-        toast.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:99999;max-width:420px;padding:12px 14px;border-radius:10px;background:#fff3cd;color:#664d03;border:1px solid #ffecb5;box-shadow:0 8px 24px rgba(0,0,0,.18);font:13px system-ui,sans-serif;';
-        toast.textContent = message;
-        container.appendChild(toast);
-        setTimeout(() => toast.remove(), 9000);
-      }
     } catch (_) {}
   };
 
-  window.ensureFunction = window.ensureFunction || function(path, fallback, context) {
+  window.ensureFunction = function(path, fallback, context) {
+    if (typeof window.getFunctionByPath(path) === 'function') return true;
+
     const parts = String(path || '').split('.').filter(Boolean);
     if (!parts.length) return false;
+
     let obj = window;
-    const startIndex = parts[0] === 'window' ? 1 : 0;
-    for (let i = startIndex; i < parts.length - 1; i++) {
-      obj[parts[i]] = obj[parts[i]] || {};
-      obj = obj[parts[i]];
+    let index = parts[0] === 'window' ? 1 : 0;
+    for (; index < parts.length - 1; index++) {
+      obj[parts[index]] = obj[parts[index]] || {};
+      obj = obj[parts[index]];
     }
+
     const name = parts[parts.length - 1];
-    if (typeof obj[name] === 'function') return true;
-    obj[name] = typeof fallback === 'function' ? fallback : function() {
-      window.notifyMissingFunction(path, context || 'fallback invoked');
-      return null;
-    };
+    obj[name] = typeof fallback === 'function'
+      ? fallback
+      : function() {
+          window.notifyMissingFunction(path, context || 'fallback invoked');
+          return null;
+        };
+
     window.notifyMissingFunction(path, context || 'fallback installed');
     return false;
   };
 
-  window.safeInvoke = window.safeInvoke || function(path, args, fallback, context) {
+  window.safeInvoke = function(path, args, fallback, context) {
     const fn = window.getFunctionByPath(path);
     if (typeof fn !== 'function') {
       window.notifyMissingFunction(path, context || 'safeInvoke');
       return typeof fallback === 'function' ? fallback.apply(window, args || []) : fallback;
     }
+
     try {
       return fn.apply(window, args || []);
     } catch (err) {
@@ -2196,7 +2253,6 @@
       const match = msg.match(/(?:TypeError:\s*)?(.+?)\s+is not a function/i);
       const fnName = match && match[1] ? match[1].trim() : 'unknown function';
       window.notifyMissingFunction(fnName, 'global error handler', err || msg);
-      // Keep the browser console usable, but prevent this known guardable issue from blocking the workflow.
       event.preventDefault();
       return true;
     }
@@ -2217,6 +2273,8 @@
   });
 
   document.addEventListener('DOMContentLoaded', function() {
+    window.refreshConnectionStatusLegend();
+
     const expectedFunctions = [
       'window.setConnectionStatus',
       'window.refreshConnectionStatusLegend',
@@ -2244,13 +2302,10 @@
     if (missing.length) {
       missing.forEach(name => window.ensureFunction(name, null, 'startup health check'));
       console.warn('Startup health check installed fallbacks for missing functions:', missing);
-      try {
-        if (typeof window.setConnectionStatus === 'function') {
-          window.setConnectionStatus('auth', 'warning', 'UI: Guarded', `Fallbacks installed for: ${missing.map(x => x.replace('window.', '')).join(', ')}`);
-        }
-      } catch (_) {}
+      window.setConnectionStatus('auth', 'warning', 'UI: Guarded', `Fallbacks installed for: ${missing.map(x => x.replace('window.', '')).join(', ')}`);
     }
   });
+
 
   // ── Theme Toggle Logic ─────────────────────────────────────────────────────
   window.cycleTheme = function() {
@@ -2351,7 +2406,7 @@
   };
 
   window.initializeApp = function() {
-    if (typeof window.refreshConnectionStatusLegend === 'function') window.refreshConnectionStatusLegend();
+    window.refreshConnectionStatusLegend();
     window.setConnectionStatus('auth', 'ok', 'Auth: Connected', currentUserRepName ? `Signed in as ${currentUserRepName}.` : 'Microsoft sign-in active.');
     document.getElementById('login-overlay').style.display = 'none';
     document.getElementById('main-app').style.display = 'block';
