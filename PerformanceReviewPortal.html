@@ -1077,6 +1077,11 @@
       .abbrev-card { width: calc(33% - 1rem) !important; box-sizing: border-box !important; border: 1px solid #ccc !important; box-shadow: none !important; break-inside: avoid; border-left: 1px solid #ccc !important;}
       .calendar-badge { border: 1px solid #999 !important; box-shadow: none !important; }
       .calendar-badge .month { -webkit-print-color-adjust: exact; print-color-adjust: exact; background-color: var(--brand) !important; color: white !important; }
+
+      #summary-preview { display: block !important; overflow: visible !important; }
+      .summary-section, .review-print-section { break-inside: avoid; page-break-inside: avoid; }
+      textarea, input, select { overflow: visible !important; }
+
       /* Hide dynamic elements that should not be printed */
       .tabulator-toolbar, .column-visibility-menu { display: none !important; }
     }
@@ -2440,7 +2445,66 @@
   }
 
   // ── Power Automate Tunnel: Fetch SharePoint Historical Reviews ──────────────
-  async function fetchSharePointHistory(empName) {
+  async 
+    // ── SharePoint Flow History Normalizer ───────────────────────────────────
+    // Handles normal JSON Flow responses AND the flattened/plain-text response shape
+    // seen in HAR/body captures: "statusCode 200 body value @odata.etag ... {Link} ...".
+    function normalizeSharePointHistoryResponse(rawData, resText) {
+      const asArray = (v) => Array.isArray(v) ? v : [];
+      if (Array.isArray(rawData)) return rawData;
+      if (rawData && Array.isArray(rawData.value)) return rawData.value;
+      if (rawData && rawData.body) {
+        if (Array.isArray(rawData.body)) return rawData.body;
+        if (Array.isArray(rawData.body.value)) return rawData.body.value;
+        if (typeof rawData.body === 'string') {
+          try {
+            const bodyJson = JSON.parse(rawData.body);
+            if (Array.isArray(bodyJson)) return bodyJson;
+            if (Array.isArray(bodyJson.value)) return bodyJson.value;
+          } catch (_) { /* fall through to text parser */ }
+        }
+      }
+
+      const text = (resText || '').trim();
+      if (!text) return [];
+
+      // Some Flow/HAR exports are not valid JSON; they flatten objects into label/value text.
+      // Split on each SharePoint item marker while preserving the marker.
+      const itemChunks = text
+        .replace(/\r?\n+/g, ' ')
+        .split(/(?=\s*@odata\.etag\s+"?\d+"?\s+ItemInternalId\s+)/g)
+        .map(x => x.trim())
+        .filter(x => /\{FilenameWithExtension\}|\{Link\}|\{FullPath\}/.test(x));
+
+      const read = (chunk, pattern, fallback='') => {
+        const m = chunk.match(pattern);
+        return m ? String(m[1]).trim() : fallback;
+      };
+
+      return itemChunks.map(chunk => {
+        const fileName = read(chunk, /\{FilenameWithExtension\}\s+(.+?)(?=\s+\{Path\}|\s+\{FullPath\}|\s+\{ContentType\}|\s+\{IsCheckedOut\}|$)/);
+        const link = read(chunk, /\{Link\}\s+(https?:\/\/\S+)/);
+        const name = read(chunk, /\{Name\}\s+(.+?)(?=\s+\{FilenameWithExtension\}|\s+\{Path\}|\s+\{FullPath\}|$)/, fileName.replace(/\.[^.]+$/, ''));
+        return {
+          '@odata.etag': read(chunk, /@odata\.etag\s+("?\d+"?)/),
+          ItemInternalId: read(chunk, /ItemInternalId\s+(\d+)/),
+          ID: read(chunk, /\sID\s+(\d+)/),
+          Modified: read(chunk, /Modified\s+(\d{4}-\d{2}-\d{2}T[^\s]+)/),
+          Created: read(chunk, /Created\s+(\d{4}-\d{2}-\d{2}T[^\s]+)/),
+          '{IsFolder}': /\{IsFolder\}\s+true/i.test(chunk) ? true : false,
+          '{Link}': link,
+          '{Name}': name,
+          '{FilenameWithExtension}': fileName,
+          '{Path}': read(chunk, /\{Path\}\s+(.+?)(?=\s+\{FullPath\}|\s+\{ContentType\}|$)/),
+          '{FullPath}': read(chunk, /\{FullPath\}\s+(.+?)(?=\s+\{ContentType\}|\s+\{IsCheckedOut\}|$)/),
+          '{DriveId}': read(chunk, /\{DriveId\}\s+(\S+)/),
+          '{DriveItemId}': read(chunk, /\{DriveItemId\}\s+(\S+)/),
+          _rawChunk: chunk
+        };
+      }).filter(f => f['{FilenameWithExtension}'] || f['{Link}']);
+    }
+
+    async function fetchSharePointHistory(empName) {
       const summaryBox = document.getElementById('sp-history-summary');
       const linksBox = document.getElementById('sp-file-links');
       const lastReviewEl = document.getElementById('last-review-date');
@@ -2506,18 +2570,18 @@
           }
           
           // Ensure we pull the array of files properly depending on flow's structure
-          const files = Array.isArray(rawData) ? rawData : (rawData.value || []);
+          const files = normalizeSharePointHistoryResponse(rawData, resText);
 
           const reviewFiles = files.filter(f => {
               const name = f['{FilenameWithExtension}'] || "";
               const isFolder = f['{IsFolder}'];
-              return isFolder === false && (name.toLowerCase().endsWith('.pdf') || name.toLowerCase().includes('.doc'));
+              return isFolder !== true && isFolder !== 'true' && (name.toLowerCase().endsWith('.pdf') || name.toLowerCase().endsWith('.doc') || name.toLowerCase().endsWith('.docx'));
           });
 
           if (reviewFiles.length > 0) {
-              reviewFiles.sort((a, b) => new Date(b.Created) - new Date(a.Created));
+              reviewFiles.sort((a, b) => new Date(b.Created || b.Modified || 0) - new Date(a.Created || a.Modified || 0));
               const newestFile = reviewFiles[0];
-              const newestDate = new Date(newestFile.Created);
+              const newestDate = new Date(newestFile.Created || newestFile.Modified);
               const fileName = newestFile['{FilenameWithExtension}'];
               const fileNameLower = fileName.toLowerCase();
               
@@ -2654,7 +2718,9 @@
               reviewFiles.forEach(file => {
                   const name = file['{FilenameWithExtension}'];
                   const link = file['{Link}']; 
-                  const fileDate = new Date(file.Created).toLocaleDateString('en-US');
+                  const rawFileDate = file.Created || file.Modified;
+                  const parsedFileDate = new Date(rawFileDate);
+                  const fileDate = isNaN(parsedFileDate.getTime()) ? 'Unknown date' : parsedFileDate.toLocaleDateString('en-US');
                   const icon = name.toLowerCase().endsWith('.pdf') ? 'fa-file-pdf' : 'fa-file-word';
                   const color = name.toLowerCase().endsWith('.pdf') ? '#dc2626' : '#2563a8';
                   
@@ -3144,165 +3210,107 @@
     return `<div class="summary-row"><span class="key">${key}</span><span class="val">${val || '—'}</span></div>`;
   }
 
-  function buildSummaryPreview() {
-    const rt = currentReviewType;
-    let html = '';
+  
+    function buildReviewSummaryHtml(includeAttachedReports = true) {
+      const esc = (v) => String(v ?? '').replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])).replace(/\n/g, '<br>');
+      const display = (v) => esc(v || '—');
+      const row = (label, value) => `<div class="summary-row"><div class="key">${esc(label)}</div><div class="val">${display(value)}</div></div>`;
+      const section = (title, rowsHtml) => `<div class="summary-section review-print-section"><h3>${esc(title)}</h3>${rowsHtml}</div>`;
+      const selectedText = (id) => {
+        const el = document.getElementById(id);
+        if (!el) return '';
+        if (el.tagName === 'SELECT') return el.options[el.selectedIndex]?.text || el.value || '';
+        return el.value || '';
+      };
+      const rating = (id) => RATING_LABELS[val(id)] || selectedText(id) || '—';
 
-    html += '<div style="margin-bottom:1rem; font-weight:600; color:var(--text-brand); font-size:1.05rem;"><i class="fas fa-address-card"></i> Employee Information</div>';
-    html += `<div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.5rem;">`;
-    html += `<div><b>Review Type:</b> ${REVIEW_LABELS[rt] || '—'}</div>`;
-    html += `<div><b>Date:</b> ${val('review-date')}</div>`;
-    html += `<div><b>Period:</b> ${val('review-period') || '—'}</div>`;
-    html += `<div><b>Employee:</b> ${val('employee-name')}</div>`;
-    html += `<div><b>Title:</b> ${val('job-title') || '—'}</div>`;
-    html += `<div><b>Dept:</b> ${val('department') || '—'}</div>`;
-    html += `<div><b>Manager:</b> ${val('manager-name')}</div>`;
-    html += `<div><b>SR Manager:</b> ${val('sr-manager-name') || '—'}</div>`;
-    html += `<div><b>Hire Date:</b> ${val('hire-date') || '—'}</div>`;
-    html += `<div><b>Tenure:</b> ${val('tenure') || '—'}</div>`;
-    html += `<div><b>Last Review:</b> ${val('last-review-date')}</div>`;
-    html += `<div><b>Shift:</b> ${val('emp-shift')}</div>`;
-    html += `<div><b>Break:</b> ${val('emp-break')}</div>`;
-    html += `<div style="grid-column:1/-1;"><b>Reviewed By:</b> ${val('reviewer-name')}</div>`;
-    html += `<div style="grid-column:1/-1; padding-top:0.5rem;"><b>Special Instructions:</b> ${val('special-instructions') || 'None'}</div>`;
-    html += `</div>`;
+      let html = '';
+      html += section('Employee & Review Details',
+        row('Employee', selectedText('employee-name')) +
+        row('Employee ID', val('employee-id')) +
+        row('Job Title', val('job-title')) +
+        row('Department', val('department')) +
+        row('Manager', val('manager-name')) +
+        row('SR Manager', val('sr-manager-name')) +
+        row('Hire Date', val('hire-date')) +
+        row('Tenure', val('tenure')) +
+        row('Last Review Completed', val('last-review-date')) +
+        row('Review Type', REVIEW_LABELS[val('review-type')] || selectedText('review-type')) +
+        row('Review Date', val('review-date')) +
+        row('Review Period', selectedText('review-period')) +
+        row('Reviewer / Submitted By', val('reviewer-name'))
+      );
 
-    document.getElementById('summary-preview').innerHTML = html;
-  }
-
-  function buildPrintSummary() {
-    const rt = currentReviewType;
-    let html = `
-      <div class="summary-section">
-        <h3>Employee Information</h3>
-        ${row('Review Type', REVIEW_LABELS[rt])}
-        ${row('Date of Review', val('review-date'))}
-        ${row('Review Period', val('review-period'))}
-        ${row('Employee Name', val('employee-name'))}
-        ${row('Employee ID', val('employee-id'))}
-        ${row('Job Title', val('job-title'))}
-        ${row('Department', val('department'))}
-        ${row('Manager', val('manager-name'))}
-        ${row('SR Manager', val('sr-manager-name'))}
-        ${row('Date of Hire', val('hire-date'))}
-        ${row('Tenure', val('tenure'))}
-        ${row('Last Review Completed', val('last-review-date'))}
-        ${row('Shift', val('emp-shift'))}
-        ${row('Break', val('emp-break'))}
-        ${row('Special Instructions', val('special-instructions'))}
-        ${row('Reviewed By', val('reviewer-name'))}
-      </div>`;
-
-    if (rt === 'eom' || rt === 'eoq') {
-      html += `<div class="summary-section"><h3>EOM/EOQ Metrics</h3>`;
-      
-      currentMetrics.forEach(m => {
-          const cleanLabel = m.label.replace(' (min)', '').replace(' (%)', '');
-          html += row(cleanLabel, formatMetricWithArrow(m.id, m.label));
-      });
-      
-      html += `</div><div class="summary-section"><h3>Schedule Adherence &amp; Reporting</h3>`;
-      
-      html += row('Lunch Adherence', formatMetricWithArrow('m-lunch-adherence', '(%)'));
-      html += row('Break Adherence', formatMetricWithArrow('m-break-adherence', '(%)'));
-      html += row('Reporting Accuracy', formatMetricWithArrow('m-reporting-accuracy', '(%)'));
-      
-      const totalWorkingDays = document.getElementById('h-total-working-days').value;
-      html += row('Working Days Present', `${val('m-days-present')} out of ${totalWorkingDays} Days`);
-
-      function ratingFormat(valId) {
-          const v = val(valId);
-          let icon = '';
-          let color = '';
-          if (v === 'exceeds') { icon = '▲'; color = 'var(--success)'; }
-          else if (v === 'meets') { icon = '▶'; color = 'var(--warning)'; }
-          else if (v === 'below') { icon = '▼'; color = 'var(--danger)'; }
-          
-          if (!v) return '—';
-          return `<span style="color:${color}; font-weight:600;">${RATING_LABELS[v]} <i style="margin-left:4px; font-style:normal;">${icon}</i></span>`;
+      if (currentReviewType === 'eom') {
+        let metricRows = '';
+        (currentMetrics || []).forEach(m => metricRows += row(m.label, formatMetricWithArrow(m.id, m.label)));
+        metricRows += row('Lunch Adherence', formatMetricWithArrow('m-lunch-adherence', 'Lunch Adherence (%)'));
+        metricRows += row('Break Adherence', formatMetricWithArrow('m-break-adherence', 'Break Adherence (%)'));
+        metricRows += row('Reporting Accuracy', formatMetricWithArrow('m-reporting-accuracy', 'Reporting Accuracy (%)'));
+        metricRows += row('Working Days Present', `${val('m-days-present') || '—'} ${document.getElementById('days-present-label')?.textContent || ''}`.trim());
+        metricRows += row('Monthly Performance Rating', rating('eom-overall-rating'));
+        metricRows += row('Attendance Rating', rating('eom-attendance-rating'));
+        html += section('EOM Metrics & Ratings', metricRows);
+        html += section('EOM Qualitative Inputs',
+          row('Opportunities This Month', val('eom-opportunities-month')) +
+          row('Opportunities This Year', val('eom-opportunities-year')) +
+          row('Best Practices & Tips', val('eom-best-practices')) +
+          row('SMART Action Plan', val('eom-smart-plan')) +
+          row('Employee Voice / Commitment', val('eom-employee-voice'))
+        );
+      } else {
+        const ratingIds = [
+          ['Job Knowledge & Skills','r-job-knowledge'], ['Quantity of Work','r-quantity'],
+          ['Attendance & Punctuality','r-attendance'], ['Cooperation','r-cooperation'],
+          ['Accountability & Problem Solving','r-accountability'], ['Initiative','r-initiative'],
+          ['Use of Technology','r-technology'], ['Dependability','r-dependability'],
+          ['Commitment & Loyalty','r-commitment'], ['Professionalism','r-professionalism'], ['Growth','r-growth']
+        ];
+        html += section('Performance Category Ratings', ratingIds.map(([label,id]) => row(label, rating(id))).join(''));
+        html += section('Reviewer Comments & Development Plan',
+          row('Comments & Observations', val('ext-reviewer-comments')) +
+          row('Development Action Plan', val('ext-action-plan')) +
+          row('Employee Voice / Commitment', val('ext-employee-voice'))
+        );
       }
 
-      html += `</div><div class="summary-section"><h3>Performance Ratings</h3>
-          ${row('Performance Rating', ratingFormat('eom-overall-rating'))}
-          ${row('Attendance Rating', ratingFormat('eom-attendance-rating'))}
+      html += section('Signatures, Shift & Special Instructions',
+        row('Physical Signature Required', document.getElementById('physical-sig-toggle')?.checked ? 'Yes — print and sign' : 'No — electronic typed names') +
+        row('Employee Signature', val('employee-signature')) +
+        row('Manager Signature', val('manager-signature')) +
+        row('Shift Selection', val('emp-shift')) +
+        row('Break Selection', val('emp-break')) +
+        row('Special Instructions', val('special-instructions'))
+      );
+
+      if (includeAttachedReports) {
+        const login = document.getElementById('login-logout-container');
+        const lunch = document.getElementById('lunch-break-container');
+        if (login && login.style.display !== 'none' && login.innerHTML.trim()) html += section('Attached Login / Logout Report Pages', login.innerHTML);
+        if (lunch && lunch.style.display !== 'none' && lunch.innerHTML.trim()) html += section('Attached Lunch / Break Report Pages', lunch.innerHTML);
+      }
+      return html;
+    }
+
+    function buildSummaryPreview() {
+      document.getElementById('summary-preview').innerHTML = buildReviewSummaryHtml(true);
+    }
+
+
+  
+    function buildPrintSummary(confNum) {
+      const container = document.getElementById('print-summary');
+      if (!container) return;
+      container.innerHTML = `
+        <div class="summary-section review-print-section">
+          <h3>Submission Confirmation</h3>
+          <div class="summary-row"><div class="key">Confirmation #</div><div class="val">${confNum || '—'}</div></div>
+          <div class="summary-row"><div class="key">Submitted</div><div class="val">${new Date().toLocaleString()}</div></div>
         </div>
-        <div class="summary-section">
-          <h3>Qualitative Assessment</h3>
-          ${row('Opportunities This Month', val('eom-opportunities-month'))}
-          ${row('Opportunities This Year', val('eom-opportunities-year'))}
-          ${row('Best Practices &amp; Tips', val('eom-best-practices'))}
-          ${row('SMART Action Plan', val('eom-smart-plan'))}
-          ${row('Employee Voice / Commitment', val('eom-employee-voice'))}
-        </div>`;
-    } else {
-      const categories = [
-        ['Job Knowledge &amp; Skills', 'r-job-knowledge'],
-        ['Quantity of Work',           'r-quantity'],
-        ['Attendance &amp; Punctuality','r-attendance'],
-        ['Cooperation',                'r-cooperation'],
-        ['Accountability &amp; Problem Solving', 'r-accountability'],
-        ['Initiative',                 'r-initiative'],
-        ['Use of Technology',          'r-technology'],
-        ['Dependability',              'r-dependability'],
-        ['Commitment &amp; Loyalty',   'r-commitment'],
-        ['Professionalism',            'r-professionalism'],
-        ['Growth',                     'r-growth'],
-      ];
-      
-      const totalWorkingDays = document.getElementById('h-total-working-days').value;
-      html += `<div class="summary-section"><h3>Schedule Adherence</h3>`;
-      html += row('Working Days Present', `${val('m-days-present')} out of ${totalWorkingDays} Days`);
-      html += `</div>`;
-
-      html += '<div class="summary-section"><h3>Performance Ratings</h3>';
-      
-      function ratingFormat(v) {
-          let icon = '';
-          let color = '';
-          if (v === 'exceeds') { icon = '▲'; color = 'var(--success)'; }
-          else if (v === 'meets') { icon = '▶'; color = 'var(--warning)'; }
-          else if (v === 'below') { icon = '▼'; color = 'var(--danger)'; }
-          
-          if (!v) return '—';
-          return `<span style="color:${color}; font-weight:600;">${RATING_LABELS[v]} <i style="margin-left:4px; font-style:normal;">${icon}</i></span>`;
-      }
-
-      categories.forEach(([label, id]) => {
-        html += row(label, ratingFormat(val(id)));
-      });
-      html += '</div>';
-      html += `
-        <div class="summary-section">
-          <h3>Reviewer Comments</h3>
-          ${row('Comments &amp; Observations', val('ext-reviewer-comments'))}
-          ${row('Development Action Plan', val('ext-action-plan'))}
-          ${row('Employee Voice / Commitment', val('ext-employee-voice'))}
-        </div>`;
+        ${buildReviewSummaryHtml(true)}
+      `;
     }
 
-    html += `
-      <div class="summary-section">
-        <h3>Signatures &amp; Acknowledgment</h3>
-        ${row('Employee Signature', val('employee-signature') || '_________________________________')}
-        ${row('Manager Signature', val('manager-signature') || '_________________________________')}
-      </div>`;
-
-    const llContainer = document.getElementById('login-logout-container');
-    if (llContainer.style.display !== 'none') {
-        let isSummary = llContainer.innerHTML.includes('abbrev-grid');
-        let renderHtml = isSummary ? generateAbbreviatedCards(window.pbiCache.loginData, 'login') : generateFormattedHTMLTable(window.pbiCache.loginData, false, 'login');
-        html += `<div class="summary-section"><h3 style="border:none; padding:0;"><i class="fas fa-sign-in-alt"></i> Login / Logout Report</h3>${renderHtml}</div>`;
-    }
-    
-    const lbContainer = document.getElementById('lunch-break-container');
-    if (lbContainer.style.display !== 'none') {
-        let isSummary = lbContainer.innerHTML.includes('abbrev-grid');
-        let renderHtml = isSummary ? generateAbbreviatedCards(window.pbiCache.avayaData, 'avaya') : generateFormattedHTMLTable(window.pbiCache.avayaData, false, 'lunch');
-        html += `<div class="summary-section"><h3 style="border:none; padding:0; margin-top: 1rem;"><i class="fas fa-coffee"></i> Lunch / Break Adherence</h3>${renderHtml}</div>`;
-    }
-
-    return html;
-  }
 
   async function submitReview() {
     if (!document.getElementById('ack-checkbox').checked) {
