@@ -2110,59 +2110,147 @@
       period: null
   };
 
-  // ── Connection Status Legend Helpers (Fixed26 hotfix) ─────────────────────
-  // These must exist before login(), getToken(), initializeApp(), and archive/PBI helpers call them.
-  window.connectionStatusState = window.connectionStatusState || {
-    auth: { state: 'pending', label: 'Auth: Checking', detail: 'Checking Microsoft sign-in state.' },
-    pbi: { state: 'idle', label: 'PBI: Idle', detail: 'Power BI metrics have not synced yet.' },
-    archive: { state: 'idle', label: 'Archive: Idle', detail: 'SharePoint archive lookup has not started.' }
-  };
 
-  window.setConnectionStatus = window.setConnectionStatus || function(key, state, label, detail) {
-    const idMap = { auth: 'conn-auth', pbi: 'conn-pbi', archive: 'conn-archive' };
-    const safeKey = idMap[key] ? key : 'auth';
-    const safeState = state || 'idle';
-    const safeLabel = label || `${safeKey}: ${safeState}`;
-    window.connectionStatusState[safeKey] = { state: safeState, label: safeLabel, detail: detail || safeLabel };
-    const el = document.getElementById(idMap[safeKey]);
-    if (!el) return;
-    el.dataset.state = safeState;
-    const labelEl = el.querySelector('.label');
-    if (labelEl) labelEl.textContent = safeLabel;
-    el.title = detail || safeLabel;
-  };
 
-  window.refreshConnectionStatusLegend = window.refreshConnectionStatusLegend || function() {
-    const state = window.connectionStatusState || {};
-    Object.keys(state).forEach(key => {
-      const s = state[key] || {};
-      window.setConnectionStatus(key, s.state, s.label, s.detail);
-    });
-  };
+  // ── Missing Function Error Handling (Fixed27 hardening) ───────────────────
+  // Prevents one missing helper from taking down the app and surfaces a friendly diagnostic.
+  window.__missingFunctionLog = window.__missingFunctionLog || new Set();
 
-  window.resetLocalCache = window.resetLocalCache || function() {
-    const ok = window.confirm('Reset this browser session?\n\nThis clears the local app cache, Microsoft sign-in cache, and cached Power BI results for this site. The page will reload and you will sign in fresh.');
-    if (!ok) return;
+  window.getFunctionByPath = window.getFunctionByPath || function(path) {
     try {
-      window.setConnectionStatus('auth', 'loading', 'Auth: Resetting', 'Clearing local Microsoft sign-in cache.');
-      window.setConnectionStatus('pbi', 'loading', 'PBI: Resetting', 'Clearing cached Power BI results.');
-      window.setConnectionStatus('archive', 'idle', 'Archive: Idle', 'Archive lookup reset.');
-      const theme = localStorage.getItem('theme');
-      window.pbiCache = { loginData: null, avayaData: null, empName: null, period: null };
-      localStorage.clear();
-      sessionStorage.clear();
-      if (theme) localStorage.setItem('theme', theme);
-      if (typeof showError === 'function') showError('Local app cache cleared. Reloading for a fresh sign-in...');
-      setTimeout(() => window.location.reload(), 450);
-    } catch (err) {
-      console.error('Local cache reset failed:', err);
-      if (typeof showError === 'function') showError('Unable to clear local cache automatically. Try clearing site data from your browser settings.');
-      else alert('Unable to clear local cache automatically. Try clearing site data from your browser settings.');
+      return String(path || '').split('.').reduce((obj, key) => obj && obj[key], window);
+    } catch (_) {
+      return undefined;
     }
   };
 
-  document.addEventListener('DOMContentLoaded', () => setTimeout(window.refreshConnectionStatusLegend, 50));
+  window.notifyMissingFunction = window.notifyMissingFunction || function(functionName, context, rawError) {
+    const cleanName = String(functionName || 'unknown function').replace(/^window\./, '');
+    const key = `${cleanName}|${context || ''}`;
+    if (window.__missingFunctionLog.has(key)) return;
+    window.__missingFunctionLog.add(key);
 
+    const message = `Missing function recovered: ${cleanName}${context ? ` (${context})` : ''}. The app stayed open, but this action may need a code update.`;
+    console.warn(message, rawError || '');
+
+    try {
+      if (typeof window.setConnectionStatus === 'function') {
+        window.setConnectionStatus('auth', 'warning', 'UI: Function Guard', message);
+      }
+    } catch (_) {}
+
+    try {
+      if (typeof showError === 'function') showError(message);
+      else {
+        const container = document.getElementById('toast-container') || document.body;
+        const toast = document.createElement('div');
+        toast.className = 'toast';
+        toast.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:99999;max-width:420px;padding:12px 14px;border-radius:10px;background:#fff3cd;color:#664d03;border:1px solid #ffecb5;box-shadow:0 8px 24px rgba(0,0,0,.18);font:13px system-ui,sans-serif;';
+        toast.textContent = message;
+        container.appendChild(toast);
+        setTimeout(() => toast.remove(), 9000);
+      }
+    } catch (_) {}
+  };
+
+  window.ensureFunction = window.ensureFunction || function(path, fallback, context) {
+    const parts = String(path || '').split('.').filter(Boolean);
+    if (!parts.length) return false;
+    let obj = window;
+    const startIndex = parts[0] === 'window' ? 1 : 0;
+    for (let i = startIndex; i < parts.length - 1; i++) {
+      obj[parts[i]] = obj[parts[i]] || {};
+      obj = obj[parts[i]];
+    }
+    const name = parts[parts.length - 1];
+    if (typeof obj[name] === 'function') return true;
+    obj[name] = typeof fallback === 'function' ? fallback : function() {
+      window.notifyMissingFunction(path, context || 'fallback invoked');
+      return null;
+    };
+    window.notifyMissingFunction(path, context || 'fallback installed');
+    return false;
+  };
+
+  window.safeInvoke = window.safeInvoke || function(path, args, fallback, context) {
+    const fn = window.getFunctionByPath(path);
+    if (typeof fn !== 'function') {
+      window.notifyMissingFunction(path, context || 'safeInvoke');
+      return typeof fallback === 'function' ? fallback.apply(window, args || []) : fallback;
+    }
+    try {
+      return fn.apply(window, args || []);
+    } catch (err) {
+      if (err instanceof TypeError && /is not a function/i.test(err.message || '')) {
+        window.notifyMissingFunction(path, context || 'safeInvoke TypeError', err);
+        return typeof fallback === 'function' ? fallback.apply(window, args || []) : fallback;
+      }
+      throw err;
+    }
+  };
+
+  window.addEventListener('error', function(event) {
+    const err = event.error;
+    const msg = (err && err.message) || event.message || '';
+    if (/is not a function/i.test(msg)) {
+      const match = msg.match(/(?:TypeError:\s*)?(.+?)\s+is not a function/i);
+      const fnName = match && match[1] ? match[1].trim() : 'unknown function';
+      window.notifyMissingFunction(fnName, 'global error handler', err || msg);
+      // Keep the browser console usable, but prevent this known guardable issue from blocking the workflow.
+      event.preventDefault();
+      return true;
+    }
+    return false;
+  }, true);
+
+  window.addEventListener('unhandledrejection', function(event) {
+    const reason = event.reason;
+    const msg = (reason && reason.message) || String(reason || '');
+    if (/is not a function/i.test(msg)) {
+      const match = msg.match(/(.+?)\s+is not a function/i);
+      const fnName = match && match[1] ? match[1].trim() : 'unknown function';
+      window.notifyMissingFunction(fnName, 'unhandled promise rejection', reason);
+      event.preventDefault();
+      return true;
+    }
+    return false;
+  });
+
+  document.addEventListener('DOMContentLoaded', function() {
+    const expectedFunctions = [
+      'window.setConnectionStatus',
+      'window.refreshConnectionStatusLegend',
+      'window.resetLocalCache',
+      'window.login',
+      'window.logout',
+      'window.getToken',
+      'updateMetricsUI',
+      'scheduleMetricsUI',
+      'updateAssistantGuide',
+      'scheduleAssistantGuide',
+      'goToPanel1',
+      'goToPanel2',
+      'goToPanel3',
+      'toggleSignatures',
+      'buildSummaryPreview',
+      'submitReview',
+      'startOver',
+      'fetchAllPbiDataInBackground',
+      'renderCachedReport',
+      'toggleComparisonModal'
+    ];
+
+    const missing = expectedFunctions.filter(name => typeof window.getFunctionByPath(name) !== 'function');
+    if (missing.length) {
+      missing.forEach(name => window.ensureFunction(name, null, 'startup health check'));
+      console.warn('Startup health check installed fallbacks for missing functions:', missing);
+      try {
+        if (typeof window.setConnectionStatus === 'function') {
+          window.setConnectionStatus('auth', 'warning', 'UI: Guarded', `Fallbacks installed for: ${missing.map(x => x.replace('window.', '')).join(', ')}`);
+        }
+      } catch (_) {}
+    }
+  });
 
   // ── Theme Toggle Logic ─────────────────────────────────────────────────────
   window.cycleTheme = function() {
@@ -2263,7 +2351,7 @@
   };
 
   window.initializeApp = function() {
-    window.refreshConnectionStatusLegend();
+    if (typeof window.refreshConnectionStatusLegend === 'function') window.refreshConnectionStatusLegend();
     window.setConnectionStatus('auth', 'ok', 'Auth: Connected', currentUserRepName ? `Signed in as ${currentUserRepName}.` : 'Microsoft sign-in active.');
     document.getElementById('login-overlay').style.display = 'none';
     document.getElementById('main-app').style.display = 'block';
