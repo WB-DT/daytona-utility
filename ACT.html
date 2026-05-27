@@ -1740,7 +1740,7 @@ window.launchEmailLogic = async function() {
     const cachedScholarCraftBottomImg = localStorage.getItem('daytona_img_scholarcraft_bottom') || "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/Scholarcraft%202026%20Two%20Page%20Promo-images-1.jpg";
     const cachedAutoDealerImg = localStorage.getItem('daytona_img_auto_10pct') || "https://raw.githubusercontent.com/WB-DT/daytona-utility/refs/heads/main/WBM%20AUTO%2010PCT%20Off.jpg";
         const cachedMaySavingsImg = TEMPLATE_IMAGE_REGISTRY.MAY_SAVINGS;
-        const cachedDownAuto10OffImg = localStorage.getItem('daytona_img_downauto_10off') || IMG_DOWNAUTO_10OFF;
+        const cachedDownAuto10OffImg = IMG_DOWNAUTO_10OFF;
     const cachedPackShip10OffImg = localStorage.getItem('daytona_img_packship_10off') || IMG_PACKSHIP_10OFF;
     // Backward-compatible alias so older/leftover references cannot throw ReferenceError.
     const cachedScholarCraftImg = cachedScholarCraftTopImg;
@@ -1846,6 +1846,22 @@ ${signature}${wrapperEnd}`;
         </div>
         ${signature}${wrapperEnd}`;
             if (window.trackDownAutoEmailEvent) window.trackDownAutoEmailEvent('Prepared', subject);
+        }
+        else if (template === "NonBuyAuto") {
+            const firstName = (contactName || "Customer").split(' ')[0] || "Customer";
+            const subjectAccountId = currentSelectedRecord?.cr714_id || currentRecordId || "";
+            subject = `${subjectAccountId} - Don’t Miss This Opportunity to Lower Your Auto Supply Costs`;
+            body = `${wrapperStart}
+        <div style="${pStyle}">Hi ${firstName},</div>
+        <div style="${pStyle}">I am reaching out from WB Mason because I was hoping to connect with you to discuss where you are currently sourcing your automotive dealer supplies, as well as other items that you order for your dealership. If you’re buying these items from another vendor due to pricing, we’d welcome the opportunity to do a comparison! We work with a number of dealerships in similar situations and can often help tighten up costs or simplify purchasing, so it would be worth a quick conversation if you’re open to it.</div>
+        <div style="${pStyle}">Our Price Match Program aims to at least match if not beat other vendors prices, ensuring you’re getting the best value. An easy way to start a comparison would be to simply forward your last order confirmation or invoice from your current vendor to me and I will have my team work on having these quoted out for you.</div>
+        <div style="${pStyle}">In the meantime, please use this coupon on your next order this month for giving us the opportunity to serve you better!</div>
+        <div style="${pStyle} text-align:center; max-width:640px; margin-left:auto; margin-right:auto;">
+            <a href="https://www.wbmason.com" target="_blank" rel="noopener noreferrer" style="display:inline-block; text-decoration:none; border:0;">
+                <img src="${cachedDownAuto10OffImg}" width="640" alt="10% Off Coupon - WBMAY26SAVE10" style="display:block; width:640px; max-width:100%; height:auto; border-radius:8px; margin:0 auto; border:0; outline:none; text-decoration:none;">
+            </a>
+        </div>
+        ${signature}${wrapperEnd}`;
         }
         else if (template === "Auto Dealer Print") {
             const firstName = (contactName || "Customer").split(' ')[0] || "Customer";
@@ -2848,7 +2864,7 @@ window.populateForm = function(rec) {
             'lb nonbuy': 'may savings',
 'scholarcraft email': 'scholarcraft email',
             'downauto': 'downauto',
-            'nonbuyauto': 'auto dealer print',
+            'nonbuyauto': 'nonbuyauto',
             'bid-nys hp': 'bid-nys hp',
             'packship decline': 'packship decline',
             'lb packship decline': 'packship decline'
@@ -2872,6 +2888,7 @@ window.populateForm = function(rec) {
          {val: "BEVPush", txt: "BEVPush"},
          {val: "BEVPushLB", txt: "BEVPushLB"},
          {val: "DownAuto", txt: "DownAuto"},
+         {val: "NonBuyAuto", txt: "NonBuyAuto"},
          {val: "Auto Dealer Print", txt: "Auto Dealer Print"},
          {val: "BID-NYS HP", txt: "BID-NYS HP"},
          {val: "PackShip Decline", txt: "PackShip Decline"},
@@ -3012,14 +3029,48 @@ window.populateForm = function(rec) {
             p.innerHTML = '<div class="text-center italic mt-10 text-muted">Loading history...</div>';
             let history = [];
             
-            // Deduplicate notes by their pure text content
+            // Deduplicate note history only when the same cleaned note text appears on the same calendar date.
+            // This keeps legitimate repeat notes from different days visible while still removing same-day duplicates
+            // caused by merged source tables and skipping obvious junk/metadata-only entries.
+            const normalizeNoteTextForDedupe = (value) => String(value || '')
+                .replace(/<[^>]*>/g, ' ')
+                .replace(/&nbsp;/gi, ' ')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .toLowerCase();
+
+            const normalizeNoteDateForDedupe = (value) => {
+                const raw = String(value || '').trim();
+                if (!raw || raw === 'Unknown Date') return 'unknown-date';
+                const parsedDate = new Date(raw);
+                if (!Number.isNaN(parsedDate.getTime())) {
+                    return `${parsedDate.getFullYear()}-${String(parsedDate.getMonth() + 1).padStart(2, '0')}-${String(parsedDate.getDate()).padStart(2, '0')}`;
+                }
+                // Fallback for non-standard CRM date text: dedupe by the visible date portion only, not the whole history.
+                return raw.split(/\s+/).slice(0, 3).join(' ').toLowerCase();
+            };
+
+            const isJunkHistoryNote = (note) => {
+                const cleaned = normalizeNoteTextForDedupe(note?.text);
+                if (!cleaned) return true;
+                if (cleaned.length < 3) return true;
+                if (/^[-–—_\s.]+$/.test(cleaned)) return true;
+                if (/^\{\{metadata:.*\}\}$/i.test(cleaned)) return true;
+                if (/^\[list:.*\]$/i.test(cleaned)) return true;
+                if (/^(null|undefined|n\/a|na|none|no notes?|test)$/i.test(cleaned)) return true;
+                return false;
+            };
+
             let uniqueNotes = new Map();
             
-            // Loop through all sources to aggregate note history uniformly
+            // Loop through all sources to aggregate note history uniformly.
             currentSelectedRecord.sources.forEach(src => {
                 let parsed = window.parseNotes(src.rawNotes || '');
                 parsed.forEach(n => {
-                    let key = n.text.trim();
+                    if (isJunkHistoryNote(n)) return;
+                    const dateKey = normalizeNoteDateForDedupe(n.date);
+                    const textKey = normalizeNoteTextForDedupe(n.text);
+                    const key = `${dateKey}|${textKey}`;
                     if (!uniqueNotes.has(key)) {
                         n.sourceType = src.type;
                         uniqueNotes.set(key, n);
