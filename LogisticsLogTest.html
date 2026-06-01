@@ -7751,5 +7751,240 @@ window.selectAccount=async function(id){
 </script>
 <!-- === COPILOT V24 POLISH ACTIVE DEFAULT + SCOPE SAFETY 2026-05-19 END === -->
 
+
+
+<!-- === COPILOT FUNCTIONALITY + UI PASS 2026-06-01 START === -->
+<script>
+(function(){
+  if (window.__COPILOT_FUNCTIONALITY_UI_PASS_20260601) return;
+  window.__COPILOT_FUNCTIONALITY_UI_PASS_20260601 = true;
+
+  /*
+    Purpose:
+    1) Scoped loads must filter Dataverse dataset tables by their dataset-owned rep columns,
+       not by Dynamics 365 account owner / sales rep lookup fields.
+    2) Keep the popup/main rep filter in sync with account dataset reps.
+    3) Harden a few UI paths that were throwing when optional controls were not present.
+  */
+
+  const DATASET_REP_FIELD_MAP = Object.freeze({
+    cr714_accountmanagementdatasets: 'cr714_rep',
+    cr714_accountmanagementdataset: 'cr714_rep',
+    cr714_cadencedatasets: 'cr714_retentionrep',
+    cr714_cadencedataset: 'cr714_retentionrep',
+    cr714_prospectingdatasets: 'cr714_repassigned',
+    cr714_prospectingdataset: 'cr714_repassigned',
+    cr714_louisebrowndatasets: 'cr714_assignedrep',
+    cr714_louisebrowndataset: 'cr714_assignedrep',
+    'Account Management': 'cr714_rep',
+    Cadence: 'cr714_retentionrep',
+    Prospecting: 'cr714_repassigned',
+    'Louise Brown': 'cr714_assignedrep'
+  });
+
+  const DATASET_ACCOUNT_FIELD_MAP = Object.freeze({
+    cr714_accountmanagementdatasets: 'cr714_accountnum',
+    cr714_accountmanagementdataset: 'cr714_accountnum',
+    cr714_cadencedatasets: 'cr714_accountnum',
+    cr714_cadencedataset: 'cr714_accountnum',
+    cr714_prospectingdatasets: 'cr714_accountnum',
+    cr714_prospectingdataset: 'cr714_accountnum',
+    cr714_louisebrowndatasets: 'cr714_accountnum',
+    cr714_louisebrowndataset: 'cr714_accountnum',
+    'Account Management': 'cr714_accountnum',
+    Cadence: 'cr714_accountnum',
+    Prospecting: 'cr714_accountnum',
+    'Louise Brown': 'cr714_accountnum'
+  });
+
+  window.ACT_DATASET_REP_FIELD_MAP = DATASET_REP_FIELD_MAP;
+  window.ACT_DATASET_ACCOUNT_FIELD_MAP = DATASET_ACCOUNT_FIELD_MAP;
+
+  function clean(v){ return String(v ?? '').replace(/\s+/g, ' ').trim(); }
+  function norm(v){ return clean(v).toLowerCase(); }
+  function odataQuote(v){ return String(v ?? '').replace(/'/g, "''"); }
+  function escapeHtml(v){
+    return String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  }
+  function activeSet(id){
+    window.activeFilters = window.activeFilters || {};
+    if (!window.activeFilters[id]) window.activeFilters[id] = new Set();
+    return window.activeFilters[id];
+  }
+  function employeeName(row){
+    return clean(row && (row.cr714_employeename || row.cr714_repname || row.fullname || row.name || row.cr714_name));
+  }
+  function employeeStatus(row){
+    if (!row) return '';
+    return row._mappedStatecode || ((row.statecode === 0 || row.cr714_status === 1) ? 'Active' : ((row.statecode === 1 || row.cr714_status === 0) ? 'Inactive' : clean(row.statecode || 'Unknown')));
+  }
+  function filterValue(row, id){
+    if (id === 'cr714_employeename') return employeeName(row);
+    if (id === 'statecode') return employeeStatus(row);
+    return clean(row && row[id]);
+  }
+  function setMatches(actual, set){
+    if (!set || !set.size) return true;
+    const a = norm(actual);
+    return Array.from(set).some(x => norm(x) === a);
+  }
+  function employeeMatchesScope(row, exceptId){
+    const ids = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode'];
+    for (const id of ids) {
+      if (id === exceptId) continue;
+      const set = activeSet(id);
+      if (set.size && !setMatches(filterValue(row, id), set)) return false;
+    }
+    return true;
+  }
+  function mapKey(table){
+    const raw = String(table || '');
+    if (DATASET_REP_FIELD_MAP[raw]) return raw;
+    const lower = raw.toLowerCase();
+    return Object.keys(DATASET_REP_FIELD_MAP).find(k => lower.includes(k.toLowerCase())) || raw;
+  }
+
+  window.getDatasetRepField = function(table){
+    return DATASET_REP_FIELD_MAP[mapKey(table)] || '';
+  };
+
+  window.getScopedRepsFromPreFilters = function(){
+    // Highest priority: an explicit Rep filter. These values are treated as dataset rep-column values.
+    const explicitRepFilter = activeSet('cr714_employeename');
+    if (explicitRepFilter.size) return new Set(Array.from(explicitRepFilter).map(clean).filter(Boolean));
+
+    // Otherwise derive reps from employee org/status selections, then apply those names to dataset rep columns.
+    const reps = new Set();
+    (window.employeesData || []).forEach(row => {
+      const rep = employeeName(row);
+      if (rep && employeeMatchesScope(row, null)) reps.add(rep);
+    });
+
+    // Fallback: if accounts are already loaded, use the merged dataset rep values, not D365 owners.
+    if (!reps.size && Array.isArray(window.mergedAccounts)) {
+      window.mergedAccounts.forEach(a => { if (clean(a && a.rep)) reps.add(clean(a.rep)); });
+    }
+    return reps;
+  };
+
+  window.getScopedODataFilter = function(table){
+    const Q = window.__ACT_QUERY_SNIPER || {};
+    if (!Q.active || Q.allowWideOpen) return '';
+
+    const key = mapKey(table);
+    const repField = DATASET_REP_FIELD_MAP[key];
+    const accountField = DATASET_ACCOUNT_FIELD_MAP[key] || 'cr714_accountnum';
+    const reps = Array.from(Q.selectedRepSet || []).map(clean).filter(Boolean);
+    const ids = Array.from(Q.selectedMassIds || []).map(clean).filter(Boolean);
+    const parts = [];
+
+    if (ids.length) {
+      parts.push('(' + ids.slice(0, 90).map(id => `${accountField} eq '${odataQuote(id)}'`).join(' or ') + ')');
+    }
+
+    // Critical fix: only dataset rep columns are used here. Never _ownerid_value, _mss_salesrepid_value, or D365 display owner.
+    if (repField && reps.length) {
+      parts.push('(' + reps.slice(0, 90).map(rep => `${repField} eq '${odataQuote(rep)}'`).join(' or ') + ')');
+    }
+
+    // If the user selected employee/org filters but no reps resolve, fail closed instead of accidentally wide-loading.
+    const hasEmployeeScope = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode']
+      .some(id => activeSet(id).size > 0);
+    if (!parts.length && hasEmployeeScope) return `${accountField} eq '__NO_MATCH__'`;
+
+    return parts.join(' and ');
+  };
+
+  // Make main filter dropdowns stable: do not rebuild filters from inside their own header click handler.
+  function stabilizeFilterHeaders(){
+    document.querySelectorAll('.multiselect-container').forEach(wrapper => {
+      const header = wrapper.querySelector('.multiselect-header');
+      const drop = wrapper.querySelector('.multiselect-dropdown');
+      if (!header || !drop) return;
+      header.onclick = function(e){
+        e.stopPropagation();
+        const wasShowing = drop.classList.contains('show');
+        document.querySelectorAll('.multiselect-dropdown').forEach(d => d.classList.remove('show'));
+        if (!wasShowing) drop.classList.add('show');
+        if (typeof window.updateFilterVisibility === 'function') window.updateFilterVisibility();
+      };
+    });
+  }
+
+  const originalBuildFilters = window.buildFilters;
+  if (typeof originalBuildFilters === 'function') {
+    window.buildFilters = function(){
+      const result = originalBuildFilters.apply(this, arguments);
+      stabilizeFilterHeaders();
+      return result;
+    };
+  }
+
+  const originalClearAllFilters = window.clearAllFilters;
+  window.clearAllFilters = function(){
+    try {
+      document.querySelectorAll('.multiselect-dropdown input, #pbi-rep-filter-list input').forEach(chk => chk.checked = false);
+      (window.FILTER_CONFIG || []).forEach(col => {
+        activeSet(col.id).clear();
+        const label = document.querySelector(`#ms-wrap-${col.id} .multiselect-header span`);
+        if (label) label.innerText = col.label;
+      });
+      if (window.massFilteredIds && typeof window.massFilteredIds.clear === 'function') window.massFilteredIds.clear();
+      const massInput = document.getElementById('mass-id-input');
+      if (massInput) massInput.value = '';
+      const massCount = document.getElementById('mass-id-count');
+      if (massCount) massCount.innerText = '0';
+      if (typeof window.clearDrilldownLock === 'function') window.clearDrilldownLock();
+      if (typeof window.applyFilters === 'function') window.applyFilters(false);
+    } catch (e) {
+      console.warn('Safe clearAllFilters fallback used:', e);
+      if (typeof originalClearAllFilters === 'function') return originalClearAllFilters.apply(this, arguments);
+    }
+  };
+
+  // UI pass: make scope source explicit in the load modal and improve empty-state hinting.
+  function polishScopedModal(){
+    const modal = document.getElementById('sniper-load-modal');
+    if (!modal) return;
+    const title = modal.querySelector('h3');
+    if (title && !title.querySelector('.dataset-scope-pill')) {
+      title.insertAdjacentHTML('beforeend', ' <span class="dataset-scope-pill" style="font-size:10px;font-weight:900;vertical-align:middle;padding:3px 8px;border-radius:999px;border:1px solid var(--primary);color:var(--primary);background:color-mix(in srgb,var(--primary) 10%,transparent);letter-spacing:.06em;">DATASET REP COLUMNS</span>');
+    }
+    const copy = modal.querySelector('p.text-sm');
+    if (copy) copy.innerHTML = 'Choose Manager, Supervisor, Department, Rep, or Status. Scoped data loads filter the source dataset rep fields (<b>AM: cr714_rep</b>, <b>Cadence: cr714_retentionrep</b>, <b>Prospecting: cr714_repassigned</b>, <b>Louise Brown: cr714_assignedrep</b>) instead of Dynamics 365 owner/sales-rep lookups.';
+  }
+
+  const originalOpenScopedLoadPrompt = window.openScopedLoadPrompt;
+  if (typeof originalOpenScopedLoadPrompt === 'function') {
+    window.openScopedLoadPrompt = function(){
+      const result = originalOpenScopedLoadPrompt.apply(this, arguments);
+      setTimeout(polishScopedModal, 0);
+      return result;
+    };
+  }
+
+  const originalBuildScopedPopupFilters = window.buildScopedPopupFilters;
+  if (typeof originalBuildScopedPopupFilters === 'function') {
+    window.buildScopedPopupFilters = function(){
+      const result = originalBuildScopedPopupFilters.apply(this, arguments);
+      polishScopedModal();
+      return result;
+    };
+  }
+
+  // Add lightweight runtime diagnostics for future troubleshooting.
+  window.ACT_SCOPE_DIAGNOSTICS = window.ACT_SCOPE_DIAGNOSTICS || {};
+  window.ACT_SCOPE_DIAGNOSTICS.datasetRepFieldMap = DATASET_REP_FIELD_MAP;
+  window.ACT_SCOPE_DIAGNOSTICS.getCurrentScopedReps = () => Array.from(window.getScopedRepsFromPreFilters ? window.getScopedRepsFromPreFilters() : []);
+  window.ACT_SCOPE_DIAGNOSTICS.getFilterForTable = table => window.getScopedODataFilter ? window.getScopedODataFilter(table) : '';
+
+  setTimeout(() => {
+    stabilizeFilterHeaders();
+    polishScopedModal();
+  }, 0);
+})();
+</script>
+<!-- === COPILOT FUNCTIONALITY + UI PASS 2026-06-01 END === -->
+
 </body>
 </html>
