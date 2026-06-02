@@ -8033,21 +8033,15 @@ window.selectAccount=async function(id){
 
   function currentReportPayload(){
     const rows = accountRows();
-    const explicitReps = explicitVals('cr714_employeename');
-    const explicitActions = explicitVals('action');
-    const rowReps = uniq(rows.map(repOf));
-    const rowActions = uniq(rows.flatMap(actionsOf));
-    const repSet = new Set(rowReps.map(v => clean(v).toLowerCase()));
-    const actionSet = new Set(rowActions.map(v => clean(v).toLowerCase()));
-    const reps = explicitReps.length ? uniq(explicitReps.filter(r => repSet.has(clean(r).toLowerCase()) || !rowReps.length)) : rowReps;
-    const actions = explicitActions.length ? uniq(explicitActions.filter(a => actionSet.has(clean(a).toLowerCase()) || !rowActions.length)) : rowActions;
+    const reps = explicitVals('cr714_employeename').length ? explicitVals('cr714_employeename') : uniq(rows.map(repOf));
+    const actions = explicitVals('action').length ? explicitVals('action') : uniq(rows.flatMap(actionsOf));
     const ids = uniq(rows.map(a => a.cr714_id || a.cr714_accountnum || a.cr714_accountnumber));
     const dates = rows.map(a => a.modifiedon || a.emailDate || a.LastModified).filter(Boolean).map(x => new Date(x)).filter(x=>!isNaN(x)).sort((a,b)=>a-b);
     const payload = {
-      source:'ACT Manager Console', createdAt:new Date().toISOString(), reps, actions, allowedReps:reps, allowedActions:actions, accountIds:ids,
+      source:'ACT Manager Console', createdAt:new Date().toISOString(), reps, actions, accountIds:ids,
       startDate: isoDate(window.reportStartDate || window.globalMinDate || dates[0]),
       endDate: isoDate(window.reportEndDate || window.globalMaxDate || dates[dates.length-1]),
-      rowCount: rows.length, quickFilter: window.activeQuickFilter || 'all', scopeMode:'manager-filtered-rows'
+      rowCount: rows.length, quickFilter: window.activeQuickFilter || 'all'
     };
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(payload)); } catch(e) { console.warn('Report bridge storage failed', e); }
     return payload;
@@ -8518,46 +8512,26 @@ window.selectAccount=async function(id){
   function summarize(p){ return `${fmt((p.reps||[]).length)} reps • ${fmt((p.actions||[]).length)} actions • ${fmt(p.rowCount)} manager rows${p.startDate||p.endDate?` • ${p.startDate||'…'} to ${p.endDate||'…'}`:''}`; }
 
   function buildActionCheckerPayload(){
-    // Build the Action Checker scope from the CURRENT Manager Console filtered account set.
-    // This means the Action Checker Rep filter shows only reps from the first filter page/current Manager filters,
-    // and the Action filter shows only actions that exist inside that filtered rep/account set.
     const rows = accountRows();
     const explicitReps = activeFilterValues('cr714_employeename');
     const explicitActions = activeFilterValues('action');
-    const rowActions = uniq(rows.flatMap(a => {
-      const out = [];
-      if (a && a.action) out.push(a.action);
-      (a && a.sources || []).forEach(s => {
-        if (s && (s.action || s.cr714_action)) out.push(s.action || s.cr714_action);
-      });
-      return out;
-    }));
-    const rowReps = uniq(rows.map(repOf));
-    const actionSet = new Set(rowActions.map(v => clean(v).toLowerCase()));
-    const repSet = new Set(rowReps.map(v => clean(v).toLowerCase()));
-    const filteredActions = explicitActions.length
-      ? uniq(explicitActions.filter(a => actionSet.has(clean(a).toLowerCase()) || !rowActions.length))
-      : rowActions;
-    const filteredReps = explicitReps.length
-      ? uniq(explicitReps.filter(r => repSet.has(clean(r).toLowerCase()) || !rowReps.length))
-      : rowReps;
     const dates = rows.map(a => a && (a.modifiedon || a.emailDate || a.LastModified)).filter(Boolean).map(x => new Date(x)).filter(x => !isNaN(x)).sort((a,b)=>a-b);
+    const scoped = hasScopedFilters();
     const payload = {
       source: 'ACT Manager Console',
       createdAt: new Date().toISOString(),
       bridgeId: activeBridgeId || ('act-' + Date.now() + '-' + Math.random().toString(16).slice(2)),
       bridgeKey: STORAGE_KEY,
       autoApply: true,
-      reps: filteredReps,
-      actions: filteredActions,
-      allowedReps: filteredReps,
-      allowedActions: filteredActions,
+      // Important: only pass explicit action selections. Passing every discovered action made the Action Checker spend time selecting/rendering huge action lists.
+      actions: uniq(explicitActions),
+      // If the Manager Console is scoped by manager/team/drilldown, pass the resulting reps. If wide open, leave reps empty and let Action Checker load normally.
+      reps: explicitReps.length ? uniq(explicitReps) : (scoped ? uniq(rows.map(repOf)) : []),
       accountIds: uniq(rows.map(a => a && (a.cr714_id || a.cr714_accountnum || a.cr714_accountnumber))),
       startDate: isoDate(window.reportStartDate || window.globalMinDate || dates[0]),
       endDate: isoDate(window.reportEndDate || window.globalMaxDate || dates[dates.length-1]),
       rowCount: rows.length,
-      quickFilter: window.activeQuickFilter || 'all',
-      scopeMode: 'manager-filtered-rows'
+      quickFilter: window.activeQuickFilter || 'all'
     };
     activeBridgeId = payload.bridgeId;
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(payload)); } catch(e) { console.warn('Action Checker bridge storage failed', e); }
@@ -8706,6 +8680,104 @@ window.selectAccount=async function(id){
 })();
 </script>
 <!-- === COPILOT MANAGER ⇄ ACTION CHECKER ACK BRIDGE 2026-06-02 END === -->
+
+
+
+<!-- === COPILOT MANAGER VIRTUAL ACTION CHECKER PAYLOAD 2026-06-02 START === -->
+<script>
+(function(){
+  if (window.__ACT_MANAGER_VIRTUAL_ACTION_CHECKER_PAYLOAD_20260602) return;
+  window.__ACT_MANAGER_VIRTUAL_ACTION_CHECKER_PAYLOAD_20260602 = true;
+
+  const STORAGE_KEY = 'act_manager_reporting_bridge_v1';
+  const REPORT_URL = 'https://wb-dt.github.io/daytona-utility/ActionChecker.html';
+  const clean = v => String(v ?? '').replace(/\s+/g, ' ').trim();
+  const uniq = arr => Array.from(new Set((arr || []).map(clean).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+  const fmt = n => (Number(n)||0).toLocaleString();
+  let bridgeId = '';
+
+  function activeFilterValues(id){
+    const s = window.activeFilters && window.activeFilters[id];
+    return s && typeof s.forEach === 'function' ? Array.from(s).map(clean).filter(Boolean) : [];
+  }
+  function rows(){ return (window.teamFilteredAccounts && window.teamFilteredAccounts.length ? window.teamFilteredAccounts : window.mergedAccounts) || []; }
+  function repOf(a){ return clean(window.getAccountListRep ? window.getAccountListRep(a) : (a && a.rep)); }
+  function actionsOf(a){
+    const out = [];
+    if (a && a.action) out.push(a.action);
+    (a && a.sources || []).forEach(s => { if (s && (s.action || s.cr714_action)) out.push(s.action || s.cr714_action); });
+    return out;
+  }
+  function isoDate(d){ try{ if(!d) return ''; const dt = d instanceof Date ? d : new Date(d); return isNaN(dt) ? '' : dt.toISOString().slice(0,10); } catch(e){ return ''; } }
+
+  window.buildVirtualActionCheckerPayload = function(){
+    const scopedRows = rows();
+    const rowReps = uniq(scopedRows.map(repOf));
+    const rowActions = uniq(scopedRows.flatMap(actionsOf));
+    const rowRepSet = new Set(rowReps.map(v => v.toLowerCase()));
+    const rowActionSet = new Set(rowActions.map(v => v.toLowerCase()));
+    const explicitReps = activeFilterValues('cr714_employeename');
+    const explicitActions = activeFilterValues('action');
+    const reps = explicitReps.length ? uniq(explicitReps.filter(v => rowRepSet.has(clean(v).toLowerCase()) || !rowReps.length)) : rowReps;
+    const actions = explicitActions.length ? uniq(explicitActions.filter(v => rowActionSet.has(clean(v).toLowerCase()) || !rowActions.length)) : rowActions;
+    const dates = scopedRows.map(a => a && (a.modifiedon || a.emailDate || a.LastModified)).filter(Boolean).map(x => new Date(x)).filter(x => !isNaN(x)).sort((a,b)=>a-b);
+    bridgeId = bridgeId || ('act-' + Date.now() + '-' + Math.random().toString(16).slice(2));
+    const payload = {
+      source: 'ACT Manager Console',
+      bridgeId,
+      bridgeKey: STORAGE_KEY,
+      autoApply: true,
+      virtualScope: true,
+      reps,
+      actions,
+      allowedReps: reps,
+      allowedActions: actions,
+      accountIds: uniq(scopedRows.map(a => a && (a.cr714_id || a.cr714_accountnum || a.cr714_accountnumber))),
+      startDate: isoDate(window.reportStartDate || window.globalMinDate || dates[0]),
+      endDate: isoDate(window.reportEndDate || window.globalMaxDate || dates[dates.length-1]),
+      rowCount: scopedRows.length,
+      quickFilter: window.activeQuickFilter || 'all',
+      scopeMode: 'virtual-manager-filtered-dataset'
+    };
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(payload)); } catch(e) { console.warn('Virtual Action Checker bridge storage failed', e); }
+    return payload;
+  };
+
+  window.getReportingBridgeFilters = window.buildVirtualActionCheckerPayload;
+
+  const oldApply = window.applyFiltersToReportingFrame;
+  window.applyFiltersToReportingFrame = async function(showToast){
+    const payload = window.buildVirtualActionCheckerPayload();
+    const pill = document.getElementById('act-report-filter-pill');
+    if (pill) pill.innerText = `${fmt(payload.reps.length)} scoped reps • ${fmt(payload.actions.length)} scoped actions • ${fmt(payload.rowCount)} manager rows`;
+    const frame = document.getElementById('act-report-frame');
+    if (!frame || !frame.contentWindow) return false;
+    try { frame.contentWindow.postMessage({ type:'ACT_MANAGER_REPORT_FILTERS', payload, autoLoad:true }, '*'); } catch(e) {}
+    try {
+      if (typeof frame.contentWindow.ACT_MANAGER_APPLY_FILTERS === 'function') {
+        frame.contentWindow.ACT_MANAGER_APPLY_FILTERS(payload, { autoLoad:true }).catch(console.warn);
+        if (showToast && window.showToast) window.showToast('Virtual scoped filters sent to Action Checker.', 'info');
+        return true;
+      }
+    } catch(e) { console.warn('Virtual direct bridge deferred:', e); }
+    if (typeof oldApply === 'function') return oldApply.call(this, showToast);
+    return false;
+  };
+
+  const oldOpenNewTab = window.openReportingInNewTab;
+  window.openReportingInNewTab = function(){
+    const payload = window.buildVirtualActionCheckerPayload();
+    const p = new URLSearchParams();
+    p.set('embedded','1'); p.set('source','manager-console'); p.set('autoApply','1'); p.set('bridgeKey', STORAGE_KEY); p.set('bridgeId', payload.bridgeId); p.set('_', String(Date.now()));
+    if (payload.startDate) p.set('start', payload.startDate);
+    if (payload.endDate) p.set('end', payload.endDate);
+    if (payload.reps.length && payload.reps.length <= 80) p.set('reps', payload.reps.join('|'));
+    if (payload.actions.length && payload.actions.length <= 30) p.set('actions', payload.actions.join('|'));
+    window.open(REPORT_URL + '?' + p.toString(), '_blank', 'noopener,noreferrer');
+  };
+})();
+</script>
+<!-- === COPILOT MANAGER VIRTUAL ACTION CHECKER PAYLOAD 2026-06-02 END === -->
 
 </body>
 </html>
