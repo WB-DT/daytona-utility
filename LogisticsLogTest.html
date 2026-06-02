@@ -8683,136 +8683,146 @@ window.selectAccount=async function(id){
 
 
 
-<!-- === COPILOT HIDE D365 REP COMPARE + REPORTS OPEN ACTION CHECKER LINK 2026-06-02 START === -->
+<!-- === COPILOT PASS 6 FINAL ACTION CHECKER INTEGRATION 2026-06-02 START === -->
 <style>
-  /* Hide only the D365-vs-dataset rep comparison UI for now. */
-  .act-live-rep-card,
-  .act-live-rep-row,
-  .act-live-rep-label,
-  .act-live-rep-value,
-  .act-live-rep-action,
-  .act-compare-pill,
-  .act-live-rep-muted-note{
-    display:none!important;
-    visibility:hidden!important;
-  }
+  /* Final integration: hide only the D365-vs-dataset rep comparison section. Keep Manager live sync intact. */
+  .act-live-rep-card,.act-live-rep-row,.act-live-rep-label,.act-live-rep-value,.act-live-rep-action,.act-compare-pill,.act-live-rep-muted-note{display:none!important;visibility:hidden!important}
+  .act-preload-status-pill{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(59,130,246,.45);color:var(--accent-info);background:rgba(59,130,246,.08);border-radius:999px;padding:3px 8px;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+  .act-preload-status-pill.ready,.act-preload-status-pill.complete{border-color:rgba(34,197,94,.55);color:var(--accent-success);background:rgba(34,197,94,.10)}
+  .act-preload-status-pill.warming{border-color:rgba(59,130,246,.55);color:var(--accent-info);background:rgba(59,130,246,.10)}
+  .act-preload-status-pill.stale,.act-preload-status-pill.skipped{border-color:rgba(234,179,8,.55);color:var(--accent-warning);background:rgba(234,179,8,.10)}
+  .act-preload-status-pill.error{border-color:rgba(239,68,68,.55);color:var(--accent-danger);background:rgba(239,68,68,.10)}
+  #act-actionchecker-preload-frame{position:absolute!important;left:-99999px!important;top:-99999px!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important;border:0!important}
 </style>
 <script>
 (function(){
-  if(window.__ACT_HIDE_D365_COMPARE_OPEN_REPORT_LINK_20260602) return;
-  window.__ACT_HIDE_D365_COMPARE_OPEN_REPORT_LINK_20260602 = true;
+  if(window.__ACT_PASS6_FINAL_INTEGRATION_20260602) return;
+  window.__ACT_PASS6_FINAL_INTEGRATION_20260602 = true;
 
   const REPORT_URL = 'https://wb-dt.github.io/daytona-utility/ActionChecker.html';
-  const STORAGE_KEY = 'act_manager_reporting_bridge_v1';
+  const SCOPE_KEY = 'act_action_checker_scope_v3';
+  const MANIFEST_KEY = 'act_action_checker_preload_v3';
+  const STATUS_KEY = 'act_action_checker_preload_status_v3';
+  const FRESH_MS = 30 * 60 * 1000;
+  const RUNNING_GRACE_MS = 5 * 60 * 1000;
   const clean = v => String(v ?? '').replace(/\s+/g,' ').trim();
   const uniq = arr => Array.from(new Set((arr || []).map(clean).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+  let preloadTimer = null;
+  let statusTimer = null;
 
-  function isoDate(d){
-    try{
-      if(!d) return '';
-      const dt = d instanceof Date ? d : new Date(d);
-      return isNaN(dt) ? '' : dt.toISOString().slice(0,10);
-    }catch(e){ return ''; }
+  function readJson(key){ try { return JSON.parse(localStorage.getItem(key) || '{}') || {}; } catch(e) { return {}; } }
+  function writeJson(key, value){ try { localStorage.setItem(key, JSON.stringify(value)); } catch(e) { console.warn('Unable to write', key, e); } }
+  function hashString(str){ let h=2166136261; for(let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,16777619); } return ('00000000'+(h>>>0).toString(16)).slice(-8); }
+  function isoDate(d){ try{ if(!d) return ''; const dt=d instanceof Date?d:new Date(d); return isNaN(dt)?'':dt.toISOString().slice(0,10); } catch(e){ return ''; } }
+  function expiresIso(minutes){ return new Date(Date.now()+minutes*60000).toISOString(); }
+  function ageMs(iso){ const t=new Date(iso||0).getTime(); return Number.isFinite(t)?Date.now()-t:Infinity; }
+  function currentRows(){ return (window.teamFilteredAccounts && window.teamFilteredAccounts.length ? window.teamFilteredAccounts : window.mergedAccounts) || []; }
+  function repOf(a){ return clean(window.getAccountListRep ? window.getAccountListRep(a) : (a && a.rep)); }
+  function actionsOf(a){ const out=[]; if(a&&a.action) out.push(a.action); (a&&a.sources||[]).forEach(s=>{ if(s&&(s.action||s.cr714_action)) out.push(s.action||s.cr714_action); }); return out; }
+  function visibleFilterValues(colId){
+    const nodes=Array.from(document.querySelectorAll(`.ms-opt-${colId}`));
+    return uniq(nodes.filter(n=>!(n.classList&&n.classList.contains('hidden-force'))&&(!n.style||n.style.display!=='none')).map(n=>n.getAttribute('data-val')||(n.querySelector('input')&&n.querySelector('input').value)||n.textContent||''));
   }
-
-  function fallbackPayload(){
-    const rows = (window.teamFilteredAccounts && window.teamFilteredAccounts.length ? window.teamFilteredAccounts : window.mergedAccounts) || [];
-    const reps = uniq(rows.map(a => window.getAccountListRep ? window.getAccountListRep(a) : (a && a.rep)));
-    const actions = uniq(rows.flatMap(a => {
-      const out = [];
-      if(a && a.action) out.push(a.action);
-      (a && a.sources || []).forEach(s => { if(s && (s.action || s.cr714_action)) out.push(s.action || s.cr714_action); });
-      return out;
-    }));
-    const dates = rows.map(a => a && (a.modifiedon || a.emailDate || a.LastModified)).filter(Boolean).map(x => new Date(x)).filter(x => !isNaN(x)).sort((a,b)=>a-b);
-    return {
-      source:'ACT Manager Console',
-      createdAt:new Date().toISOString(),
-      bridgeId:'act-' + Date.now() + '-' + Math.random().toString(16).slice(2),
-      bridgeKey:STORAGE_KEY,
-      autoApply:true,
-      reps,
-      actions,
-      allowedReps:reps,
-      allowedActions:actions,
-      accountIds:uniq(rows.map(a => a && (a.cr714_id || a.cr714_accountnum || a.cr714_accountnumber))),
-      startDate:isoDate(window.reportStartDate || window.globalMinDate || dates[0]),
-      endDate:isoDate(window.reportEndDate || window.globalMaxDate || dates[dates.length-1]),
-      rowCount:rows.length,
-      quickFilter:window.activeQuickFilter || 'all',
-      scopeMode:'manager-console-link-launch'
-    };
+  function selectedFilterValues(colId){ const s=window.activeFilters&&window.activeFilters[colId]; return s&&typeof s.forEach==='function'?uniq(Array.from(s)):[]; }
+  function intersectIfSelected(visible, selected){ if(!selected.length) return visible; const vs=new Set((visible||[]).map(v=>clean(v).toLowerCase())); const out=selected.filter(v=>vs.has(clean(v).toLowerCase())||!visible.length); return uniq(out.length?out:selected); }
+  function scopeHash(payload){
+    const acctIds=uniq(payload.accountIds||[]);
+    const slim={startDate:payload.startDate||'',endDate:payload.endDate||'',reps:uniq(payload.reps||[]),actions:uniq(payload.actions||[]),accountCount:acctIds.length,accountHash:hashString(JSON.stringify(acctIds))};
+    return hashString(JSON.stringify(slim));
   }
+  function statusHost(){ return document.querySelector('.filters-top-row .ml-auto') || document.getElementById('active-filter-subtitle') || document.querySelector('.filters-top-row') || document.querySelector('header'); }
+  function setStatus(text, cls, title){
+    let pill=document.getElementById('act-preload-status-pill'); const host=statusHost(); if(!host) return;
+    if(!pill){ pill=document.createElement('span'); pill.id='act-preload-status-pill'; host.appendChild(pill); }
+    pill.className='act-preload-status-pill '+(cls||''); pill.textContent=text; pill.title=title || text;
+  }
+  function friendlyStatus(){
+    const s=readJson(STATUS_KEY);
+    if(s.status==='preload-complete') setStatus(`Action Checker ready • ${Number(s.rows||0).toLocaleString()} rows`,'complete','Background cache warm completed for this Manager scope.');
+    else if(s.status==='preload-running') setStatus('Action Checker warming cache...','warming','Background cache warm is running. You can keep using Manager Console.');
+    else if(s.status==='preload-error') setStatus('Action Checker preload failed','error','Normal Action Checker launch still works; it will load missing rows itself.');
+    else if(s.status==='preload-skipped') setStatus('Action Checker preload skipped','skipped',s.skipReason||s.detail||'Skipped by cache/scope rules.');
+    else if(s.status==='manifest-ready') setStatus('Action Checker scope ready','ready','Scope is calculated and ready to send to Action Checker.');
+  }
+  function hideD365Compare(){ document.querySelectorAll('.act-live-rep-card,.act-live-rep-row,.act-compare-pill,.act-live-rep-muted-note').forEach(el=>{ el.style.setProperty('display','none','important'); el.style.setProperty('visibility','hidden','important'); }); }
 
-  function getPayload(){
-    let payload = null;
-    try{
-      if(typeof window.getReportingBridgeFilters === 'function') payload = window.getReportingBridgeFilters();
-    }catch(e){ console.warn('Existing reporting bridge payload failed; using fallback payload.', e); }
-    if(!payload) payload = fallbackPayload();
-    payload.bridgeKey = payload.bridgeKey || STORAGE_KEY;
-    payload.autoApply = true;
-    payload.bridgeId = payload.bridgeId || ('act-' + Date.now() + '-' + Math.random().toString(16).slice(2));
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(payload)); }catch(e){ console.warn('Unable to store Action Checker bridge payload', e); }
+  window.buildActionCheckerScopePayload = function(){
+    try{ if(typeof window.updateFilterVisibility==='function') window.updateFilterVisibility(); }catch(e){}
+    const rows=currentRows();
+    const visibleReps=visibleFilterValues('cr714_employeename');
+    const visibleActions=visibleFilterValues('action');
+    const fallbackReps=uniq(rows.map(repOf));
+    const fallbackActions=uniq(rows.flatMap(actionsOf));
+    const reps=intersectIfSelected(visibleReps.length?visibleReps:fallbackReps, selectedFilterValues('cr714_employeename'));
+    const actions=intersectIfSelected(visibleActions.length?visibleActions:fallbackActions, selectedFilterValues('action'));
+    const dates=rows.map(a=>a&&(a.modifiedon||a.emailDate||a.LastModified)).filter(Boolean).map(x=>new Date(x)).filter(x=>!isNaN(x)).sort((a,b)=>a-b);
+    const payload={bridgeVersion:6,mode:'fast-link-contract',source:'ACT Manager Console',createdAt:new Date().toISOString(),bridgeKey:SCOPE_KEY,bridgeId:'act-scope-'+Date.now()+'-'+Math.random().toString(16).slice(2),autoApply:true,autoLoad:true,virtualScope:true,mirrorDropdowns:true,reps,actions,allowedReps:reps,allowedActions:actions,accountIds:uniq(rows.map(a=>a&&(a.cr714_id||a.cr714_accountnum||a.cr714_accountnumber))),startDate:isoDate(window.reportStartDate||window.globalMinDate||dates[0]),endDate:isoDate(window.reportEndDate||window.globalMaxDate||dates[dates.length-1]),rowCount:rows.length,quickFilter:window.activeQuickFilter||'all',scopeMode:'manager-calculated-filter-screen'};
+    writeJson(SCOPE_KEY,payload);
     return payload;
-  }
-
-  function actionCheckerUrl(payload){
-    const p = new URLSearchParams();
-    p.set('embedded','1');
-    p.set('source','manager-console');
-    p.set('autoApply','1');
-    p.set('bridgeKey', payload.bridgeKey || STORAGE_KEY);
-    p.set('bridgeId', payload.bridgeId);
-    p.set('_', String(Date.now()));
-    if(payload.startDate) p.set('start', payload.startDate);
-    if(payload.endDate) p.set('end', payload.endDate);
-    if(payload.reps && payload.reps.length && payload.reps.length <= 120) p.set('reps', payload.reps.join('|'));
-    if(payload.actions && payload.actions.length && payload.actions.length <= 80) p.set('actions', payload.actions.join('|'));
-    return REPORT_URL + '?' + p.toString();
-  }
-
-  window.openReportingInNewTab = function(){
-    const payload = getPayload();
-    window.open(actionCheckerUrl(payload), '_blank', 'noopener,noreferrer');
   };
 
-  // Replace modal rendering with direct Action Checker link launch.
-  window.openReportingModal = function(){
-    const modal = document.getElementById('act-reporting-modal');
-    if(modal) modal.classList.remove('show');
-    document.body.style.overflow = '';
-    window.openReportingInNewTab();
+  window.buildActionCheckerPreloadManifest = function(scopePayload){
+    const payload=scopePayload||window.buildActionCheckerScopePayload();
+    const hash=scopeHash(payload);
+    const manifest={bridgeVersion:6,manifestVersion:4,mode:'preload-manifest',preloadRequested:true,source:'ACT Manager Console',createdAt:new Date().toISOString(),expiresAt:expiresIso(30),bridgeKey:SCOPE_KEY,manifestKey:MANIFEST_KEY,statusKey:STATUS_KEY,bridgeId:payload.bridgeId,scopeHash:hash,reps:uniq(payload.reps||[]),actions:uniq(payload.actions||[]),accountIds:uniq(payload.accountIds||[]),startDate:payload.startDate||'',endDate:payload.endDate||'',rowCount:Number(payload.rowCount||0),quickFilter:payload.quickFilter||'all',status:'manifest-ready'};
+    writeJson(MANIFEST_KEY,manifest);
+    const existing=readJson(STATUS_KEY);
+    if(existing.scopeHash!==hash || !['preload-complete','preload-running'].includes(existing.status)) writeJson(STATUS_KEY,{scopeHash:hash,status:'manifest-ready',updatedAt:new Date().toISOString(),detail:'Manager scope calculated and ready for Action Checker.',rowCount:manifest.rowCount,reps:manifest.reps.length,actions:manifest.actions.length});
+    friendlyStatus();
+    return manifest;
   };
 
-  function wireReportsNavToLink(){
-    const tab = document.getElementById('nav-reporting-tab');
-    if(tab){
-      tab.onclick = function(e){
-        if(e) e.preventDefault();
-        window.openReportingInNewTab();
-        return false;
-      };
-      tab.title = 'Open Action Checker reporting in a new tab';
-    }
+  function manifestExpired(m){ const t=new Date(m&&m.expiresAt||0).getTime(); return !Number.isFinite(t)||Date.now()>t; }
+  function preloadDecision(m){
+    if(!m||m.mode!=='preload-manifest') return {run:false,reason:'missing-manifest',label:'Action Checker scope pending',cls:'stale'};
+    if(manifestExpired(m)) return {run:false,reason:'manifest-expired',label:'Action Checker scope expired',cls:'stale'};
+    if(!m.startDate||!m.endDate) return {run:false,reason:'missing-dates',label:'Action Checker needs dates',cls:'stale'};
+    const s=readJson(STATUS_KEY);
+    if(s.scopeHash===m.scopeHash && s.status==='preload-complete' && ageMs(s.completedAt||s.updatedAt)<FRESH_MS) return {run:false,reason:'fresh-complete',label:`Action Checker ready • ${Number(s.rows||0).toLocaleString()} rows`,cls:'complete'};
+    if(s.scopeHash===m.scopeHash && s.status==='preload-running' && ageMs(s.updatedAt)<RUNNING_GRACE_MS) return {run:false,reason:'already-running',label:'Action Checker warming cache...',cls:'warming'};
+    return {run:true,reason:'needs-warm',label:'Action Checker warming cache...',cls:'warming'};
   }
-
-  function hideCompareCards(){
-    document.querySelectorAll('.act-live-rep-card,.act-live-rep-row,.act-compare-pill,.act-live-rep-muted-note').forEach(el => {
-      el.style.setProperty('display','none','important');
-      el.style.setProperty('visibility','hidden','important');
-    });
+  function preloadUrl(m){ const p=new URLSearchParams(); p.set('preload','1'); p.set('source','manager-console'); p.set('manifestKey',m.manifestKey||MANIFEST_KEY); p.set('statusKey',m.statusKey||STATUS_KEY); p.set('bridgeKey',m.bridgeKey||SCOPE_KEY); p.set('bridgeId',m.bridgeId||''); p.set('scopeHash',m.scopeHash||''); p.set('_',String(Date.now())); return REPORT_URL+'?'+p.toString(); }
+  function ensurePreloadFrame(){ let f=document.getElementById('act-actionchecker-preload-frame'); if(!f){ f=document.createElement('iframe'); f.id='act-actionchecker-preload-frame'; f.title='Action Checker background preload'; f.setAttribute('aria-hidden','true'); f.tabIndex=-1; document.body.appendChild(f); } return f; }
+  function pollStatus(hash){
+    if(statusTimer) clearInterval(statusTimer);
+    statusTimer=setInterval(()=>{ const s=readJson(STATUS_KEY); if(hash&&s.scopeHash&&s.scopeHash!==hash) return; friendlyStatus(); if(['preload-complete','preload-error','preload-skipped'].includes(s.status)){ clearInterval(statusTimer); statusTimer=null; } },1200);
   }
+  window.startActionCheckerBackgroundPreload = function(manifest){
+    manifest=manifest||readJson(MANIFEST_KEY);
+    const d=preloadDecision(manifest);
+    setStatus(d.label,d.cls,d.reason);
+    if(!d.run){ writeJson(STATUS_KEY,Object.assign(readJson(STATUS_KEY),{scopeHash:(manifest&&manifest.scopeHash)||'',status:d.reason==='fresh-complete'?'preload-complete':(d.reason==='already-running'?'preload-running':'preload-skipped'),skipReason:d.reason,updatedAt:new Date().toISOString()})); friendlyStatus(); return false; }
+    writeJson(STATUS_KEY,{scopeHash:manifest.scopeHash||'',status:'preload-running',updatedAt:new Date().toISOString(),detail:'Warming Action Checker cache in the background.',rowCount:Number(manifest.rowCount||0),reps:(manifest.reps||[]).length,actions:(manifest.actions||[]).length});
+    friendlyStatus(); pollStatus(manifest.scopeHash||''); ensurePreloadFrame().src=preloadUrl(manifest); return true;
+  };
+  window.openActionCheckerFastLink = function(){
+    const payload=window.buildActionCheckerScopePayload();
+    const manifest=window.buildActionCheckerPreloadManifest(payload);
+    window.startActionCheckerBackgroundPreload(manifest);
+    const p=new URLSearchParams(); p.set('source','manager-console'); p.set('fastLink','1'); p.set('bridgeKey',SCOPE_KEY); p.set('manifestKey',MANIFEST_KEY); p.set('bridgeId',payload.bridgeId); p.set('_',String(Date.now()));
+    window.open(REPORT_URL+'?'+p.toString(),'_blank','noopener,noreferrer');
+  };
+  window.openReportingModal=function(){ window.openActionCheckerFastLink(); };
+  window.openReportingInNewTab=function(){ window.openActionCheckerFastLink(); };
 
-  wireReportsNavToLink();
-  hideCompareCards();
-  document.addEventListener('DOMContentLoaded', () => { wireReportsNavToLink(); hideCompareCards(); });
-  setTimeout(() => { wireReportsNavToLink(); hideCompareCards(); }, 250);
-  setTimeout(() => { wireReportsNavToLink(); hideCompareCards(); }, 1000);
-  setTimeout(() => { wireReportsNavToLink(); hideCompareCards(); }, 2500);
+  function ensureReportingNav(){
+    const nav=document.querySelector('header nav'); if(!nav) return;
+    let report=document.getElementById('nav-reporting-tab');
+    if(!report){ report=document.createElement('div'); report.id='nav-reporting-tab'; report.className='nav-tab uppercase tracking-widest text-[11px]'; report.innerHTML='<i class="fas fa-chart-pie mr-2"></i>Reports'; nav.appendChild(report); }
+    report.onclick=e=>{ if(e)e.preventDefault(); window.openActionCheckerFastLink(); return false; };
+    report.title='Open Action Checker with cache-aware fast link'; report.style.display=''; report.classList.remove('hidden-force');
+  }
+  function schedulePreload(){ clearTimeout(preloadTimer); preloadTimer=setTimeout(()=>{ try{ const payload=window.buildActionCheckerScopePayload(); const manifest=window.buildActionCheckerPreloadManifest(payload); window.startActionCheckerBackgroundPreload(manifest); }catch(e){ console.warn('Action Checker preload scheduling failed', e); } },900); }
+
+  const oldApply=window.applyFilters;
+  if(typeof oldApply==='function'&&!oldApply.__actPass6Wrapped){ window.applyFilters=function(){ const out=oldApply.apply(this,arguments); schedulePreload(); return out; }; window.applyFilters.__actPass6Wrapped=true; }
+  ensureReportingNav(); hideD365Compare(); friendlyStatus();
+  document.addEventListener('DOMContentLoaded',()=>{ ensureReportingNav(); hideD365Compare(); friendlyStatus(); schedulePreload(); });
+  setTimeout(()=>{ ensureReportingNav(); hideD365Compare(); friendlyStatus(); schedulePreload(); },2500);
 })();
 </script>
-<!-- === COPILOT HIDE D365 REP COMPARE + REPORTS OPEN ACTION CHECKER LINK 2026-06-02 END === -->
+<!-- === COPILOT PASS 6 FINAL ACTION CHECKER INTEGRATION 2026-06-02 END === -->
 
 </body>
 </html>
