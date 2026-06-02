@@ -8915,151 +8915,174 @@ window.selectAccount=async function(id){
 
 
 
-<!-- === COPILOT REP DROPDOWN FULL-ROSTER ROOT FIX 2026-06-02 START === -->
+<!-- === COPILOT INSTANT CARD FILTER + LAZY RECORD LOAD MANAGER 2026-06-02 START === -->
 <style>
-  .act-scope-repair-pill{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(74,222,128,.45);background:rgba(74,222,128,.10);color:var(--accent-success,#4ade80);border-radius:999px;padding:3px 8px;font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+  .act-instant-filter-pill{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(74,222,128,.45);background:rgba(74,222,128,.10);color:var(--accent-success,#4ade80);border-radius:999px;padding:3px 8px;font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+  .act-filter-applying #account-list-container{opacity:.78;transition:opacity .12s ease}
 </style>
 <script>
 (function(){
-  if(window.__ACT_REP_DROPDOWN_FULL_ROSTER_ROOT_FIX_20260602) return;
-  window.__ACT_REP_DROPDOWN_FULL_ROSTER_ROOT_FIX_20260602 = true;
+  if(window.__ACT_INSTANT_CARD_FILTER_LAZY_RECORD_LOAD_20260602) return;
+  window.__ACT_INSTANT_CARD_FILTER_LAZY_RECORD_LOAD_20260602 = true;
 
   const REP='cr714_employeename', ACTION='action';
   const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
   const norm=v=>clean(v).toLowerCase().replace(/[.,]/g,'').replace(/\s+/g,' ');
   const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
   const fmt=n=>(Number(n)||0).toLocaleString();
-  let rebuilding=false, applying=false;
+  let applyTimer=null, lastApplyMs=0, indexBuiltFor=-1, indexes=null, rebuildingDropdown=false;
 
   function ensureSet(id){ if(!window.activeFilters) window.activeFilters={}; if(!window.activeFilters[id]) window.activeFilters[id]=new Set(); return window.activeFilters[id]; }
-  function snapshotFilters(){ const s={}; (window.FILTER_CONFIG||[]).forEach(c=>s[c.id]=Array.from(ensureSet(c.id))); return s; }
-  function restoreFilters(s){ if(!s)return; window.activeFilters=window.activeFilters||{}; Object.keys(s).forEach(k=>window.activeFilters[k]=new Set(s[k]||[])); }
-  function selectedNorm(id){ return new Set(Array.from(ensureSet(id)).map(norm)); }
-  function uniq(vals){ const m=new Map(); (vals||[]).forEach(v=>{v=clean(v);const k=norm(v);if(k&&!m.has(k))m.set(k,v)}); return Array.from(m.values()).sort((a,b)=>a.localeCompare(b)); }
-  function rowsAll(){ return Array.isArray(window.mergedAccounts)?window.mergedAccounts:[]; }
-  function repVals(a){ const out=[]; try{ if(window.getAccountListRep) out.push(window.getAccountListRep(a)); }catch(e){}; ['cr714_employeename','employeename','employeeName','rep','Rep','repName','cr714_accountrep','cr714_repfromnote'].forEach(f=>out.push(a&&a[f])); (a&&a.sources||[]).forEach(s=>['cr714_employeename','employeename','employeeName','rep','Rep','repName','cr714_accountrep','cr714_repfromnote'].forEach(f=>out.push(s&&s[f]))); return out.map(clean).filter(Boolean); }
-  function actionVals(a){ const out=[]; ['cr714_action','action','Action'].forEach(f=>out.push(a&&a[f])); (a&&a.sources||[]).forEach(s=>['cr714_action','action','Action'].forEach(f=>out.push(s&&s[f]))); return out.map(clean).filter(Boolean); }
-  function hasAny(vals,set){ if(!set.size) return true; return vals.some(v=>set.has(norm(v))); }
+  function setValues(id){return Array.from(ensureSet(id)).map(clean).filter(Boolean)}
+  function setNorm(id){return new Set(setValues(id).map(norm))}
+  function uniq(vals){const m=new Map();(vals||[]).forEach(v=>{v=clean(v);const k=norm(v);if(k&&!m.has(k))m.set(k,v)});return Array.from(m.values()).sort((a,b)=>a.localeCompare(b));}
+  function rowsAll(){return Array.isArray(window.mergedAccounts)?window.mergedAccounts:[]}
+  function repVals(a){const out=[];try{if(window.getAccountListRep)out.push(window.getAccountListRep(a))}catch(e){};['cr714_employeename','employeename','employeeName','rep','Rep','repName','cr714_accountrep','cr714_repfromnote'].forEach(f=>out.push(a&&a[f]));(a&&a.sources||[]).forEach(s=>['cr714_employeename','employeename','employeeName','rep','Rep','repName','cr714_accountrep','cr714_repfromnote'].forEach(f=>out.push(s&&s[f])));return out.map(clean).filter(Boolean)}
+  function actionVals(a){const out=[];['cr714_action','action','Action'].forEach(f=>out.push(a&&a[f]));(a&&a.sources||[]).forEach(s=>['cr714_action','action','Action'].forEach(f=>out.push(s&&s[f])));return out.map(clean).filter(Boolean)}
+  function hasAny(vals,set){if(!set.size)return true;return vals.some(v=>set.has(norm(v)))}
 
-  function validEmployeeRepSet(ignoreRep){
+  function buildIndexes(){
+    const rows=rowsAll();
+    if(indexes && indexBuiltFor===rows.length) return indexes;
+    const rowInfo=rows.map(a=>({a, reps:repVals(a), actions:actionVals(a), id:String(a&&a.cr714_id||'').toUpperCase()}));
+    indexes={rowInfo}; indexBuiltFor=rows.length; return indexes;
+  }
+
+  function validEmployeeReps(){
     const teamCols=(window.FILTER_CONFIG||[]).filter(c=>![REP,ACTION,'statecode'].includes(c.id));
     const hasTeam=teamCols.some(c=>ensureSet(c.id).size>0), state=ensureSet('statecode');
     if(!hasTeam && !state.size) return null;
     const valid=new Set();
     (window.employeesData||[]).forEach(e=>{
       let ok=true;
-      for(const c of teamCols){ const s=ensureSet(c.id); if(s.size&&!s.has(e[c.id])){ok=false;break;} }
-      if(ok && state.size && !state.has(e._mappedStatecode)) ok=false;
-      if(ok && e.cr714_employeename) valid.add(norm(e.cr714_employeename));
+      for(const c of teamCols){const s=ensureSet(c.id); if(s.size&&!s.has(e[c.id])){ok=false;break;}}
+      if(ok&&state.size&&!state.has(e._mappedStatecode)) ok=false;
+      if(ok&&e.cr714_employeename) valid.add(norm(e.cr714_employeename));
     });
     return valid;
   }
 
-  function scopedRowsForDropdown(target){
-    const empSet=validEmployeeRepSet(target===REP);
-    const reps=target===REP?new Set():selectedNorm(REP);
-    const actions=target===ACTION?new Set():selectedNorm(ACTION);
-    return rowsAll().filter(a=>{
-      const rv=repVals(a), av=actionVals(a);
-      if(empSet && rv.length && !rv.some(r=>empSet.has(norm(r)))) return false;
-      if(reps.size && !hasAny(rv,reps)) return false;
-      if(actions.size && !hasAny(av,actions)) return false;
-      if(window.massFilteredIds&&window.massFilteredIds.size>0&&!window.massFilteredIds.has(String(a.cr714_id||'').toUpperCase())) return false;
-      return true;
-    });
+  function computeFilteredRows(ignoreCol){
+    const {rowInfo}=buildIndexes();
+    const empReps=validEmployeeReps();
+    const repSel=ignoreCol===REP?new Set():setNorm(REP);
+    const actionSel=ignoreCol===ACTION?new Set():setNorm(ACTION);
+    const mass=window.massFilteredIds;
+    const out=[];
+    for(const x of rowInfo){
+      if(empReps && x.reps.length && !x.reps.some(r=>empReps.has(norm(r)))) continue;
+      if(repSel.size && !hasAny(x.reps,repSel)) continue;
+      if(actionSel.size && !hasAny(x.actions,actionSel)) continue;
+      if(mass&&mass.size>0&&!mass.has(x.id)) continue;
+      out.push(x.a);
+    }
+    return out;
   }
-  function valuesFor(target){ const r=scopedRowsForDropdown(target); return target===REP?uniq(r.flatMap(repVals)):uniq(r.flatMap(actionVals)); }
 
-  function optionHtml(id,v,checked){ return `<label class="multiselect-option ms-opt-${id}" data-val="${esc(v)}"><input type="checkbox" value="${esc(v)}" ${checked?'checked':''} onchange="window.updateFilterState && window.updateFilterState('${id}', this)"><span class="truncate">${esc(v)}</span></label>`; }
-  function updateHeader(id,total){ const wrap=document.getElementById(`ms-wrap-${id}`), head=wrap&&wrap.querySelector('.multiselect-header span'); if(!head)return; const label=(window.FILTER_CONFIG||[]).find(c=>c.id===id)?.label||id; const count=ensureSet(id).size; head.innerText=count===total&&total?`${label} (All)`:count>1?`${label} (Multiple)`:count===1?`${label} (1)`:label; }
-
-  function rebuildDropdown(id,force){
-    const drop=document.getElementById(`ms-drop-${id}`); if(!drop) return [];
-    const vals=valuesFor(id), state=ensureSet(id), valid=new Set(vals.map(norm));
-    Array.from(state).forEach(v=>{ if(!valid.has(norm(v))) state.delete(v); });
+  function dropdownValues(id){const rows=computeFilteredRows(id); return id===REP?uniq(rows.flatMap(repVals)):uniq(rows.flatMap(actionVals));}
+  function updateHeader(id,total){const h=document.querySelector(`#ms-wrap-${id} .multiselect-header span`); if(!h)return; const label=(window.FILTER_CONFIG||[]).find(c=>c.id===id)?.label||id; const count=ensureSet(id).size; h.innerText=count===total&&total?`${label} (All)`:count>1?`${label} (Multiple)`:count===1?`${label} (1)`:label;}
+  function optionHtml(id,v,checked){return `<label class="multiselect-option ms-opt-${id}" data-val="${esc(v)}"><input type="checkbox" value="${esc(v)}" ${checked?'checked':''} onchange="window.updateFilterState && window.updateFilterState('${id}', this)"><span class="truncate">${esc(v)}</span></label>`}
+  function rebuildRepActionDropdown(id,force=true){
+    const drop=document.getElementById(`ms-drop-${id}`); if(!drop)return [];
+    const vals=dropdownValues(id), state=ensureSet(id), valid=new Set(vals.map(norm));
+    Array.from(state).forEach(v=>{if(!valid.has(norm(v)))state.delete(v)});
     const chosen=new Set(Array.from(state).map(norm));
     const sig=vals.join('\u0001')+'|'+Array.from(state).join('\u0001');
-    if(!force && drop.dataset.scopeSig===sig) return vals;
-    drop.dataset.scopeSig=sig;
+    if(!force&&drop.dataset.instantSig===sig)return vals;
+    drop.dataset.instantSig=sig;
     const search=drop.querySelector('.multiselect-search')?.outerHTML||`<div class="multiselect-search"><input type="text" placeholder="Search..." oninput="window.debouncedFilterDropdown('${id}', this.value)" class="w-full"></div>`;
     const selectAll=`<label class="multiselect-option select-all-opt" style="color: var(--primary);"><input type="checkbox" onchange="window.toggleAllFilter('${id}', this)"> <span>Select All</span></label>`;
     drop.innerHTML=search+selectAll+(vals.length?vals.map(v=>optionHtml(id,v,chosen.has(norm(v)))).join(''):`<div class="p-3 text-xs font-bold text-muted">No values match current filters</div>`);
     updateHeader(id,vals.length);
     return vals;
   }
-
-  function restoreCheckboxesAndHeaders(){
-    (window.FILTER_CONFIG||[]).forEach(c=>{
-      const id=c.id, set=ensureSet(id), selected=new Set(Array.from(set).map(norm));
-      document.querySelectorAll(`.ms-opt-${id} input[type="checkbox"]`).forEach(ch=>{ ch.checked=selected.has(norm(ch.value)); });
-      const total=document.querySelectorAll(`.ms-opt-${id}`).length; updateHeader(id,total);
-    });
-  }
-
-  function updateScopePill(){
-    const host=document.getElementById('active-filter-subtitle')||document.querySelector('.filters-top-row'); if(!host)return;
-    let p=document.getElementById('actRepDropdownScopeRepairPill'); if(!p){p=document.createElement('span');p.id='actRepDropdownScopeRepairPill';p.className='act-scope-repair-pill';host.appendChild(p)}
-    const reps=valuesFor(REP).length, actions=valuesFor(ACTION).length;
-    p.textContent=`Scoped dropdowns: ${fmt(reps)} reps • ${fmt(actions)} actions`;
-    p.title='Rep and Action dropdowns are rebuilt from the active Manager filters.';
-  }
-
-  function refreshScopedDropdowns(force=true){ const out={reps:rebuildDropdown(REP,force),actions:rebuildDropdown(ACTION,force)}; restoreCheckboxesAndHeaders(); updateScopePill(); return out; }
+  function refreshScopedDropdowns(force=true){rebuildingDropdown=true;try{const r=rebuildRepActionDropdown(REP,force), a=rebuildRepActionDropdown(ACTION,force); updatePill(r.length,a.length); return {reps:r,actions:a};}finally{rebuildingDropdown=false}}
   window.refreshFilteredRepActionDropdowns=refreshScopedDropdowns;
+
+  function updatePill(repCount,actionCount){
+    const host=document.querySelector('.filters-top-row .ml-auto')||document.getElementById('active-filter-subtitle')||document.querySelector('.filters-top-row'); if(!host)return;
+    let p=document.getElementById('actInstantFilterPill'); if(!p){p=document.createElement('span');p.id='actInstantFilterPill';p.className='act-instant-filter-pill';host.appendChild(p)}
+    p.textContent=`Cards-only filter: ${fmt(repCount??dropdownValues(REP).length)} reps • ${fmt(actionCount??dropdownValues(ACTION).length)} actions • ${Math.round(lastApplyMs)}ms`;
+    p.title='Filtering updates the left account cards only. Record history and D365 data load only when an account card is clicked.';
+  }
+
+  function updateSubtitleSafe(){try{if(typeof window.updateFilterSubtitle==='function')window.updateFilterSubtitle()}catch(e){}}
+  function updateBellsSafe(){try{if(typeof window.updateGlobalBells==='function')window.updateGlobalBells()}catch(e){}}
+
+  function fastApplyFilters(preservePage=false){
+    const t0=performance.now(); document.body.classList.add('act-filter-applying');
+    try{
+      const filtered=computeFilteredRows();
+      window.teamFilteredAccounts=filtered;
+      const fs=document.getElementById('fs-accts'); if(fs)fs.innerText=filtered.length;
+      const rc=document.getElementById('reassign-count-display'); if(rc)rc.innerText=filtered.length;
+      if(window.activeAccountId&&!filtered.find(a=>a.cr714_id===window.activeAccountId)&&typeof window.clearSelection==='function') window.clearSelection();
+      if(window.bulkSelectedIds) window.bulkSelectedIds.clear();
+      if(typeof window.updateBulkUI==='function') window.updateBulkUI();
+      // Important: render only the left card gallery. Do not load history, D365, reports, or Action Checker payload here.
+      if(typeof window.renderAccountList==='function') window.renderAccountList(true,preservePage);
+      window.reportsDirty=true;
+      refreshScopedDropdowns(true);
+      updateSubtitleSafe(); updateBellsSafe();
+      lastApplyMs=performance.now()-t0; updatePill();
+      return filtered;
+    }finally{setTimeout(()=>document.body.classList.remove('act-filter-applying'),80)}
+  }
+  window.applyFilters=function(preservePage=false){return fastApplyFilters(preservePage)};
+  window.debouncedApplyFilters=function(preservePage=false){clearTimeout(applyTimer);applyTimer=setTimeout(()=>fastApplyFilters(preservePage),15)};
+
+  window.updateFilterState=function(colId,checkbox){
+    const set=ensureSet(colId); checkbox.checked?set.add(checkbox.value):set.delete(checkbox.value);
+    document.querySelectorAll(`.ms-opt-${colId} input[type="checkbox"]`).forEach(ch=>{if(ch.value===checkbox.value)ch.checked=checkbox.checked});
+    updateHeader(colId,document.querySelectorAll(`.ms-opt-${colId}`).length);
+    fastApplyFilters(false);
+  };
+
+  window.toggleAllFilter=function(colId,checkbox){
+    const set=ensureSet(colId), on=checkbox.checked;
+    const boxes=Array.from(document.querySelectorAll(`#ms-drop-${colId} .ms-opt-${colId}`)).filter(opt=>opt.style.display!=='none').map(opt=>opt.querySelector('input[type="checkbox"]')).filter(Boolean);
+    boxes.forEach(ch=>{ch.checked=on; on?set.add(ch.value):set.delete(ch.value)});
+    updateHeader(colId,document.querySelectorAll(`.ms-opt-${colId}`).length);
+    fastApplyFilters(false);
+  };
+
+  const originalFilterDropdown=window.filterDropdown;
+  window.filterDropdown=function(id,term){
+    const q=norm(term);
+    document.querySelectorAll(`#ms-drop-${id} .ms-opt-${id}`).forEach(opt=>{const val=opt.getAttribute('data-val')||''; opt.style.display=norm(val).includes(q)?'flex':'none'});
+  };
+  window.debouncedFilterDropdown=function(id,term){clearTimeout(window.searchTimeout);window.searchTimeout=setTimeout(()=>window.filterDropdown(id,term),60)};
 
   function wireHeaders(){
     document.querySelectorAll('.multiselect-container').forEach(wrap=>{
-      const id=(wrap.id||'').replace('ms-wrap-',''); const head=wrap.querySelector('.multiselect-header'); if(!id||!head)return;
+      const id=(wrap.id||'').replace('ms-wrap-',''), head=wrap.querySelector('.multiselect-header'); if(!id||!head)return;
       head.onclick=function(e){
-        e.stopPropagation(); e.preventDefault();
-        if(id===REP||id===ACTION) refreshScopedDropdowns(true); else restoreCheckboxesAndHeaders();
-        const current=document.getElementById(`ms-drop-${id}`); const was=current&&current.classList.contains('show');
+        e.preventDefault(); e.stopPropagation();
+        if(id===REP||id===ACTION)refreshScopedDropdowns(true);
+        const drop=document.getElementById(`ms-drop-${id}`), was=drop&&drop.classList.contains('show');
         document.querySelectorAll('.multiselect-dropdown').forEach(d=>d.classList.remove('show'));
-        if(current&&!was) current.classList.add('show');
+        if(drop&&!was)drop.classList.add('show');
         return false;
       };
     });
   }
 
   const originalBuild=window.buildFilters;
-  if(typeof originalBuild==='function'&&!originalBuild.__repScopeRootFixed){
+  if(typeof originalBuild==='function'){
     window.buildFilters=function(){
-      if(rebuilding) return originalBuild.apply(this,arguments);
-      const snap=snapshotFilters(); rebuilding=true;
-      try{ const out=originalBuild.apply(this,arguments); restoreFilters(snap); refreshScopedDropdowns(true); wireHeaders(); return out; }
-      finally{ rebuilding=false; }
+      const old={}; (window.FILTER_CONFIG||[]).forEach(c=>old[c.id]=Array.from(ensureSet(c.id)));
+      const out=originalBuild.apply(this,arguments);
+      Object.keys(old).forEach(k=>window.activeFilters[k]=new Set(old[k]));
+      refreshScopedDropdowns(true); wireHeaders(); updateSubtitleSafe(); return out;
     };
-    window.buildFilters.__repScopeRootFixed=true;
   }
 
-  const originalApply=window.applyFilters;
-  if(typeof originalApply==='function'&&!originalApply.__repScopeRootFixed){
-    window.applyFilters=function(){
-      applying=true;
-      try{ const out=originalApply.apply(this,arguments); refreshScopedDropdowns(true); wireHeaders(); return out; }
-      finally{ applying=false; }
-    };
-    window.applyFilters.__repScopeRootFixed=true;
-  }
-
-  const originalUpdate=window.updateFilterState;
-  if(typeof originalUpdate==='function'&&!originalUpdate.__repScopeRootFixed){
-    window.updateFilterState=function(colId,checkbox){ const out=originalUpdate.apply(this,arguments); setTimeout(()=>{refreshScopedDropdowns(true);wireHeaders();},25); return out; };
-    window.updateFilterState.__repScopeRootFixed=true;
-  }
-  const originalToggleAll=window.toggleAllFilter;
-  if(typeof originalToggleAll==='function'&&!originalToggleAll.__repScopeRootFixed){
-    window.toggleAllFilter=function(colId,checkbox){ const out=originalToggleAll.apply(this,arguments); setTimeout(()=>{refreshScopedDropdowns(true);wireHeaders();},25); return out; };
-    window.toggleAllFilter.__repScopeRootFixed=true;
-  }
-
-  document.addEventListener('pointerdown',e=>{const box=e.target.closest&&e.target.closest(`#ms-wrap-${REP},#ms-wrap-${ACTION}`); if(box) refreshScopedDropdowns(true);},true);
-  document.addEventListener('DOMContentLoaded',()=>{setTimeout(()=>{refreshScopedDropdowns(true);wireHeaders();},250);});
-  setTimeout(()=>{refreshScopedDropdowns(true);wireHeaders();},900);
-  setTimeout(()=>{refreshScopedDropdowns(true);wireHeaders();},2500);
+  document.addEventListener('pointerdown',e=>{const box=e.target.closest&&e.target.closest(`#ms-wrap-${REP},#ms-wrap-${ACTION}`); if(box)refreshScopedDropdowns(true)},true);
+  document.addEventListener('DOMContentLoaded',()=>{setTimeout(()=>{buildIndexes();refreshScopedDropdowns(true);wireHeaders();updatePill();},250)});
+  setTimeout(()=>{buildIndexes();refreshScopedDropdowns(true);wireHeaders();updatePill();},1200);
 })();
 </script>
-<!-- === COPILOT REP DROPDOWN FULL-ROSTER ROOT FIX 2026-06-02 END === -->
+<!-- === COPILOT INSTANT CARD FILTER + LAZY RECORD LOAD MANAGER 2026-06-02 END === -->
 
 </body>
 </html>
