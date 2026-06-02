@@ -8683,50 +8683,136 @@ window.selectAccount=async function(id){
 
 
 
-<!-- === COPILOT REMOVE MANAGER LIVE COMPARE / LIVE SYNC 2026-06-02 START === -->
+<!-- === COPILOT HIDE D365 REP COMPARE + REPORTS OPEN ACTION CHECKER LINK 2026-06-02 START === -->
 <style>
-  /* Remove the Manager Console live compare / live sync widget entirely. */
-  #live-poll-indicator{display:none!important;visibility:hidden!important;width:0!important;min-width:0!important;height:0!important;margin:0!important;padding:0!important;border:0!important;overflow:hidden!important;pointer-events:none!important}
+  /* Hide only the D365-vs-dataset rep comparison UI for now. */
+  .act-live-rep-card,
+  .act-live-rep-row,
+  .act-live-rep-label,
+  .act-live-rep-value,
+  .act-live-rep-action,
+  .act-compare-pill,
+  .act-live-rep-muted-note{
+    display:none!important;
+    visibility:hidden!important;
+  }
 </style>
 <script>
 (function(){
-  if(window.__ACT_REMOVE_MANAGER_LIVE_COMPARE_20260602) return;
-  window.__ACT_REMOVE_MANAGER_LIVE_COMPARE_20260602 = true;
+  if(window.__ACT_HIDE_D365_COMPARE_OPEN_REPORT_LINK_20260602) return;
+  window.__ACT_HIDE_D365_COMPARE_OPEN_REPORT_LINK_20260602 = true;
 
-  function removeLiveCompareUi(){
-    const el = document.getElementById('live-poll-indicator');
-    if(el) el.remove();
+  const REPORT_URL = 'https://wb-dt.github.io/daytona-utility/ActionChecker.html';
+  const STORAGE_KEY = 'act_manager_reporting_bridge_v1';
+  const clean = v => String(v ?? '').replace(/\s+/g,' ').trim();
+  const uniq = arr => Array.from(new Set((arr || []).map(clean).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+
+  function isoDate(d){
+    try{
+      if(!d) return '';
+      const dt = d instanceof Date ? d : new Date(d);
+      return isNaN(dt) ? '' : dt.toISOString().slice(0,10);
+    }catch(e){ return ''; }
   }
 
-  // Disable the background live compare/polling loop in Manager Console.
-  window.pollLiveUpdates = async function(){ return false; };
+  function fallbackPayload(){
+    const rows = (window.teamFilteredAccounts && window.teamFilteredAccounts.length ? window.teamFilteredAccounts : window.mergedAccounts) || [];
+    const reps = uniq(rows.map(a => window.getAccountListRep ? window.getAccountListRep(a) : (a && a.rep)));
+    const actions = uniq(rows.flatMap(a => {
+      const out = [];
+      if(a && a.action) out.push(a.action);
+      (a && a.sources || []).forEach(s => { if(s && (s.action || s.cr714_action)) out.push(s.action || s.cr714_action); });
+      return out;
+    }));
+    const dates = rows.map(a => a && (a.modifiedon || a.emailDate || a.LastModified)).filter(Boolean).map(x => new Date(x)).filter(x => !isNaN(x)).sort((a,b)=>a-b);
+    return {
+      source:'ACT Manager Console',
+      createdAt:new Date().toISOString(),
+      bridgeId:'act-' + Date.now() + '-' + Math.random().toString(16).slice(2),
+      bridgeKey:STORAGE_KEY,
+      autoApply:true,
+      reps,
+      actions,
+      allowedReps:reps,
+      allowedActions:actions,
+      accountIds:uniq(rows.map(a => a && (a.cr714_id || a.cr714_accountnum || a.cr714_accountnumber))),
+      startDate:isoDate(window.reportStartDate || window.globalMinDate || dates[0]),
+      endDate:isoDate(window.reportEndDate || window.globalMaxDate || dates[dates.length-1]),
+      rowCount:rows.length,
+      quickFilter:window.activeQuickFilter || 'all',
+      scopeMode:'manager-console-link-launch'
+    };
+  }
 
-  // If initApp later tries to start the old live poll interval, block that specific interval.
-  const nativeSetInterval = window.setInterval.bind(window);
-  window.setInterval = function(callback, delay, ...args){
+  function getPayload(){
+    let payload = null;
     try{
-      if((callback === window.pollLiveUpdates) || (callback && callback.name === 'pollLiveUpdates')){
-        console.info('Manager live compare interval removed.');
-        return 0;
-      }
-    }catch(e){}
-    return nativeSetInterval(callback, delay, ...args);
+      if(typeof window.getReportingBridgeFilters === 'function') payload = window.getReportingBridgeFilters();
+    }catch(e){ console.warn('Existing reporting bridge payload failed; using fallback payload.', e); }
+    if(!payload) payload = fallbackPayload();
+    payload.bridgeKey = payload.bridgeKey || STORAGE_KEY;
+    payload.autoApply = true;
+    payload.bridgeId = payload.bridgeId || ('act-' + Date.now() + '-' + Math.random().toString(16).slice(2));
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(payload)); }catch(e){ console.warn('Unable to store Action Checker bridge payload', e); }
+    return payload;
+  }
+
+  function actionCheckerUrl(payload){
+    const p = new URLSearchParams();
+    p.set('embedded','1');
+    p.set('source','manager-console');
+    p.set('autoApply','1');
+    p.set('bridgeKey', payload.bridgeKey || STORAGE_KEY);
+    p.set('bridgeId', payload.bridgeId);
+    p.set('_', String(Date.now()));
+    if(payload.startDate) p.set('start', payload.startDate);
+    if(payload.endDate) p.set('end', payload.endDate);
+    if(payload.reps && payload.reps.length && payload.reps.length <= 120) p.set('reps', payload.reps.join('|'));
+    if(payload.actions && payload.actions.length && payload.actions.length <= 80) p.set('actions', payload.actions.join('|'));
+    return REPORT_URL + '?' + p.toString();
+  }
+
+  window.openReportingInNewTab = function(){
+    const payload = getPayload();
+    window.open(actionCheckerUrl(payload), '_blank', 'noopener,noreferrer');
   };
 
-  // Remove visible sync timestamp text if anything else tries to update it.
-  try{
-    const sync = document.getElementById('sync-time-display');
-    if(sync) sync.textContent = '';
-  }catch(e){}
+  // Replace modal rendering with direct Action Checker link launch.
+  window.openReportingModal = function(){
+    const modal = document.getElementById('act-reporting-modal');
+    if(modal) modal.classList.remove('show');
+    document.body.style.overflow = '';
+    window.openReportingInNewTab();
+  };
 
-  removeLiveCompareUi();
-  document.addEventListener('DOMContentLoaded', removeLiveCompareUi);
-  setTimeout(removeLiveCompareUi, 250);
-  setTimeout(removeLiveCompareUi, 1000);
-  setTimeout(removeLiveCompareUi, 2500);
+  function wireReportsNavToLink(){
+    const tab = document.getElementById('nav-reporting-tab');
+    if(tab){
+      tab.onclick = function(e){
+        if(e) e.preventDefault();
+        window.openReportingInNewTab();
+        return false;
+      };
+      tab.title = 'Open Action Checker reporting in a new tab';
+    }
+  }
+
+  function hideCompareCards(){
+    document.querySelectorAll('.act-live-rep-card,.act-live-rep-row,.act-compare-pill,.act-live-rep-muted-note').forEach(el => {
+      el.style.setProperty('display','none','important');
+      el.style.setProperty('visibility','hidden','important');
+    });
+  }
+
+  wireReportsNavToLink();
+  hideCompareCards();
+  document.addEventListener('DOMContentLoaded', () => { wireReportsNavToLink(); hideCompareCards(); });
+  setTimeout(() => { wireReportsNavToLink(); hideCompareCards(); }, 250);
+  setTimeout(() => { wireReportsNavToLink(); hideCompareCards(); }, 1000);
+  setTimeout(() => { wireReportsNavToLink(); hideCompareCards(); }, 2500);
 })();
 </script>
-<!-- === COPILOT REMOVE MANAGER LIVE COMPARE / LIVE SYNC 2026-06-02 END === -->
+<!-- === COPILOT HIDE D365 REP COMPARE + REPORTS OPEN ACTION CHECKER LINK 2026-06-02 END === -->
 
 </body>
 </html>
