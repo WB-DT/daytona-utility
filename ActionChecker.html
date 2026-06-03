@@ -451,27 +451,44 @@ setTimeout(applyLiveEnhancements,0);
     finally{hideLoading();}
   };
 
+  
+  const LIVE_POLL_MS=30000;
+  let liveStableRows=[], liveSeenKeys=new Set(), liveIncomingQueue=[], liveIncomingBusy=false, liveTimer=null, liveLastLabel='';
+  function liveKey(r){return String(raw(r,FACT.id)||raw(r,FACT.naturalKey)||r._key||[raw(r,FACT.accountNumber),raw(r,FACT.activityDate),raw(r,FACT.created),r._rep].join('|'))}
+  function liveRowTime(r){return String(raw(r,FACT.activityDate)||raw(r,FACT.created)||raw(r,FACT.modified)||'')}
+  function liveCardHtml(r){const dt=liveRowTime(r);return `<div class="ac-incoming-item ac-slide-in" data-live-key="${esc(liveKey(r))}"><b>${esc(r._rep||'Unassigned')}</b> <span class="pill">${esc(r._category||'Activity')}</span><div>${esc(disp(r,FACT.accountNumber)||'')} ${esc(disp(r,FACT.company)||'')}</div><div class="meta">${dt?new Date(dt).toLocaleString():'--'} • ${esc(r._cleanAction||'')} ${r._template?'• '+esc(r._template):''}</div></div>`}
+  function ensureIncomingShell(){const feed=$('feed');if(!feed)return null;if(!feed.querySelector('.ac-incoming-shell')){feed.innerHTML=`<div class="ac-incoming-shell"><div class="ac-incoming-head"><div><b>Incoming live entries</b><div class="live-today-note" id="acIncomingNote">Waiting for next poll...</div></div><span class="pill ac-live-polling" id="acIncomingCount">0 queued</span></div><div class="ac-incoming-list" id="acIncomingList"></div></div>`;}return $('acIncomingList')}
+  function renderStableLiveChart(rows,total,label){const live=$('liveList');if(!live)return;liveLastLabel=label||liveLastLabel;const source=(rows&&rows.length?rows:liveStableRows)||[];if(!source.length){if(!live.innerHTML.trim()){live.innerHTML='<div class="ac-live-chart-empty"><b>No selected-team live entries yet today.</b><br>The leaderboard panel will stay here and update as soon as rows arrive.</div>';}return}const by={};source.forEach(r=>{const rep=r._rep||'Unassigned';if(!by[rep])by[rep]={rep,total:0,accounts:new Set(),sent:0,notes:0,score:0,employee:employeeFor(rep),topAction:''};const x=by[rep];x.total++;x.score++;if(disp(r,FACT.accountNumber))x.accounts.add(disp(r,FACT.accountNumber));if(isEmail(r)&&/sent/i.test(String(disp(r,FACT.emailStatus)||disp(r,FACT.activityType)||disp(r,FACT.noteText))))x.sent++;if(hasActivityNote(r))x.notes++;if(r._cleanAction&&!x.topAction)x.topAction=r._cleanAction;});const list=Object.values(by).map(x=>({...x,accounts:x.accounts.size})).sort((a,b)=>b.total-a.total);const max=Math.max(1,...list.map(x=>x.total));live.innerHTML='<div class="ac-live-chart-shell"><div class="ac-live-chart-note">Persistent today leaderboard • '+fmt(total==null?source.length:total)+' records • '+esc(liveShowAll?'all reps':'selected team')+'</div>'+list.map((x,i)=>`<div class="leader" onclick="window.acLoadManagerRepDetails&&window.acLoadManagerRepDetails('${String(x.rep).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}')"><div class="rank r${i+1}">#${i+1}</div><div><b>${esc(x.rep)}</b><div class="muted">${esc(x.employee?.[EMP.department]||'')} ${x.topAction?'• '+esc(x.topAction):''}</div><div class="bar"><span style="width:${x.total/max*100}%"></span></div></div><div class="hide-sm"><b>${fmt(x.total)}</b><div class="muted">records</div></div><div class="hide-sm"><b>${fmt(x.accounts)}</b><div class="muted">accounts</div></div><div><b>${fmt(x.sent)}</b><div class="muted">sent</div></div></div>`).join('')+'</div>';}
+  function enqueueIncoming(rows){const list=ensureIncomingShell();if(!list)return;const note=$('acIncomingNote'),count=$('acIncomingCount');liveIncomingQueue.push(...rows);if(count)count.textContent=`${fmt(liveIncomingQueue.length)} queued`;if(note)note.textContent=liveIncomingQueue.length?'Animating new rows one at a time...':'No new rows this poll.';processIncomingQueue();}
+  function processIncomingQueue(){if(liveIncomingBusy)return;const list=ensureIncomingShell();if(!list)return;if(!liveIncomingQueue.length){const note=$('acIncomingNote'),count=$('acIncomingCount');if(note)note.textContent='Poll complete. Waiting for next scheduled refresh.';if(count)count.textContent='0 queued';scheduleLivePoll();return}liveIncomingBusy=true;const r=liveIncomingQueue.shift();list.insertAdjacentHTML('afterbegin',liveCardHtml(r));const item=list.firstElementChild;requestAnimationFrame(()=>{item?.classList.remove('ac-slide-in')});while(list.children.length>30)list.removeChild(list.lastElementChild);setTimeout(()=>{liveIncomingBusy=false;const count=$('acIncomingCount');if(count)count.textContent=`${fmt(liveIncomingQueue.length)} queued`;processIncomingQueue();},720);}
+  function scheduleLivePoll(){if(liveTimer){clearTimeout(liveTimer);liveTimer=null}liveTimer=setTimeout(()=>{const live=(typeof activeViewId==='function'?activeViewId():document.querySelector('.view.active')?.id)==='live';if(live&&managerCountsMode())loadLiveToday(false);},LIVE_POLL_MS);}
   async function loadLiveToday(force){
     if(!managerCountsMode())return; if(liveBusy)return; if(!force&&Date.now()-liveLast<20000)return; liveBusy=true;
-    const oldR=range, t=todayRange();
-    showLoading('Refreshing Live Leaderboard',`${t.label} • ${liveShowAll?'all reps':'selected team'}`);
+    if(liveTimer){clearTimeout(liveTimer);liveTimer=null}
+    const t=todayRange(); renderLiveToolbar(liveStableRows.length,t.label); ensureIncomingShell();
+    const rs=$('rowStatus'); if(rs){rs.textContent=`Live polling ${t.label} • ${liveShowAll?'all reps':'selected team'}`;rs.classList.add('ac-live-polling')}
     try{
       const token=await getToken(), reps=effReps(), actions=effActions();
       const filters=[`${FACT.activityDate} ge ${t.start}T00:00:00Z`,`${FACT.activityDate} le ${t.end}T23:59:59Z`]; const rf=repO(reps,liveShowAll), af=actionO(actions); if(rf)filters.push(rf); if(af)filters.push(af);
-      audit('live-query',{today:t.label,showAllReps:liveShowAll,hasRepFilter:!!rf,hasActionFilter:!!af});
+      audit('live-query',{today:t.label,showAllReps:liveShowAll,hasRepFilter:!!rf,hasActionFilter:!!af,stable:true});
       let url=`${DATAVERSE_URL}/${ENTITY_SET}?$select=${API_SELECT.join(',')}&$filter=${encodeURIComponent(filters.join(' and '))}&$orderby=${FACT.activityDate} desc&$top=5000`, rows=[];
       while(url){const j=await dvFetch(url,token);rows.push(...((j.value||[]).map(normalize)));url=j['@odata.nextLink']||''; if(rows.length>=5000)break; await new Promise(r=>setTimeout(r,0));}
-      state.rows=rows; state.filtered=rows.slice(); const s=summarize(); renderLiveToolbar(rows.length,t.label); renderLeaders(); renderFeed(); markRecentFeed(); if($('rowStatus'))$('rowStatus').textContent=`Live: ${fmt(rows.length)} today • ${liveShowAll?'all reps':'selected team'}`; liveLast=Date.now();
-    }catch(e){console.error(e); if(typeof toast==='function')toast('Live refresh failed: '+(e.message||e),12000);}
+      const incoming=[]; rows.forEach(r=>{const k=liveKey(r); if(!liveSeenKeys.has(k)){liveSeenKeys.add(k); incoming.push(r)}});
+      liveStableRows=rows.length?rows:liveStableRows;
+      state.rows=liveStableRows.slice(); state.filtered=liveStableRows.slice(); summarize();
+      renderLiveToolbar(rows.length,t.label); renderStableLiveChart(liveStableRows,rows.length,t.label);
+      if(incoming.length && liveLast){incoming.sort((a,b)=>liveRowTime(a).localeCompare(liveRowTime(b))); enqueueIncoming(incoming);} else if(!liveLast){const list=ensureIncomingShell(); if(list&&!list.children.length){rows.slice(0,12).forEach(r=>{list.insertAdjacentHTML('beforeend',liveCardHtml(r));list.lastElementChild?.classList.remove('ac-slide-in')});} scheduleLivePoll();} else {const note=$('acIncomingNote'); if(note)note.textContent='No new rows this poll. Waiting for next scheduled refresh.'; scheduleLivePoll();}
+      liveLast=Date.now(); if(rs){rs.textContent=`Live: ${fmt(rows.length)} today • ${liveShowAll?'all reps':'selected team'} • stable`;rs.classList.remove('ac-live-polling')}
+    }catch(e){console.error(e); if(typeof toast==='function')toast('Live refresh failed: '+(e.message||e),12000); scheduleLivePoll();}
     finally{liveBusy=false;hideLoading();}
   }
   function renderLiveToolbar(total,label){
     const live=$('live'); if(!live)return; let bar=$('acLiveScopeToolbar'); if(!bar){bar=document.createElement('div');bar.id='acLiveScopeToolbar';bar.className='ac-contract-status';live.prepend(bar)}
-    bar.innerHTML=`<span><b>Live Leaderboard</b> <span class="ac-chip info">Today ${label}</span> <span class="ac-chip ${liveShowAll?'warn':'good'}">${liveShowAll?'All reps':'Selected team'}</span> <span class="ac-chip info">${fmt(total)} records</span></span><button class="btn" id="acLiveShowAllBtn">${liveShowAll?'Show selected team':'Show all reps'}</button>`;
-    const btn=$('acLiveShowAllBtn'); if(btn&&!btn.__wired){btn.__wired=true;btn.onclick=()=>{liveShowAll=!liveShowAll;loadLiveToday(true)}}
+    bar.innerHTML=`<span><b>Live Leaderboard</b> <span class="ac-chip info">Today ${label}</span> <span class="ac-chip ${liveShowAll?'warn':'good'}">${liveShowAll?'All reps':'Selected team'}</span> <span class="ac-chip info">${fmt(total)} records</span> <span class="ac-chip good">stable view</span></span><button class="btn" id="acLiveShowAllBtn">${liveShowAll?'Show selected team':'Show all reps'}</button>`;
+    const btn=$('acLiveShowAllBtn'); if(btn&&!btn.__wired){btn.__wired=true;btn.onclick=()=>{liveShowAll=!liveShowAll;liveSeenKeys=new Set();liveStableRows=[];const list=ensureIncomingShell();if(list)list.innerHTML='';loadLiveToday(true)}}
   }
-  function markRecentFeed(){const now=Date.now();document.querySelectorAll('#feed .feed').forEach(el=>{const text=el.textContent||'';}); state.rows.slice(0,12).forEach(r=>{const dt=new Date(raw(r,FACT.activityDate)||raw(r,FACT.created)||0).getTime(); if(Number.isFinite(dt)&&now-dt<4*60*1000){const first=document.querySelector('#feed .feed'); if(first)first.classList.add('ac-live-recent');}}); setTimeout(()=>document.querySelectorAll('.ac-live-recent').forEach(x=>x.classList.remove('ac-live-recent')),18000);}
-  function liveModeCheck(){const live=(typeof activeViewId==='function'?activeViewId():document.querySelector('.view.active')?.id)==='live';document.body.classList.toggle('ac-manager-live',!!(managerCountsMode()&&live));if(managerCountsMode()&&live)loadLiveToday(false);}
+function markRecentFeed(){const now=Date.now();document.querySelectorAll('#feed .feed').forEach(el=>{const text=el.textContent||'';}); state.rows.slice(0,12).forEach(r=>{const dt=new Date(raw(r,FACT.activityDate)||raw(r,FACT.created)||0).getTime(); if(Number.isFinite(dt)&&now-dt<4*60*1000){const first=document.querySelector('#feed .feed'); if(first)first.classList.add('ac-live-recent');}}); setTimeout(()=>document.querySelectorAll('.ac-live-recent').forEach(x=>x.classList.remove('ac-live-recent')),18000);}
+  function liveModeCheck(){const live=(typeof activeViewId==='function'?activeViewId():document.querySelector('.view.active')?.id)==='live';document.body.classList.toggle('ac-manager-live',!!(managerCountsMode()&&live));if(managerCountsMode()&&live){try{if(typeof stopLiveAutoPoll==='function')stopLiveAutoPoll()}catch(e){} loadLiveToday(false);}}
 
   function install(){
     if(!isManagerLaunch())return;
@@ -483,7 +500,7 @@ setTimeout(applyLiveEnhancements,0);
     const lb=$('loadBtn'); if(lb&&!lb.__acContract){lb.__acContract=true;lb.onclick=()=>loadManagerSummary();}
     const lab=$('loadActionBtn'); if(lab)lab.onclick=()=>loadManagerSummary();
     document.querySelectorAll('.nav').forEach(b=>{if(!b.__acLiveGuard){b.__acLiveGuard=true;b.addEventListener('click',()=>setTimeout(liveModeCheck,30),true)}});
-    if(!contractInstalled){contractInstalled=true; setTimeout(()=>loadManagerSummary(),350); setInterval(()=>{if(((typeof activeViewId==='function'?activeViewId():document.querySelector('.view.active')?.id)==='live')&&managerCountsMode())loadLiveToday(false)},30000);}
+    if(!contractInstalled){contractInstalled=true; setTimeout(()=>loadManagerSummary(),350); setTimeout(()=>{if(((typeof activeViewId==='function'?activeViewId():document.querySelector('.view.active')?.id)==='live')&&managerCountsMode())loadLiveToday(false)},1200);}
   }
   document.addEventListener('DOMContentLoaded',install); setTimeout(install,500); setTimeout(install,1800);
 })();
@@ -496,4 +513,23 @@ setTimeout(applyLiveEnhancements,0);
 <script>(function(){if(window.__AC_STABILITY_PATCH_20260603)return;window.__AC_STABILITY_PATCH_20260603=true;function q(id){return document.getElementById(id)}function addBadges(){document.querySelectorAll('#kpis .card.k').forEach(function(c){var label=(c.querySelector('.l')?.textContent||'').toLowerCase();if(!/(records found|reps|accounts|loaded details|loaded records)/.test(label)||c.querySelector('.ac-counts-pending-note'))return;var n=document.createElement('div');n.className='ac-counts-pending-note';n.textContent=/loaded/.test(label)?'detail fetch pending':'counts ready';c.querySelector('.b')?.appendChild(n);});}function emptyLive(){var live=q('liveList');if(!live)return;var active=document.querySelector('.view.active')?.id==='live';var text=(live.textContent||'').trim();if(active&&(!text||/^No live leaderboard entries|No rows\.?$/i.test(text))){live.innerHTML='<div class="ac-live-empty-team"><b>No selected-team entries are on the live leaderboard yet today.</b><br>The filters were accepted. If you expect activity, wait for the next live refresh, select <b>Show all reps</b>, or broaden the rep/action filters.</div>';var feed=q('feed');if(feed&&!(feed.textContent||'').trim())feed.innerHTML='<div class="live-preview-empty">No latest entries for this selected team yet.</div>';}}var mo=new MutationObserver(function(){addBadges();emptyLive();});mo.observe(document.body,{subtree:true,childList:true,characterData:true});setInterval(function(){addBadges();emptyLive();},2500);setTimeout(function(){addBadges();emptyLive();},500);})();</script>
 <!-- === COPILOT ACTION CHECKER STABILITY PATCH 2026-06-03 END === -->
 
+
+<!-- === COPILOT LIVE LEADERBOARD PERMANENCE PATCH 2026-06-03 START === -->
+<style>
+  #live .grid{grid-template-columns:minmax(420px,1.1fr) minmax(360px,.9fr)!important;align-items:stretch;}
+  #live .card{min-height:0;}
+  #liveList.scroll-body,#feed.scroll-body{max-height:calc(100vh - 245px);overflow:auto;}
+  .ac-live-chart-shell{display:grid;gap:8px;}
+  .ac-live-chart-note{padding:8px 10px;border:1px solid rgba(56,189,248,.35);background:rgba(56,189,248,.08);border-radius:10px;color:var(--muted);font-size:12px;font-weight:800;}
+  .ac-live-chart-empty{padding:18px;border:1px dashed var(--border);border-radius:14px;background:rgba(148,163,184,.07);color:var(--muted);line-height:1.45;}
+  .ac-incoming-shell{display:flex;flex-direction:column;gap:10px;overflow:hidden;}
+  .ac-incoming-head{display:flex;justify-content:space-between;gap:8px;align-items:center;position:sticky;top:0;z-index:2;background:var(--card);padding-bottom:8px;}
+  .ac-incoming-list{display:flex;flex-direction:column;gap:8px;overflow:hidden;}
+  .ac-incoming-item{background:var(--input);border:1px solid var(--border);border-left:5px solid var(--good);border-radius:12px;padding:10px;box-shadow:0 10px 24px rgba(0,0,0,.14);transform:translateX(0);opacity:1;max-height:220px;transition:transform .62s cubic-bezier(.22,.61,.36,1),opacity .62s ease,max-height .62s ease,margin .62s ease,padding .62s ease;}
+  .ac-incoming-item.ac-slide-in{transform:translateX(125%);opacity:0;}
+  .ac-incoming-item .meta{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.35;}
+  .ac-live-polling{border-color:rgba(56,189,248,.45)!important;color:var(--primary)!important;}
+  @media(max-width:1050px){#live .grid{grid-template-columns:1fr!important;}.ac-incoming-head{position:static;}}
+</style>
+<!-- === COPILOT LIVE LEADERBOARD PERMANENCE PATCH 2026-06-03 END === -->
 </body></html>
