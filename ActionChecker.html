@@ -956,4 +956,256 @@ function markRecentFeed(){const now=Date.now();document.querySelectorAll('#feed 
 </script>
 <!-- === COPILOT USER EXPERIENCE PASS 2026-06-03 END === -->
 
+
+<!-- === COPILOT CLEANUP / DEDUPE STABILITY PATCH 2026-06-03 START === -->
+<script>
+(function(){
+  'use strict';
+  if (window.__acCopilotCleanupPatch) return;
+  window.__acCopilotCleanupPatch = true;
+
+  const log = (...a) => { try { console.info('[ActionChecker cleanup]', ...a); } catch(e){} };
+  const byId = id => document.getElementById(id);
+  const getFact = () => { try { return (typeof FACT !== 'undefined' && FACT) ? FACT : (window.FACT || {}); } catch(e) { return window.FACT || {}; } };
+  const getState = () => { try { return (typeof state !== 'undefined' && state) ? state : window.state; } catch(e) { return window.state; } };
+  const getActionSeed = () => { try { return (typeof ACTION_SEED !== 'undefined' && ACTION_SEED) ? ACTION_SEED : (window.ACTION_SEED || []); } catch(e) { return window.ACTION_SEED || []; } };
+  const htmlEsc = v => { try { return (typeof esc === 'function') ? esc(v) : String(v ?? '').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); } catch(e) { return String(v ?? ''); } };
+
+  function cleanText(v){
+    return String(v ?? '').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim();
+  }
+  function cleanRep(v){
+    let s = cleanText(v).replace(/Modified On:.*/i,'').trim();
+    s = s.replace(/,\s*/g, ', ');
+    return s || 'Unassigned';
+  }
+  function cleanAction(v){
+    let s = cleanText(v);
+    if (!s) return '';
+    if (s.includes('|')) s = s.replace(/\s*\|\s*Template:.*/i,'').trim();
+    s = s.replace(/^Action:\s*/i,'').replace(/\s+/g,' ').trim();
+    return s;
+  }
+  function norm(v){ return cleanText(v).toLowerCase(); }
+  function val(r,k){
+    if (!r || !k) return '';
+    const fv = k + '@OData.Community.Display.V1.FormattedValue';
+    return r[fv] ?? r[k] ?? '';
+  }
+  function shortHash(s){
+    s = String(s ?? '');
+    let h = 2166136261;
+    for (let i=0;i<s.length;i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return (h >>> 0).toString(36);
+  }
+  function stableRowKey(r){
+    try {
+      const F = getFact();
+      const explicit = cleanText(val(r,F.id) || val(r,F.naturalKey));
+      if (explicit) return 'id:' + explicit.toLowerCase();
+      const parts = [
+        val(r,F.sourceRecordId), val(r,F.sourceTable), val(r,F.accountNumber),
+        String(val(r,F.activityDate) || val(r,F.created) || val(r,F.noteDate)).slice(0,19),
+        val(r,F.activityType), val(r,F.noteSequence), val(r,F.emailTemplate),
+        cleanAction(val(r,F.effectiveAction) || val(r,F.action) || val(r,F.emailAction) || val(r,F.actionFromNote)),
+        cleanRep(val(r,F.repFromNote) || val(r,F.accountRep)),
+        cleanText(val(r,F.noteText) || val(r,F.noteTextRaw) || val(r,F.actionMessage)).slice(0,240)
+      ].map(norm);
+      const joined = parts.join('|');
+      return 'cmp:' + shortHash(joined) + ':' + joined.slice(0,120);
+    } catch(e) {
+      return 'fallback:' + shortHash(JSON.stringify(r || {}));
+    }
+  }
+  function completeness(r){
+    if (!r) return 0;
+    let n = 0;
+    for (const [k,v] of Object.entries(r)) if (v !== null && v !== undefined && String(v).trim() !== '') n++;
+    return n;
+  }
+  function better(a,b){
+    if (!a) return b;
+    if (!b) return a;
+    const F = getFact();
+    const am = String(val(a,F.modified) || val(a,F.created) || val(a,F.activityDate) || '');
+    const bm = String(val(b,F.modified) || val(b,F.created) || val(b,F.activityDate) || '');
+    if (bm && bm > am) return b;
+    if (completeness(b) > completeness(a)) return b;
+    return a;
+  }
+  function normalizeOne(row){
+    let r = row || {};
+    try { if (typeof window.__acOrigNormalize === 'function') r = window.__acOrigNormalize(row); }
+    catch(e) { r = {...(row || {})}; }
+    const F = getFact();
+    if (F.accountNumber && r[F.accountNumber] != null) r[F.accountNumber] = cleanText(r[F.accountNumber]).replace(/\s*\|\s*$/,'');
+    r._rep = cleanRep(r._rep || val(r,F.repFromNote) || val(r,F.accountRep));
+    r._cleanAction = cleanAction(r._cleanAction || val(r,F.effectiveAction) || val(r,F.action) || val(r,F.emailAction) || val(r,F.actionFromNote));
+    r._key = stableRowKey(r);
+    r._dedupeKey = r._key;
+    return r;
+  }
+  function dedupeRows(rows){
+    const m = new Map();
+    (rows || []).forEach(x => {
+      const r = normalizeOne(x);
+      const k = String(r._dedupeKey || r._key || stableRowKey(r)).toLowerCase();
+      m.set(k, better(m.get(k), r));
+    });
+    return [...m.values()];
+  }
+  window.acDedupeRows = dedupeRows;
+  window.acStableRowKey = stableRowKey;
+
+  if (!window.__acOrigNormalize && typeof normalize === 'function') window.__acOrigNormalize = normalize;
+  try { window.normalize = normalize = normalizeOne; } catch(e) { window.normalize = normalizeOne; }
+  try { window.keyOf = keyOf = stableRowKey; } catch(e) { window.keyOf = stableRowKey; }
+
+  if (!window.__acOrigSaveRows && typeof saveRows === 'function') window.__acOrigSaveRows = saveRows;
+  window.saveRows = async function(rows){
+    const S = getState();
+    const incoming = dedupeRows(rows || []);
+    const combined = dedupeRows([...(S?.rows || []), ...incoming]);
+    if (S) S.rows = combined;
+    try {
+      if (typeof idbClear === 'function' && typeof idbPutRows === 'function') {
+        await idbClear();
+        await idbPutRows(combined);
+        if (S) S.storageMode = 'IndexedDB';
+        return;
+      }
+      if (typeof window.__acOrigSaveRows === 'function') await window.__acOrigSaveRows(combined);
+    } catch(e) {
+      if (S) S.storageMode = 'Memory only';
+      try { toast('Storage cleanup used memory mode: ' + e.message, 8000); } catch(_) {}
+    }
+  };
+  try { saveRows = window.saveRows; } catch(e) {}
+
+  if (!window.__acOrigReloadRows && typeof reloadRows === 'function') window.__acOrigReloadRows = reloadRows;
+  window.reloadRows = async function(){
+    const S = getState();
+    let before = 0, after = 0;
+    try {
+      if (typeof idbGetAll === 'function') {
+        const all = await idbGetAll();
+        before = all.length;
+        const compact = dedupeRows(all);
+        after = compact.length;
+        if (S) { S.rows = compact; S.storageMode = 'IndexedDB'; }
+        if (before !== after && typeof idbClear === 'function' && typeof idbPutRows === 'function') {
+          await idbClear();
+          await idbPutRows(compact);
+        }
+      } else if (typeof window.__acOrigReloadRows === 'function') {
+        await window.__acOrigReloadRows();
+        before = S?.rows?.length || 0;
+        if (S) S.rows = dedupeRows(S.rows);
+        after = S?.rows?.length || 0;
+      }
+    } catch(e) {
+      if (typeof window.__acOrigReloadRows === 'function') await window.__acOrigReloadRows();
+      if (S) S.rows = dedupeRows(S.rows || []);
+      before = after = S?.rows?.length || 0;
+    }
+    if (before && before !== after) log(`Removed ${before-after} duplicate cached row(s).`);
+  };
+  try { reloadRows = window.reloadRows; } catch(e) {}
+
+  function selectedValuesSafe(id){
+    const el = byId(id);
+    return el ? [...el.selectedOptions].map(o => o.value).filter(Boolean) : [];
+  }
+  function rowDate(r){
+    const F = getFact();
+    return String(val(r,F.activityDate) || val(r,F.created) || '').slice(0,10);
+  }
+  function currentDateFiltered(rows){
+    const s = byId('actionStartDate')?.value || byId('startDate')?.value || '';
+    const e = byId('actionEndDate')?.value || byId('endDate')?.value || '';
+    if (!s && !e) return rows || [];
+    return (rows || []).filter(r => {
+      const d = rowDate(r);
+      return (!s || d >= s) && (!e || d <= e);
+    });
+  }
+
+  if (!window.__acOrigFiltered && typeof filtered === 'function') window.__acOrigFiltered = filtered;
+  window.filtered = function(){
+    const S = getState();
+    if (S) S.rows = dedupeRows(S.rows || []);
+    let out;
+    try { out = typeof window.__acOrigFiltered === 'function' ? window.__acOrigFiltered() : (S?.rows || []); }
+    catch(e) { out = S?.rows || []; }
+    out = dedupeRows(out);
+    out = currentDateFiltered(out);
+    if (S) S.filtered = out;
+    return out;
+  };
+  try { filtered = window.filtered; } catch(e) {}
+
+  function rebuildOptions(selectId, values, placeholder){
+    const el = byId(selectId);
+    if (!el) return;
+    const current = new Set(selectedValuesSafe(selectId).map(norm));
+    const seen = new Set();
+    const list = [];
+    values.forEach(v => {
+      const label = cleanText(v);
+      const key = norm(label);
+      if (!label || seen.has(key) || label === 'Unassigned') return;
+      seen.add(key); list.push(label);
+    });
+    list.sort((a,b) => a.localeCompare(b));
+    el.innerHTML = list.length ? list.map(v => `<option value="${htmlEsc(v)}" ${current.has(norm(v))?'selected':''}>${htmlEsc(v)}</option>`).join('') : `<option value="" disabled>${htmlEsc(placeholder)}</option>`;
+  }
+  window.populateActions = function(){
+    const seed = getActionSeed().map(cleanAction);
+    const S = getState();
+    const rows = dedupeRows(S?.rows || []);
+    const actions = seed.concat(rows.map(r => r._cleanAction || cleanAction((typeof actionValue === 'function') ? actionValue(r) : ''))).filter(a => a && !a.includes('|'));
+    rebuildOptions('actionFilter', actions, 'No actions found');
+    try { updateEndDateAvailability(); } catch(e) {}
+    try { refreshFilterDropdowns(); } catch(e) {}
+  };
+  try { populateActions = window.populateActions; } catch(e) {}
+
+  window.populateReps = function(){
+    const S = getState();
+    const rows = dedupeRows(S?.rows || []);
+    rebuildOptions('repFilter', rows.map(r => cleanRep(r._rep)), 'Load data to populate reps');
+    try { refreshFilterDropdowns(); } catch(e) {}
+  };
+  try { populateReps = window.populateReps; } catch(e) {}
+
+  if (!window.__acOrigRenderAll && typeof renderAll === 'function') window.__acOrigRenderAll = renderAll;
+  window.renderAll = function(){
+    const S = getState();
+    if (S) S.rows = dedupeRows(S.rows || []);
+    const beforeFiltered = S?.filtered?.length || 0;
+    try { return typeof window.__acOrigRenderAll === 'function' ? window.__acOrigRenderAll() : undefined; }
+    finally {
+      try {
+        const total = S?.rows?.length || 0;
+        const shown = S?.filtered?.length || beforeFiltered || 0;
+        const rs = byId('rowStatus'); if (rs) rs.textContent = `${total.toLocaleString()} rows`;
+        const tc = byId('tableCount'); if (tc && shown) tc.textContent = `Showing ${Math.min(2000, shown).toLocaleString()} of ${shown.toLocaleString()} clean rows`;
+      } catch(e) {}
+    }
+  };
+  try { renderAll = window.renderAll; } catch(e) {}
+
+  async function initialCleanup(){
+    try {
+      if (typeof window.reloadRows === 'function') await window.reloadRows();
+      if (typeof window.renderAll === 'function') window.renderAll();
+      log('Cleanup patch active. Current rows:', getState()?.rows?.length || 0);
+    } catch(e) { console.warn('[ActionChecker cleanup] initial cleanup failed', e); }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(initialCleanup, 650));
+  else setTimeout(initialCleanup, 650);
+})();
+</script>
+<!-- === COPILOT CLEANUP / DEDUPE STABILITY PATCH 2026-06-03 END === -->
+
 </body></html>
