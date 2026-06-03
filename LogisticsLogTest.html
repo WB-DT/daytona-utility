@@ -10397,5 +10397,399 @@ window.selectAccount=async function(id){
 })();
 </script>
 <!-- === END COPILOT DROPDOWN FILTER PERFORMANCE + CLASH GUARD 2026-06-03 === -->
+
+
+<!-- === COPILOT INDEXED FILTER ENGINE + DASHBOARD LAYOUT CLEANUP 2026-06-03 === -->
+<style>
+  /* Easy-on-the-eyes dashboard row: D365 + Help Status side-by-side */
+  .act-d365-help-row{
+    display:grid!important;
+    grid-template-columns:minmax(280px,1fr) minmax(260px,.82fr)!important;
+    gap:14px!important;
+    margin-bottom:18px!important;
+    align-items:stretch!important;
+  }
+  .act-d365-help-row > div{
+    margin:0!important;
+    min-width:0!important;
+    height:100%!important;
+  }
+  .act-d365-help-row .act-help-status-card{
+    background:linear-gradient(180deg,var(--act-soft-panel,var(--bg-card)),var(--bg-card))!important;
+    border:1px solid var(--act-soft-border,var(--border-color))!important;
+    border-radius:18px!important;
+    box-shadow:0 10px 24px rgba(15,23,42,.065)!important;
+  }
+  [data-theme="dark"] .act-d365-help-row .act-help-status-card{box-shadow:0 12px 30px rgba(0,0,0,.24)!important;}
+  @media(max-width:1050px){.act-d365-help-row{grid-template-columns:1fr!important;}}
+
+  /* Fact-table history controls get a calm opaque surface so history does not bleed through while scrolling. */
+  #fv-history .fact-history-toolbar,
+  .fact-history-toolbar{
+    position:sticky!important;
+    top:0!important;
+    z-index:35!important;
+    background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 94%,var(--primary) 4%))!important;
+    border:1px solid color-mix(in srgb,var(--border-color) 72%,var(--primary) 28%)!important;
+    border-radius:16px!important;
+    box-shadow:0 14px 30px rgba(15,23,42,.12)!important;
+    margin:0 0 12px 0!important;
+    isolation:isolate!important;
+  }
+  [data-theme="dark"] #fv-history .fact-history-toolbar,
+  [data-theme="dark"] .fact-history-toolbar{
+    background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 88%,white 4%))!important;
+    box-shadow:0 16px 36px rgba(0,0,0,.36)!important;
+  }
+  #fv-history .fact-history-toolbar::before,
+  .fact-history-toolbar::before{
+    content:"";
+    position:absolute;
+    inset:-8px -6px;
+    z-index:-1;
+    border-radius:20px;
+    background:var(--bg-app);
+  }
+  .fact-toolbar-controls{display:flex!important;gap:6px!important;align-items:center!important;flex-wrap:wrap!important;}
+  .fact-range-btn,.fact-sort-btn{
+    background:var(--bg-input)!important;
+    border:1px solid var(--border-color)!important;
+    color:var(--text-main)!important;
+    border-radius:999px!important;
+    padding:4px 9px!important;
+    font-size:10px!important;
+    font-weight:950!important;
+  }
+  .fact-range-btn.active,.fact-sort-btn:hover{
+    background:var(--primary)!important;
+    border-color:var(--primary)!important;
+    color:var(--primary-fg)!important;
+  }
+</style>
+<script>
+(function(){
+  if(window.__ACT_INDEXED_FILTER_ENGINE_LAYOUT_20260603) return;
+  window.__ACT_INDEXED_FILTER_ENGINE_LAYOUT_20260603=true;
+
+  const REP='cr714_employeename', ACTION='action', STATE='statecode';
+  const TEAM_COLS=['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname'];
+  const EMP_COLS=[...TEAM_COLS,REP,STATE];
+  let IDX=null, applyTimer=0, searchTimers=Object.create(null), installed=false;
+  const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+  const cssEsc=s=>(window.CSS&&CSS.escape)?CSS.escape(s):String(s).replace(/[^a-zA-Z0-9_-]/g,'\\$&');
+  const str=v=>String(v??'').trim();
+  const normalizeAction=v=>{try{return window.normalizeActionStrict?window.normalizeActionStrict(v)||'':str(v);}catch(e){return str(v);}};
+  const ensureSet=col=>{ if(!window.activeFilters) window.activeFilters={}; if(!(window.activeFilters[col] instanceof Set)) window.activeFilters[col]=new Set(window.activeFilters[col]||[]); return window.activeFilters[col]; };
+  const cfg=()=>window.FILTER_CONFIG||[];
+  const empVal=(e,col)=> col===STATE ? (e._mappedStatecode || ((e.statecode===0||e.cr714_status===1)?'Active':'Inactive')) : str(e[col]);
+  const addToMapSet=(map,key,val)=>{ if(!key) return; if(!map.has(key)) map.set(key,new Set()); map.get(key).add(val); };
+  const unionInto=(target,src)=>{ if(!src) return target; src.forEach(v=>target.add(v)); return target; };
+  const intersect=(a,b)=>{ if(!a) return new Set(b||[]); if(!b) return new Set(); const small=a.size<=b.size?a:b, large=a.size<=b.size?b:a; const out=new Set(); small.forEach(v=>{ if(large.has(v)) out.add(v); }); return out; };
+
+  function accountId(a){ return str(a&&a.cr714_id); }
+  function buildIndexedFilterModel(){
+    const accounts=window.mergedAccounts||[];
+    const employees=window.employeesData||[];
+    const idx={
+      sig:`${accounts.length}|${employees.length}|${Date.now()}`,
+      order:[], allIds:new Set(), accountById:new Map(),
+      byRep:new Map(), byAction:new Map(), repToAccountIds:new Map(),
+      empValueToReps:Object.create(null), valueToIds:Object.create(null), optionValues:Object.create(null)
+    };
+    cfg().forEach(c=>{ idx.valueToIds[c.id]=new Map(); idx.optionValues[c.id]=new Set(); });
+    employees.forEach(e=>{
+      const rep=str(e.cr714_employeename); if(!rep) return;
+      EMP_COLS.forEach(col=>{
+        const v=empVal(e,col); if(!v) return;
+        if(!idx.empValueToReps[col]) idx.empValueToReps[col]=new Map();
+        addToMapSet(idx.empValueToReps[col],v,rep);
+        if(idx.optionValues[col]) idx.optionValues[col].add(v);
+      });
+    });
+    accounts.forEach(a=>{
+      const id=accountId(a); if(!id) return;
+      idx.order.push(id); idx.allIds.add(id); idx.accountById.set(id,a);
+      const rep=str(a.rep)||'Unassigned';
+      const act=normalizeAction(a.action);
+      addToMapSet(idx.byRep,rep,id); addToMapSet(idx.repToAccountIds,rep,id);
+      if(act) addToMapSet(idx.byAction,act,id);
+      if(idx.optionValues[REP]) idx.optionValues[REP].add(rep);
+      if(act && idx.optionValues[ACTION]) idx.optionValues[ACTION].add(act);
+    });
+    // Convert employee/team/status values to account-id sets once. This is the big win.
+    EMP_COLS.forEach(col=>{
+      const map=idx.empValueToReps[col]||new Map();
+      map.forEach((reps,value)=>{
+        const ids=new Set(); reps.forEach(r=>unionInto(ids,idx.repToAccountIds.get(r)));
+        if(!idx.valueToIds[col]) idx.valueToIds[col]=new Map();
+        idx.valueToIds[col].set(value,ids);
+      });
+    });
+    idx.byRep.forEach((ids,rep)=>idx.valueToIds[REP].set(rep,new Set(ids)));
+    idx.byAction.forEach((ids,act)=>idx.valueToIds[ACTION].set(act,new Set(ids)));
+    IDX=idx;
+    window.__ACT_FILTER_INDEX=idx;
+    return idx;
+  }
+  function getIndex(){ return IDX || buildIndexedFilterModel(); }
+  function optionValues(col){
+    const idx=getIndex();
+    const vals=idx.optionValues[col]||new Set();
+    return Array.from(vals).filter(v=>str(v)!=='').sort((a,b)=>String(a).localeCompare(String(b)));
+  }
+  function selectedUnionIds(col){
+    const idx=getIndex(), set=ensureSet(col);
+    if(!set.size) return null;
+    const map=idx.valueToIds[col]||new Map();
+    const ids=new Set();
+    set.forEach(v=>unionInto(ids,map.get(v)));
+    return ids;
+  }
+  function computeFilteredAccountIds(){
+    const idx=getIndex();
+    let candidate=null;
+    for(const c of cfg()){
+      const ids=selectedUnionIds(c.id);
+      if(ids) candidate=intersect(candidate,ids);
+      if(candidate && candidate.size===0) break;
+    }
+    if(window.massFilteredIds && window.massFilteredIds.size){
+      const mass=new Set(Array.from(window.massFilteredIds).map(v=>String(v).toUpperCase()));
+      const massIds=new Set(); idx.allIds.forEach(id=>{ if(mass.has(String(id).toUpperCase())) massIds.add(id); });
+      candidate=intersect(candidate,massIds);
+    }
+    const finalSet=candidate||idx.allIds;
+    return idx.order.filter(id=>finalSet.has(id));
+  }
+  function updateHeader(col){
+    const def=cfg().find(c=>c.id===col); if(!def) return;
+    const head=document.querySelector(`#ms-wrap-${cssEsc(col)} .multiselect-header span`); if(!head) return;
+    const set=ensureSet(col); const total=optionValues(col).length;
+    head.textContent=set.size===0?def.label:(set.size===total&&total>0?`${def.label} (All)`:set.size>1?`${def.label} (Multiple)`:`${def.label} (1)`);
+  }
+  function updateAllHeaders(){ cfg().forEach(c=>updateHeader(c.id)); }
+
+  function buildFiltersFast(){
+    getIndex();
+    const host=document.getElementById('filter-container'); if(!host) return;
+    cfg().forEach(c=>ensureSet(c.id));
+    const html=cfg().map(c=>{
+      const vals=optionValues(c.id);
+      const active=ensureSet(c.id);
+      // prune selected values that no longer exist after data reload only
+      Array.from(active).forEach(v=>{ if(!vals.includes(v)) active.delete(v); });
+      return `<div class="multiselect-container" id="ms-wrap-${esc(c.id)}">
+        <div class="multiselect-header" data-indexed-filter="1" data-col="${esc(c.id)}"><span>${esc(c.label)}</span> <i class="fas fa-chevron-down opacity-50"></i></div>
+        <div class="multiselect-dropdown custom-scrollbar" id="ms-drop-${esc(c.id)}" data-col="${esc(c.id)}">
+          <div class="multiselect-search"><input type="text" placeholder="Search..." oninput="window.debouncedFilterDropdown('${esc(c.id)}', this.value)" class="w-full"></div>
+          <label class="multiselect-option select-all-opt" style="color: var(--primary);"><input type="checkbox" onchange="window.toggleAllFilter('${esc(c.id)}', this)"> <span>Select All</span></label>
+          ${vals.map(v=>`<label class="multiselect-option ms-opt-${esc(c.id)}" data-val="${esc(v)}" data-key="${esc(String(v).toLowerCase())}"><input type="checkbox" value="${esc(v)}" ${active.has(v)?'checked':''} onchange="window.updateFilterState('${esc(c.id)}', this)"><span>${esc(v)}</span></label>`).join('')}
+        </div>
+      </div>`;
+    }).join('');
+    host.innerHTML=html;
+    wireDropdownHeaders(); updateAllHeaders(); syncSelectAllStates();
+    const reassign=document.getElementById('reassign-target-rep');
+    if(reassign){ const reps=optionValues(REP); reassign.innerHTML='<option value="">-- Select Representative --</option>'+reps.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join(''); }
+  }
+  function wireDropdownHeaders(){
+    document.querySelectorAll('.multiselect-header[data-indexed-filter="1"]').forEach(head=>{
+      head.onclick=function(e){
+        e.preventDefault(); e.stopPropagation();
+        const wrap=head.closest('.multiselect-container'); const drop=wrap&&wrap.querySelector('.multiselect-dropdown'); if(!drop) return false;
+        const open=drop.classList.contains('show');
+        document.querySelectorAll('.multiselect-dropdown.show').forEach(d=>{ if(d!==drop) d.classList.remove('show'); });
+        if(open){ drop.classList.remove('show'); return false; }
+        // Important: opening a dropdown is now O(1). No account scans, no updateFilterVisibility.
+        drop.classList.add('show');
+        const input=drop.querySelector('.multiselect-search input'); if(input) setTimeout(()=>input.focus(),0);
+        syncSelectAllStates(drop.getAttribute('data-col'));
+        return false;
+      };
+    });
+  }
+  function syncSelectAllStates(col){
+    const cols=col?[col]:cfg().map(c=>c.id);
+    cols.forEach(id=>{
+      const visible=Array.from(document.querySelectorAll(`#ms-drop-${cssEsc(id)} .ms-opt-${cssEsc(id)}:not(.is-filter-hidden) input[type="checkbox"]`));
+      const all=document.querySelector(`#ms-drop-${cssEsc(id)} .select-all-opt input[type="checkbox"]`);
+      if(all) all.checked=visible.length>0 && visible.every(x=>x.checked);
+    });
+  }
+  function applySearchOnly(id,term){
+    const q=String(term||'').toLowerCase();
+    document.querySelectorAll(`#ms-drop-${cssEsc(id)} .ms-opt-${cssEsc(id)}`).forEach(opt=>{
+      const key=opt.getAttribute('data-key')||'';
+      opt.classList.toggle('is-filter-hidden',!!q && !key.includes(q));
+    });
+    syncSelectAllStates(id);
+  }
+  function scheduleApply(preserve=true){ clearTimeout(applyTimer); applyTimer=setTimeout(()=>window.applyFilters(preserve),25); }
+
+  function applyFiltersFast(preservePage=false){
+    const idx=getIndex();
+    const ids=computeFilteredAccountIds();
+    window.teamFilteredAccounts=ids.map(id=>idx.accountById.get(id)).filter(Boolean);
+    const fs=document.getElementById('fs-accts'); if(fs) fs.textContent=window.teamFilteredAccounts.length;
+    const rc=document.getElementById('reassign-count-display'); if(rc) rc.textContent=window.teamFilteredAccounts.length;
+    if(window.activeAccountId && !idx.accountById.has(window.activeAccountId)) window.clearSelection&&window.clearSelection();
+    // Clear bulk selection without a card rerender. renderAccountList below is the one intentional render.
+    if(window.bulkSelectedIds) window.bulkSelectedIds.clear();
+    if(window.updateBulkUI) window.updateBulkUI();
+    if(window.renderAccountList) window.renderAccountList(true,preservePage);
+    window.reportsDirty=true;
+    if(typeof window.updateFilterSubtitle==='function') window.updateFilterSubtitle();
+    if(typeof window.updateGlobalBells==='function') window.updateGlobalBells();
+    return window.teamFilteredAccounts;
+  }
+
+  function installIndexedEngine(){
+    installed=true;
+    IDX=null; buildIndexedFilterModel();
+    window.buildFilterIndex=buildIndexedFilterModel;
+    window.buildFilters=buildFiltersFast;
+    window.applyFilters=applyFiltersFast;
+    window.updateFilterVisibility=function(){ /* intentionally cheap: dropdown option universes are indexed/static until data reload */ syncSelectAllStates(); updateAllHeaders(); };
+    window.filterDropdown=function(id,term){ applySearchOnly(id,term); };
+    window.debouncedFilterDropdown=function(id,term){ clearTimeout(searchTimers[id]); searchTimers[id]=setTimeout(()=>applySearchOnly(id,term),35); };
+    window.updateFilterState=function(colId,checkbox){
+      const set=ensureSet(colId); checkbox.checked?set.add(checkbox.value):set.delete(checkbox.value);
+      document.querySelectorAll(`#ms-drop-${cssEsc(colId)} .ms-opt-${cssEsc(colId)} input[type="checkbox"]`).forEach(chk=>{ if(chk.value===checkbox.value) chk.checked=checkbox.checked; });
+      updateHeader(colId); syncSelectAllStates(colId); if(window.updateFilterSubtitle) window.updateFilterSubtitle(); scheduleApply(true);
+    };
+    window.toggleAllFilter=function(colId,checkbox){
+      const set=ensureSet(colId);
+      const opts=Array.from(document.querySelectorAll(`#ms-drop-${cssEsc(colId)} .ms-opt-${cssEsc(colId)}:not(.is-filter-hidden) input[type="checkbox"]`));
+      opts.forEach(chk=>{ chk.checked=checkbox.checked; checkbox.checked?set.add(chk.value):set.delete(chk.value); });
+      updateHeader(colId); syncSelectAllStates(colId); if(window.updateFilterSubtitle) window.updateFilterSubtitle(); scheduleApply(true);
+    };
+    window.clearBulkSelection=function(){ if(window.bulkSelectedIds) window.bulkSelectedIds.clear(); if(window.updateBulkUI) window.updateBulkUI(); };
+    window.clearAllFilters=function(){
+      cfg().forEach(c=>ensureSet(c.id).clear());
+      if(window.massFilteredIds) window.massFilteredIds.clear();
+      document.querySelectorAll('.multiselect-dropdown input[type="checkbox"]').forEach(chk=>chk.checked=false);
+      const mass=document.getElementById('mass-id-input'); if(mass) mass.value='';
+      const mc=document.getElementById('mass-id-count'); if(mc) mc.textContent='0';
+      if(window.clearDrilldownLock) { try{ window.clearDrilldownLock(); }catch(e){} }
+      updateAllHeaders(); syncSelectAllStates(); applyFiltersFast(false);
+    };
+    buildFiltersFast();
+    applyFiltersFast(false);
+  }
+
+  function moveHelpStatusBesideD365(){
+    const d365=document.getElementById('fv-d365-owner')?.closest('.p-3.border.rounded, .p-3.border, div');
+    const help=document.getElementById('fv-help-select')?.closest('.p-4.border.rounded, .p-4.border, div');
+    if(!d365||!help||d365===help) return;
+    if(help.parentElement&&help.parentElement.classList.contains('act-d365-help-row')) return;
+    let row=document.querySelector('.act-d365-help-row');
+    if(!row){ row=document.createElement('div'); row.className='act-d365-help-row'; d365.parentNode.insertBefore(row,d365); }
+    help.classList.add('act-help-status-card');
+    row.appendChild(d365); row.appendChild(help);
+  }
+  window.moveHelpStatusBesideD365=moveHelpStatusBesideD365;
+  const oldSelect=window.selectAccount;
+  if(typeof oldSelect==='function'){
+    window.selectAccount=async function(){ const r=await oldSelect.apply(this,arguments); setTimeout(moveHelpStatusBesideD365,0); return r; };
+  }
+
+  const oldFetchAll=window.fetchAllData;
+  if(typeof oldFetchAll==='function'){
+    window.fetchAllData=async function(){ const r=await oldFetchAll.apply(this,arguments); setTimeout(()=>{ try{installIndexedEngine(); moveHelpStatusBesideD365();}catch(e){console.warn('Indexed filter install after fetch failed',e);} },0); return r; };
+  }
+  const oldInit=window.initApp;
+  if(typeof oldInit==='function'){
+    window.initApp=async function(){ const r=await oldInit.apply(this,arguments); setTimeout(()=>{ try{installIndexedEngine(); moveHelpStatusBesideD365();}catch(e){console.warn('Indexed filter install after init failed',e);} },0); return r; };
+  }
+
+  document.addEventListener('click',e=>{ if(!e.target.closest('.multiselect-container')) document.querySelectorAll('.multiselect-dropdown.show').forEach(d=>d.classList.remove('show')); },true);
+  setInterval(moveHelpStatusBesideD365,1500);
+})();
+</script>
+<!-- === END COPILOT INDEXED FILTER ENGINE + DASHBOARD LAYOUT CLEANUP 2026-06-03 === -->
+
+
+<!-- === COPILOT INDEXED FILTER LAYOUT HOTFIX 2026-06-03B === -->
+<script>
+(function(){
+  if(window.__ACT_INDEXED_FILTER_LAYOUT_HOTFIX_20260603B) return;
+  window.__ACT_INDEXED_FILTER_LAYOUT_HOTFIX_20260603B=true;
+  const REP='cr714_employeename', ACTION='action';
+  const esc=s=>(window.CSS&&CSS.escape)?CSS.escape(s):String(s).replace(/[^a-zA-Z0-9_-]/g,'\\$&');
+  const str=v=>String(v??'').trim();
+  const normalizeAction=v=>{try{return window.normalizeActionStrict?window.normalizeActionStrict(v)||'':str(v);}catch(e){return str(v);}};
+  const ensureSet=col=>{ if(!window.activeFilters) window.activeFilters={}; if(!(window.activeFilters[col] instanceof Set)) window.activeFilters[col]=new Set(window.activeFilters[col]||[]); return window.activeFilters[col]; };
+  const cfg=()=>window.FILTER_CONFIG||[];
+  const intersect=(a,b)=>{ if(!a) return new Set(b||[]); if(!b) return new Set(); const small=a.size<=b.size?a:b, large=a.size<=b.size?b:a; const out=new Set(); small.forEach(v=>{if(large.has(v))out.add(v)}); return out; };
+  const unionInto=(target,src)=>{ if(src) src.forEach(v=>target.add(v)); return target; };
+  function rebuildIndexIfNeeded(){ if(!window.__ACT_FILTER_INDEX && window.buildFilterIndex) window.buildFilterIndex(); return window.__ACT_FILTER_INDEX; }
+  function selectedUnionIds(idx,col){
+    const set=ensureSet(col); if(!set.size) return null;
+    const map=(idx.valueToIds&&idx.valueToIds[col])||new Map();
+    const ids=new Set(); set.forEach(v=>unionInto(ids,map.get(v))); return ids;
+  }
+  function computeIds(idx){
+    let candidate=null;
+    for(const c of cfg()){
+      const ids=selectedUnionIds(idx,c.id);
+      if(ids) candidate=intersect(candidate,ids);
+      if(candidate&&candidate.size===0) break;
+    }
+    if(window.massFilteredIds&&window.massFilteredIds.size){
+      const mass=new Set(Array.from(window.massFilteredIds).map(v=>String(v).toUpperCase()));
+      const massIds=new Set(); idx.allIds.forEach(id=>{if(mass.has(String(id).toUpperCase()))massIds.add(id)});
+      candidate=intersect(candidate,massIds);
+    }
+    const finalSet=candidate||idx.allIds;
+    return idx.order.filter(id=>finalSet.has(id));
+  }
+  window.applyFilters=function(preservePage=false){
+    const idx=rebuildIndexIfNeeded(); if(!idx) return [];
+    const ids=computeIds(idx);
+    const idSet=new Set(ids);
+    window.teamFilteredAccounts=ids.map(id=>idx.accountById.get(id)).filter(Boolean);
+    const fs=document.getElementById('fs-accts'); if(fs) fs.textContent=window.teamFilteredAccounts.length;
+    const rc=document.getElementById('reassign-count-display'); if(rc) rc.textContent=window.teamFilteredAccounts.length;
+    if(window.activeAccountId && !idSet.has(window.activeAccountId) && window.clearSelection) window.clearSelection();
+    if(window.bulkSelectedIds) window.bulkSelectedIds.clear();
+    if(window.updateBulkUI) window.updateBulkUI();
+    if(window.renderAccountList) window.renderAccountList(true,preservePage);
+    window.reportsDirty=true;
+    if(window.updateFilterSubtitle) window.updateFilterSubtitle();
+    if(window.updateGlobalBells) window.updateGlobalBells();
+    return window.teamFilteredAccounts;
+  };
+  function cardContaining(id){
+    const el=document.getElementById(id); if(!el) return null;
+    let n=el;
+    for(let i=0;n&&i<10;i++,n=n.parentElement){
+      if(n.classList && n.classList.contains('act-d365-help-row')) return null;
+      if(n.querySelector && n.querySelector('#'+id) && n.classList && (n.classList.contains('p-3')||n.classList.contains('p-4')) && (n.classList.contains('border')||String(n.getAttribute('style')||'').includes('border-color'))) return n;
+    }
+    return el.closest('.p-3.border.rounded') || el.closest('.p-4.border.rounded') || el.parentElement;
+  }
+  window.moveHelpStatusBesideD365=function(){
+    const d365=cardContaining('fv-d365-owner');
+    const help=cardContaining('fv-help-select');
+    if(!d365||!help||d365===help) return;
+    if(d365.parentElement&&d365.parentElement.classList.contains('act-d365-help-row')) return;
+    const parent=d365.parentNode;
+    const row=document.createElement('div');
+    row.className='act-d365-help-row';
+    parent.insertBefore(row,d365);
+    help.classList.add('act-help-status-card');
+    row.appendChild(d365);
+    row.appendChild(help);
+  };
+  const oldSelect=window.selectAccount;
+  if(typeof oldSelect==='function' && !oldSelect.__actHelpLayoutHotfix){
+    const wrapped=async function(){ const r=await oldSelect.apply(this,arguments); setTimeout(()=>window.moveHelpStatusBesideD365&&window.moveHelpStatusBesideD365(),0); return r; };
+    wrapped.__actHelpLayoutHotfix=true;
+    window.selectAccount=wrapped;
+  }
+  setTimeout(()=>window.moveHelpStatusBesideD365&&window.moveHelpStatusBesideD365(),500);
+})();
+</script>
+<!-- === END COPILOT INDEXED FILTER LAYOUT HOTFIX 2026-06-03B === -->
 </body>
 </html>
