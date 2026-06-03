@@ -532,4 +532,119 @@ function markRecentFeed(){const now=Date.now();document.querySelectorAll('#feed 
   @media(max-width:1050px){#live .grid{grid-template-columns:1fr!important;}.ac-incoming-head{position:static;}}
 </style>
 <!-- === COPILOT LIVE LEADERBOARD PERMANENCE PATCH 2026-06-03 END === -->
+
+
+<!-- === COPILOT DETAIL FETCH COMPLETION PATCH 2026-06-03 START === -->
+<style>
+  .ac-detail-progress{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0 10px;padding:10px 12px;border:1px solid rgba(56,189,248,.45);background:rgba(56,189,248,.08);border-radius:12px;color:var(--text);font-size:12px;font-weight:850}.ac-detail-progress .warn{color:var(--warn)}.ac-detail-progress .good{color:var(--good)}
+</style>
+<script>
+(function(){
+  if(window.__AC_DETAIL_FETCH_COMPLETION_PATCH_20260603) return;
+  window.__AC_DETAIL_FETCH_COMPLETION_PATCH_20260603 = true;
+
+  const DV_URL='https://org23279050.crm.dynamics.com/api/data/v9.2';
+  const ENTITY='cr714_dt_act_fctbls';
+  const FVX='@OData.Community.Display.V1.FormattedValue';
+  const F=(typeof FACT!=='undefined'?FACT:(window.FACT||{}));
+  const SELECT=(typeof API_SELECT!=='undefined'?API_SELECT:(window.API_SELECT||[]));
+  const fmt=n=>(Number(n)||0).toLocaleString();
+  const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
+  const qs=new URLSearchParams(((location.search||'').replace(/^\?/,''))+'&'+((location.hash||'').replace(/^#/,'')));
+  const scopeKey=qs.get('bridgeKey')||'act_action_checker_scope_v3';
+
+  let activeDetailAbort=null;
+
+  function readScope(){try{return JSON.parse(localStorage.getItem(scopeKey)||'{}')||{}}catch(e){return{}}}
+  function listFromPayload(p,...keys){for(const k of keys){const v=p[k]; if(Array.isArray(v)&&v.length)return v.map(clean).filter(Boolean); if(typeof v==='string'&&v.trim())return v.split(/[|,;]/).map(clean).filter(Boolean);} return []}
+  function detailRange(){const p=readScope();return {start:qs.get('startDate')||qs.get('start')||p.startDate||'',end:qs.get('endDate')||qs.get('end')||p.endDate||''}}
+  function detailActions(){const p=readScope();return listFromPayload(p,'effectiveActions','selectedActions','allowedActions','actions')}
+  function od(v){return String(v??'').replace(/'/g,"''")}
+  function rowAction(r){try{return (typeof actionValue==='function'?actionValue(r):(r?.cr714_effectiveaction||r?.cr714_action||r?.cr714_emailaction||r?.cr714_actionfromnotetag||''))||''}catch(e){return ''}}
+  function actionAllowed(r,actions){if(!actions||!actions.length)return true;const a=rowAction(r).toLowerCase();return actions.some(x=>a.includes(String(x).toLowerCase()))}
+  function toIsoStart(d){return new Date(d+'T00:00:00Z').toISOString()}
+  function toIsoEnd(d){return new Date(d+'T23:59:59Z').toISOString()}
+  function segments(start,end){
+    const s=start?new Date(start+'T00:00:00Z'):new Date(Date.now()-7*86400000), e=end?new Date(end+'T23:59:59Z'):new Date();
+    const days=Math.max(1,Math.ceil((e-s)/86400000));
+    const step=days<=14?1:(days<=90?7:14);
+    const out=[]; let cur=new Date(s);
+    while(cur<=e){let nxt=new Date(cur.getTime()+step*86400000-1000); if(nxt>e)nxt=e; out.push({start:cur.toISOString(),end:nxt.toISOString()}); cur=new Date(nxt.getTime()+1000)}
+    return out;
+  }
+  function progress(msg,tone=''){
+    let host=document.getElementById('acDetailProgress');
+    if(!host){host=document.createElement('div');host.id='acDetailProgress';host.className='ac-detail-progress';const table=document.getElementById('table');const reps=document.getElementById('reps');(table||reps||document.querySelector('.content'))?.prepend(host)}
+    host.innerHTML=`<span class="${tone}">${msg}</span>`;
+    const rs=document.getElementById('rowStatus'); if(rs)rs.textContent=msg.replace(/<[^>]*>/g,'');
+    if(typeof updateLoading==='function') updateLoading(0,msg.replace(/<[^>]*>/g,''));
+  }
+  async function fetchJsonWithTimeout(url,token,signal,attempt=0){
+    const ctrl=new AbortController();
+    const timer=setTimeout(()=>ctrl.abort(),45000);
+    const linked=()=>ctrl.abort(); if(signal)signal.addEventListener('abort',linked,{once:true});
+    try{
+      const res=await fetch(url,{signal:ctrl.signal,headers:{Authorization:`Bearer ${token}`,Accept:'application/json','OData-Version':'4.0','OData-MaxVersion':'4.0','Prefer':'odata.include-annotations="OData.Community.Display.V1.FormattedValue", odata.maxpagesize=1000'}});
+      if((res.status===429||res.status>=500)&&attempt<3){const wait=(Number(res.headers.get('Retry-After'))||Math.pow(2,attempt)+1)*1000;await new Promise(r=>setTimeout(r,wait));return fetchJsonWithTimeout(url,token,signal,attempt+1)}
+      if(!res.ok)throw new Error(`${res.status}: ${await res.text()}`);
+      return res.json();
+    } finally {clearTimeout(timer); if(signal)signal.removeEventListener('abort',linked);}
+  }
+  async function fetchDetailResilient(rep){
+    const token=await getToken();
+    const r=detailRange(), actions=detailActions();
+    const segs=segments(r.start,r.end);
+    const selected=SELECT.length?SELECT:['cr714_dt_act_fctblid','createdon','modifiedon','cr714_accountnumber','cr714_accountrep','cr714_action','cr714_actionfromnotetag','cr714_activitydate','cr714_activitytype','cr714_companyname','cr714_contactname','cr714_effectiveaction','cr714_emailaction','cr714_emailstatus','cr714_emailtemplate','cr714_notetext','cr714_notetextraw','cr714_repfromnote','cr714_sourcetype'];
+    const repFilter=`(${F.repFromNote||'cr714_repfromnote'} eq '${od(rep)}' or ${F.accountRep||'cr714_accountrep'} eq '${od(rep)}')`;
+    const out=[], seen=new Set();
+    activeDetailAbort=new AbortController();
+    progress(`Detail fetch started for ${rep} • ${segs.length} date slice(s) • action filters applied client-side`, 'warn');
+    for(let si=0; si<segs.length; si++){
+      const sg=segs[si];
+      const filters=[`${F.activityDate||'cr714_activitydate'} ge ${sg.start}`,`${F.activityDate||'cr714_activitydate'} le ${sg.end}`,repFilter];
+      let url=`${DV_URL}/${ENTITY}?$select=${selected.join(',')}&$filter=${encodeURIComponent(filters.join(' and '))}&$orderby=${F.activityDate||'cr714_activitydate'} desc`;
+      let page=0;
+      while(url){
+        if(activeDetailAbort.signal.aborted) throw new Error('Detail fetch cancelled.');
+        const j=await fetchJsonWithTimeout(url,token,activeDetailAbort.signal);
+        const rows=(j.value||[]).map(x=>typeof normalize==='function'?normalize(x):x).filter(x=>actionAllowed(x,actions));
+        for(const row of rows){const k=(typeof keyOf==='function'?keyOf(row):(row._key||row.cr714_dt_act_fctblid||JSON.stringify(row))); if(!seen.has(k)){seen.add(k);out.push(row)}}
+        page++;
+        progress(`Loading ${rep}: ${fmt(out.length)} detail rows • slice ${si+1}/${segs.length} • page ${page}`, 'warn');
+        if(out.length && (out.length<2500 || out.length%1000<rows.length)){
+          try{state.rows=out.slice();state.filtered=out.slice(); if(typeof renderTable==='function')renderTable(); if(typeof renderReps==='function')renderReps();}catch(e){console.warn('partial render skipped',e)}
+        }
+        url=j['@odata.nextLink']||'';
+        await new Promise(r=>setTimeout(r,0));
+      }
+    }
+    return out;
+  }
+
+  window.acCancelDetailFetch=function(){if(activeDetailAbort)activeDetailAbort.abort();};
+  window.acLoadManagerRepDetails=async function(rep){
+    rep=clean(rep); if(!rep)return;
+    if(activeDetailAbort)activeDetailAbort.abort();
+    if(typeof showLoading==='function')showLoading('Loading scoped records',`Loading ${rep}; keeping counts available while rows stream in...`);
+    try{
+      const host=document.getElementById('acDetailProgress'); if(host)host.remove();
+      const rows=await fetchDetailResilient(rep);
+      state.rows=rows; state.filtered=rows.slice();
+      if(typeof renderAll==='function')renderAll();
+      if(typeof openRep==='function')openRep(rep);
+      progress(`Loaded ${fmt(rows.length)} detail rows for ${rep}.`, 'good');
+      try{console.info('detail-rendered',{rep,rows:rows.length});}catch(e){}
+    }catch(e){
+      console.error(e);
+      progress(`Detail fetch failed for ${rep}: ${(e&&e.message)||e}`, 'warn');
+      if(typeof toast==='function')toast('Could not load rep details: '+((e&&e.message)||e),12000);
+    }finally{
+      activeDetailAbort=null;
+      if(typeof hideLoading==='function')hideLoading();
+    }
+  };
+})();
+</script>
+<!-- === COPILOT DETAIL FETCH COMPLETION PATCH 2026-06-03 END === -->
+
 </body></html>
