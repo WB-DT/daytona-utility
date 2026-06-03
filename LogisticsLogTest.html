@@ -11127,5 +11127,291 @@ window.selectAccount=async function(id){
 })();
 </script>
 
+
+
+<!-- =========================================================
+     COPILOT V5 MANAGER OVERRIDE SCROLL + ACT LEGACY HISTORY BACKFILL
+     2026-06-03D
+     - Manager Override may extend vertically, but scrolls inside its host.
+     - If fact history is empty, render original ACT-style dataset notes.
+     - Silently backfill those legacy notes into cr714_dt_act_fctbls in
+       small async chunks so the UI stays responsive.
+     ========================================================= -->
+<style id="copilot-v5-manager-scroll-legacy-history-css">
+  /* The override card itself is the host box. It may be tall, but its contents
+     are clipped/scrollable inside the card instead of escaping into nearby UI. */
+  #active-form .act-manager-override-clean,
+  #active-form .act-manager-note-fullwidth.act-manager-override-clean{
+    max-height:min(78vh,720px)!important;
+    overflow-y:auto!important;
+    overflow-x:hidden!important;
+    overscroll-behavior:contain!important;
+    scrollbar-gutter:stable!important;
+    contain:layout paint!important;
+  }
+  #active-form .act-manager-override-clean::-webkit-scrollbar{width:8px;height:8px;}
+  #active-form .act-manager-override-clean::-webkit-scrollbar-thumb{background:var(--primary);border-radius:999px;}
+  #active-form .act-manager-override-clean::-webkit-scrollbar-track{background:color-mix(in srgb,var(--bg-app) 78%,transparent);border-radius:999px;}
+  #active-form .act-manager-override-clean > *,
+  #active-form .act-manager-override-clean textarea,
+  #active-form .act-manager-override-clean select,
+  #active-form .act-manager-override-clean button,
+  #active-form .act-manager-override-clean label{
+    max-width:100%!important;
+    min-width:0!important;
+    box-sizing:border-box!important;
+  }
+  #active-form .act-manager-override-clean #fv-manager-note{
+    max-height:none!important;
+    overflow:auto!important;
+  }
+  #active-form .act-manager-override-clean .act-manager-override-actions,
+  #active-form .act-manager-override-clean .act-manager-override-options{
+    position:relative!important;
+    z-index:1!important;
+  }
+  /* Original ACT-style fallback cards, used only when fact table is empty. */
+  #fv-history .act-legacy-history-banner{
+    border:1px solid color-mix(in srgb,var(--primary) 35%,var(--border-color));
+    background:color-mix(in srgb,var(--bg-card) 88%,var(--primary) 7%);
+    color:var(--text-muted);
+    border-radius:14px;
+    padding:10px 12px;
+    font-size:10px;
+    font-weight:900;
+    text-transform:uppercase;
+    letter-spacing:.06em;
+    box-shadow:var(--shadow);
+  }
+  #fv-history .act-legacy-backfill-subtle{
+    font-size:9px;
+    font-weight:850;
+    color:var(--text-muted);
+    opacity:.82;
+    text-align:center;
+    padding:2px 0 6px 0;
+  }
+</style>
+<script id="copilot-v5-manager-scroll-legacy-history-js">
+(function(){
+  if(window.__ACT_V5_MANAGER_SCROLL_LEGACY_HISTORY_20260603D) return;
+  window.__ACT_V5_MANAGER_SCROLL_LEGACY_HISTORY_20260603D=true;
+
+  const FACT_SET='cr714_dt_act_fctbls';
+  const BACKFILL_FLAG_PREFIX='act_legacy_fact_backfill_v1:';
+  const q=(s,r=document)=>r.querySelector(s);
+  const qa=(s,r=document)=>Array.from(r.querySelectorAll(s));
+  const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+  const clean=s=>String(s??'').replace(/\r/g,'').trim();
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+  const yieldPaint=()=>new Promise(r=>(window.requestIdleCallback?requestIdleCallback(()=>r(),{timeout:350}):requestAnimationFrame(()=>r())));
+  function accountById(id){return (window.teamFilteredAccounts||[]).find(a=>String(a.cr714_id)===String(id))||(window.mergedAccounts||[]).find(a=>String(a.cr714_id)===String(id));}
+  function safeDate(v,fallback){
+    if(v==='Permanent') return new Date().toISOString();
+    const d=new Date(v||fallback||Date.now());
+    return isNaN(d)?new Date().toISOString():d.toISOString();
+  }
+  function datasetLabel(src){
+    const v=String(src||'');
+    if(v==='AM'||/accountmanagement/i.test(v)) return 'Account Management';
+    if(/cadence/i.test(v)) return 'Cadence';
+    if(/prospecting/i.test(v)) return 'Prospecting';
+    if(/louise|brown|lb/i.test(v)) return 'Louise Brown';
+    if(v==='Profile') return 'Profile';
+    return v||'Dataset Notes';
+  }
+  function sourceBadgeClass(src){
+    const v=String(src||'');
+    if(v==='AM'||/account/i.test(v)) return 'bg-green-100 text-green-800 border-green-300';
+    if(/cadence/i.test(v)) return 'bg-blue-100 text-blue-800 border-blue-300';
+    if(/louise|brown|lb/i.test(v)) return 'bg-purple-100 text-purple-800 border-purple-300';
+    return 'bg-orange-100 text-orange-800 border-orange-300';
+  }
+  function historyKey(accountId, h){
+    return ['legacy',accountId,h.src||'',h.date||'',h.author||'',String(h.text||'').slice(0,120)].join('|').toLowerCase();
+  }
+
+  function buildLegacyEvents(account){
+    if(!account) return [];
+    let rows=[];
+    try{
+      (account.sources||[]).forEach(src=>{
+        let combined=src.rawNotes||'';
+        if(src.message && String(src.message).trim()) combined += '\n------------------------------\n' + src.message;
+        if(combined && typeof window.parseNoteHistory==='function'){
+          rows=rows.concat(window.parseNoteHistory(combined, src.type||datasetLabel(src.table), account.modifiedon));
+        }
+      });
+      if(account.importantInfo && String(account.importantInfo).trim()){
+        rows.push({date:'Permanent',author:'Important Account Info',text:String(account.importantInfo).trim(),src:'Profile',tags:['D365 Field'],touchType:'Note'});
+      }
+      const seen=new Set();
+      rows=rows.filter(h=>{
+        if(!h || !String(h.text||h.emailSubject||h.historicalAction||'').trim()) return false;
+        const k=historyKey(account.cr714_id,h);
+        if(seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      rows.sort((a,b)=>{
+        if(a.date==='Permanent') return -1;
+        if(b.date==='Permanent') return 1;
+        const da=new Date(a.date).getTime()||0, db=new Date(b.date).getTime()||0;
+        return db-da;
+      });
+    }catch(e){console.warn('Legacy history build failed',e);}
+    return rows;
+  }
+
+  function renderLegacyActHistory(accountId, legacyRows, backfillState){
+    const host=q('#fv-history'); if(!host) return;
+    const rows=legacyRows||[];
+    if(!rows.length) return;
+    window.currentModalHistory=rows;
+    host.innerHTML =
+      `<div class="act-legacy-history-banner"><i class="fas fa-database mr-2" style="color:var(--primary)"></i>Fact table empty — showing original ACT dataset history while legacy rows are queued for silent fact-table backfill.</div>`+
+      rows.map(h=>{
+        const srcBadge=h.src?`<span class="px-1.5 py-0.5 rounded text-[8px] border font-bold ${sourceBadgeClass(h.src)}">${esc(h.src)}</span>`:'';
+        const tags=(h.tags||[]).filter(Boolean).map(t=>`<span class="px-1.5 py-0.5 rounded text-[8px] border font-bold" style="background:var(--bg-hover);border-color:var(--border-color);color:var(--text-muted);">${esc(t)}</span>`).join(' ');
+        const meta=[];
+        if(h.historicalAction) meta.push(`<b>Action:</b> ${esc(h.historicalAction)}`);
+        if(h.emailSubject) meta.push(`<b>Subject:</b> ${esc(h.emailSubject)}`);
+        if(h.metaLoc) meta.push(`<b>Loc:</b> ${esc(h.metaLoc)}`);
+        if(h.metaDm) meta.push(`<b>DM:</b> ${esc(h.metaDm)}`);
+        if(h.metaComp) meta.push(`<b>Comp:</b> ${esc(h.metaComp)}`);
+        const metaHtml=meta.length?`<div class="flex flex-wrap gap-3 mb-2 text-[10px] p-2 rounded border" style="background-color:var(--bg-app);border-color:var(--border-color);color:var(--text-muted);">${meta.map(m=>`<span>${m}</span>`).join('')}</div>`:'';
+        const typeIcon=h.touchType==='Email'?'<i class="fas fa-envelope mr-1" style="color:var(--chart-email);"></i>':h.touchType==='Masonville'?'<i class="fas fa-link mr-1" style="color:var(--chart-masonville);"></i>':'<i class="fas fa-comment-alt mr-1" style="color:var(--chart-note);"></i>';
+        const linkBtn=h.extractedLink?`<a href="${esc(h.extractedLink)}" target="_blank" class="inline-flex items-center gap-1 mt-3 px-2 py-1 rounded text-[10px] font-black" style="background-color:var(--primary);color:var(--primary-fg);text-decoration:none;"><i class="fas fa-external-link-alt"></i> Open in Masonville</a>`:'';
+        return `<div class="note-card border" style="border-color:var(--border-color);"><div class="p-2 flex justify-between items-center border-b" style="background-color:var(--bg-hover);border-color:var(--border-color);"><span class="flex items-center gap-2 font-bold text-[11px]" style="color:var(--text-muted);">${srcBadge}<span>${typeIcon}${esc(h.date||'--')}</span></span><span class="font-black text-[11px] uppercase tracking-wider" style="color:var(--primary);">${esc(h.author||'System')}</span></div><div class="p-3 text-sm" style="color:var(--text-main);">${tags?`<div class="flex flex-wrap gap-1 mb-2">${tags}</div>`:''}${metaHtml}<div class="whitespace-pre-wrap leading-relaxed">${esc(h.text||'').replace(/\n/g,'<br>')}</div>${linkBtn}</div></div>`;
+      }).join('')+
+      `<div class="act-legacy-backfill-subtle">${backfillState||'Backfill runs silently in the background; you can keep using the app.'}</div>`;
+  }
+
+  function legacyFactPayload(account,h){
+    const d=safeDate(h.date, account&&account.modifiedon);
+    const action=clean(h.historicalAction)||clean(h.touchType)||'Dataset Note';
+    const dataset=datasetLabel(h.src);
+    return {
+      cr714_accountnumber:clean(account&&account.cr714_id),
+      cr714_accountid:clean(account&&account.cr714_id),
+      cr714_d365accountid:clean(account&&account.cr714_id),
+      cr714_companyname:clean(account&&account.company),
+      cr714_accountname:clean(account&&account.company),
+      cr714_accountrep:clean(account&&account.rep)||'Unassigned',
+      cr714_repfromnote:clean(h.author)||clean(account&&account.rep)||'System',
+      cr714_action:action,
+      cr714_effectiveaction:action,
+      cr714_activitytype:clean(h.touchType)||'Note',
+      cr714_touchtype:clean(h.touchType)||'Note',
+      cr714_actionmessage:clean(h.text),
+      cr714_note:clean(h.text),
+      cr714_notes:clean(h.text),
+      cr714_notetext:clean(h.text),
+      cr714_notetextraw:clean(h.text),
+      cr714_subject:clean(h.emailSubject),
+      cr714_activitydate:d,
+      cr714_activitydateonly:d.slice(0,10),
+      cr714_activitymonth:d.slice(0,7),
+      cr714_activitynaturalkey:historyKey(account&&account.cr714_id,h),
+      cr714_isemailactivity:clean(h.touchType).toLowerCase()==='email',
+      cr714_dataset:dataset,
+      cr714_source:'ACT Legacy Dataset Notes',
+      cr714_sourcetype:dataset,
+      cr714_actionfromnotetag:clean(h.historicalAction),
+      cr714_emailtemplate:clean(h.emailSubject),
+      cr714_managernotes:/manager/i.test(String(h.author)+' '+String(h.text))?clean(h.text):'',
+      cr714_snapshotjson:JSON.stringify({backfilledFrom:'legacyDatasetNotes',accountId:account&&account.cr714_id,src:h.src,date:h.date,author:h.author,tags:h.tags||[],createdAt:new Date().toISOString()})
+    };
+  }
+
+  function removeBadProperty(payload,txt){
+    const m=String(txt||'').match(/(?:property|Property) ['"]?([a-zA-Z0-9_]+)['"]?/i)||String(txt||'').match(/Could not find a property named ['"]?([a-zA-Z0-9_]+)['"]?/i);
+    if(m&&m[1]&&Object.prototype.hasOwnProperty.call(payload,m[1])){delete payload[m[1]];return true;}
+    const optional=Object.keys(payload).filter(k=>!['cr714_accountnumber','cr714_action','cr714_activitytype','cr714_actionmessage','cr714_activitydate','cr714_activitynaturalkey'].includes(k));
+    if(optional.length){delete payload[optional[optional.length-1]];return true;}
+    return false;
+  }
+  async function postFact(payload){
+    if(typeof window.getToken!=='function') return false;
+    const token=await window.getToken();
+    const headers={Authorization:`Bearer ${token}`,'Content-Type':'application/json','Prefer':'return=representation'};
+    const body={...payload};
+    for(let i=0;i<14;i++){
+      const res=await fetch(`${window.DATAVERSE_URL}/${FACT_SET}`,{method:'POST',headers,body:JSON.stringify(body)});
+      if(res.ok) return true;
+      const err=await res.text().catch(()=>res.statusText);
+      if(!removeBadProperty(body,err)){console.warn('Legacy fact backfill row skipped',err); return false;}
+      await yieldPaint();
+    }
+    return false;
+  }
+  async function backfillLegacySilently(account, rows){
+    if(!account||!account.cr714_id||!rows||!rows.length) return;
+    const flag=BACKFILL_FLAG_PREFIX+account.cr714_id;
+    if(sessionStorage.getItem(flag)==='running'||localStorage.getItem(flag)==='done') return;
+    sessionStorage.setItem(flag,'running');
+    let ok=0;
+    try{
+      const capped=rows.slice(0,250);
+      for(let i=0;i<capped.length;i++){
+        try{ if(await postFact(legacyFactPayload(account,capped[i]))) ok++; }
+        catch(e){ console.warn('Legacy fact backfill failed',e); }
+        if(i%2===1) await yieldPaint();
+        if(i%12===11) await sleep(35);
+      }
+      localStorage.setItem(flag,'done');
+    }finally{
+      sessionStorage.removeItem(flag);
+    }
+  }
+
+  function maybeRenderLegacyAndBackfill(accountId){
+    const account=accountById(accountId); if(!account) return;
+    const st=window.__actFactHistoryState&&window.__actFactHistoryState[accountId];
+    if(st && st.loading) return;
+    if(st && Array.isArray(st.rows) && st.rows.length>0) return;
+    const legacy=buildLegacyEvents(account);
+    if(!legacy.length) return;
+    renderLegacyActHistory(accountId, legacy);
+    backfillLegacySilently(account, legacy);
+  }
+
+  const oldRender=window.renderFactHistory;
+  if(typeof oldRender==='function' && !oldRender.__actLegacyFallbackWrapped){
+    const wrapped=function(accountId){
+      oldRender.apply(this,arguments);
+      try{ maybeRenderLegacyAndBackfill(accountId||window.activeAccountId); }catch(e){console.warn('Legacy history fallback render skipped',e);}
+    };
+    wrapped.__actLegacyFallbackWrapped=true;
+    window.renderFactHistory=wrapped;
+  }
+  const oldLoad=window.loadFactHistoryRange;
+  if(typeof oldLoad==='function' && !oldLoad.__actLegacyFallbackWrapped){
+    const wrapped=async function(accountId){
+      const r=await oldLoad.apply(this,arguments);
+      setTimeout(()=>{try{maybeRenderLegacyAndBackfill(accountId||window.activeAccountId);}catch(e){}},0);
+      setTimeout(()=>{try{maybeRenderLegacyAndBackfill(accountId||window.activeAccountId);}catch(e){}},500);
+      return r;
+    };
+    wrapped.__actLegacyFallbackWrapped=true;
+    window.loadFactHistoryRange=wrapped;
+  }
+  const oldSelect=window.selectAccount;
+  if(typeof oldSelect==='function' && !oldSelect.__actLegacyFallbackWrapped){
+    const wrapped=async function(id){
+      const r=await oldSelect.apply(this,arguments);
+      const accountId=id||window.activeAccountId;
+      setTimeout(()=>{try{maybeRenderLegacyAndBackfill(accountId);}catch(e){}},350);
+      setTimeout(()=>{try{maybeRenderLegacyAndBackfill(accountId);}catch(e){}},1300);
+      return r;
+    };
+    wrapped.__actLegacyFallbackWrapped=true;
+    window.selectAccount=wrapped;
+  }
+
+  window.renderLegacyActHistoryFallback=function(){ maybeRenderLegacyAndBackfill(window.activeAccountId); };
+})();
+</script>
+
 </body>
 </html>
