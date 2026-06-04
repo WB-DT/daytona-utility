@@ -379,6 +379,15 @@
             #bug-image-stage { min-height: 300px; }
         }
 
+
+        #bug-image-stage.bug-annotation-active {
+            border-color: rgba(239, 68, 68, 0.65);
+            box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.10);
+        }
+        #bug-annotation-canvas.bug-annotation-drawing {
+            cursor: crosshair;
+        }
+
 </style>
 
 <script>
@@ -3619,6 +3628,7 @@ document.getElementById('script-modal').style.display='flex';
     let bugImage = null;
     let bugCircles = [];
     let bugStartPoint = null;
+    let bugPreviewPoint = null;
     let bugImageScale = 1;
     let bugScreenshotSource = '';
 
@@ -3660,9 +3670,13 @@ document.getElementById('script-modal').style.display='flex';
             window.setBugAnnotateMode('circle');
             drawBugCanvas();
             bugCanvas.onmousedown = handleBugCanvasMouseDown;
+            bugCanvas.onmousemove = handleBugCanvasMouseMove;
             bugCanvas.onmouseup = handleBugCanvasMouseUp;
-            bugCanvas.ontouchstart = function(e) { e.preventDefault(); handleBugCanvasMouseDown(e.touches[0]); };
-            bugCanvas.ontouchend = function(e) { e.preventDefault(); handleBugCanvasMouseUp(e.changedTouches[0]); };
+            bugCanvas.onmouseleave = handleBugCanvasMouseUp;
+            bugCanvas.ontouchstart = handleBugCanvasTouchStart;
+            bugCanvas.ontouchmove = handleBugCanvasTouchMove;
+            bugCanvas.ontouchend = handleBugCanvasTouchEnd;
+            bugCanvas.ontouchcancel = handleBugCanvasTouchEnd;
         };
         bugImage.src = dataUrl;
     }
@@ -3671,43 +3685,125 @@ document.getElementById('script-modal').style.display='flex';
         if (!bugCtx || !bugImage || !bugCanvas) return;
         bugCtx.clearRect(0, 0, bugCanvas.width, bugCanvas.height);
         bugCtx.drawImage(bugImage, 0, 0, bugCanvas.width, bugCanvas.height);
-        bugCtx.lineWidth = 5;
+
+        bugCircles.forEach(shape => drawBugEllipse(shape, false));
+
+        if (bugStartPoint && bugPreviewPoint) {
+            drawBugEllipse({ start: bugStartPoint, end: bugPreviewPoint }, true);
+        }
+    }
+
+    function drawBugEllipse(shape, isPreview = false) {
+        const start = shape.start || { x: shape.x, y: shape.y };
+        const end = shape.end || { x: shape.x + shape.w, y: shape.y + shape.h };
+        const left = Math.min(start.x, end.x);
+        const top = Math.min(start.y, end.y);
+        const width = Math.abs(end.x - start.x);
+        const height = Math.abs(end.y - start.y);
+        if (width < 2 || height < 2) return;
+
+        const cx = left + width / 2;
+        const cy = top + height / 2;
+        const rx = width / 2;
+        const ry = height / 2;
+
+        bugCtx.save();
+        bugCtx.lineWidth = isPreview ? 4 : 5;
         bugCtx.strokeStyle = '#ef4444';
-        bugCtx.fillStyle = 'rgba(239, 68, 68, 0.10)';
-        bugCircles.forEach(circle => {
-            bugCtx.beginPath();
-            bugCtx.arc(circle.x, circle.y, circle.radius, 0, Math.PI * 2);
-            bugCtx.fill();
-            bugCtx.stroke();
-        });
+        bugCtx.fillStyle = isPreview ? 'rgba(239, 68, 68, 0.06)' : 'rgba(239, 68, 68, 0.10)';
+        if (isPreview) bugCtx.setLineDash([10, 7]);
+        bugCtx.beginPath();
+        bugCtx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+        bugCtx.fill();
+        bugCtx.stroke();
+        bugCtx.restore();
     }
 
     function getBugCanvasPoint(e) {
         const rect = bugCanvas.getBoundingClientRect();
+        const rawX = (e.clientX - rect.left) * (bugCanvas.width / rect.width);
+        const rawY = (e.clientY - rect.top) * (bugCanvas.height / rect.height);
         return {
-            x: (e.clientX - rect.left) * (bugCanvas.width / rect.width),
-            y: (e.clientY - rect.top) * (bugCanvas.height / rect.height)
+            x: Math.max(0, Math.min(bugCanvas.width, rawX)),
+            y: Math.max(0, Math.min(bugCanvas.height, rawY))
         };
     }
 
-    function handleBugCanvasMouseDown(e) {
+    function beginBugEllipse(e) {
         if (!bugCanvas || (window.__bugAnnotateMode || 'circle') !== 'circle') return;
+        e?.preventDefault?.();
         bugStartPoint = getBugCanvasPoint(e);
+        bugPreviewPoint = { ...bugStartPoint };
+        bugCanvas.classList.add('bug-annotation-drawing');
+        document.getElementById('bug-image-stage')?.classList.add('bug-annotation-active');
+        drawBugCanvas();
+    }
+
+    function updateBugEllipsePreview(e) {
+        if (!bugCanvas || !bugStartPoint) return;
+        e?.preventDefault?.();
+        bugPreviewPoint = getBugCanvasPoint(e);
+        drawBugCanvas();
+    }
+
+    function commitBugEllipse(e) {
+        if (!bugCanvas || !bugStartPoint) return;
+        e?.preventDefault?.();
+        const endPoint = getBugCanvasPoint(e);
+        const width = Math.abs(endPoint.x - bugStartPoint.x);
+        const height = Math.abs(endPoint.y - bugStartPoint.y);
+
+        if (width >= 10 && height >= 10) {
+            bugCircles.push({
+                start: { ...bugStartPoint },
+                end: { ...endPoint }
+            });
+        }
+
+        bugStartPoint = null;
+        bugPreviewPoint = null;
+        bugCanvas.classList.remove('bug-annotation-drawing');
+        document.getElementById('bug-image-stage')?.classList.remove('bug-annotation-active');
+        drawBugCanvas();
+    }
+
+    function handleBugCanvasMouseDown(e) {
+        beginBugEllipse(e);
+    }
+
+    function handleBugCanvasMouseMove(e) {
+        updateBugEllipsePreview(e);
     }
 
     function handleBugCanvasMouseUp(e) {
-        if (!bugCanvas || (window.__bugAnnotateMode || 'circle') !== 'circle' || !bugStartPoint) return;
-        const endPoint = getBugCanvasPoint(e);
-        const dx = endPoint.x - bugStartPoint.x;
-        const dy = endPoint.y - bugStartPoint.y;
-        const radius = Math.max(8, Math.sqrt(dx * dx + dy * dy));
-        bugCircles.push({ x: bugStartPoint.x, y: bugStartPoint.y, radius });
-        bugStartPoint = null;
-        drawBugCanvas();
+        commitBugEllipse(e);
+    }
+
+    function handleBugCanvasTouchStart(e) {
+        if (!e.touches || !e.touches[0]) return;
+        beginBugEllipse(e.touches[0]);
+        e.preventDefault();
+    }
+
+    function handleBugCanvasTouchMove(e) {
+        if (!e.touches || !e.touches[0]) return;
+        updateBugEllipsePreview(e.touches[0]);
+        e.preventDefault();
+    }
+
+    function handleBugCanvasTouchEnd(e) {
+        const touch = e.changedTouches && e.changedTouches[0];
+        if (!touch) return;
+        commitBugEllipse(touch);
+        e.preventDefault();
     }
 
     window.clearBugAnnotations = function() {
         bugCircles = [];
+        bugStartPoint = null;
+        bugPreviewPoint = null;
+        bugCanvas?.classList.remove('bug-annotation-drawing');
+        document.getElementById('bug-image-stage')?.classList.remove('bug-annotation-active');
         drawBugCanvas();
     }
 
@@ -3758,7 +3854,7 @@ document.getElementById('script-modal').style.display='flex';
                     isInline: true,
                     contentId: inlineContentId
                 });
-                inlineImageHtml = `<h3 style="margin-top:18px;color:#ef4444;">ACT Screenshot</h3><p style="font-size:12px;color:#666;">Source: ${bugScreenshotSource || 'captured'} screenshot. Red circles are rep annotations.</p><img src="cid:${inlineContentId}" alt="ACT bug screenshot" style="max-width:100%;border:1px solid #ddd;border-radius:8px;display:block;">`;
+                inlineImageHtml = `<h3 style="margin-top:18px;color:#ef4444;">ACT Screenshot</h3><p style="font-size:12px;color:#666;">Source: ${bugScreenshotSource || 'captured'} screenshot. Red ovals/circles are rep annotations.</p><img src="cid:${inlineContentId}" alt="ACT bug screenshot" style="max-width:100%;border:1px solid #ddd;border-radius:8px;display:block;">`;
             }
 
             const safeIssueHtml = issue.replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])).replace(/\n/g, '<br>');
@@ -3791,7 +3887,7 @@ document.getElementById('script-modal').style.display='flex';
             if (descriptionEl) descriptionEl.value = '';
             const screenshotInput = document.getElementById('bug-report-screenshot');
             if (screenshotInput) screenshotInput.value = '';
-            bugImage = null; bugCanvas = null; bugCtx = null; bugCircles = []; bugScreenshotSource = '';
+            bugImage = null; bugCanvas = null; bugCtx = null; bugCircles = []; bugStartPoint = null; bugPreviewPoint = null; bugScreenshotSource = '';
             document.getElementById('bug-image-placeholder')?.classList.remove('hidden');
             const canvas = document.getElementById('bug-annotation-canvas');
             if (canvas) canvas.style.display = 'none';
@@ -4460,7 +4556,7 @@ document.getElementById('script-modal').style.display='flex';
 
                     <div class="flex flex-wrap gap-2">
                         <button id="bug-circle-tool-btn" type="button" class="btn-secondary text-xs" onclick="window.setBugAnnotateMode('circle')">
-                            <i class="far fa-circle mr-1"></i> Circle Tool
+                            <i class="far fa-circle mr-1"></i> Circle / Lasso Tool
                         </button>
                         <button type="button" class="btn-secondary text-xs" onclick="window.clearBugAnnotations()">
                             <i class="fas fa-eraser mr-1"></i> Clear Circles
@@ -4468,7 +4564,7 @@ document.getElementById('script-modal').style.display='flex';
                     </div>
 
                     <p class="text-xs text-muted leading-relaxed">
-                        Tip: click-drag on the screenshot to draw a red circle around the problem area. Uploading a file replaces the automatic capture.
+                        How to circle the issue: click and hold on one corner of the problem area, drag to the opposite corner like Paint, then release. A red oval preview follows your drag. Use Clear Circles to start over. Uploading a file replaces the automatic capture.
                     </p>
                 </div>
 
