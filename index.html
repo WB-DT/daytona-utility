@@ -8,6 +8,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 
     <style>
         :root { --bg-app: #f1f5f9; --bg-card: #ffffff; --bg-input: #f8fafc; --bg-header: #f8fafc; --text-main: #0f172a; --text-muted: #64748b; --primary: #2563eb; --primary-fg: #ffffff; --accent-danger: #ef4444; --accent-success: #22c55e; --accent-warning: #eab308; --border-color: #cbd5e1; --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); --radius: 0.5rem; --modal-bg: #ffffff; --tab-bg: #e2e8f0; --tab-active-bg: #ffffff; --z-base: 1; --z-sidebar: 100; --z-overlay: 9000; --z-modal: 9100; --z-toast: 9999; --z-loader: 9998; --z-delivery: 8500; }
@@ -3541,11 +3542,50 @@ document.getElementById('script-modal').style.display='flex';
         });
     }
 
-    window.reportIssue = function(prefillText = '') {
-        window.openBugReportModal(prefillText);
+    window.reportIssue = async function(prefillText = '') {
+        // Capture the visible ACT app before opening the modal so the modal itself is not in the screenshot.
+        let capturedDataUrl = null;
+        try {
+            capturedDataUrl = await window.captureActBugScreenshot();
+        } catch (captureError) {
+            console.warn('Automatic ACT screenshot capture failed:', captureError);
+            window.showToast?.('Could not auto-capture screenshot. You can upload one manually.', 'error');
+        }
+        window.openBugReportModal(prefillText, capturedDataUrl);
     }
 
-    window.openBugReportModal = function(prefillText = '') {
+    window.captureActBugScreenshot = async function() {
+        if (typeof html2canvas !== 'function') {
+            throw new Error('html2canvas is not loaded.');
+        }
+
+        const target = document.getElementById('main-app-container') || document.body;
+        const hiddenSelectors = ['bug-report-modal', 'global-loader'];
+        const canvas = await html2canvas(target, {
+            backgroundColor: getComputedStyle(document.body).backgroundColor || '#ffffff',
+            scale: Math.min(window.devicePixelRatio || 1, 1.5),
+            useCORS: true,
+            allowTaint: false,
+            logging: false,
+            ignoreElements: (el) => hiddenSelectors.includes(el.id)
+        });
+
+        // Keep the email payload reasonable. Large screenshots can exceed Graph message limits.
+        const maxWidth = 1400;
+        if (canvas.width <= maxWidth) {
+            return canvas.toDataURL('image/jpeg', 0.86);
+        }
+
+        const scaled = document.createElement('canvas');
+        const ratio = maxWidth / canvas.width;
+        scaled.width = maxWidth;
+        scaled.height = Math.round(canvas.height * ratio);
+        const scaledCtx = scaled.getContext('2d');
+        scaledCtx.drawImage(canvas, 0, 0, scaled.width, scaled.height);
+        return scaled.toDataURL('image/jpeg', 0.86);
+    }
+
+    window.openBugReportModal = function(prefillText = '', screenshotDataUrl = null) {
         const modal = document.getElementById('bug-report-modal');
         const textarea = document.getElementById('bug-report-description');
         if (!modal || !textarea) {
@@ -3553,6 +3593,15 @@ document.getElementById('script-modal').style.display='flex';
             return;
         }
         if (prefillText && !textarea.value.trim()) textarea.value = prefillText;
+
+        if (screenshotDataUrl) {
+            window.loadBugScreenshotDataUrl(screenshotDataUrl, 'automatic');
+        } else if (!bugImage) {
+            document.getElementById('bug-image-placeholder')?.classList.remove('hidden');
+            const canvas = document.getElementById('bug-annotation-canvas');
+            if (canvas) canvas.style.display = 'none';
+        }
+
         modal.classList.remove('hidden');
         modal.style.display = 'flex';
         setTimeout(() => textarea.focus(), 50);
@@ -3571,6 +3620,7 @@ document.getElementById('script-modal').style.display='flex';
     let bugCircles = [];
     let bugStartPoint = null;
     let bugImageScale = 1;
+    let bugScreenshotSource = '';
 
     window.setBugAnnotateMode = function(mode) {
         window.__bugAnnotateMode = mode || 'circle';
@@ -3587,28 +3637,34 @@ document.getElementById('script-modal').style.display='flex';
         }
         const reader = new FileReader();
         reader.onload = function(loadEvent) {
-            bugImage = new Image();
-            bugImage.onload = function() {
-                bugCanvas = document.getElementById('bug-annotation-canvas');
-                if (!bugCanvas) return;
-                bugCtx = bugCanvas.getContext('2d');
-                const maxWidth = 900;
-                bugImageScale = Math.min(1, maxWidth / bugImage.width);
-                bugCanvas.width = Math.round(bugImage.width * bugImageScale);
-                bugCanvas.height = Math.round(bugImage.height * bugImageScale);
-                bugCanvas.style.display = 'block';
-                document.getElementById('bug-image-placeholder')?.classList.add('hidden');
-                bugCircles = [];
-                window.setBugAnnotateMode('circle');
-                drawBugCanvas();
-                bugCanvas.onmousedown = handleBugCanvasMouseDown;
-                bugCanvas.onmouseup = handleBugCanvasMouseUp;
-                bugCanvas.ontouchstart = function(e) { e.preventDefault(); handleBugCanvasMouseDown(e.touches[0]); };
-                bugCanvas.ontouchend = function(e) { e.preventDefault(); handleBugCanvasMouseUp(e.changedTouches[0]); };
-            };
-            bugImage.src = loadEvent.target.result;
+            window.loadBugScreenshotDataUrl(loadEvent.target.result, 'uploaded');
         };
         reader.readAsDataURL(file);
+    }
+
+    window.loadBugScreenshotDataUrl = function(dataUrl, source = '') {
+        if (!dataUrl) return;
+        bugImage = new Image();
+        bugImage.onload = function() {
+            bugCanvas = document.getElementById('bug-annotation-canvas');
+            if (!bugCanvas) return;
+            bugCtx = bugCanvas.getContext('2d');
+            const maxWidth = 900;
+            bugImageScale = Math.min(1, maxWidth / bugImage.width);
+            bugCanvas.width = Math.round(bugImage.width * bugImageScale);
+            bugCanvas.height = Math.round(bugImage.height * bugImageScale);
+            bugCanvas.style.display = 'block';
+            document.getElementById('bug-image-placeholder')?.classList.add('hidden');
+            bugCircles = [];
+            bugScreenshotSource = source;
+            window.setBugAnnotateMode('circle');
+            drawBugCanvas();
+            bugCanvas.onmousedown = handleBugCanvasMouseDown;
+            bugCanvas.onmouseup = handleBugCanvasMouseUp;
+            bugCanvas.ontouchstart = function(e) { e.preventDefault(); handleBugCanvasMouseDown(e.touches[0]); };
+            bugCanvas.ontouchend = function(e) { e.preventDefault(); handleBugCanvasMouseUp(e.changedTouches[0]); };
+        };
+        bugImage.src = dataUrl;
     }
 
     function drawBugCanvas() {
@@ -3664,7 +3720,7 @@ document.getElementById('script-modal').style.display='flex';
             return;
         }
 
-        const annotatedImage = bugCanvas && bugImage ? bugCanvas.toDataURL('image/png') : null;
+        const annotatedImage = bugCanvas && bugImage ? bugCanvas.toDataURL('image/jpeg', 0.86) : null;
         window.showToast('Reporting...', 'processing');
 
         try {
@@ -3672,7 +3728,7 @@ document.getElementById('script-modal').style.display='flex';
             const mailToken = await window.getToken("Mail.Send");
             const currentRecordId = (window.selectedRecord && (window.selectedRecord.id || window.selectedRecord.cr714_recordid)) || '';
             const currentCompany = (window.selectedRecord && (window.selectedRecord.company || window.selectedRecord.cr714_companyname || window.selectedRecord.name)) || '';
-            const screenshotNote = annotatedImage ? '\nScreenshot: Annotated image attached to notification email.' : '';
+            const screenshotNote = annotatedImage ? `\nScreenshot: ${bugScreenshotSource || 'captured'} ACT screenshot included inline in notification email.` : '';
 
             const payload = {
                 cr714_topic: `ACT Bug: ${issue.substring(0, 30)}`,
@@ -3691,13 +3747,18 @@ document.getElementById('script-modal').style.display='flex';
             if (!res.ok) throw new Error(`Dataverse bug tracker save failed: ${res.status}`);
 
             const attachments = [];
+            const inlineContentId = `act-bug-screenshot-${Date.now()}@act`;
+            let inlineImageHtml = '';
             if (annotatedImage) {
                 attachments.push({
                     '@odata.type': '#microsoft.graph.fileAttachment',
-                    name: `ACT_Bug_Screenshot_${new Date().toISOString().replace(/[:.]/g, '-')}.png`,
-                    contentType: 'image/png',
-                    contentBytes: annotatedImage.split(',')[1]
+                    name: `ACT_Bug_Screenshot_${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`,
+                    contentType: 'image/jpeg',
+                    contentBytes: annotatedImage.split(',')[1],
+                    isInline: true,
+                    contentId: inlineContentId
                 });
+                inlineImageHtml = `<h3 style="margin-top:18px;color:#ef4444;">ACT Screenshot</h3><p style="font-size:12px;color:#666;">Source: ${bugScreenshotSource || 'captured'} screenshot. Red circles are rep annotations.</p><img src="cid:${inlineContentId}" alt="ACT bug screenshot" style="max-width:100%;border:1px solid #ddd;border-radius:8px;display:block;">`;
             }
 
             const safeIssueHtml = issue.replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch])).replace(/\n/g, '<br>');
@@ -3706,7 +3767,7 @@ document.getElementById('script-modal').style.display='flex';
                     subject: `🚨 ACT BUG REPORT: ${currentUserRepName}`,
                     body: {
                         contentType: "HTML",
-                        content: `<div style="font-family: Arial, sans-serif; color: #333;"><h2 style="color: #ef4444;">New Bug Reported</h2><p><strong>Reported By:</strong> ${currentUserRepName}</p><p><strong>Description:</strong><br>${safeIssueHtml}</p><p><strong>Current Record:</strong> ${currentRecordId || 'N/A'}<br><strong>Company:</strong> ${currentCompany || 'N/A'}</p>${annotatedImage ? '<p><strong>Screenshot:</strong> Annotated screenshot attached.</p>' : ''}<hr style="border: 0; border-top: 1px solid #eee;"><p style="font-size: 11px; color: #666;">Time: ${new Date().toLocaleString()}<br>Browser: ${navigator.userAgent}</p></div>`
+                        content: `<div style="font-family: Arial, sans-serif; color: #333;"><h2 style="color: #ef4444;">New Bug Reported</h2><p><strong>Reported By:</strong> ${currentUserRepName}</p><p><strong>Description:</strong><br>${safeIssueHtml}</p><p><strong>Current Record:</strong> ${currentRecordId || 'N/A'}<br><strong>Company:</strong> ${currentCompany || 'N/A'}</p>${inlineImageHtml}<hr style="border: 0; border-top: 1px solid #eee;"><p style="font-size: 11px; color: #666;">Time: ${new Date().toLocaleString()}<br>Browser: ${navigator.userAgent}</p></div>`
                     },
                     toRecipients: [
                         { emailAddress: { address: "Anslee.Erickson@wbmason.com" } },
@@ -3730,7 +3791,7 @@ document.getElementById('script-modal').style.display='flex';
             if (descriptionEl) descriptionEl.value = '';
             const screenshotInput = document.getElementById('bug-report-screenshot');
             if (screenshotInput) screenshotInput.value = '';
-            bugImage = null; bugCanvas = null; bugCtx = null; bugCircles = [];
+            bugImage = null; bugCanvas = null; bugCtx = null; bugCircles = []; bugScreenshotSource = '';
             document.getElementById('bug-image-placeholder')?.classList.remove('hidden');
             const canvas = document.getElementById('bug-annotation-canvas');
             if (canvas) canvas.style.display = 'none';
@@ -4378,7 +4439,7 @@ document.getElementById('script-modal').style.display='flex';
                         <i class="fas fa-bug text-status-danger"></i>
                         Report an ACT Bug
                     </h2>
-                    <p class="text-sm text-muted mt-1">Give the dev team the details. You can optionally attach an ACT screenshot and circle the issue area.</p>
+                    <p class="text-sm text-muted mt-1">An ACT screenshot is captured before this modal opens. Add details, then circle the issue area if needed.</p>
                 </div>
                 <button type="button" class="btn-secondary shrink-0" onclick="window.closeBugReportModal()" aria-label="Close bug report modal">
                     <i class="fas fa-times"></i>
@@ -4393,7 +4454,7 @@ document.getElementById('script-modal').style.display='flex';
                     </label>
 
                     <label class="block">
-                        <span class="text-sm font-bold text-main">Optional ACT Screenshot</span>
+                        <span class="text-sm font-bold text-main">ACT Screenshot</span>
                         <input id="bug-report-screenshot" type="file" accept="image/*" onchange="window.loadBugScreenshot(event)">
                     </label>
 
@@ -4407,14 +4468,14 @@ document.getElementById('script-modal').style.display='flex';
                     </div>
 
                     <p class="text-xs text-muted leading-relaxed">
-                        Tip: after uploading a screenshot, click-drag on the image to draw a red circle around the problem area.
+                        Tip: click-drag on the screenshot to draw a red circle around the problem area. Uploading a file replaces the automatic capture.
                     </p>
                 </div>
 
                 <div class="min-w-0 flex flex-col">
                     <div class="text-sm font-bold text-main mb-2">Screenshot Preview / Annotation</div>
                     <div id="bug-image-stage">
-                        <span id="bug-image-placeholder" class="text-muted text-sm text-center px-4">Upload a screenshot to preview it here and circle the issue.</span>
+                        <span id="bug-image-placeholder" class="text-muted text-sm text-center px-4">An ACT screenshot will appear here automatically. You can also upload a replacement screenshot.</span>
                         <canvas id="bug-annotation-canvas"></canvas>
                     </div>
                 </div>
