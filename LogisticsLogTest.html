@@ -532,6 +532,25 @@
 }
 /* === END COPILOT PATCH: Header Last Email Placement v8 === */
 
+
+
+/* === COPILOT PATCH: Contacts Three-Contact Height + Fact History Default v9 (2026-06-04) === */
+#fv-contact-list{
+    max-height: var(--act-contact-three-height, 174px) !important;
+    min-height: 0 !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    scrollbar-gutter: stable !important;
+}
+#fv-contact-list > *{
+    flex: 0 0 auto !important;
+}
+.fact-range-btn[data-months="3"],
+.fact-range-btn.active{
+    font-weight: 900 !important;
+}
+/* === END COPILOT PATCH: Contacts Three-Contact Height + Fact History Default v9 === */
+
 </style>
 </head>
 <body data-theme="light">
@@ -12017,6 +12036,153 @@ window.selectAccount=async function(id){
 
   window.copilotMoveLastEmailToHeader = verifyMiddleLayout;
   setTimeout(verifyMiddleLayout, 500);
+})();
+</script>
+
+
+<script id="copilot-contact-fact-history-v9">
+(function(){
+  if(window.__COPILOT_CONTACT_FACT_HISTORY_V9) return;
+  window.__COPILOT_CONTACT_FACT_HISTORY_V9 = true;
+
+  // Always start a fresh app load on the performant 3-month view; users can still change range after opening.
+  try { localStorage.setItem('act_mgr_fact_history_months', '3'); } catch(e) {}
+
+  function sizeContactsToThree(){
+    var list = document.getElementById('fv-contact-list');
+    if(!list) return;
+    list.classList.add('custom-scrollbar');
+    list.style.overflowY = 'auto';
+    list.style.overflowX = 'hidden';
+    list.style.scrollbarGutter = 'stable';
+
+    var kids = Array.prototype.slice.call(list.children).filter(function(el){
+      return el && el.nodeType === 1 && getComputedStyle(el).display !== 'none';
+    });
+    if(!kids.length){
+      list.style.setProperty('--act-contact-three-height', '174px');
+      return;
+    }
+    var total = 0;
+    var count = Math.min(3, kids.length);
+    for(var i=0;i<count;i++){
+      var rect = kids[i].getBoundingClientRect();
+      total += Math.ceil(rect.height || kids[i].offsetHeight || 48);
+    }
+    var cs = getComputedStyle(list);
+    var gap = parseFloat(cs.rowGap || cs.gap || '8') || 8;
+    var padTop = parseFloat(cs.paddingTop || '0') || 0;
+    var padBottom = parseFloat(cs.paddingBottom || '0') || 0;
+    var maxH = Math.max(132, Math.min(240, total + (Math.max(0,count-1) * gap) + padTop + padBottom + 4));
+    list.style.setProperty('--act-contact-three-height', maxH + 'px');
+    list.style.maxHeight = maxH + 'px';
+  }
+
+  function isoDateOnly(d){
+    try { return d.toISOString().slice(0,10); } catch(e){ return ''; }
+  }
+  function addMonths(d,m){
+    var x = new Date(d);
+    x.setMonth(x.getMonth()+m);
+    return x;
+  }
+  function escOData(v){ return String(v == null ? '' : v).replace(/'/g,"''").trim(); }
+  function apiRoot(){ return String(window.DATAVERSE_URL || 'https://org23279050.crm.dynamics.com/api/data/v9.2').replace(/\/$/,''); }
+  async function token(){
+    if(typeof window.getToken === 'function') return await window.getToken();
+    if(window.accessToken) return window.accessToken;
+    throw new Error('No Dataverse token provider available.');
+  }
+
+  // Disable the older no-date timeline hook. The newer fact-table history loader below is the source of truth.
+  window.loadFactTimeline = async function(acctId){
+    return [];
+  };
+
+  // Override with account-first, date-bounded fact table query. This is intentionally selective for speed.
+  window.fetchFactHistorySlice = async function(accountId,start,end){
+    var t = await token();
+    var acct = escOData(accountId);
+    if(!acct) return [];
+
+    var effectiveEnd = end || isoDateOnly(new Date());
+    var effectiveStart = start || isoDateOnly(addMonths(new Date(), -3));
+    var filters = ["cr714_accountnumber eq '" + acct + "'"];
+    if(effectiveStart) filters.push('cr714_activitydate ge ' + effectiveStart + 'T00:00:00Z');
+    if(effectiveEnd) filters.push('cr714_activitydate le ' + effectiveEnd + 'T23:59:59Z');
+
+    var select = [
+      'cr714_dt_act_fctblid','cr714_activitynaturalkey','cr714_accountnumber','cr714_accountrep','cr714_repfromnote',
+      'cr714_activitydate','cr714_activitytype','cr714_effectiveaction','cr714_action','cr714_actionfromnotetag',
+      'cr714_actionmessage','cr714_emaildate','cr714_emailstatus','cr714_emailtemplate','cr714_notedate',
+      'cr714_notetext','cr714_notetextraw','cr714_managernotes','cr714_sourcetype','createdon','modifiedon'
+    ].join(',');
+
+    var url = apiRoot() + "/cr714_dt_act_fctbls?$select=" + select +
+      "&$filter=" + encodeURIComponent(filters.join(' and ')) +
+      "&$orderby=cr714_activitydate desc";
+
+    window.__lastFactHistoryUrl = url;
+    var rows = [];
+    while(url){
+      var res = await fetch(url, {
+        headers: {
+          Authorization: 'Bearer ' + t,
+          Accept: 'application/json',
+          'OData-Version': '4.0',
+          'OData-MaxVersion': '4.0',
+          Prefer: 'odata.include-annotations="OData.Community.Display.V1.FormattedValue", odata.maxpagesize=5000'
+        }
+      });
+      if(!res.ok) throw new Error(await res.text());
+      var json = await res.json();
+      rows.push.apply(rows, json.value || []);
+      url = json['@odata.nextLink'] || '';
+      await new Promise(function(r){ setTimeout(r,0); });
+    }
+    return rows;
+  };
+
+  // Ensure 3M buttons are the active/default UI state before the first selected account load.
+  var previousLoadRange = window.loadFactHistoryRange;
+  if(typeof previousLoadRange === 'function' && !previousLoadRange.__copilotV9Wrapped){
+    window.loadFactHistoryRange = async function(accountId){
+      if(!localStorage.getItem('act_mgr_fact_history_months')) localStorage.setItem('act_mgr_fact_history_months','3');
+      return previousLoadRange.apply(this, arguments);
+    };
+    window.loadFactHistoryRange.__copilotV9Wrapped = true;
+  }
+
+  function polishFactButtons(){
+    document.querySelectorAll('.fact-range-btn').forEach(function(btn){
+      var m = (btn.textContent || '').replace(/\D/g,'');
+      if(m) btn.setAttribute('data-months', m);
+    });
+  }
+
+  function afterAccountPaint(){
+    requestAnimationFrame(function(){
+      sizeContactsToThree();
+      polishFactButtons();
+    });
+    setTimeout(sizeContactsToThree, 150);
+    setTimeout(sizeContactsToThree, 500);
+  }
+
+  document.addEventListener('DOMContentLoaded', afterAccountPaint);
+  window.addEventListener('resize', function(){ setTimeout(sizeContactsToThree, 100); });
+
+  var oldSelect = window.selectAccount;
+  if(typeof oldSelect === 'function' && !oldSelect.__copilotContactFactV9Wrapped){
+    window.selectAccount = async function(){
+      var result = await oldSelect.apply(this, arguments);
+      afterAccountPaint();
+      return result;
+    };
+    window.selectAccount.__copilotContactFactV9Wrapped = true;
+  }
+
+  window.copilotSizeContactsToThree = sizeContactsToThree;
 })();
 </script>
 
