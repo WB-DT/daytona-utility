@@ -12186,5 +12186,180 @@ window.selectAccount=async function(id){
 })();
 </script>
 
+
+
+<!-- === COPILOT PATCH: Loader Hold + Fact Counter + 3-Month History Warmup 2026-06-04 === -->
+<script>
+(function(){
+  if (window.__ACT_LOADER_FACT_WARMUP_20260604) return;
+  window.__ACT_LOADER_FACT_WARMUP_20260604 = true;
+
+  const WARMUP_ACCOUNT_LIMIT = 36;       // "first few dozen" accounts
+  const WARMUP_CONCURRENCY = 2;          // intentionally low so normal app work stays responsive
+  const MIN_LOADER_VISIBLE_MS = 4500;    // keeps the loading screen open longer without blocking forever
+  const FACT_HISTORY_MONTHS = 3;
+
+  function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
+  function now(){ return Date.now ? Date.now() : new Date().getTime(); }
+  function ymd(d){ return d.toISOString().slice(0,10); }
+  function addMonths(d, months){
+    const x = new Date(d.getTime());
+    x.setMonth(x.getMonth() + months);
+    return x;
+  }
+  function setLoaderVisible(isVisible){
+    const loader = document.getElementById('global-loader');
+    if (loader) loader.style.display = isVisible ? 'flex' : 'none';
+  }
+  function safeUpdateLoader(pct, text, count){
+    try {
+      if (typeof window.updateLoader === 'function') window.updateLoader(pct, text, count);
+    } catch(e) { console.warn('Loader update skipped', e); }
+  }
+  function normalizeAccountId(account){
+    return String(account && (account.cr714_id || account.accountId || account.accountnumber || account.cr714_accountnum) || '').trim();
+  }
+  function getWarmupAccounts(){
+    const source = (Array.isArray(window.listDisplayAccounts) && window.listDisplayAccounts.length ? window.listDisplayAccounts :
+                  (Array.isArray(window.teamFilteredAccounts) && window.teamFilteredAccounts.length ? window.teamFilteredAccounts :
+                  (Array.isArray(window.mergedAccounts) ? window.mergedAccounts : [])));
+    const seen = new Set();
+    const out = [];
+    for (const account of source) {
+      const id = normalizeAccountId(account);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(account);
+      if (out.length >= WARMUP_ACCOUNT_LIMIT) break;
+    }
+    return out;
+  }
+  function ensureFactState(accountId){
+    if (!window.__actFactHistoryState) window.__actFactHistoryState = {};
+    if (!window.__actFactHistoryState[accountId]) {
+      window.__actFactHistoryState[accountId] = { rows: [], loading: false, hasMore: true, page: 0, warmed: false };
+    }
+    return window.__actFactHistoryState[accountId];
+  }
+  function getCachedFactRows(accountId){
+    const st = window.__actFactHistoryState && window.__actFactHistoryState[accountId];
+    return st && Array.isArray(st.rows) ? st.rows : [];
+  }
+
+  async function warmOneAccount(account, startDate, endDate){
+    const accountId = normalizeAccountId(account);
+    if (!accountId || typeof window.fetchFactHistorySlice !== 'function') return 0;
+
+    const st = ensureFactState(accountId);
+    if (st.loading || st.warmed || getCachedFactRows(accountId).length > 0) return 0;
+
+    st.loading = true;
+    try {
+      const rows = await window.fetchFactHistorySlice(accountId, startDate, endDate);
+      st.rows = Array.isArray(rows) ? rows : [];
+      st.loading = false;
+      st.hasMore = false;
+      st.page = 1;
+      st.warmed = true;
+      st.rangeMonths = FACT_HISTORY_MONTHS;
+      st.warmupLoadedAt = new Date().toISOString();
+
+      if (window.activeAccountId === accountId && typeof window.renderFactHistory === 'function') {
+        window.renderFactHistory(accountId);
+      }
+      return st.rows.length;
+    } catch(e) {
+      st.loading = false;
+      st.warmupError = String(e && e.message || e || 'Unknown error');
+      console.warn('Fact history warmup skipped for account', accountId, e);
+      return 0;
+    }
+  }
+
+  window.preloadInitialFactHistory = async function(){
+    if (window.__actFactHistoryWarmupRunning) return 0;
+    if (typeof window.fetchFactHistorySlice !== 'function') return 0;
+
+    window.__actFactHistoryWarmupRunning = true;
+    try {
+      localStorage.setItem('act_mgr_fact_history_months', String(FACT_HISTORY_MONTHS));
+      const accounts = getWarmupAccounts();
+      if (!accounts.length) return 0;
+
+      const endDate = ymd(new Date());
+      const startDate = ymd(addMonths(new Date(), -FACT_HISTORY_MONTHS));
+      let cursor = 0;
+      let factRowsLoaded = 0;
+
+      safeUpdateLoader(null, `Preloading ${FACT_HISTORY_MONTHS}-Month History Cache...`, window.totalLoadedRecords || 0);
+
+      const workers = Array.from({ length: Math.min(WARMUP_CONCURRENCY, accounts.length) }, async function(){
+        while (cursor < accounts.length) {
+          const idx = cursor++;
+          const loaded = await warmOneAccount(accounts[idx], startDate, endDate);
+          factRowsLoaded += loaded;
+
+          // Add fact-table rows to the visible loader counter without touching the main account merge logic.
+          window.totalLoadedRecords = (window.totalLoadedRecords || 0) + loaded;
+          const pct = 92 + Math.min(7, Math.round(((idx + 1) / accounts.length) * 7));
+          safeUpdateLoader(pct, `Warming History Cache ${idx + 1}/${accounts.length}...`, window.totalLoadedRecords || 0);
+          await sleep(0);
+        }
+      });
+
+      await Promise.all(workers);
+      safeUpdateLoader(100, factRowsLoaded ? `History Cache Ready (${factRowsLoaded.toLocaleString()} fact rows)` : 'History Cache Ready', window.totalLoadedRecords || 0);
+      return factRowsLoaded;
+    } finally {
+      window.__actFactHistoryWarmupRunning = false;
+    }
+  };
+
+  const previousFetchAllData = window.fetchAllData;
+  if (typeof previousFetchAllData === 'function' && !previousFetchAllData.__actLoaderFactWarmupWrapped) {
+    const wrappedFetchAllData = async function(){
+      const started = now();
+      setLoaderVisible(true);
+      safeUpdateLoader(20, 'Establishing Parallel Streams...', 0);
+
+      let result;
+      try {
+        result = await previousFetchAllData.apply(this, arguments);
+
+        // Re-open/hold the loader because the original routine hides it shortly after account sync.
+        setLoaderVisible(true);
+        await window.preloadInitialFactHistory();
+
+        const remaining = Math.max(0, MIN_LOADER_VISIBLE_MS - (now() - started));
+        if (remaining > 0) {
+          safeUpdateLoader(100, 'Finalizing Cached Activity History...', window.totalLoadedRecords || 0);
+          await sleep(remaining);
+        }
+        safeUpdateLoader(100, 'Ready.', window.totalLoadedRecords || 0);
+        setLoaderVisible(false);
+        return result;
+      } catch(e) {
+        setLoaderVisible(false);
+        throw e;
+      }
+    };
+    wrappedFetchAllData.__actLoaderFactWarmupWrapped = true;
+    window.fetchAllData = wrappedFetchAllData;
+  }
+
+  const previousForceRefreshData = window.forceRefreshData;
+  if (typeof previousForceRefreshData === 'function' && !previousForceRefreshData.__actLoaderFactWarmupWrapped) {
+    const wrappedForceRefreshData = async function(){
+      const result = await previousForceRefreshData.apply(this, arguments);
+      try { await window.preloadInitialFactHistory(); } catch(e) { console.warn('Post-refresh history warmup skipped', e); }
+      return result;
+    };
+    wrappedForceRefreshData.__actLoaderFactWarmupWrapped = true;
+    window.forceRefreshData = wrappedForceRefreshData;
+  }
+})();
+</script>
+<!-- === END COPILOT PATCH: Loader Hold + Fact Counter + 3-Month History Warmup 2026-06-04 === -->
+
 </body>
 </html>
