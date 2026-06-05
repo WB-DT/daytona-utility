@@ -970,27 +970,73 @@
     }
 
     // --- EMAIL ATTACHMENT FUNCTIONS ---
-    window.handleAttachmentSelection = async function(event) {
-        const files = event.target.files;
-        if (!files || files.length === 0) return;
+    window.formatAttachmentSize = function(bytes) {
+        if (!Number.isFinite(bytes)) return '0 KB';
+        if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+        return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    };
 
-        for (let file of files) {
-            pendingAttachments.push(file); 
-        }
-        event.target.value = ''; // Reset input so same file can be selected again if removed
+    window.readFileAsGraphAttachment = function(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const result = String(e.target?.result || '');
+                const base64 = result.includes(',') ? result.split(',').pop() : result;
+                resolve({
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": file.name,
+                    "contentType": file.type || "application/octet-stream",
+                    "contentBytes": base64
+                });
+            };
+            reader.onerror = function() {
+                reject(new Error(`Unable to read attachment: ${file.name}`));
+            };
+            reader.readAsDataURL(file);
+        });
+    };
+
+    window.handleAttachmentSelection = async function(event) {
+        const files = Array.from(event.target.files || []);
+        if (files.length === 0) return;
+
+        // Append every selected file. This supports selecting multiple files at once and adding more later.
+        files.forEach(file => pendingAttachments.push(file));
+        event.target.value = ''; // Reset input so the same file can be selected again after removal
         window.renderAttachmentUI();
+        window.showToast(`${files.length} attachment${files.length === 1 ? '' : 's'} added`, 'success');
     };
 
     window.renderAttachmentUI = function() {
-        let container = document.getElementById('email-attachments-container');
+        const container = document.getElementById('email-attachments-container');
         if (!container) return;
-        container.innerHTML = pendingAttachments.map((file, idx) => `
-            <div class="flex items-center gap-2 px-2 py-1 rounded text-xs border shadow-sm ${file.size > 3 * 1024 * 1024 ? 'border-red-400 bg-red-50 text-red-800' : ''}" style="border-color: var(--border-color); background-color: var(--bg-input);">
-                <i class="fas fa-file ${file.size > 3 * 1024 * 1024 ? 'text-red-500' : 'text-blue-500'}"></i> <span class="truncate max-w-[150px]" style="color: var(--text-main);">${file.name}</span>
-                <span class="text-muted">(${(file.size/1024/1024).toFixed(2)}MB)</span>
-                <button onclick="window.removeAttachment(${idx})" class="text-status-danger hover:text-red-700 ml-1" title="Remove attachment"><i class="fas fa-times"></i></button>
-            </div>
-        `).join('');
+
+        if (!pendingAttachments.length) {
+            container.innerHTML = '';
+            return;
+        }
+
+        const totalSize = pendingAttachments.reduce((sum, file) => sum + (file.size || 0), 0);
+        const header = `
+            <div class="w-full flex items-center justify-between text-[11px] font-bold uppercase tracking-wide px-1" style="color: var(--text-muted);">
+                <span><i class="fas fa-paperclip mr-1"></i>${pendingAttachments.length} Attachment${pendingAttachments.length === 1 ? '' : 's'}</span>
+                <span>${window.formatAttachmentSize(totalSize)} total</span>
+            </div>`;
+
+        const rows = pendingAttachments.map((file, idx) => {
+            const isLarge = file.size > 3 * 1024 * 1024;
+            const safeName = window.escapeHTML ? window.escapeHTML(file.name) : String(file.name || '').replace(/[&<>"']/g, '');
+            return `
+                <div class="flex items-center gap-2 px-2 py-1 rounded text-xs border shadow-sm ${isLarge ? 'border-red-400 bg-red-50 text-red-800' : ''}" style="border-color: var(--border-color); background-color: var(--bg-input); max-width: 100%;">
+                    <i class="fas fa-file ${isLarge ? 'text-red-500' : 'text-blue-500'}"></i>
+                    <span class="truncate max-w-[220px]" style="color: var(--text-main);" title="${safeName}">${safeName}</span>
+                    <span class="text-muted whitespace-nowrap">(${window.formatAttachmentSize(file.size || 0)})</span>
+                    ${isLarge ? '<span class="text-status-danger font-bold whitespace-nowrap">Over 3MB</span>' : ''}
+                    <button onclick="window.removeAttachment(${idx})" class="text-status-danger hover:text-red-700 ml-1" title="Remove attachment" type="button"><i class="fas fa-times"></i></button>
+                </div>`;
+        }).join('');
+
+        container.innerHTML = header + rows;
     };
 
     window.removeAttachment = function(idx) {
@@ -2335,8 +2381,15 @@ ${signature}${wrapperEnd}`;
         toInputElement.classList.remove('empty-field-warning');
 
         // Verify if any files exceed 3MB limit
-        const hasLargeAttachments = pendingAttachments.some(f => f.size > 3 * 1024 * 1024);
-        if (hasLargeAttachments) {
+        const largeAttachments = pendingAttachments.filter(f => f.size > 3 * 1024 * 1024);
+        if (largeAttachments.length > 0) {
+            const list = document.getElementById('large-attachment-list');
+            if (list) {
+                list.innerHTML = largeAttachments.map(file => {
+                    const safeName = window.escapeHTML ? window.escapeHTML(file.name) : String(file.name || '').replace(/[&<>"']/g, '');
+                    return `<div class="flex items-center justify-between gap-2 py-1 border-b last:border-b-0" style="border-color: var(--border-color);"><span class="truncate" title="${safeName}"><i class="fas fa-file mr-1 text-status-danger"></i>${safeName}</span><span class="text-status-danger font-bold whitespace-nowrap">${window.formatAttachmentSize(file.size || 0)}</span></div>`;
+                }).join('');
+            }
             document.getElementById('large-attachment-modal').classList.remove('hidden');
             document.getElementById('large-attachment-modal').style.display = 'flex';
             window._isSending = false;
@@ -2393,7 +2446,14 @@ const toRecipients = rawEmails.map(email => ({
             
             finalContent = tempDiv.innerHTML;
 
-            // 2. Attach standard user files
+            // 2. Attach standard user files selected with the paperclip button
+            if (pendingAttachments.length > 0) {
+                const userFileAttachments = await Promise.all(
+                    pendingAttachments.map(file => window.readFileAsGraphAttachment(file))
+                );
+                base64Attachments.push(...userFileAttachments);
+            }
+
 const selectedTemplate = document.getElementById('email-template-dropdown')?.value;
             const token = await window.getToken("Mail.Send");
 
@@ -4680,10 +4740,11 @@ document.getElementById('script-modal').style.display='flex';
     <div id="large-attachment-modal" class="modal-overlay hidden" style="display:none; z-index: 9300;">
         <div class="modal-content w-96 text-center shadow-2xl rounded-xl">
             <h3 class="text-xl font-bold mb-4 text-status-danger"><i class="fas fa-file-archive mr-2"></i>Attachment Too Large</h3>
-            <p class="text-sm mb-6 text-muted">Files over 3MB cannot be sent directly through the app due to server restrictions.</p>
+            <p class="text-sm mb-3 text-muted">Files over 3MB cannot be sent directly through the app due to server restrictions.</p>
+            <div id="large-attachment-list" class="text-left text-xs mb-5 p-2 rounded border max-h-32 overflow-y-auto" style="border-color: var(--border-color); background: var(--bg-input);"></div>
             <div class="flex flex-col gap-3">
                 <button onclick="window.openOutlookWebDraft()" class="btn-primary"><i class="fas fa-external-link-alt mr-2"></i>Open in Outlook Web</button>
-                <button onclick="window.removeLargeFilesAndSend()" class="btn-secondary text-status-danger border-red-200 hover:bg-red-50"><i class="fas fa-trash-alt mr-2"></i>Drop Large File & Send</button>
+                <button onclick="window.removeLargeFilesAndSend()" class="btn-secondary text-status-danger border-red-200 hover:bg-red-50"><i class="fas fa-trash-alt mr-2"></i>Drop Large File(s) & Send</button>
                 <button onclick="document.getElementById('large-attachment-modal').style.display='none';" class="text-xs text-muted underline mt-2 bg-transparent border-none hover:text-primary cursor-pointer">Cancel</button>
             </div>
         </div>
