@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dataverse Auditor Pro v1.17</title>
+  <title>Dataverse Auditor Pro v1.18</title>
 
   <script src="https://alcdn.msauth.net/browser/2.38.2/js/msal-browser.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
@@ -318,7 +318,7 @@
       <div class="brand">
         <div class="logo">DA</div>
         <div>
-          <h1>Dataverse Auditor Pro <span class="muted-text" style="font-size:13px;">v1.17</span></h1>
+          <h1>Dataverse Auditor Pro <span class="muted-text" style="font-size:13px;">v1.18</span></h1>
           <div class="subtitle">Readable audit review with accountnum lookup, export, filters, and corrected redirect behavior.</div>
         </div>
       </div>
@@ -330,6 +330,7 @@
         <h2>Connect to Dataverse</h2>
         <p>Sign in to pull audit rows, compare field changes, and show the actual <strong>accountnum</strong> value from the audited records when available.</p>
         <button onclick="signIn()">Connect to Dataverse</button>
+        <button class="btn-ghost" style="margin-left:10px;" onclick="resetAuth()">Reset Sign-In</button>
       </div>
     </section>
 
@@ -363,6 +364,7 @@
         <button class="btn-success" onclick="exportExcel()">Export Clean XLSX</button>
         <button class="btn-secondary" onclick="toggleColumnPanel()">Columns</button>
         <button class="btn-ghost" onclick="clearFilters()">Clear Filters</button>
+        <button class="btn-ghost" onclick="resetAuth()">Reset Sign-In</button>
         <input type="text" id="g-search" placeholder="Search all loaded audit fields, account #, record name, user, notes..." />
       </div>
 
@@ -379,7 +381,16 @@
         // Restored to the earlier working behavior from your v1.13 app.
         redirectUri: window.location.href
       },
-      cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false }
+      cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false },
+      system: {
+        loggerOptions: {
+          loggerCallback: (level, message, containsPii) => {
+            if (!containsPii) console.log(message);
+          },
+          piiLoggingEnabled: false,
+          logLevel: msal.LogLevel.Warning
+        }
+      }
     };
 
     const msalInstance = new msal.PublicClientApplication(msalConfig);
@@ -836,15 +847,75 @@
       document.getElementById("st-acct").innerText = allData.filter(r => !!r.accountNum).length.toLocaleString();
     }
 
+    function isInteractionRequiredError(error) {
+      const text = `${error?.errorCode || ""} ${error?.subError || ""} ${error?.errorMessage || ""} ${error?.message || ""}`.toLowerCase();
+      return text.includes("interaction_required") ||
+        text.includes("login_required") ||
+        text.includes("consent_required") ||
+        text.includes("invalid_grant") ||
+        text.includes("bad_token") ||
+        text.includes("700084") ||
+        text.includes("no_tokens_found") ||
+        text.includes("token_refresh_required");
+    }
+
     async function getToken() {
-      const account = msalInstance.getActiveAccount();
-      if (!account) throw new Error("No active Microsoft account. Please sign in again.");
-      const req = { scopes: [`${orgUrl}/user_impersonation`], account };
-      try { return (await msalInstance.acquireTokenSilent(req)).accessToken; }
-      catch (silentError) {
-        console.warn("Silent token failed. Trying popup.", silentError);
-        return (await msalInstance.acquireTokenPopup(req)).accessToken;
+      let account = msalInstance.getActiveAccount();
+      const accounts = msalInstance.getAllAccounts();
+
+      if (!account && accounts.length === 1) {
+        account = accounts[0];
+        msalInstance.setActiveAccount(account);
       }
+
+      if (!account) {
+        setStatus("Sign-in required", "warn");
+        await msalInstance.loginRedirect({ scopes: [`${orgUrl}/user_impersonation`] });
+        throw new Error("Redirecting to sign in...");
+      }
+
+      const req = {
+        scopes: [`${orgUrl}/user_impersonation`],
+        account
+      };
+
+      try {
+        const result = await msalInstance.acquireTokenSilent(req);
+        return result.accessToken;
+      } catch (silentError) {
+        console.warn("Silent token acquisition failed:", silentError);
+
+        if (isInteractionRequiredError(silentError)) {
+          setStatus("Session expired. Redirecting to sign in...", "warn");
+          const logEl = document.getElementById("p-log");
+          if (logEl) logEl.innerText = "Your Microsoft session token expired. Redirecting to Microsoft sign-in to refresh access...";
+          await msalInstance.acquireTokenRedirect(req);
+          throw new Error("Redirecting to refresh token...");
+        }
+
+        throw silentError;
+      }
+    }
+
+    function resetAuth() {
+      try {
+        Object.keys(localStorage).forEach(key => {
+          if (key.toLowerCase().includes("msal") || key.toLowerCase().includes("interaction.status")) {
+            localStorage.removeItem(key);
+          }
+        });
+        Object.keys(sessionStorage).forEach(key => {
+          if (key.toLowerCase().includes("msal") || key.toLowerCase().includes("interaction.status")) {
+            sessionStorage.removeItem(key);
+          }
+        });
+      } catch (e) {
+        console.warn("Could not fully clear auth cache:", e);
+      }
+      msalInstance.setActiveAccount(null);
+      setStatus("Sign-in reset. Connect again.", "warn");
+      document.getElementById("appSection").classList.add("hidden");
+      document.getElementById("loginSection").classList.remove("hidden");
     }
 
     function exportExcel() {
@@ -871,7 +942,7 @@
       ws["!cols"] = Object.keys(data[0] || {}).map(key => ({ wch: Math.min(Math.max(key.length + 4, 18), 90) }));
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Audits");
-      XLSX.writeFile(wb, "Dataverse_Audit_v1.17.xlsx");
+      XLSX.writeFile(wb, "Dataverse_Audit_v1.18.xlsx");
     }
   </script>
 </body>
