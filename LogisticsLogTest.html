@@ -270,14 +270,6 @@
             <input type="text" id="filter-date" class="input-dark h-10 text-[10px] text-center w-48" placeholder="Custom Range Override">
             
             <div class="relative filter-dd-container">
-                <button onclick="toggleDropdown(event, 'dd-month')" class="input-dark h-10 text-[10px] font-bold uppercase w-36 flex justify-between items-center text-[var(--text-dim)] hover:text-white border-[var(--brand)] shadow-[0_0_10px_rgba(45,212,191,0.2)]">
-                    <span id="btn-lbl-month" class="truncate pointer-events-none text-[var(--brand)]">All Months</span>
-                    <i class="fas fa-calendar-alt pointer-events-none text-[var(--brand)]"></i>
-                </button>
-                <div id="dd-month" class="absolute top-full left-0 mt-1 w-48 bg-[var(--bg-deep)] border border-[var(--border)] rounded shadow-xl hidden z-[100] max-h-60 overflow-y-auto p-2 glass-panel text-[10px] font-bold text-[var(--text-main)]"></div>
-            </div>
-
-            <div class="relative filter-dd-container">
                 <button onclick="toggleDropdown(event, 'dd-wh')" class="input-dark h-10 text-[10px] font-bold uppercase w-36 flex justify-between items-center text-[var(--text-dim)] hover:text-white">
                     <span id="btn-lbl-wh" class="truncate pointer-events-none">All Warehouses</span>
                     <i class="fas fa-chevron-down pointer-events-none"></i>
@@ -854,7 +846,7 @@
                     const matchOwner = ownerArr.length === 0 || ownerArr.includes(t.owner);
                     const matchMine = !mine || t.owner === normalizeRep(user);
                     
-                    // If months are checked, override the basic minDate/maxDate logic
+                    // If sticky month buttons are selected, bypass range constraints for exact matches
                     let matchTime = false;
                     if (monthArr && monthArr.length > 0) {
                         matchTime = t.date && monthArr.includes(t.date.substring(0, 7));
@@ -904,6 +896,7 @@
         const worker = new Worker(URL.createObjectURL(new Blob([document.getElementById('worker-script').textContent], { type: "text/javascript" })));
         
         let fullData = [], filteredData = [], currentId = null, userProfile = { name: "Guest Rep", id: null, email: "" }, globalReps = [];
+        let selectedMonthTokens = []; // Holds active toggles like ['curmo', 'prevmo2']
         let empHierarchyMap = {};
         let mapInstance = null, mapLayerGroup = null, chartInstances = {}, showMine = false, activeTimeFrame = 'curmo';
         let isSilentUpdate = false;
@@ -3082,10 +3075,16 @@
         }
 
         function applyFilters() { 
-            // Dim time buttons if months are manually selected
-            if (getCheckedValues('cb-month').length > 0) {
-                document.querySelectorAll('.time-btn').forEach(b => { b.classList.remove('active'); b.classList.add('dimmed'); });
-            }
+            // Map token IDs into readable YYYY-MM strings for the worker layer
+            const mappedMonths = selectedMonthTokens.map(token => {
+                const d = new Date();
+                if (token === 'curmo') return new Date(d.getFullYear(), d.getMonth(), 1).toLocaleDateString('en-CA').substring(0, 7);
+                const match = token.match(/prevmo(\d+)/);
+                if (match) {
+                    return new Date(d.getFullYear(), d.getMonth() - parseInt(match[1]), 1).toLocaleDateString('en-CA').substring(0, 7);
+                }
+                return null;
+            }).filter(x => x);
 
             worker.postMessage({ 
                 type: 'FILTER', 
@@ -3094,7 +3093,7 @@
                     whArr: getCheckedValues('cb-wh'), 
                     statusArr: getCheckedValues('cb-status'), 
                     ownerArr: getCheckedValues('cb-owner'), 
-                    monthArr: getCheckedValues('cb-month'),
+                    monthArr: mappedMonths,
                     sortFilter: document.getElementById('filter-sort').value, 
                     fullData, 
                     mine: showMine, 
@@ -3112,28 +3111,54 @@
         
         async function setTimeFrame(tf) { 
             document.getElementById('filter-date')._flatpickr.clear();
-            activeTimeFrame = tf; 
             
-            // Check if history needs to be pulled from the server
-            const needsDeepFetch = (tf === '1y' || tf === 'all');
-            const hasHistoryLoaded = fullData.some(t => {
-                const recordYear = new Date(t.date).getFullYear();
-                return recordYear < new Date().getFullYear();
-            });
-
-            if (needsDeepFetch && !hasHistoryLoaded) {
-                Toastify({text: "Fetching historical records...", style: {background: "#3b82f6"}}).showToast();
-                await refreshData(true, tf); // true = silent (no loading screen)
+            const isRangeReset = (tf === '1y' || tf === 'all');
+            
+            if (isRangeReset) {
+                // Clicking 1YR or ALL completely resets individual month selections
+                selectedMonthTokens = [];
+                activeTimeFrame = tf;
+            } else {
+                // Toggle clicked month in or out of the list
+                const tokenIdx = selectedMonthTokens.indexOf(tf);
+                if (tokenIdx > -1) {
+                    selectedMonthTokens.splice(tokenIdx, 1);
+                } else {
+                    selectedMonthTokens.push(tf);
+                }
+                
+                // If months are chosen, update state, otherwise fall back to native current month
+                if (selectedMonthTokens.length > 0) {
+                    activeTimeFrame = 'multimonth';
+                } else {
+                    activeTimeFrame = 'curmo';
+                }
             }
 
+            // Sync with backend API if checking broader historical parameters
+            const needsDeepFetch = (tf === '1y' || tf === 'all' || activeTimeFrame === 'multimonth');
+            const hasHistoryLoaded = fullData.some(t => new Date(t.date).getFullYear() < new Date().getFullYear());
+
+            if (needsDeepFetch && !hasHistoryLoaded) {
+                Toastify({text: "Expanding target lookup window...", style: {background: "#3b82f6"}}).showToast();
+                await refreshData(true, 'all'); 
+            }
+
+            // Dynamic UI button selection color mapping
             document.querySelectorAll('.time-btn').forEach(b => {
-                b.classList.remove('dimmed');
-                b.classList.toggle('active', b.id === `tf-${tf}`); 
+                b.classList.remove('active', 'dimmed');
+                const elementId = b.id.replace('tf-', '');
+                
+                if (activeTimeFrame === 'multimonth') {
+                    if (selectedMonthTokens.includes(elementId)) {
+                        b.classList.add('active');
+                    }
+                } else {
+                    if (elementId === activeTimeFrame) {
+                        b.classList.add('active');
+                    }
+                }
             });
-            
-            // If they click a standard time button, uncheck any manual month selections
-            document.querySelectorAll('.cb-month').forEach(cb => cb.checked = false);
-            updateDropdownLabel('btn-lbl-month', [], 'All Months');
 
             applyFilters(); 
         }
