@@ -12550,6 +12550,56 @@ window.selectAccount=async function(id){
 
 
 
+<!-- === COPILOT DATAVERSE FACT POST TYPE COERCION PATCH 2026-06-10 START === -->
+<script>
+(function(){
+  if(window.__ACT_DATAVERSE_FACT_POST_TYPE_COERCION_20260610) return;
+  window.__ACT_DATAVERSE_FACT_POST_TYPE_COERCION_20260610 = true;
+
+  const FACT_ENTITY_RE = /\/api\/data\/v[0-9.]+\/cr714_dt_act_fctbls(?:\?|$|\()/i;
+  // HAR confirmed Dataverse expects cr714_isemailactivity as Edm.String, not Edm.Boolean.
+  // These legacy/manager fields are also commonly text columns in this table, so booleans are stringified before POST.
+  const STRING_BOOLEAN_FIELDS = new Set([
+    'cr714_isemailactivity',
+    'cr714_intro',
+    'cr714_hasintro',
+    'cr714_hasmanagernotes',
+    'cr714_hasimportantaccountinformation'
+  ]);
+
+  function boolText(v){ return v === true ? 'True' : v === false ? 'False' : v; }
+  function normalizeFactPayload(obj){
+    if(!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+    STRING_BOOLEAN_FIELDS.forEach(k => {
+      if(Object.prototype.hasOwnProperty.call(obj,k) && typeof obj[k] === 'boolean') obj[k] = boolText(obj[k]);
+    });
+    return obj;
+  }
+  window.normalizeActFactPayloadForDataverse = normalizeFactPayload;
+
+  // Patch fetch as a safety net for every fact-table POST, including older stacked patches.
+  const nativeFetch = window.fetch;
+  if(typeof nativeFetch === 'function' && !nativeFetch.__actFactTypeCoercionWrapped){
+    const wrappedFetch = function(input, init){
+      try{
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+        if(method === 'POST' && FACT_ENTITY_RE.test(url) && init && typeof init.body === 'string'){
+          const body = JSON.parse(init.body);
+          normalizeFactPayload(body);
+          init = Object.assign({}, init, { body: JSON.stringify(body) });
+        }
+      }catch(e){ console.warn('ACT fact payload type coercion skipped:', e); }
+      return nativeFetch.call(this, input, init);
+    };
+    wrappedFetch.__actFactTypeCoercionWrapped = true;
+    window.fetch = wrappedFetch;
+  }
+})();
+</script>
+<!-- === COPILOT DATAVERSE FACT POST TYPE COERCION PATCH 2026-06-10 END === -->
+
+
 <!-- === COPILOT MANAGER → ACTION CHECKER URL-CONTRACT OVERRIDE PATCH 2026-06-10 START === -->
 <style>
   .act-url-contract-pill{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(59,130,246,.45);background:rgba(59,130,246,.10);color:var(--accent-info,var(--primary));border-radius:999px;padding:3px 8px;font-size:10px;font-weight:950;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
@@ -12558,285 +12608,45 @@ window.selectAccount=async function(id){
 (function(){
   if(window.__ACT_MANAGER_ACTION_CHECKER_URL_CONTRACT_OVERRIDE_20260610) return;
   window.__ACT_MANAGER_ACTION_CHECKER_URL_CONTRACT_OVERRIDE_20260610 = true;
-
-  /*
-    Purpose:
-    - Make the Manager Console -> Action Checker launch deterministic.
-    - Stop relying only on localStorage, because localStorage is origin-scoped.
-    - Send the actionable scope through the URL when it is reasonably small.
-    - Still write the legacy storage keys for same-origin launches/backward compatibility.
-    - Capture reporting/action-checker clicks late so older bridge patches cannot steal the launch.
-  */
-
   const ACTION_CHECKER_FILE = 'ActionChecker6.10.26.html';
   const FALLBACK_ACTION_CHECKER_URL = 'https://wb-dt.github.io/daytona-utility/ActionChecker6.10.26.html';
   const TARGET = 'ACT_ACTION_CHECKER_SINGLETON';
   const SCOPE_KEY = 'act_action_checker_scope_v3';
   const MANIFEST_KEY = 'act_action_checker_preload_v3';
   const STATUS_KEY = 'act_action_checker_preload_status_v3';
-  const LEGACY_KEYS = [
-    'act_manager_reporting_bridge_v1',
-    'act_manager_reporting_bridge_v2_fastlink',
-    'act_action_checker_scope_v3',
-    'act_action_checker_preload_v3',
-    'act_action_checker_preload_status_v3'
-  ];
   const MAX_SAFE_URL = 14500;
   let singletonWindow = null;
   let lastOpenAt = 0;
-
   function clean(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim(); }
   function norm(v){ return clean(v).toLowerCase().replace(/[.,]/g,'').replace(/\s+/g,' '); }
-  function uniq(arr){
-    const m = new Map();
-    (arr || []).flat(Infinity).forEach(v => { v = clean(v); if(v) m.set(norm(v), v); });
-    return Array.from(m.values()).sort((a,b)=>a.localeCompare(b));
-  }
-  function isoDate(d){
-    try{ if(!d) return ''; const dt = d instanceof Date ? d : new Date(d); return isNaN(dt) ? '' : dt.toISOString().slice(0,10); }
-    catch(e){ return ''; }
-  }
-  function writeJson(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){ console.warn('Action Checker bridge storage write failed:', k, e); } }
-  function readSet(name){ const s = window.activeFilters && window.activeFilters[name]; return s && typeof s.forEach === 'function' ? uniq(Array.from(s)) : []; }
-
-  function rows(){
-    try{ if(typeof window.applyFilters === 'function') window.applyFilters(false); }catch(e){}
-    const scoped = (Array.isArray(window.teamFilteredAccounts) && window.teamFilteredAccounts.length) ? window.teamFilteredAccounts : null;
-    const base = scoped || window.listDisplayAccounts || window.filteredAccounts || window.mergedAccounts || window.allAccounts || [];
-    return Array.isArray(base) ? base : [];
-  }
-
-  function valuesFromRow(row, fields){
-    const out = [];
-    fields.forEach(f => out.push(row && row[f]));
-    const src = row && row.sources;
-    if(Array.isArray(src)) src.forEach(s => fields.forEach(f => out.push(s && s[f])));
-    return out;
-  }
-  function repOf(row){
-    const out = [];
-    try{ if(typeof window.getAccountListRep === 'function') out.push(window.getAccountListRep(row)); }catch(e){}
-    out.push(...valuesFromRow(row, ['cr714_employeename','employeename','employeeName','rep','Rep','repName','cr714_accountrep','cr714_repfromnote','cr714_assignedrep','cr714_repassigned','cr714_retentionrep']));
-    return out;
-  }
-  function actionOf(row){
-    return valuesFromRow(row, ['cr714_action','action','Action','effectiveAction','cr714_effectiveaction','cr714_actionfromnotetag','cr714_emailaction']);
-  }
-  function accountOf(row){
-    const v = row && (row.cr714_id || row.cr714_accountnum || row.cr714_accountnumber || row.accountNumber || row.accountnum || row.accountId || row.id || row.Account || row.account);
-    return clean(v).replace(/\s*\|.*$/,'');
-  }
-  function rowDate(row){ return row && (row.modifiedon || row.emailDate || row.LastModified || row.createdon || row.activityDate || row.cr714_activitydate); }
-  function chosenDateRange(r){
-    const dates = (r || []).map(rowDate).filter(Boolean).map(x=>new Date(x)).filter(x=>!isNaN(x)).sort((a,b)=>a-b);
-    const start = window.reportStartDate || window.globalMinDate || dates[0] || null;
-    const end = window.reportEndDate || window.globalMaxDate || dates[dates.length-1] || null;
-    return { startDate: isoDate(start), endDate: isoDate(end) };
-  }
-  function bridgeId(){ return 'act-url-contract-' + Date.now() + '-' + Math.random().toString(16).slice(2); }
-
-  function actionCheckerBaseUrl(){
-    if(window.ACT_ACTION_CHECKER_URL_OVERRIDE) return String(window.ACT_ACTION_CHECKER_URL_OVERRIDE);
-    try{ return new URL(ACTION_CHECKER_FILE, location.href).href; }
-    catch(e){ return FALLBACK_ACTION_CHECKER_URL; }
-  }
-
+  function uniq(arr){ const m=new Map(); (arr||[]).flat(Infinity).forEach(v=>{v=clean(v); if(v) m.set(norm(v),v);}); return Array.from(m.values()).sort((a,b)=>a.localeCompare(b)); }
+  function isoDate(d){ try{ if(!d) return ''; const dt=d instanceof Date?d:new Date(d); return isNaN(dt)?'':dt.toISOString().slice(0,10); }catch(e){ return ''; } }
+  function writeJson(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)); }catch(e){ console.warn('Action Checker bridge storage write failed:',k,e); } }
+  function readSet(name){ const s=window.activeFilters&&window.activeFilters[name]; return s&&typeof s.forEach==='function'?uniq(Array.from(s)):[]; }
+  function rows(){ try{ if(typeof window.applyFilters==='function') window.applyFilters(false); }catch(e){} const scoped=(Array.isArray(window.teamFilteredAccounts)&&window.teamFilteredAccounts.length)?window.teamFilteredAccounts:null; const base=scoped||window.listDisplayAccounts||window.filteredAccounts||window.mergedAccounts||window.allAccounts||[]; return Array.isArray(base)?base:[]; }
+  function vals(row,fields){ const out=[]; fields.forEach(f=>out.push(row&&row[f])); const src=row&&row.sources; if(Array.isArray(src))src.forEach(s=>fields.forEach(f=>out.push(s&&s[f]))); return out; }
+  function repOf(row){ const out=[]; try{ if(typeof window.getAccountListRep==='function') out.push(window.getAccountListRep(row)); }catch(e){} out.push(...vals(row,['cr714_employeename','employeename','employeeName','rep','Rep','repName','cr714_accountrep','cr714_repfromnote','cr714_assignedrep','cr714_repassigned','cr714_retentionrep'])); return out; }
+  function actionOf(row){ return vals(row,['cr714_action','action','Action','effectiveAction','cr714_effectiveaction','cr714_actionfromnotetag','cr714_emailaction']); }
+  function accountOf(row){ const v=row&&(row.cr714_id||row.cr714_accountnum||row.cr714_accountnumber||row.accountNumber||row.accountnum||row.accountId||row.id||row.Account||row.account); return clean(v).replace(/\s*\|.*$/,''); }
+  function rowDate(row){ return row&&(row.modifiedon||row.emailDate||row.LastModified||row.createdon||row.activityDate||row.cr714_activitydate); }
+  function chosenDateRange(r){ const dates=(r||[]).map(rowDate).filter(Boolean).map(x=>new Date(x)).filter(x=>!isNaN(x)).sort((a,b)=>a-b); const start=window.reportStartDate||window.globalMinDate||dates[0]||null; const end=window.reportEndDate||window.globalMaxDate||dates[dates.length-1]||null; return {startDate:isoDate(start),endDate:isoDate(end)}; }
+  function bridgeId(){ return 'act-url-contract-'+Date.now()+'-'+Math.random().toString(16).slice(2); }
+  function actionCheckerBaseUrl(){ if(window.ACT_ACTION_CHECKER_URL_OVERRIDE) return String(window.ACT_ACTION_CHECKER_URL_OVERRIDE); try{return new URL(ACTION_CHECKER_FILE,location.href).href;}catch(e){return FALLBACK_ACTION_CHECKER_URL;} }
   function buildPayload(){
-    const r = rows();
-    const selectedReps = readSet('cr714_employeename');
-    const selectedActions = readSet('action');
-    const allReps = uniq(r.flatMap(repOf));
-    const allActions = uniq(r.flatMap(actionOf));
-    const accounts = uniq(r.map(accountOf));
-    const range = chosenDateRange(r);
-    const payload = {
-      bridgeVersion: 30,
-      mode: 'manager-url-contract-full-detail',
-      source: 'ACT Manager Console',
-      createdAt: new Date().toISOString(),
-      bridgeId: bridgeId(),
-      bridgeKey: SCOPE_KEY,
-      manifestKey: MANIFEST_KEY,
-      statusKey: STATUS_KEY,
-      fullDetailsRequired: true,
-      countsOnly: false,
-      serverSideScope: true,
-      verifiedFilters: true,
-      autoApply: true,
-      autoLoad: true,
-      detailLoadMode: 'full-before-present',
-      noPartialPresentation: true,
-      urlContractPreferred: true,
-      localStorageFallback: true,
-      rowsInManagerScope: r.length,
-      rowCount: r.length,
-      quickFilter: window.activeQuickFilter || 'all',
-      selectedReps,
-      selectedActions,
-      reps: allReps,
-      actions: allActions,
-      allowedReps: allReps,
-      allowedActions: allActions,
-      effectiveReps: selectedReps.length ? selectedReps : allReps,
-      effectiveActions: selectedActions.length ? selectedActions : allActions,
-      accountNumbers: accounts,
-      accountIds: accounts,
-      accounts,
-      effectiveAccounts: accounts,
-      selectedAccounts: accounts,
-      startDate: range.startDate,
-      endDate: range.endDate,
-      filterContract: {
-        mustUseDateRange: true,
-        mustUseRepScope: false,
-        mustUseActionScope: false,
-        mustUseAccountScope: true,
-        fullDetailsBeforePresentation: true,
-        selectedRepsCount: selectedReps.length,
-        selectedActionsCount: selectedActions.length,
-        effectiveRepsCount: (selectedReps.length ? selectedReps : allReps).length,
-        effectiveActionsCount: (selectedActions.length ? selectedActions : allActions).length,
-        accountCount: accounts.length
-      }
-    };
-
-    writeJson(SCOPE_KEY, payload);
-    writeJson(MANIFEST_KEY, Object.assign({}, payload, { manifestMode: 'url-contract-plus-storage' }));
-    writeJson(STATUS_KEY, {
-      status: 'ready',
-      updatedAt: new Date().toISOString(),
-      bridgeId: payload.bridgeId,
-      bridgeVersion: payload.bridgeVersion,
-      fullDetailsRequired: true,
-      urlContractPreferred: true,
-      scopeRows: r.length,
-      accountCount: accounts.length,
-      reps: payload.effectiveReps.length,
-      actions: payload.effectiveActions.length,
-      startDate: payload.startDate,
-      endDate: payload.endDate
-    });
-    LEGACY_KEYS.forEach(k => {
-      if(k === STATUS_KEY) return;
-      try{ if(!localStorage.getItem(k) || /^act_manager_reporting_bridge/.test(k)) writeJson(k, payload); }catch(e){}
-    });
-    updateBridgePill(payload);
-    return payload;
+    const r=rows(), selectedReps=readSet('cr714_employeename'), selectedActions=readSet('action'), allReps=uniq(r.flatMap(repOf)), allActions=uniq(r.flatMap(actionOf)), accounts=uniq(r.map(accountOf)), range=chosenDateRange(r);
+    const payload={bridgeVersion:30,mode:'manager-url-contract-full-detail',source:'ACT Manager Console',createdAt:new Date().toISOString(),bridgeId:bridgeId(),bridgeKey:SCOPE_KEY,manifestKey:MANIFEST_KEY,statusKey:STATUS_KEY,fullDetailsRequired:true,countsOnly:false,serverSideScope:true,verifiedFilters:true,autoApply:true,autoLoad:true,detailLoadMode:'full-before-present',noPartialPresentation:true,urlContractPreferred:true,localStorageFallback:true,rowsInManagerScope:r.length,rowCount:r.length,quickFilter:window.activeQuickFilter||'all',selectedReps,selectedActions,reps:allReps,actions:allActions,allowedReps:allReps,allowedActions:allActions,effectiveReps:selectedReps.length?selectedReps:allReps,effectiveActions:selectedActions.length?selectedActions:allActions,accountNumbers:accounts,accountIds:accounts,accounts,effectiveAccounts:accounts,selectedAccounts:accounts,startDate:range.startDate,endDate:range.endDate,filterContract:{mustUseDateRange:true,mustUseRepScope:false,mustUseActionScope:false,mustUseAccountScope:true,fullDetailsBeforePresentation:true,selectedRepsCount:selectedReps.length,selectedActionsCount:selectedActions.length,effectiveRepsCount:(selectedReps.length?selectedReps:allReps).length,effectiveActionsCount:(selectedActions.length?selectedActions:allActions).length,accountCount:accounts.length}};
+    writeJson(SCOPE_KEY,payload); writeJson(MANIFEST_KEY,Object.assign({},payload,{manifestMode:'url-contract-plus-storage'})); writeJson(STATUS_KEY,{status:'ready',updatedAt:new Date().toISOString(),bridgeId:payload.bridgeId,bridgeVersion:payload.bridgeVersion,fullDetailsRequired:true,urlContractPreferred:true,scopeRows:r.length,accountCount:accounts.length,reps:payload.effectiveReps.length,actions:payload.effectiveActions.length,startDate:payload.startDate,endDate:payload.endDate}); updateBridgePill(payload); return payload;
   }
-
-  function addList(q, key, values){
-    values = uniq(values || []);
-    if(values.length) q.set(key, values.join('|'));
-  }
-  function urlFor(payload, includeAccounts){
-    const q = new URLSearchParams();
-    q.set('source','manager-console');
-    q.set('fastLink','1');
-    q.set('fullDetails','1');
-    q.set('countsOnly','0');
-    q.set('serverSideScope','1');
-    q.set('verifiedFilters','1');
-    q.set('autoLoad','1');
-    q.set('urlContract','1');
-    q.set('bridgeVersion', String(payload.bridgeVersion || 30));
-    q.set('bridgeKey', SCOPE_KEY);
-    q.set('manifestKey', MANIFEST_KEY);
-    q.set('statusKey', STATUS_KEY);
-    q.set('bridgeId', payload.bridgeId);
-    if(payload.startDate) q.set('startDate', payload.startDate);
-    if(payload.endDate) q.set('endDate', payload.endDate);
-    addList(q, 'effectiveReps', payload.effectiveReps);
-    addList(q, 'effectiveActions', payload.effectiveActions);
-    if(includeAccounts) addList(q, 'accountNumbers', payload.effectiveAccounts || payload.accountNumbers || payload.accounts);
-    q.set('_', String(Date.now()));
-    return actionCheckerBaseUrl() + '?' + q.toString();
-  }
-  function reportUrl(payload){
-    payload = payload || buildPayload();
-    let url = urlFor(payload, true);
-    if(url.length <= MAX_SAFE_URL) return url;
-    url = urlFor(payload, false);
-    const sep = url.indexOf('?') >= 0 ? '&' : '?';
-    return url + sep + 'accountScopeInStorage=1&accountCount=' + encodeURIComponent(String((payload.effectiveAccounts || payload.accountNumbers || []).length));
-  }
-
-  function updateBridgePill(payload){
-    try{
-      const host = document.querySelector('.filters-top-row .ml-auto') || document.getElementById('active-filter-subtitle') || document.querySelector('header') || document.body;
-      let pill = document.getElementById('act-url-contract-pill');
-      if(!pill){ pill = document.createElement('span'); pill.id = 'act-url-contract-pill'; pill.className = 'act-url-contract-pill'; host.appendChild(pill); }
-      const accounts = (payload.effectiveAccounts || payload.accountNumbers || []).length;
-      const reps = (payload.effectiveReps || []).length;
-      const actions = (payload.effectiveActions || []).length;
-      pill.textContent = 'Action Checker URL contract • ' + accounts.toLocaleString() + ' accounts • ' + reps.toLocaleString() + ' reps • ' + actions.toLocaleString() + ' actions';
-      pill.title = 'Action Checker launch now passes scope in URL plus storage fallback. Target: ' + actionCheckerBaseUrl();
-    }catch(e){}
-  }
-
-  function openActionChecker(evt){
-    if(evt){ try{ evt.preventDefault(); evt.stopPropagation(); if(evt.stopImmediatePropagation) evt.stopImmediatePropagation(); }catch(e){} }
-    const payload = buildPayload();
-    const url = reportUrl(payload);
-    const now = Date.now();
-    if(singletonWindow && !singletonWindow.closed && now - lastOpenAt < 2500){ try{ singletonWindow.focus(); }catch(e){} return singletonWindow; }
-    lastOpenAt = now;
-    // Intentionally do not use noopener/noreferrer here. Same-origin storage is still written, and keeping opener available preserves a future postMessage path.
-    singletonWindow = window.open(url, TARGET);
-    if(!singletonWindow){
-      const a = document.createElement('a');
-      a.href = url;
-      a.target = TARGET;
-      a.rel = 'noopener';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      if(typeof window.showToast === 'function') window.showToast('If Action Checker did not open, allow pop-ups for this site.', 'warning');
-      else if(typeof window.toast === 'function') window.toast('If Action Checker did not open, allow pop-ups for this site.', 8000);
-    } else { try{ singletonWindow.focus(); }catch(e){} }
-    return singletonWindow || window;
-  }
-
-  function isActionCheckerLauncher(el){
-    if(!el || el === document || el === window) return false;
-    const txt = clean(el.textContent).toLowerCase();
-    const attr = [el.id, el.name, el.className, el.getAttribute && el.getAttribute('href'), el.getAttribute && el.getAttribute('title'), el.getAttribute && el.getAttribute('data-tab'), el.getAttribute && el.getAttribute('data-target'), el.getAttribute && el.getAttribute('data-view'), el.getAttribute && el.getAttribute('aria-label')].map(clean).join(' ').toLowerCase();
-    return txt === 'reports' || txt === 'reporting' || txt.includes('action checker') || txt.includes('action leaderboard') || attr.includes('reporting') || attr.includes('actionchecker') || attr.includes('action checker') || attr.includes('action leaderboard');
-  }
-  function wire(){
-    try{
-      document.querySelectorAll('#nav-reporting-tab,#nav-reports-tab,[data-tab="reporting"],[data-target="reporting"],[data-view="reporting"],button,.nav-tab,a').forEach(el => {
-        if(!isActionCheckerLauncher(el)) return;
-        el.onclick = openActionChecker;
-        el.setAttribute('data-act-url-contract-bridge','true');
-        if(el.tagName === 'A'){
-          try{ el.href = reportUrl(buildPayload()); el.target = TARGET; el.rel = 'noopener'; }catch(e){}
-        }
-      });
-    }catch(e){ console.warn('Action Checker URL-contract wire failed', e); }
-  }
-
-  window.buildActionCheckerScopePayload = buildPayload;
-  window.buildActionCheckerFastLinkPayload = buildPayload;
-  window.buildActionCheckerPayload = buildPayload;
-  window.currentReportPayload = buildPayload;
-  window.getReportingBridgeFilters = buildPayload;
-  window.reportUrl = reportUrl;
-  window.openActionCheckerFastLink = openActionChecker;
-  window.openActionCheckerOnce = openActionChecker;
-  window.openReportingModal = openActionChecker;
-  window.openReportingInNewTab = openActionChecker;
-  window.startActionCheckerBackgroundPreload = function(){ buildPayload(); return false; };
-
-  document.addEventListener('click', function(evt){
-    const el = evt.target && evt.target.closest ? evt.target.closest('a,button,.nav-tab,[role="button"],[data-tab],[data-target],[data-view]') : null;
-    if(isActionCheckerLauncher(el)) openActionChecker(evt);
-  }, true);
-
-  document.addEventListener('DOMContentLoaded', wire);
-  setTimeout(wire, 150);
-  setTimeout(wire, 800);
-  setTimeout(wire, 2200);
-  setInterval(wire, 5000);
+  function addList(q,key,values){ values=uniq(values||[]); if(values.length) q.set(key,values.join('|')); }
+  function urlFor(payload,includeAccounts){ const q=new URLSearchParams(); q.set('source','manager-console'); q.set('fastLink','1'); q.set('fullDetails','1'); q.set('countsOnly','0'); q.set('serverSideScope','1'); q.set('verifiedFilters','1'); q.set('autoLoad','1'); q.set('urlContract','1'); q.set('bridgeVersion',String(payload.bridgeVersion||30)); q.set('bridgeKey',SCOPE_KEY); q.set('manifestKey',MANIFEST_KEY); q.set('statusKey',STATUS_KEY); q.set('bridgeId',payload.bridgeId); if(payload.startDate)q.set('startDate',payload.startDate); if(payload.endDate)q.set('endDate',payload.endDate); addList(q,'effectiveReps',payload.effectiveReps); addList(q,'effectiveActions',payload.effectiveActions); if(includeAccounts)addList(q,'accountNumbers',payload.effectiveAccounts||payload.accountNumbers||payload.accounts); q.set('_',String(Date.now())); return actionCheckerBaseUrl()+'?'+q.toString(); }
+  function reportUrl(payload){ payload=payload||buildPayload(); let url=urlFor(payload,true); if(url.length<=MAX_SAFE_URL)return url; url=urlFor(payload,false); return url+'&accountScopeInStorage=1&accountCount='+encodeURIComponent(String((payload.effectiveAccounts||payload.accountNumbers||[]).length)); }
+  function updateBridgePill(payload){ try{ const host=document.querySelector('.filters-top-row .ml-auto')||document.getElementById('active-filter-subtitle')||document.querySelector('header')||document.body; let pill=document.getElementById('act-url-contract-pill'); if(!pill){pill=document.createElement('span');pill.id='act-url-contract-pill';pill.className='act-url-contract-pill';host.appendChild(pill);} pill.textContent='Action Checker URL contract • '+((payload.effectiveAccounts||payload.accountNumbers||[]).length).toLocaleString()+' accounts • '+((payload.effectiveReps||[]).length).toLocaleString()+' reps • '+((payload.effectiveActions||[]).length).toLocaleString()+' actions'; pill.title='Action Checker launch passes scope in URL plus storage fallback. Target: '+actionCheckerBaseUrl(); }catch(e){} }
+  function openActionChecker(evt){ if(evt){try{evt.preventDefault();evt.stopPropagation();evt.stopImmediatePropagation&&evt.stopImmediatePropagation();}catch(e){}} const payload=buildPayload(), url=reportUrl(payload), now=Date.now(); if(singletonWindow&&!singletonWindow.closed&&now-lastOpenAt<2500){try{singletonWindow.focus();}catch(e){} return singletonWindow;} lastOpenAt=now; singletonWindow=window.open(url,TARGET); if(!singletonWindow){const a=document.createElement('a'); a.href=url; a.target=TARGET; a.rel='noopener'; document.body.appendChild(a); a.click(); a.remove(); if(typeof window.showToast==='function')window.showToast('If Action Checker did not open, allow pop-ups for this site.','warning'); else if(typeof window.toast==='function')window.toast('If Action Checker did not open, allow pop-ups for this site.',8000);} else {try{singletonWindow.focus();}catch(e){}} return singletonWindow||window; }
+  function isLauncher(el){ if(!el||el===document||el===window)return false; const txt=clean(el.textContent).toLowerCase(); const attr=[el.id,el.name,el.className,el.getAttribute&&el.getAttribute('href'),el.getAttribute&&el.getAttribute('title'),el.getAttribute&&el.getAttribute('data-tab'),el.getAttribute&&el.getAttribute('data-target'),el.getAttribute&&el.getAttribute('data-view'),el.getAttribute&&el.getAttribute('aria-label')].map(clean).join(' ').toLowerCase(); return txt==='reports'||txt==='reporting'||txt.includes('action checker')||txt.includes('action leaderboard')||attr.includes('reporting')||attr.includes('actionchecker')||attr.includes('action checker')||attr.includes('action leaderboard'); }
+  function wire(){ try{ document.querySelectorAll('#nav-reporting-tab,#nav-reports-tab,[data-tab="reporting"],[data-target="reporting"],[data-view="reporting"],button,.nav-tab,a').forEach(el=>{ if(!isLauncher(el))return; el.onclick=openActionChecker; el.setAttribute('data-act-url-contract-bridge','true'); if(el.tagName==='A'){try{el.href=reportUrl(buildPayload());el.target=TARGET;el.rel='noopener';}catch(e){}} }); }catch(e){console.warn('Action Checker URL-contract wire failed',e);} }
+  window.buildActionCheckerScopePayload=buildPayload; window.buildActionCheckerFastLinkPayload=buildPayload; window.buildActionCheckerPayload=buildPayload; window.currentReportPayload=buildPayload; window.getReportingBridgeFilters=buildPayload; window.reportUrl=reportUrl; window.openActionCheckerFastLink=openActionChecker; window.openActionCheckerOnce=openActionChecker; window.openReportingModal=openActionChecker; window.openReportingInNewTab=openActionChecker; window.startActionCheckerBackgroundPreload=function(){buildPayload();return false;};
+  document.addEventListener('click',function(evt){const el=evt.target&&evt.target.closest?evt.target.closest('a,button,.nav-tab,[role="button"],[data-tab],[data-target],[data-view]'):null; if(isLauncher(el))openActionChecker(evt);},true);
+  document.addEventListener('DOMContentLoaded',wire); setTimeout(wire,150); setTimeout(wire,800); setTimeout(wire,2200); setInterval(wire,5000);
 })();
 </script>
 <!-- === COPILOT MANAGER → ACTION CHECKER URL-CONTRACT OVERRIDE PATCH 2026-06-10 END === -->
