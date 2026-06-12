@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. v6.10.26 Action Email Template Fix - ACT Final Images + June Templates + Auto15 SyntaxFix</title>
+    <title>A.C.T. Best of Three - Dynamics CSW + Sales Order</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -3343,10 +3343,24 @@ window.populateForm = function(rec) {
                     addEmailTemplateOption(match, true);
                     dd.value = match.val;
                 } else { 
-                    // Default keeps the workflow alive when an account action does not map
-                    // to a campaign template. launchEmailLogic's final else builds the default email.
-                    addEmailTemplateOption({ val: "Default", txt: "Default" }, true);
-                    dd.value = "Default";
+                    // When an account action does not map to a specific campaign template,
+                    // show current-month promotion templates instead of only the Default option.
+                    // This only changes dropdown visibility/options; hard-coded email bodies remain unchanged.
+                    const currentMonthName = new Date().toLocaleString('en-US', { month: 'long' });
+                    const currentMonthTemplates = allTemplates.filter(t => {
+                        const templateText = `${t.val || ''} ${t.txt || ''}`.toLowerCase();
+                        return templateText.includes(currentMonthName.toLowerCase());
+                    });
+
+                    if (currentMonthTemplates.length > 0) {
+                        currentMonthTemplates.forEach((t, idx) => addEmailTemplateOption(t, idx === 0));
+                        dd.value = currentMonthTemplates[0].val;
+                    } else {
+                        // Final fallback keeps the workflow alive when no current-month promo exists.
+                        // launchEmailLogic's final else builds the default email.
+                        addEmailTemplateOption({ val: "Default", txt: "Default" }, true);
+                        dd.value = "Default";
+                    }
                 } 
             }
             dd.disabled = false;
@@ -5217,6 +5231,1927 @@ document.getElementById('script-modal').style.display='flex';
     } else {
         wireLoaderGifSync();
     }
+})();
+</script>
+
+
+
+<!-- ============================================================
+     ACT Best-of-Three Integration
+     Base: latest ACT export with monthly fallback + email/image fixes.
+     Added: v4.60 account hub, Dynamics fields display, CSW display, MVGO/sales-order process.
+     ACT Experimental display parity checked: latest and experimental differed only by monthly fallback block.
+=============================================================== -->
+<!-- ==========================================
+     ACT ADDITIVE BUILD v4.30 (UI + Priority + Saved Views)
+     Additive-only, safe to remove or diff
+========================================== -->
+<style>
+/* SESSION STATUS BADGE PULSE */
+@keyframes pulseError {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
+  70% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+.session-error-pulse { animation: pulseError 1.6s infinite; }
+
+/* Priority badges */
+.badge-priority{
+  display:inline-flex;align-items:center;gap:4px;font-size:9px;font-weight:900;
+  letter-spacing:.05em;padding:2px 6px;border-radius:999px;border:1px solid transparent;
+  text-transform:uppercase;white-space:nowrap
+}
+.badge-priority.high{background:rgba(239,68,68,.12);color:#dc2626;border-color:rgba(239,68,68,.35)}
+.badge-priority.medium{background:rgba(234,179,8,.14);color:#ca8a04;border-color:rgba(234,179,8,.35)}
+.badge-priority.low{background:rgba(34,197,94,.12);color:#16a34a;border-color:rgba(34,197,94,.35)}
+.badge-priority.auto{box-shadow:0 0 0 1px rgba(255,255,255,.65) inset}
+</style>
+
+<script>
+/* =============================
+   PRIORITY ENGINE (AUTO + MANUAL)
+   ============================= */
+window.getAccountPriority = function (record) {
+  const manual = localStorage.getItem(`daytona_priority_${record.cr714_id}`);
+  if (manual) return manual;
+  if (record.cr714_managernotes && record.cr714_managernotes.trim()) return 'high';
+  if (record.cr714_intro && record.cr714_intro.trim()) return 'medium';
+  if (record.cr714_followup) return 'medium';
+  return 'low';
+};
+window.setAccountPriority = function (recordId, level) {
+  localStorage.setItem(`daytona_priority_${recordId}`, level);
+  if (typeof window.filterAndSortGallery === 'function') window.filterAndSortGallery(true);
+  if (typeof window.showToast === 'function') window.showToast(`Priority set to ${level.toUpperCase()}`, 'success');
+};
+
+/* =============================
+   SAVED FILTER VIEWS
+   ============================= */
+window.saveCurrentFilterView = function () {
+  const name = prompt('Save view as:'); if (!name) return;
+  const view = {
+    search: document.getElementById('search-bar')?.value || '',
+    sort: document.getElementById('sort-dropdown')?.value || '',
+    checks: Array.from(document.querySelectorAll('.filter-pill input')).filter(c=>c.checked).map(c=>c.id),
+    actions: Array.from(document.querySelectorAll('.filter-action-chk:checked')).map(c=>c.value)
+  };
+  const views = JSON.parse(localStorage.getItem('daytona_filter_views')||'{}');
+  views[name]=view; localStorage.setItem('daytona_filter_views', JSON.stringify(views));
+  if (typeof window.renderSavedFilterViews==='function') window.renderSavedFilterViews();
+  if (typeof window.showToast==='function') window.showToast(`Saved view "${name}"`,'success');
+};
+window.applySavedFilterView = function (name) {
+  const views = JSON.parse(localStorage.getItem('daytona_filter_views')||'{}'); const v=views[name]; if(!v) return;
+  const sb=document.getElementById('search-bar'); if(sb) sb.value=v.search;
+  const sd=document.getElementById('sort-dropdown'); if(sd) sd.value=v.sort;
+  document.querySelectorAll('.filter-pill input').forEach(c=>c.checked=v.checks.includes(c.id));
+  document.querySelectorAll('.filter-action-chk').forEach(c=>c.checked=v.actions.includes(c.value));
+  if (typeof window.filterAndSortGallery==='function') window.filterAndSortGallery();
+};
+window.renderSavedFilterViews = function () {
+  const c=document.getElementById('saved-filter-views'); if(!c) return;
+  const views=JSON.parse(localStorage.getItem('daytona_filter_views')||'{}');
+  c.innerHTML = Object.keys(views).length===0
+    ? '<span class="text-muted text-xs italic">No saved views</span>'
+    : Object.keys(views).map(n=>`<button class="filter-pill" onclick="window.applySavedFilterView('${n}')">⭐ ${n}</button>`).join('');
+};
+
+/* =============================
+   SESSION STATUS BADGE (SAFE EXPORT + PULSE ON ERROR)
+   ============================= */
+(function(){let STATUS=null;function init(){STATUS=document.getElementById('session-status-badge');}
+  function _set(text,cls,isErr){ if(!STATUS) return; STATUS.textContent=text; STATUS.className=cls||'text-xs px-2 py-1 ml-2 rounded border text-muted';
+    STATUS.classList.toggle('session-error-pulse', !!isErr); }
+  window.setStatus=function(text,cls,isErr){ _set(text,cls,isErr); };
+  if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded', init, {once:true}); } else { init(); }
+  const _orig=window.getToken; if(typeof _orig==='function'){ window.getToken=async function(){ try{ const t=await _orig.apply(this,arguments);
+      window.setStatus('✅ Session OK','text-xs px-2 py-1 ml-2 rounded border text-status-success', false); return t;
+    }catch(e){ window.setStatus('❌ Session Issue – Refresh','text-xs font-bold px-2 py-1 rounded border ml-2 text-status-danger cursor-pointer', true);
+      if(STATUS){ STATUS.onclick=()=>location.reload(); } throw e; } } }
+})();
+</script>
+
+<!-- ============================================================
+     ACT v4.33 FULL ENHANCEMENT BUILD
+     No Copilot • SLA Gallery Badges • Priority Sorting
+     Saved Views UI • Diagnostics • Admin Feature Flags
+     Additive-only safety layer
+=============================================================== -->
+<style id="act-v433-style">
+/* ---------- Visual polish ---------- */
+.btn-primary {
+  background: linear-gradient(135deg, var(--primary), #818cf8) !important;
+  box-shadow: 0 2px 8px rgba(99,102,241,.25);
+}
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-secondary:hover { transform: translateY(-1px); box-shadow: var(--shadow); }
+.gallery-item { position: relative; transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease; }
+.gallery-item:hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(0,0,0,.10); }
+
+/* ---------- Session badge pulse ---------- */
+@keyframes actPulseError {
+  0% { box-shadow: 0 0 0 0 rgba(239,68,68,.60); }
+  70% { box-shadow: 0 0 0 7px rgba(239,68,68,0); }
+  100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+}
+.session-error-pulse { animation: actPulseError 1.6s infinite; }
+
+/* ---------- Priority badges ---------- */
+.badge-priority {
+  display:inline-flex; align-items:center; gap:4px; font-size:9px; font-weight:900;
+  letter-spacing:.04em; padding:2px 6px; border-radius:999px; border:1px solid transparent;
+  text-transform:uppercase; white-space:nowrap;
+}
+.badge-priority.high { background:rgba(239,68,68,.13); color:#dc2626; border-color:rgba(239,68,68,.36); }
+.badge-priority.medium { background:rgba(234,179,8,.15); color:#ca8a04; border-color:rgba(234,179,8,.36); }
+.badge-priority.low { background:rgba(34,197,94,.12); color:#16a34a; border-color:rgba(34,197,94,.34); }
+.gallery-item.is-selected .badge-priority,
+.gallery-item.is-selected .sla-badge { color:var(--primary-fg)!important; border-color:rgba(255,255,255,.35)!important; background:rgba(255,255,255,.14)!important; }
+
+/* ---------- SLA badges in gallery ---------- */
+.sla-badge {
+  position:absolute; top:6px; right:6px; z-index:7;
+  display:inline-flex; align-items:center; gap:4px;
+  font-size:9px; font-weight:900; padding:2px 6px; border-radius:999px;
+  border:1px solid transparent; white-space:nowrap; pointer-events:auto;
+}
+.sla-overdue { background:rgba(239,68,68,.18); color:#b91c1c; border-color:rgba(239,68,68,.35); }
+.sla-due { background:rgba(234,179,8,.18); color:#92400e; border-color:rgba(234,179,8,.35); }
+.sla-ok { background:rgba(34,197,94,.14); color:#166534; border-color:rgba(34,197,94,.30); }
+
+/* keep card content from hiding behind top-right SLA badge */
+.gallery-item .act-v433-badge-row { margin-top: 2px; }
+
+/* ---------- Diagnostics tooltip ---------- */
+#status-tooltip {
+  position: fixed; z-index: 99999; display:none; max-width: 320px;
+  padding: 10px 12px; font-size: 11px; line-height: 1.45;
+  color: var(--text-main); background: var(--bg-card); border:1px solid var(--border-color);
+  border-radius: 10px; box-shadow: 0 16px 38px rgba(0,0,0,.28);
+}
+#status-tooltip strong { color: var(--primary); }
+
+/* ---------- Saved views strip ---------- */
+#saved-filter-views { min-height: 32px; align-items:center; }
+.act-feature-panel-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid var(--border-color); }
+</style>
+
+<script id="act-v433-script">
+(function(){
+  if (window.__ACT_V433_INSTALLED) return;
+  window.__ACT_V433_INSTALLED = true;
+
+  /* ============================================================
+     NO COPILOT / PREDICT / PERSONA
+  ============================================================ */
+  (function disableCopilotPredict(){
+    window.PredictAPI = null;
+    window.Predict = null;
+    window.__msdynCopilotDisabled = true;
+    window.__isCopilotEnabled = false;
+    try {
+      localStorage.setItem('msdyn_disableCopilot','true');
+      localStorage.setItem('msdyn_predict_disabled','true');
+    } catch(e) {}
+    try { Object.defineProperty(window,'PredictAPI',{ get:()=>null, configurable:false }); } catch(e) {}
+    try { Object.defineProperty(window,'Predict',{ get:()=>null, configurable:false }); } catch(e) {}
+
+    if (!window.__ACT_FETCH_COPILOT_BLOCKED) {
+      window.__ACT_FETCH_COPILOT_BLOCKED = true;
+      const _fetch = window.fetch;
+      window.fetch = function(){
+        const url = String(arguments[0] || '');
+        if (/Predict|Copilot|msdyn_personasecurityrolemapping/i.test(url)) {
+          console.warn('[ACT] Copilot/Predict request blocked:', url);
+          return Promise.resolve(new Response(null,{status:204}));
+        }
+        return _fetch.apply(this, arguments);
+      };
+    }
+
+    window.addEventListener('unhandledrejection', function(e){
+      const msg = String(e.reason || '');
+      if (/Predict|Copilot|persona/i.test(msg)) {
+        console.warn('[ACT] Suppressed Copilot/Predict noise:', msg);
+        e.preventDefault();
+      }
+    });
+  })();
+
+  /* ============================================================
+     FEATURE FLAGS
+  ============================================================ */
+  const DEFAULT_FLAGS = {
+    prioritySorting: true,
+    slaTimers: true,
+    gallerySlaBadges: true,
+    savedViews: true,
+    diagnostics: true,
+    adminToggles: true,
+    noCopilot: true
+  };
+
+  window.ACT_FEATURES = Object.assign({}, DEFAULT_FLAGS, (() => {
+    try { return JSON.parse(localStorage.getItem('daytona_act_feature_flags') || '{}'); }
+    catch(e) { return {}; }
+  })());
+
+  window.saveACTFeatureFlags = function(){
+    localStorage.setItem('daytona_act_feature_flags', JSON.stringify(window.ACT_FEATURES));
+    if (typeof window.showToast === 'function') window.showToast('Feature flags saved', 'success');
+    if (typeof window.filterAndSortGallery === 'function') window.filterAndSortGallery(true);
+  };
+
+  /* ============================================================
+     ADMIN MODE
+  ============================================================ */
+  window.isACTAdmin = function(){
+    if (localStorage.getItem('daytona_act_admin_unlocked') === 'true') return true;
+    try {
+      const admins = JSON.parse(localStorage.getItem('daytona_admins') || '[]');
+      const upn = (window.currentUserUpn || window.msalAccount?.username || '').toLowerCase();
+      return !!upn && admins.map(x => String(x).toLowerCase()).includes(upn);
+    } catch(e) { return false; }
+  };
+
+  const _origCheckAdminPassword = window.checkAdminPassword;
+  if (typeof _origCheckAdminPassword === 'function') {
+    window.checkAdminPassword = function(){
+      const pwd = document.getElementById('admin-password')?.value;
+      const before = localStorage.getItem('daytona_act_admin_unlocked');
+      const result = _origCheckAdminPassword.apply(this, arguments);
+      if (pwd === 'admin' || pwd === 'daytona') localStorage.setItem('daytona_act_admin_unlocked','true');
+      if (before !== 'true' && localStorage.getItem('daytona_act_admin_unlocked') === 'true' && typeof window.showToast === 'function') {
+        window.showToast('Admin feature toggles unlocked', 'success');
+      }
+      return result;
+    };
+  }
+
+  window.openACTFeaturePanel = function(){
+    if (!window.isACTAdmin()) {
+      if (typeof window.showToast === 'function') window.showToast('Admin unlock required', 'error');
+      return;
+    }
+    let modal = document.getElementById('act-feature-flags-modal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'act-feature-flags-modal';
+      modal.className = 'modal-overlay';
+      modal.style.display = 'none';
+      modal.innerHTML = `
+        <div class="modal-content w-96 shadow-2xl rounded-xl">
+          <button onclick="document.getElementById('act-feature-flags-modal').style.display='none'" class="absolute top-2 right-2 text-gray-400 hover:text-status-danger bg-transparent border-none text-xl">×</button>
+          <h3 class="text-lg font-bold mb-3" style="color: var(--primary);"><i class="fas fa-flask mr-2"></i>ACT Feature Flags</h3>
+          <p class="text-xs text-muted mb-3">Admin-only local controls. Changes apply after Save.</p>
+          <div id="act-feature-flags-list"></div>
+          <div class="flex justify-end gap-2 mt-4">
+            <button class="btn-secondary text-xs" onclick="localStorage.removeItem('daytona_act_feature_flags'); location.reload();">Reset</button>
+            <button class="btn-primary text-xs" onclick="window.saveACTFeatureFlags(); document.getElementById('act-feature-flags-modal').style.display='none';">Save</button>
+          </div>
+        </div>`;
+      document.body.appendChild(modal);
+    }
+    const list = document.getElementById('act-feature-flags-list');
+    list.innerHTML = Object.keys(DEFAULT_FLAGS).map(k => `
+      <label class="act-feature-panel-row">
+        <span class="text-sm font-bold">${k}</span>
+        <input type="checkbox" ${window.ACT_FEATURES[k] ? 'checked' : ''} onchange="window.ACT_FEATURES['${k}']=this.checked" style="width:16px;height:16px;">
+      </label>`).join('');
+    modal.classList.remove('hidden');
+    modal.style.display = 'flex';
+  };
+
+  document.addEventListener('keydown', function(e){
+    if (e.ctrlKey && e.shiftKey && String(e.key).toLowerCase() === 'a') window.openACTFeaturePanel();
+  });
+
+  /* ============================================================
+     SESSION STATUS BADGE + HOVER DIAGNOSTICS
+  ============================================================ */
+  (function setupStatusBadge(){
+    let STATUS = null;
+    function init(){ STATUS = document.getElementById('session-status-badge'); }
+    function set(text, cls, isError){
+      if (!STATUS) init();
+      if (!STATUS) return;
+      STATUS.textContent = text;
+      STATUS.className = cls || 'text-xs px-2 py-1 ml-2 rounded border text-muted';
+      STATUS.classList.toggle('session-error-pulse', !!isError);
+      if (isError) STATUS.onclick = () => location.reload();
+    }
+    window.setStatus = function(text, cls, isError){ set(text, cls, isError); };
+
+    document.addEventListener('DOMContentLoaded', function(){
+      init();
+      if (!STATUS) return;
+      let tip = document.getElementById('status-tooltip');
+      if (!tip) {
+        tip = document.createElement('div');
+        tip.id = 'status-tooltip';
+        document.body.appendChild(tip);
+      }
+      STATUS.addEventListener('mouseenter', function(e){
+        if (!window.ACT_FEATURES.diagnostics) return;
+        const accountCount = Array.isArray(window.allRecords) ? window.allRecords.length : (typeof allRecords !== 'undefined' && Array.isArray(allRecords) ? allRecords.length : 'n/a');
+        tip.innerHTML = `<strong>Session Diagnostics</strong><br>
+          User: ${(window.msalAccount?.username || window.currentUserRepName || 'unknown')}<br>
+          Time: ${new Date().toLocaleString()}<br>
+          Records: ${accountCount}<br>
+          Flags: ${Object.keys(window.ACT_FEATURES).filter(k => window.ACT_FEATURES[k]).join(', ')}`;
+        tip.style.left = (e.clientX + 12) + 'px';
+        tip.style.top = (e.clientY + 12) + 'px';
+        tip.style.display = 'block';
+      });
+      STATUS.addEventListener('mousemove', function(e){
+        tip.style.left = (e.clientX + 12) + 'px';
+        tip.style.top = (e.clientY + 12) + 'px';
+      });
+      STATUS.addEventListener('mouseleave', function(){ tip.style.display = 'none'; });
+    });
+
+    const _origGetToken = window.getToken;
+    if (typeof _origGetToken === 'function' && !window.__ACT_GETTOKEN_STATUS_WRAPPED) {
+      window.__ACT_GETTOKEN_STATUS_WRAPPED = true;
+      window.getToken = async function(){
+        try {
+          const token = await _origGetToken.apply(this, arguments);
+          window.setStatus('✅ Session OK','text-xs px-2 py-1 ml-2 rounded border text-status-success', false);
+          return token;
+        } catch(e) {
+          window.setStatus('❌ Session Issue – Refresh','text-xs font-bold px-2 py-1 rounded border ml-2 text-status-danger cursor-pointer', true);
+          throw e;
+        }
+      };
+    }
+  })();
+
+  /* ============================================================
+     PRIORITY + SLA ENGINES
+  ============================================================ */
+  window.getAccountPriority = window.getAccountPriority || function(record){
+    if (!record) return 'low';
+    const manual = localStorage.getItem(`daytona_priority_${record.cr714_id}`);
+    if (manual) return manual;
+    if (record.cr714_managernotes && String(record.cr714_managernotes).trim()) return 'high';
+    if (record.cr714_intro && String(record.cr714_intro).trim()) return 'medium';
+    if (record.cr714_followup) return 'medium';
+    return 'low';
+  };
+  window.setAccountPriority = window.setAccountPriority || function(recordId, level){
+    localStorage.setItem(`daytona_priority_${recordId}`, level);
+    if (typeof window.filterAndSortGallery === 'function') window.filterAndSortGallery(true);
+    if (typeof window.showToast === 'function') window.showToast(`Priority set to ${String(level).toUpperCase()}`, 'success');
+  };
+  window.getSLAStatus = function(record){
+    if (!record || !record.cr714_followup) return { status:'ok', label:'OK to Contact', rank:0, title:'No follow-up date' };
+    const due = new Date(record.cr714_followup);
+    if (isNaN(due.getTime())) return { status:'ok', label:'OK to Contact', rank:0, title:'Invalid follow-up date' };
+    const now = new Date();
+    const hours = (due - now) / 36e5;
+    if (hours < 0) return { status:'overdue', label:'Overdue', rank:3, title:'Follow-up overdue: ' + due.toLocaleString() };
+    if (hours < 24) return { status:'due', label:'Due Soon', rank:2, title:'Follow-up due: ' + due.toLocaleString() };
+    return { status:'ok', label:'OK to Contact', rank:1, title:'Follow-up due: ' + due.toLocaleString() };
+  };
+
+  function findRecordForGalleryItem(item){
+    const explicit = item.dataset.recordId || item.getAttribute('data-record-id');
+    const idText = explicit || item.querySelector('.gallery-item-id')?.textContent?.trim();
+    if (!idText) return null;
+    const source = (typeof allRecords !== 'undefined' && Array.isArray(allRecords)) ? allRecords : (Array.isArray(window.allRecords) ? window.allRecords : []);
+    return source.find(r => String(r.cr714_id) === String(idText)) || null;
+  }
+
+  function decorateGalleryCards(){
+    const items = Array.from(document.querySelectorAll('.gallery-item'));
+    if (!items.length) return;
+    items.forEach(item => {
+      const rec = findRecordForGalleryItem(item);
+      if (!rec) return;
+      const priority = window.getAccountPriority(rec);
+      item.dataset.priority = priority;
+      item.dataset.recordId = rec.cr714_id;
+
+      if (!item.querySelector('.act-v433-badge-row')) {
+        const row = document.createElement('div');
+        row.className = 'act-v433-badge-row flex flex-wrap gap-1 mt-1';
+        const company = item.querySelector('.gallery-item-company');
+        if (company && company.parentNode) company.insertAdjacentElement('afterend', row);
+        else item.appendChild(row);
+      }
+      const row = item.querySelector('.act-v433-badge-row');
+
+      if (!row.querySelector('.badge-priority')) {
+        const p = document.createElement('span');
+        p.className = `badge-priority ${priority}`;
+        p.textContent = priority === 'high' ? '🔥 High' : priority === 'medium' ? '⚡ Medium' : '✅ Low';
+        p.title = 'Account priority';
+        row.appendChild(p);
+      } else {
+        const p = row.querySelector('.badge-priority');
+        p.className = `badge-priority ${priority}`;
+        p.textContent = priority === 'high' ? '🔥 High' : priority === 'medium' ? '⚡ Medium' : '✅ Low';
+      }
+
+      if (window.ACT_FEATURES.slaTimers && window.ACT_FEATURES.gallerySlaBadges) {
+        const sla = window.getSLAStatus(rec);
+        let badge = item.querySelector('.sla-badge');
+        if (!badge) {
+          badge = document.createElement('span');
+          item.appendChild(badge);
+        }
+        badge.className = `sla-badge sla-${sla.status}`;
+        badge.textContent = sla.status === 'overdue' ? '⏰ Overdue' : sla.status === 'due' ? '⏳ Due Soon' : '✓ OK to Contact';
+        badge.title = sla.title;
+        item.dataset.slaRank = String(sla.rank);
+      }
+    });
+  }
+
+  function priorityAndSLASortGallery(){
+    if (!window.ACT_FEATURES.prioritySorting) return;
+    const list = document.getElementById('record-gallery-list');
+    if (!list) return;
+    const rank = { high:3, medium:2, low:1 };
+    const items = Array.from(list.children).filter(el => el.classList && el.classList.contains('gallery-item'));
+    const others = Array.from(list.children).filter(el => !(el.classList && el.classList.contains('gallery-item')));
+    items.sort((a,b) => {
+      const pr = (rank[b.dataset.priority || 'low'] || 0) - (rank[a.dataset.priority || 'low'] || 0);
+      if (pr !== 0) return pr;
+      const sr = (parseInt(b.dataset.slaRank || '0',10) || 0) - (parseInt(a.dataset.slaRank || '0',10) || 0);
+      return sr;
+    });
+    items.concat(others).forEach(el => list.appendChild(el));
+  }
+  /* ACT v4.46: badge post-processing disabled; badges render statically in filterAndSortGallery(). */
+  /* ============================================================
+     SAVED FILTER VIEWS UI
+  ============================================================ */
+  window.saveCurrentFilterView = window.saveCurrentFilterView || function(){
+    const name = prompt('Save view as:');
+    if (!name) return;
+    const view = {
+      search: document.getElementById('search-bar')?.value || '',
+      sort: document.getElementById('sort-dropdown')?.value || '',
+      checks: Array.from(document.querySelectorAll('.filter-pill input')).filter(c => c.checked).map(c => c.id),
+      actions: Array.from(document.querySelectorAll('.filter-action-chk:checked')).map(c => c.value)
+    };
+    const views = JSON.parse(localStorage.getItem('daytona_filter_views') || '{}');
+    views[name] = view;
+    localStorage.setItem('daytona_filter_views', JSON.stringify(views));
+    window.renderSavedFilterViews();
+    if (typeof window.showToast === 'function') window.showToast(`Saved view "${name}"`, 'success');
+  };
+  window.applySavedFilterView = window.applySavedFilterView || function(name){
+    const views = JSON.parse(localStorage.getItem('daytona_filter_views') || '{}');
+    const v = views[name];
+    if (!v) return;
+    const sb = document.getElementById('search-bar'); if (sb) sb.value = v.search || '';
+    const sd = document.getElementById('sort-dropdown'); if (sd) sd.value = v.sort || 'company-asc';
+    document.querySelectorAll('.filter-pill input').forEach(c => c.checked = (v.checks || []).includes(c.id));
+    document.querySelectorAll('.filter-action-chk').forEach(c => c.checked = (v.actions || []).includes(c.value));
+    if (typeof window.filterAndSortGallery === 'function') window.filterAndSortGallery();
+  };
+  window.renderSavedFilterViews = function(){
+    const container = document.getElementById('saved-filter-views');
+    if (!container) return;
+    const views = JSON.parse(localStorage.getItem('daytona_filter_views') || '{}');
+    const names = Object.keys(views);
+    container.innerHTML = names.length
+      ? names.map(n => `<button class="filter-pill" title="Apply saved view" onclick="window.applySavedFilterView('${String(n).replace(/'/g,"\\'")}')">⭐ ${n}</button>`).join('')
+      : '<span class="text-muted text-xs italic">No saved views</span>';
+  };
+
+  function ensureSavedViewsUI(){
+    if (!window.ACT_FEATURES.savedViews) return;
+    if (document.getElementById('saved-filter-views-wrap')) return;
+    const filterBar = document.getElementById('filter-bar-container');
+    if (!filterBar) return;
+    const wrap = document.createElement('div');
+    wrap.id = 'saved-filter-views-wrap';
+    wrap.className = 'flex items-center gap-2 flex-wrap border-l pl-2 ml-2';
+    wrap.style.borderColor = 'var(--border-color)';
+    wrap.innerHTML = `
+      <button onclick="window.saveCurrentFilterView()" class="btn-secondary text-xs flex items-center gap-2 h-8" title="Save current search/filter setup">
+        <i class="fas fa-save"></i> Save View
+      </button>
+      <div id="saved-filter-views" class="flex flex-wrap gap-1"></div>`;
+    const mlAuto = filterBar.querySelector('.ml-auto');
+    if (mlAuto) filterBar.insertBefore(wrap, mlAuto);
+    else filterBar.appendChild(wrap);
+    window.renderSavedFilterViews();
+  }
+
+  document.addEventListener('DOMContentLoaded', function(){
+    ensureSavedViewsUI();
+    setTimeout(function(){ decorateGalleryCards(); priorityAndSLASortGallery(); }, 800);
+  });
+})();
+</script>
+
+
+<!-- ============================================================
+     ACT v4.35 – D365 Last Order + Pertinent Dynamics Panel
+     - Last Order maps mss_lastorderdate, fallback mss_lastinvoicedate
+     - Dynamics panel shows friendly display names only
+     - Dataverse/system/internal fields are filtered out
+=============================================================== -->
+<style id="act-v435-d365-style">
+  .act-d365-open-btn {
+    display:inline-flex; align-items:center; gap:6px;
+    height:28px; padding:0 10px; border-radius:8px;
+    border:1px solid var(--border-color, rgba(255,255,255,.14));
+    background:linear-gradient(135deg, rgba(99,102,241,.18), rgba(14,165,233,.10));
+    color:var(--text-main, #f9fafb); font-size:11px; font-weight:800;
+    cursor:pointer; margin-left:auto;
+  }
+  .act-d365-open-btn:hover { filter:brightness(1.08); transform:translateY(-1px); }
+  .act-last-order-fallback-note { font-size:9px; color:var(--text-muted, #9ca3af); margin-left:4px; }
+  #act-d365-history-panel {
+    display:none; height:100%; min-height:0; overflow:hidden;
+    background:var(--bg-card, #111827); color:var(--text-main, #f9fafb);
+  }
+  #act-d365-history-panel.open { display:flex; flex-direction:column; }
+  #act-d365-history-panel .act-d365-panel-header {
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:10px 12px; border-bottom:1px solid var(--border-color, rgba(255,255,255,.12));
+    background:linear-gradient(135deg, rgba(99,102,241,.16), rgba(14,165,233,.08));
+    flex-shrink:0;
+  }
+  #act-d365-history-panel .act-d365-panel-body { padding:10px 12px; overflow:auto; flex:1; min-height:0; }
+  #act-d365-field-search {
+    width:100%; margin-bottom:10px; padding:8px 10px; border-radius:8px;
+    border:1px solid var(--border-color, rgba(255,255,255,.12));
+    background:var(--bg-input, rgba(255,255,255,.05)); color:var(--text-main, #f9fafb);
+    font-size:12px;
+  }
+  .act-d365-section-title {
+    margin:12px 0 5px; padding-top:8px; border-top:1px solid var(--border-color, rgba(255,255,255,.12));
+    color:var(--primary, #818cf8); font-size:10px; font-weight:900; letter-spacing:.07em; text-transform:uppercase;
+  }
+  .act-d365-section-title:first-child { margin-top:0; padding-top:0; border-top:none; }
+  .act-d365-row {
+    display:grid; grid-template-columns: minmax(118px, 42%) 1fr; gap:10px;
+    padding:7px 0; border-bottom:1px solid var(--border-color, rgba(255,255,255,.08));
+    font-size:11px; line-height:1.35;
+  }
+  .act-d365-key { font-weight:900; color:var(--text-muted, #9ca3af); overflow-wrap:anywhere; }
+  .act-d365-value { color:var(--text-main, #f9fafb); overflow-wrap:anywhere; white-space:pre-wrap; }
+  .act-d365-source-pill {
+    display:inline-flex; align-items:center; padding:1px 6px; border-radius:999px; margin-left:6px;
+    background:rgba(99,102,241,.14); color:var(--primary,#818cf8); font-size:9px; font-weight:800;
+  }
+</style>
+<script id="act-v435-d365-script">
+(function(){
+  if (window.__ACT_V435_D365_INSTALLED) return;
+  window.__ACT_V435_D365_INSTALLED = true;
+
+  window.ACT_D365_RAW_BY_ACCOUNTNUMBER = window.ACT_D365_RAW_BY_ACCOUNTNUMBER || {};
+  window.ACT_D365_RAW_BY_ACCOUNTID = window.ACT_D365_RAW_BY_ACCOUNTID || {};
+  window.ACT_CURRENT_D365_ACCOUNT = window.ACT_CURRENT_D365_ACCOUNT || null;
+
+  const FORMATTED_SUFFIX = '@OData.Community.Display.V1.FormattedValue';
+
+  const FRIENDLY_LABELS = {
+    accountnumber: 'Account Number',
+    name: 'Account Name',
+    emailaddress1: 'Email',
+    telephone1: 'Main Phone',
+    address1_telephone1: 'Bill To Phone',
+    address1_telephone3: 'Bill To Alternate Phone',
+    address2_telephone1: 'Ship To Phone',
+    address2_telephone3: 'Ship To Alternate Phone',
+    address1_name: 'Bill To Name',
+    address1_line1: 'Bill To Address 1',
+    address1_city: 'Bill To City',
+    address1_stateorprovince: 'Bill To State',
+    address1_postalcode: 'Bill To Zip',
+    address1_county: 'Bill To County',
+    address1_country: 'Bill To Country',
+    address1_composite: 'Bill To Address',
+    address2_name: 'Ship To Name',
+    address2_line1: 'Ship To Address 1',
+    address2_city: 'Ship To City',
+    address2_stateorprovince: 'Ship To State',
+    address2_postalcode: 'Ship To Zip',
+    address2_county: 'Ship To County',
+    address2_country: 'Ship To Country',
+    address2_composite: 'Ship To Address',
+    statuscode: 'Status',
+    statecode: 'State',
+    creditonhold: 'Credit Hold',
+    donotemail: 'Email Permission',
+    donotphone: 'Phone Permission',
+    donotfax: 'Fax Permission',
+    donotpostalmail: 'Postal Mail Permission',
+    donotbulkemail: 'Bulk Email Permission',
+    donotbulkpostalmail: 'Bulk Postal Mail',
+    donotsendmm: 'Marketing Mail',
+    followemail: 'Follow Email',
+    preferredcontactmethodcode: 'Preferred Contact Method',
+    _mss_salesrepid_value: 'Sales Rep',
+    _mss_csrid_value: 'CSR',
+    _mss_arrepteamid_value: 'A/R Team',
+    _mss_customerclassificationid_value: 'Customer Classification',
+    _transactioncurrencyid_value: 'Currency',
+    mss_lastorderdate: 'Last Order',
+    mss_lastinvoicedate: 'Last Invoice',
+    mss_lastactivitydate: 'Last Activity Date',
+    mss_lastactivityby: 'Last Activity By',
+    mss_lastactivitytype: 'Last Activity Type',
+    mss_lastactivitysubject: 'Last Activity Subject',
+    mss_opsstatus: 'OPS Status',
+    mss_messagecenter: 'Message Center',
+    mss_beverageservicenotes: 'Beverage Service Notes',
+    mss_besttimetocontact: 'Best Time To Contact',
+    mss_hoursofoperation: 'Hours Of Operation',
+    mss_nextorderdate: 'Next Order Date',
+    mss_orderfrequency: 'Order Frequency',
+    mss_avgdaysbetweenorders: 'Avg Days Between Orders',
+    mss_monthlyspend: 'Monthly Spend',
+    mss_numberoflocations: 'Number Of Locations',
+    mss_nooflocations: 'Number Of Locations',
+    mss_noofemployees: 'Number Of Employees',
+    mss_numberofemployees: 'Number Of Employees',
+    mss_preferredordermethod: 'Preferred Order Method',
+    mss_paymentmode: 'Payment Mode',
+    mss_taxexemptstatus: 'Tax Exempt Status',
+    mss_currentpaperprice: 'Current Paper Price',
+    mss_statement: 'Statement',
+    mss_type: 'Type',
+    mss_categoryinterest: 'Category Interest',
+    mss_followupdate: 'Follow-Up Date',
+    mss_followupsubject: 'Follow-Up Subject',
+    mss_followupdescription: 'Follow-Up Description',
+    mss_followupcontactname: 'Follow-Up Contact',
+    mss_followupphonenumber: 'Follow-Up Phone',
+    mss_nextcallsubject: 'Next Call Subject',
+    mss_dateofnextcall: 'Next Call Date',
+    mss_nextcallcontact: 'Next Call Contact',
+    mss_nextcallphonenumber: 'Next Call Phone',
+    description: 'Description',
+    websiteurl: 'Website'
+  };
+
+  const FIELD_GROUPS = [
+    { title: 'Account', fields: ['accountnumber','name','statuscode','statecode','mss_opsstatus','mss_type','_mss_customerclassificationid_value','_mss_salesrepid_value','_mss_csrid_value','_mss_arrepteamid_value','creditonhold'] },
+    { title: 'Contact', fields: ['telephone1','emailaddress1','preferredcontactmethodcode','address1_telephone1','address1_telephone3','address2_telephone1','address2_telephone3','mss_besttimetocontact','mss_hoursofoperation'] },
+    { title: 'Order / Activity', fields: ['mss_lastorderdate','mss_lastinvoicedate','mss_nextorderdate','mss_orderfrequency','mss_avgdaysbetweenorders','mss_monthlyspend','mss_lastactivitydate','mss_lastactivitytype','mss_lastactivityby','mss_lastactivitysubject'] },
+    { title: 'Billing Address', fields: ['address1_name','address1_composite','address1_line1','address1_city','address1_stateorprovince','address1_postalcode','address1_county','address1_country'] },
+    { title: 'Shipping Address', fields: ['address2_name','address2_composite','address2_line1','address2_city','address2_stateorprovince','address2_postalcode','address2_county','address2_country'] },
+    { title: 'Preferences', fields: ['donotemail','donotphone','donotfax','donotpostalmail','donotbulkemail','donotbulkpostalmail','donotsendmm','followemail','mss_preferredordermethod','mss_paymentmode','mss_taxexemptstatus'] },
+    { title: 'Notes / Instructions', fields: ['mss_messagecenter','description','mss_beverageservicenotes','mss_categoryinterest','mss_followupdate','mss_followupsubject','mss_followupdescription','mss_followupcontactname','mss_followupphonenumber','mss_nextcallsubject','mss_dateofnextcall','mss_nextcallcontact','mss_nextcallphonenumber'] }
+  ];
+
+  const SYSTEM_OR_NOISE_BASES = new Set([
+    'accountid','address1_addressid','address2_addressid','versionnumber','timezoneruleversionnumber','exchangerate','importsequencenumber',
+    'createdon','modifiedon','overriddencreatedon','openrevenue_date','opendeals_date','participatesinworkflow','merged','marketingonly',
+    '_createdby_value','_modifiedby_value','_ownerid_value','_owningbusinessunit_value','_owninguser_value','_owningteam_value',
+    '_createdonbehalfby_value','_modifiedonbehalfby_value','_createdbyexternalparty_value','_modifiedbyexternalparty_value',
+    'processid','stageid','traversedpath','entityimage','entityimageid','entityimage_timestamp','entityimage_url',
+    '_slaid_value','_slainvokedid_value','_masterid_value','_parentaccountid_value','_originatingleadid_value',
+    'teamsfollowed','lastusedincampaign','lastonholdtime','onholdtime','timespentbymeonemailandmeetings',
+    'openrevenue','openrevenue_base','openrevenue_state','opendeals','opendeals_state','revenue','revenue_base',
+    'creditlimit','creditlimit_base','marketcap','marketcap_base','aging30','aging30_base','aging60','aging60_base','aging90','aging90_base',
+    'sharesoutstanding','stockexchange','tickersymbol','sic','yominame','primarysatoriid',
+    'address1_latitude','address1_longitude','address2_latitude','address2_longitude','address1_utcoffset','address2_utcoffset',
+    'address1_upszone','address2_upszone','address1_postofficebox','address2_postofficebox','address1_freighttermscode','address2_freighttermscode',
+    'address1_shippingmethodcode','address2_shippingmethodcode','shippingmethodcode','territorycode','businesstypecode','customersizecode','accountclassificationcode','accountratingcode',
+    'adx_createdbyipaddress','adx_modifiedbyipaddress','adx_createdbyusername','adx_modifiedbyusername',
+    'msdyn_websiteurldescription','msdyn_primarytwitteriddescription','msdyn_primaryfacebookdescription','msdyn_primarylinkedindescrption','msdyn_emailaddress1description','msdyn_telephone1description','msdyn_faxdescription',
+    'msdyn_vendorcreatedbyworkflow','msdyn_vendororganizationname','msdyn_vendorknownasname','msdyn_invoiceaddress','msdyn_taxexempt','msdyn_taxexemptnumber','msdyn_taxexemptstatus','msdyn_creditlimitismandatory',
+    'msdyn_travelcharge','msdyn_travelcharge_base','msdyn_travelchargetype','msdyn_faxextension','msdyn_telephone1extension','msdyn_gdproptout','msdyn_language','msdyn_onetimecustomer','msdyn_onholdstatus','msdyn_creditrating','msdyn_primarytimezone','msdyn_workorderinstructions','msdyn_paymenttermsbasedays','msdyn_partynumber','msdyn_partycountry','msdyn_partystateprovince',
+    '_defaultpricelevelid_value','_transactioncurrencyid_value','_territoryid_value','_preferredequipmentid_value','_preferredserviceid_value','_preferredsystemuserid_value',
+    '_msdyn_segmentid_value','_msdyn_paymentterm_value','_msdyn_mappedvendoraccount_value','_msdyn_billingaccount_value','_msdyn_salestaxcode_value','_msdyn_defaultvendorpaymentmethodname_value','_msdyn_paymentschedule_value','_msdyn_invoicevendoraccount_value','_msdyn_company_value','_msdyn_vendor_value','_msdyn_serviceterritory_value','_msdyn_vendorgroup_value','_msdyn_salestaxgroup_value','_msdyn_paymentday_value','_msdyn_customerpaymentmethod_value','_msdyn_workhourtemplate_value','_msdyn_accountkpiid_value','_msdyn_customergroupid_value','_msdyn_preferredresource_value','_msdyn_salesaccelerationinsightid_value',
+    '_msa_managingpartnerid_value','_mss_competitorid_value','_mss_followupcontactid_value','_mss_arrepteamid_value','_mss_csrteamid_value','_mss_customersegmentid_value'
+  ]);
+
+  function baseKey(key) { return key.endsWith(FORMATTED_SUFFIX) ? key.slice(0, -FORMATTED_SUFFIX.length) : key; }
+  function hasValue(v) { return v !== null && v !== undefined && v !== ''; }
+  function stripHtml(s) {
+    const div = document.createElement('div');
+    div.innerHTML = String(s || '');
+    return (div.textContent || div.innerText || '').trim();
+  }
+  function friendlyLabel(key) {
+    if (FRIENDLY_LABELS[key]) return FRIENDLY_LABELS[key];
+    let label = key.replace(/^_/, '').replace(/_value$/, '').replace(/^mss_/, '').replace(/^address([12])_/, (_,n)=> n === '1' ? 'Bill To ' : 'Ship To ');
+    label = label.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    label = label.replace(/D365/g, 'D365').replace(/Url/g, 'URL').replace(/Csr/g, 'CSR').replace(/Ar/g, 'A/R');
+    return label;
+  }
+  function displayValue(account, key) {
+    const formatted = account[key + FORMATTED_SUFFIX];
+    const raw = account[key];
+    let value = hasValue(formatted) ? formatted : raw;
+    if (!hasValue(value)) return null;
+    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+    if (key === 'mss_messagecenter' || key === 'description' || /notes|description|message/i.test(key)) value = stripHtml(value);
+    return value;
+  }
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
+  function formatValue(v) { return typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v); }
+
+  function formatD365Date(value) {
+    if (!value) return 'N/A';
+    const d = new Date(value);
+    if (isNaN(d.getTime())) return 'N/A';
+    return d.toLocaleDateString('en-US', { month:'numeric', day:'numeric', year:'numeric' });
+  }
+  window.formatD365Date = window.formatD365Date || formatD365Date;
+
+  window.getLastOrderInfo = function(account) {
+    if (!account) return { value:'N/A', source:'None', raw:null };
+    const orderFormatted = account['mss_lastorderdate' + FORMATTED_SUFFIX];
+    if (orderFormatted || account.mss_lastorderdate) return { value: orderFormatted || formatD365Date(account.mss_lastorderdate), source:'Last Order', raw: account.mss_lastorderdate || orderFormatted };
+    const invoiceFormatted = account['mss_lastinvoicedate' + FORMATTED_SUFFIX];
+    if (invoiceFormatted || account.mss_lastinvoicedate) return { value: invoiceFormatted || formatD365Date(account.mss_lastinvoicedate), source:'Last Invoice fallback', raw: account.mss_lastinvoicedate || invoiceFormatted };
+    return { value:'N/A', source:'None', raw:null };
+  };
+
+  function indexD365Account(account) {
+    if (!account) return;
+    window.ACT_CURRENT_D365_ACCOUNT = account;
+    if (account.accountid) window.ACT_D365_RAW_BY_ACCOUNTID[String(account.accountid)] = account;
+    if (account.accountnumber) window.ACT_D365_RAW_BY_ACCOUNTNUMBER[String(account.accountnumber)] = account;
+  }
+
+  function getCurrentAccountNumber() {
+    try {
+      if (window.currentSelectedRecord?.cr714_id) return String(window.currentSelectedRecord.cr714_id);
+      if (typeof currentSelectedRecord !== 'undefined' && currentSelectedRecord?.cr714_id) return String(currentSelectedRecord.cr714_id);
+      if (typeof currentRecordId !== 'undefined' && currentRecordId) return String(currentRecordId);
+      if (window.currentRecordId) return String(window.currentRecordId);
+    } catch(e) {}
+    return '';
+  }
+
+  function getCurrentD365Account() {
+    const acctNum = getCurrentAccountNumber();
+    return (acctNum && window.ACT_D365_RAW_BY_ACCOUNTNUMBER[acctNum]) || window.ACT_CURRENT_D365_ACCOUNT || null;
+  }
+
+  window.applyLastOrderMapping = function(account) {
+    const acct = account || getCurrentD365Account();
+    if (!acct) return false;
+    indexD365Account(acct);
+    const info = window.getLastOrderInfo(acct);
+    const el = document.getElementById('last-order-date') || document.querySelector('[data-act-field="last-order"], [data-field="last-order"]');
+    if (!el) return false;
+    if ('value' in el && /input|textarea|select/i.test(el.tagName)) el.value = info.value;
+    else el.textContent = info.value;
+    el.title = `Source: ${info.source}`;
+    el.dataset.lastOrderSource = info.source;
+    if (info.source === 'Last Invoice fallback') {
+      const parent = el.parentElement;
+      if (parent && !parent.querySelector('.act-last-order-fallback-note')) {
+        const note = document.createElement('span');
+        note.className = 'act-last-order-fallback-note';
+        note.textContent = '(invoice)';
+        note.title = 'mss_lastorderdate was blank; using mss_lastinvoicedate.';
+        parent.appendChild(note);
+      }
+    }
+    return true;
+  };
+
+  const originalFetchD365Account = window.fetchD365Account;
+  if (typeof originalFetchD365Account === 'function' && !originalFetchD365Account.__actV435Wrapped) {
+    const wrapped = async function(accountId) {
+      const account = await originalFetchD365Account.apply(this, arguments);
+      if (account) {
+        indexD365Account(account);
+        setTimeout(() => {
+          window.applyLastOrderMapping(account);
+          if (document.getElementById('act-d365-history-panel')?.classList.contains('open')) window.refreshDynamicsFieldsPanel();
+        }, 0);
+      }
+      return account;
+    };
+    wrapped.__actV435Wrapped = true;
+    window.fetchD365Account = wrapped;
+  }
+
+  function isPertinentField(key) {
+    const base = baseKey(key);
+    if (key.startsWith('@odata') || key.endsWith(FORMATTED_SUFFIX)) return false;
+    if (SYSTEM_OR_NOISE_BASES.has(base)) return false;
+    if (/^_.*_value$/.test(base) && !FRIENDLY_LABELS[base]) return false;
+    if (/^msdyn_|^adx_/i.test(base)) return false;
+    return true;
+  }
+
+  function buildPertinentRows(account) {
+    const used = new Set();
+    const sections = [];
+
+    FIELD_GROUPS.forEach(group => {
+      const rows = [];
+      group.fields.forEach(key => {
+        if (!isPertinentField(key) && !FRIENDLY_LABELS[key]) return;
+        const value = displayValue(account, key);
+        if (!hasValue(value)) return;
+        used.add(key);
+        rows.push({ label: friendlyLabel(key), value, key });
+      });
+      if (rows.length) sections.push({ title: group.title, rows });
+    });
+
+    const additional = [];
+    Object.keys(account || {}).forEach(key => {
+      const base = baseKey(key);
+      if (used.has(base) || key.endsWith(FORMATTED_SUFFIX)) return;
+      if (!isPertinentField(base)) return;
+      // Keep unknown custom business fields, but avoid generic Dataverse noise.
+      const isBusinessCustom = /^mss_/i.test(base) || ['websiteurl','fax','telephone2','telephone3','emailaddress2','emailaddress3'].includes(base);
+      if (!isBusinessCustom && !FRIENDLY_LABELS[base]) return;
+      const value = displayValue(account, base);
+      if (!hasValue(value)) return;
+      additional.push({ label: friendlyLabel(base), value, key: base });
+    });
+    if (additional.length) sections.push({ title: 'Additional Business Fields', rows: additional.sort((a,b)=>a.label.localeCompare(b.label)) });
+    return sections;
+  }
+
+  function ensureDynamicsPanel() {
+    const historyContainer = document.getElementById('history-container');
+    if (!historyContainer) return null;
+    let panel = document.getElementById('act-d365-history-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'act-d365-history-panel';
+      panel.innerHTML = `
+        <div class="act-d365-panel-header">
+          <div>
+            <div class="text-sm font-black" style="color:var(--primary,#818cf8);"><i class="fas fa-database mr-1"></i>Dynamics Details <span class="act-d365-source-pill">Business Fields</span></div>
+            <div class="text-xs text-muted">Filtered to pertinent non-null account values</div>
+          </div>
+          <button class="btn-secondary text-xs" onclick="window.closeDynamicsFieldsPanel()">History</button>
+        </div>
+        <div class="act-d365-panel-body">
+          <input id="act-d365-field-search" placeholder="Search displayed fields or values..." oninput="window.refreshDynamicsFieldsPanel()">
+          <div id="act-d365-fields-body"></div>
+        </div>`;
+      historyContainer.appendChild(panel);
+    }
+    return panel;
+  }
+
+  window.refreshDynamicsFieldsPanel = function() {
+    const body = document.getElementById('act-d365-fields-body');
+    const search = document.getElementById('act-d365-field-search');
+    if (!body) return;
+    const account = getCurrentD365Account();
+    const q = (search?.value || '').toLowerCase();
+    if (!account) {
+      body.innerHTML = '<div class="text-muted text-sm italic">No Dynamics response captured for this account yet. Select the account again to refresh the D365 lookup.</div>';
+      return;
+    }
+    const sections = buildPertinentRows(account).map(section => ({
+      title: section.title,
+      rows: section.rows.filter(r => !q || r.label.toLowerCase().includes(q) || String(r.value).toLowerCase().includes(q))
+    })).filter(section => section.rows.length);
+
+    body.innerHTML = sections.length
+      ? sections.map(section => `<div class="act-d365-section-title">${escapeHtml(section.title)}</div>` + section.rows.map(r => `<div class="act-d365-row"><div class="act-d365-key">${escapeHtml(r.label)}</div><div class="act-d365-value">${escapeHtml(formatValue(r.value))}</div></div>`).join('')).join('')
+      : '<div class="text-muted text-sm italic">No matching pertinent fields.</div>';
+  };
+
+  window.openDynamicsFieldsPanel = function() {
+    const panel = ensureDynamicsPanel();
+    if (!panel) return;
+    const preview = document.getElementById('qb-notes-preview');
+    if (preview) preview.style.display = 'none';
+    panel.classList.add('open');
+    window.refreshDynamicsFieldsPanel();
+  };
+
+  window.closeDynamicsFieldsPanel = function() {
+    const panel = document.getElementById('act-d365-history-panel');
+    if (panel) panel.classList.remove('open');
+    const preview = document.getElementById('qb-notes-preview');
+    if (preview) preview.style.display = '';
+  };
+
+  function ensureDynamicsButton() {
+    if (document.getElementById('act-open-d365-fields-btn')) return;
+    const historyContainer = document.getElementById('history-container');
+    const historyCard = historyContainer?.closest('.card');
+    const header = historyCard?.querySelector('.card-header');
+    if (!header) return;
+    header.classList.add('flex','items-center','gap-2');
+    const btn = document.createElement('button');
+    btn.id = 'act-open-d365-fields-btn';
+    btn.type = 'button';
+    btn.className = 'act-d365-open-btn';
+    btn.innerHTML = '<i class="fas fa-database"></i> Dynamics';
+    btn.title = 'Show pertinent Dynamics fields for the selected account';
+    btn.onclick = window.openDynamicsFieldsPanel;
+    header.appendChild(btn);
+    ensureDynamicsPanel();
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    ensureDynamicsButton();
+    setTimeout(() => window.applyLastOrderMapping(), 1200);
+  });
+})();
+</script>
+
+
+
+<!-- ============================================================
+ ACT v4.58 MasonvilleGO Dropdown + Sales Order Search
+ Compact dropdown navigation, Favorites drilldown removed, Sales Order
+ Search added to main form and routes directly to order history drilldown.
+=============================================================== -->
+<style id="act-v458-mvgo-panel-style">
+#filter-bar-container{row-gap:.35rem!important;column-gap:.4rem!important;align-items:center!important}#priority-filter-dropdown{width:9rem!important;flex:0 0 auto!important}.act-v446-static-badge-row,.act-v433-badge-row{display:flex;flex-wrap:wrap;gap:.25rem;align-items:center;min-height:18px}.gallery-item .sla-badge{position:static!important;top:auto!important;right:auto!important;z-index:auto!important}
+.act-main-sales-order-search{display:flex;align-items:center;gap:5px;margin-left:auto;min-width:260px}.act-main-sales-order-search input{height:28px;background:var(--bg-input,#1f2937);border:1px solid var(--border-color);border-radius:8px;color:var(--text-main);padding:0 8px;font-size:11px;width:150px}.act-main-sales-order-search button{height:28px!important;padding:0 8px!important;font-size:10px!important;white-space:nowrap}
+#act-sales-history-panel{display:none;height:100%;min-height:0;overflow:hidden;background:var(--bg-card,#111827);color:var(--text-main,#f9fafb)}#act-sales-history-panel.open{display:flex;flex-direction:column}.act-mvgo-header{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--border-color,rgba(255,255,255,.12));background:linear-gradient(135deg,rgba(34,197,94,.18),rgba(14,165,233,.10))}.act-mvgo-title{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:900;color:var(--accent-success,#22c55e);line-height:1.15}.act-mvgo-subtitle{font-size:10px;color:var(--text-muted,#9ca3af);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}.act-mvgo-actions{display:flex;align-items:center;gap:5px;flex-wrap:nowrap}.act-mvgo-actions button{height:26px;padding:0 8px!important;font-size:10px!important;white-space:nowrap}
+.act-mvgo-body{padding:10px;overflow-y:auto;flex:1 1 auto;min-height:0}.act-mvgo-card{border:1px solid var(--border-color);background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.015));border-radius:12px;padding:10px;margin-bottom:10px;box-shadow:0 8px 18px rgba(0,0,0,.16)}.act-mvgo-frame-card{padding:0;overflow:hidden}.act-mvgo-muted{color:var(--text-muted);font-size:11px}.act-mvgo-warning{border-left:4px solid #f59e0b;padding:10px;background:rgba(245,158,11,.10);border-radius:8px;margin-bottom:8px}.act-mvgo-error{border-left:4px solid var(--accent-danger,#ef4444);padding:10px;background:rgba(239,68,68,.10);border-radius:8px;margin-bottom:8px}.act-mvgo-code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10px;word-break:break-all;color:var(--text-muted)}
+.act-mvgo-picker{display:grid;grid-template-columns:minmax(210px,310px) minmax(0,1fr);gap:8px;align-items:center;margin-bottom:10px}.act-mvgo-picker-select{height:34px;background:var(--bg-input,#1f2937);border:1px solid var(--border-color);border-radius:10px;color:var(--text-main,#f9fafb);font-size:12px;font-weight:800;padding:0 10px;outline:none}.act-mvgo-picker-select:focus{border-color:rgba(34,197,94,.8);box-shadow:0 0 0 2px rgba(34,197,94,.16)}.act-mvgo-current-chip{display:flex;align-items:center;gap:7px;min-height:34px;padding:7px 10px;border:1px solid var(--border-color);border-radius:10px;background:rgba(255,255,255,.035);color:var(--text-muted);font-size:11px;overflow:hidden}.act-mvgo-current-chip b{color:var(--text-main,#f9fafb);white-space:nowrap}.act-mvgo-current-chip span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.act-mvgo-section-title{display:flex;align-items:center;gap:6px;font-weight:900;font-size:12px;color:var(--accent-success,#22c55e);margin-bottom:7px;text-transform:uppercase;letter-spacing:.05em}.act-mvgo-frame-title{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 10px;border-bottom:1px solid var(--border-color);background:rgba(255,255,255,.03)}
+.act-mvgo-iframe-wrap{height:calc(100vh - 255px);min-height:590px;border:0;overflow:hidden;background:#fff}.act-mvgo-iframe{width:100%;height:100%;border:0;background:#fff}.act-mvgo-small-control{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.act-mvgo-small-control input{background:var(--bg-input,#1f2937);border:1px solid var(--border-color);border-radius:8px;color:var(--text-main);height:28px;padding:0 8px;font-size:11px;min-width:145px}.act-mvgo-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px}.act-mvgo-kpi{border:1px solid var(--border-color);border-radius:10px;background:rgba(0,0,0,.16);padding:9px}.act-mvgo-kpi-label{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px}.act-mvgo-kpi-value{font-size:16px;font-weight:900;color:#fff;line-height:1.15}
+.act-sales-table-wrap{overflow:auto;border:1px solid var(--border-color);border-radius:10px;background:rgba(0,0,0,.14)}.act-sales-table{width:100%;border-collapse:separate;border-spacing:0;font-size:11px;min-width:390px}.act-sales-table th{position:sticky;top:0;z-index:1;background:rgba(31,41,55,.96);color:#e5e7eb;text-align:left;font-weight:900;padding:7px 8px;border-bottom:1px solid var(--border-color);white-space:nowrap}.act-sales-table td{padding:6px 8px;border-bottom:1px solid rgba(255,255,255,.07);vertical-align:top;color:var(--text-main,#f9fafb)}.act-sales-table tr:last-child td{border-bottom:0}.act-sales-table td.num,.act-sales-table th.num{text-align:right;font-variant-numeric:tabular-nums}.act-sales-table tr.total-row td{font-weight:900;background:rgba(34,197,94,.10);border-top:1px solid rgba(34,197,94,.35)}.act-sales-pos{color:#22c55e!important}.act-sales-neg{color:#ef4444!important}.act-sales-neutral{color:var(--text-muted)!important}
+@media(max-width:900px){.act-main-sales-order-search{order:99;width:100%;margin-left:0}.act-main-sales-order-search input{flex:1;width:auto}}@media(max-width:860px){.act-mvgo-picker,.act-mvgo-kpis{grid-template-columns:1fr}.act-mvgo-header{grid-template-columns:1fr}.act-mvgo-actions{flex-wrap:wrap;justify-content:flex-end}.act-mvgo-iframe-wrap{height:calc(100vh - 330px);min-height:480px}}
+</style>
+<script id="act-v458-mvgo-panel-script">
+(function(){
+ if(window.__ACT_V458_MVGO_PANEL_INSTALLED)return;window.__ACT_V458_MVGO_PANEL_INSTALLED=true;
+ window.decorateGalleryCards=function(){return};window.priorityAndSLASortGallery=function(){return};window.polishGalleryBadges=function(){return};
+ const REPORT_FLOW_URL="https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/1247a80b0f7b450f9dcf6ce5c6ea42d1/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=ytLmmLawtGiUhtenLout2xiDxy72pAfxsePB3OEiZH4";
+ const MVGO_BASE='https://go.masonville.com/#';
+ const REPORT_BASE='https://crmsrws.masonville.com/ReportViewer.aspx';
+ const state={activeKey:'pricing',lastUrl:null,lastAccount:null,orderNo:'',lastFlowResponse:null};
+ const PAGES=[
+  {key:'pricing',label:'Pricing',icon:'fa-tags',route:a=>`/pricing/${enc(a)}`},
+  {key:'orderhistory',label:'Order History',icon:'fa-clock-rotate-left',route:a=>`/orderhistory?customerId=${enc(a)}&oo=&oc=`},
+  {key:'orderdrill',label:'Sales Order Search',icon:'fa-magnifying-glass-chart',route:a=>`/orderhistory?customerId=${enc(a)}&oo=${enc(state.orderNo||'')}&oc=${enc(a)}`,needsOrder:true},
+  {key:'overdue',label:'AR Overdue',icon:'fa-file-invoice-dollar',route:a=>`/overdueBalanceAccount/${enc(a)}`},
+  {key:'deliverystatus',label:'Delivery Status',icon:'fa-truck',route:a=>`/deliverystatus/${enc(a)}`},
+  {key:'subscriptions',label:'Subscription Orders',icon:'fa-repeat',route:a=>`/subscriptionorders/${enc(a)}`},
+  {key:'contracts',label:'Service Contract',icon:'fa-file-contract',route:a=>`/serviceContracts/${enc(a)}`},
+  {key:'favorites',label:'Favorites List',icon:'fa-star',route:a=>`/favoriteslists/${enc(a)}`},
+  {key:'employees',label:'# Employees',icon:'fa-users',route:a=>`/employees/${enc(a)}`,small:true},
+  {key:'competitors',label:'Competitors',icon:'fa-building-shield',route:a=>`/competitors/${enc(a)}`},
+  {key:'invoices',label:'Invoices',icon:'fa-receipt',route:a=>`/invoices/${enc(a)}`},
+  {key:'openorders',label:'Open Orders Report',icon:'fa-folder-open',reportName:'Open Orders',reportPath:'/wbreports/Sales Rep App/Open Orders',fallback:a=>`${MVGO_BASE}/report/${enc(a)}/Open%20Orders`},
+  {key:'backorders',label:'Backorders Report',icon:'fa-boxes-stacked',reportName:'Backorders',reportPath:'/wbreports/Sales Rep App/Backorders',fallback:a=>`${MVGO_BASE}/report/${enc(a)}/Backorders`},
+  {key:'mtdcategory',label:'MTD/YTD Category',icon:'fa-chart-column',reportName:'MTD/YTD Category',reportPath:'/wbreports/Sales Rep App/Cust_MTDYTD_Category',fallback:a=>`${REPORT_BASE}?Path=/wbreports/Sales%20Rep%20App/Cust_MTDYTD_Category&Params=AccountNum,${enc(a)}`},
+  {key:'fourmonth',label:'4 Month Sales',icon:'fa-chart-line',reportName:'Four Month Sales',reportPath:'/wbreports/Sales Rep App/Cust_4MonthSales',fallback:a=>`${MVGO_BASE}/report/${enc(a)}/Four%20Month%20Sales`}
+ ];
+ function enc(v){return encodeURIComponent(String(v||''))}
+ function esc(v){return window.escapeHTML?window.escapeHTML(v):String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+ function decodeHtml(s){let t=String(s||'');if(t.includes('&lt;')||t.includes('&gt;')||t.includes('&amp;')){const x=document.createElement('textarea');x.innerHTML=t;t=x.value}return t}
+ function clean(v){return String(v||'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim().replace(/^NaN$/i,'—').replace(/&amp;/g,'&')}
+ function money(v){const n=Number(String(v||'').replace(/[^0-9.-]/g,''));return Number.isFinite(n)?n:null}
+ function moneyClass(v){const t=clean(v),n=money(t);if(t==='—')return'act-sales-neutral';if(n>0)return'act-sales-pos';if(n<0)return'act-sales-neg';return''}
+ function selectedAccount(explicit){if(explicit&&!/^[0-9a-f-]{36}$/i.test(String(explicit)))return String(explicit).trim();const h=document.getElementById('acct-number-header')?.innerText?.trim();if(h&&h!=='--'&&!/^[0-9a-f-]{36}$/i.test(h))return h;try{if(typeof currentRecordId!=='undefined'&&currentRecordId&&!/^[0-9a-f-]{36}$/i.test(String(currentRecordId)))return String(currentRecordId).trim()}catch(e){}return window.currentAccountNumber||null}
+ function company(){return document.getElementById('acct-company')?.innerText?.trim()||''}
+ function body(h){const b=document.getElementById('act-sales-panel-body');if(b)b.innerHTML=h}
+ function page(key){return PAGES.find(p=>p.key===key)||PAGES[0]}
+ function ensurePanel(){const hc=document.getElementById('history-container');if(!hc)return null;let p=document.getElementById('act-sales-history-panel');if(!p){p=document.createElement('div');p.id='act-sales-history-panel';p.innerHTML=`<div class="act-mvgo-header"><div class="min-w-0"><div class="act-mvgo-title"><i class="fas fa-store"></i><span>MasonvilleGO Account Hub</span><span class="act-d365-source-pill">Account Displays</span></div><div id="act-sales-subtitle" class="act-mvgo-subtitle">Select an account to load MasonvilleGO account displays.</div></div><div class="act-mvgo-actions"><button class="btn-secondary" onclick="window.refreshSalesReportPanel()">Refresh</button><button class="btn-secondary" onclick="window.openSalesTunnelExternal()">Open Tab</button><button class="btn-secondary" onclick="window.closeSalesReportPanel()">History</button></div></div><div class="act-mvgo-body custom-scrollbar" id="act-sales-panel-body"></div>`;hc.appendChild(p)}return p}
+ function picker(){const p=page(state.activeKey);return `<div class="act-mvgo-picker"><select class="act-mvgo-picker-select" onchange="window.openMvgoDisplay(this.value)">${PAGES.map(x=>`<option value="${x.key}" ${x.key===state.activeKey?'selected':''}>${esc(x.label)}</option>`).join('')}</select><div class="act-mvgo-current-chip"><i class="fas ${p.icon}"></i><b>${esc(p.label)}</b><span>${state.lastAccount?' • '+esc(state.lastAccount):''}</span></div></div>`}
+ function controls(p){let h='';if(p.needsOrder)h+=`<div class="act-mvgo-card"><div class="act-mvgo-section-title"><i class="fas fa-keyboard"></i>Sales Order Search</div><div class="act-mvgo-small-control"><span class="act-mvgo-muted">Order #</span><input id="act-mvgo-order-input" value="${esc(state.orderNo||'')}" placeholder="S093549690"><button class="btn-primary text-xs" onclick="window.setMvgoOrderDrilldown()">Load Order</button></div></div>`;if(p.small)h+=`<div class="act-mvgo-card"><div class="act-mvgo-section-title"><i class="fas fa-users"></i>Number of Employees</div><div class="act-mvgo-muted">Use this MasonvilleGO screen to select/view the employee count value.</div></div>`;return h}
+ function routePage(p,a){const url=MVGO_BASE+p.route(a);state.lastUrl=url;body(picker()+controls(p)+`<div class="act-mvgo-card act-mvgo-frame-card"><div class="act-mvgo-frame-title"><div class="act-mvgo-section-title" style="margin:0"><i class="fas ${p.icon}"></i>${esc(p.label)}</div><span class="act-mvgo-muted">${esc(a)}</span></div><div class="act-mvgo-iframe-wrap"><iframe class="act-mvgo-iframe" src="${esc(url)}" title="${esc(p.label)}"></iframe></div></div>`)}
+ async function callReportFlow(p,a){const r=await fetch(REPORT_FLOW_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accountNumber:a,reportName:p.reportName||p.label,reportPath:p.reportPath,includeHtml:true,mode:'report'})});const tx=await r.text();let d;try{d=JSON.parse(tx)}catch(e){d={success:false,message:tx||r.statusText}}if(!r.ok||!d||d.success===false)throw new Error((d&&d.message?d.message:'Flow failed')+(d&&d.error?' | '+String(d.error).slice(0,600):` (${r.status})`));return d}
+ function extractRows(table){return Array.from(table.querySelectorAll('tr')).map(tr=>Array.from(tr.children).map(td=>clean(td.textContent))).filter(r=>r.some(Boolean))}
+ function normalizeRows(rows){const titleIdx=rows.findIndex(r=>/4 Month|Open Orders|Backorders|Category|MTD|YTD/i.test(r.join(' ')));const title=titleIdx>=0?rows[titleIdx].join(' '):'Report Section';const headerIdx=rows.findIndex((r,i)=>i>titleIdx&&r.length>1&&/Month|Category|Order|Invoice|Item|Date|Current|Customer|Status/i.test(r[0]||''));if(headerIdx<0)return null;const headers=rows[headerIdx].filter(Boolean);const data=[];for(let i=headerIdx+1;i<rows.length;i++){const r=rows[i].filter(Boolean);if(!r.length)continue;if(/^Totals$/i.test(r[0])||r.length>=Math.min(2,headers.length))data.push(r.slice(0,headers.length))}return data.length?{title,headers,rows:data}:null}
+ function parseReport(raw){const doc=new DOMParser().parseFromString(decodeHtml(raw),'text/html');doc.querySelectorAll('[style*="transform: scale"]').forEach(el=>{el.style.transform='';el.style.transformOrigin=''});const sections=[];Array.from(doc.querySelectorAll('table')).forEach(t=>{if(!/4 Month|Category|Current Year|CY Daily Avg|Totals|Open Orders|Backorders|Order|Invoice|Item/i.test(clean(t.textContent)))return;const s=normalizeRows(extractRows(t));if(s){const key=s.title+'|'+s.headers.join('|');if(!sections.some(x=>x.key===key)){s.key=key;sections.push(s)}}});return sections}
+ function reportFallback(p,a,msg){const u=state.lastUrl||p.fallback?.(a)||'';state.lastUrl=u;body(picker()+`<div class="act-mvgo-warning"><b>${esc(p.label)}</b><br><span class="act-mvgo-muted">${esc(msg||'Use the header Open Tab button if needed.')}</span></div>${u?`<div class="act-mvgo-card act-mvgo-frame-card"><div class="act-mvgo-frame-title"><div class="act-mvgo-section-title" style="margin:0"><i class="fas ${p.icon}"></i>${esc(p.label)}</div><span class="act-mvgo-muted">Fallback preview</span></div><div class="act-mvgo-iframe-wrap"><iframe class="act-mvgo-iframe" src="${esc(u)}"></iframe></div></div>`:''}`)}
+ function renderParsedReport(p,a,d){const raw=d.reportHtml||d.rawHtml||d.html||d.reportBody||d.viewerHtml;const sections=raw?parseReport(raw):[];state.lastUrl=d.viewerUrl||p.fallback?.(a);if(!sections.length)return reportFallback(p,a,'Report HTML was not parseable.');const fmt=n=>n.toLocaleString(undefined,{style:'currency',currency:'USD'});let h=picker();if(/fourmonth|mtdcategory/i.test(p.key)){const cur=sections[0]?.rows.reduce((s,r)=>s+(money(r[1])||0),0)||0;const pri=sections[0]?.rows.reduce((s,r)=>s+(money(r[2])||0),0)||0;const diff=cur-pri;h+=`<div class="act-mvgo-kpis"><div class="act-mvgo-kpi"><div class="act-mvgo-kpi-label">Current</div><div class="act-mvgo-kpi-value">${esc(fmt(cur))}</div></div><div class="act-mvgo-kpi"><div class="act-mvgo-kpi-label">Prior</div><div class="act-mvgo-kpi-value">${esc(fmt(pri))}</div></div><div class="act-mvgo-kpi"><div class="act-mvgo-kpi-label">Variance</div><div class="act-mvgo-kpi-value ${diff>0?'act-sales-pos':diff<0?'act-sales-neg':'act-sales-neutral'}">${esc(fmt(diff))}</div></div></div>`}sections.forEach(s=>{h+=`<div class="act-mvgo-card"><div class="act-mvgo-section-title"><i class="fas ${p.icon}"></i>${esc(s.title)}</div><div class="act-sales-table-wrap"><table class="act-sales-table"><thead><tr>${s.headers.map((x,i)=>`<th class="${i?'num':''}">${esc(x)}</th>`).join('')}</tr></thead><tbody>${s.rows.map(r=>`<tr class="${/^Totals$/i.test(r[0])?'total-row':''}">${s.headers.map((x,i)=>`<td class="${i?'num '+moneyClass(r[i]):''}">${esc(r[i]||'')}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div>`});body(h)}
+ async function reportPage(p,a){body(picker()+`<div class="act-mvgo-card text-center p-6 act-mvgo-muted"><i class="fas fa-spinner fa-spin mr-2"></i>Loading ${esc(p.label)} for <b>${esc(a)}</b>...</div>`);try{const d=await callReportFlow(p,a);state.lastFlowResponse=d;renderParsedReport(p,a,d)}catch(e){state.lastUrl=p.fallback?.(a)||'';reportFallback(p,a,'Flow failed. Fallback URL is ready in the header Open Tab button.')}}
+ function active(){const a=selectedAccount();if(!a){window.showToast?.('Select an account first','error');return}state.lastAccount=a;const sub=document.getElementById('act-sales-subtitle');if(sub)sub.textContent=`${a}${company()&&company()!=='--'?' - '+company():''}`;const p=page(state.activeKey);if(p.reportName||p.reportPath)return reportPage(p,a);routePage(p,a)}
+ function ensureMainSalesOrderSearch(){if(document.getElementById('act-main-sales-order-search'))return;const host=document.getElementById('filter-bar-container')||document.querySelector('.filter-bar')||document.querySelector('header')||document.body;if(!host)return;const box=document.createElement('div');box.id='act-main-sales-order-search';box.className='act-main-sales-order-search';box.innerHTML='<input id="act-main-sales-order-input" placeholder="Sales order #"><button class="btn-secondary" type="button" onclick="window.searchMvgoSalesOrderFromMain()"><i class="fas fa-search"></i> Sales Order</button>';host.appendChild(box);box.querySelector('input').addEventListener('keydown',e=>{if(e.key==='Enter')window.searchMvgoSalesOrderFromMain()})}
+ window.searchMvgoSalesOrderFromMain=function(){const input=document.getElementById('act-main-sales-order-input');const order=(input?.value||'').trim();const a=selectedAccount();if(!order){window.showToast?.('Enter a sales order number','error');input?.focus();return}if(!a){window.showToast?.('Select an account first','error');return}state.orderNo=order;state.activeKey='orderdrill';window.openSalesReportPanel(a)};
+ window.openMvgoDisplay=function(key){state.activeKey=key;active()};window.setMvgoOrderDrilldown=function(){state.orderNo=document.getElementById('act-mvgo-order-input')?.value?.trim()||'';state.activeKey='orderdrill';active()};window.loadSalesReportData=function(){active()};
+ window.openSalesReportPanel=function(accountNumber){const p=ensurePanel();if(!p)return;if(accountNumber&&!/^[0-9a-f-]{36}$/i.test(String(accountNumber)))state.lastAccount=String(accountNumber);const preview=document.getElementById('qb-notes-preview');if(preview)preview.style.display='none';const d365=document.getElementById('act-d365-history-panel');if(d365)d365.classList.remove('open');p.classList.add('open');active()};window.refreshSalesReportPanel=function(){active()};window.closeSalesReportPanel=function(){const p=document.getElementById('act-sales-history-panel');if(p)p.classList.remove('open');const preview=document.getElementById('qb-notes-preview');if(preview)preview.style.display=''};window.openSalesTunnelExternal=function(){if(state.lastUrl)window.open(state.lastUrl,'_blank');else active()};window.openSalesReportTunnel=function(accountNumber){return window.openSalesReportPanel(accountNumber)};
+ const orig=window.handleContextButton;if(typeof orig==='function'&&!window.__ACT_V458_CONTEXT_PATCHED){window.__ACT_V458_CONTEXT_PATCHED=true;window.handleContextButton=function(type){if(type==='sales')return window.openSalesReportPanel();return orig.apply(this,arguments)}}function patch(){ensureMainSalesOrderSearch();document.querySelectorAll('button[onclick*="Four%20Month%20Sales"],button[onclick*="openSalesReportTunnel"]').forEach(b=>{b.onclick=function(){window.openSalesReportPanel()}})}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',patch,{once:true});else patch();
+})();
+</script>
+
+
+<!-- ============================================================
+     ACT v4.60 – Unified Account Hub + CSW Section
+     CSW details are based on the attached HAR telemetry snapshot.
+=============================================================== -->
+<style id="act-v460-account-hub-csw-style">
+  #account-hub-header{background:var(--bg-header)!important}#account-hub-tabs{width:100%}.act-hub-tab{height:30px;display:flex;align-items:center;justify-content:center;gap:5px;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-input);color:var(--text-muted);font-size:10px;font-weight:900;letter-spacing:.02em;cursor:pointer;transition:.15s}.act-hub-tab:hover{border-color:var(--primary);color:var(--primary);transform:translateY(-1px)}.act-hub-tab.active{background:var(--primary);color:var(--primary-fg);border-color:var(--primary);box-shadow:var(--shadow)}#history-container{position:relative;min-height:0}#history-container>#qb-notes-preview.act-hub-pane{display:block;height:100%;min-height:0}#act-d365-history-panel,#act-sales-history-panel,#act-csw-history-panel{border-top:none}#act-open-d365-fields-btn{display:none!important}#act-d365-history-panel .act-d365-panel-header,#act-sales-history-panel .act-mvgo-header,#act-csw-history-panel .act-csw-header{padding:8px 10px}#act-d365-history-panel .act-d365-panel-header button[onclick="window.closeDynamicsFieldsPanel()"],#act-sales-history-panel .act-mvgo-actions button[onclick="window.closeSalesReportPanel()"]{display:none!important}
+  #act-csw-history-panel{display:none;height:100%;min-height:0;overflow:hidden;background:var(--bg-card);color:var(--text-main)}#act-csw-history-panel.open{display:flex;flex-direction:column}.act-csw-header{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;border-bottom:1px solid var(--border-color);background:linear-gradient(135deg,rgba(168,85,247,.18),rgba(14,165,233,.10))}.act-csw-title{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:900;color:#a855f7}.act-csw-subtitle{font-size:10px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.act-csw-actions{display:flex;gap:5px;flex-wrap:nowrap}.act-csw-actions button{height:26px;padding:0 8px!important;font-size:10px!important;white-space:nowrap}.act-csw-body{padding:10px;overflow:auto;flex:1;min-height:0}.act-csw-card{border:1px solid var(--border-color);background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.015));border-radius:12px;padding:10px;margin-bottom:10px;box-shadow:0 8px 18px rgba(0,0,0,.12)}.act-csw-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.act-csw-kpi{padding:8px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-input)}.act-csw-kpi-label{font-size:9px;font-weight:900;text-transform:uppercase;color:var(--text-muted);letter-spacing:.05em}.act-csw-kpi-value{font-size:12px;font-weight:900;color:var(--text-main);margin-top:2px}.act-csw-chiprow{display:flex;flex-wrap:wrap;gap:5px}.act-csw-chip{font-size:9px;font-weight:900;border:1px solid var(--border-color);border-radius:999px;padding:2px 7px;background:var(--bg-input);color:var(--text-muted)}.act-csw-frame{width:100%;height:360px;border:1px solid var(--border-color);border-radius:10px;background:white}.act-csw-note{font-size:10px;color:var(--text-muted);line-height:1.4}@media(max-width:1100px){.act-hub-tab span{display:none}.act-hub-tab{font-size:12px}.act-csw-grid{grid-template-columns:1fr}.act-csw-actions{flex-wrap:wrap}}
+</style>
+<script id="act-v460-account-hub-csw-script">
+(function(){
+ if(window.__ACT_V460_ACCOUNT_HUB_CSW_INSTALLED)return;window.__ACT_V460_ACCOUNT_HUB_CSW_INSTALLED=true;
+ const CSW_APP_ID='9e06e7d4-8616-eb11-a817-000d3a8b6b20';
+ const HAR={app:'msdyn_CustomerServiceWorkspace',crm:'9.2.26035.00200',apm:'10.1.26035.1007',client:'1.4.11831-2603.5',org:'f4460d6f-0261-495d-a1da-ca8ec997def5',geo:'NA',tz:'-04:00',load:'3225 ms',timeline:'3141 ms',createTab:'3343 ms',onload:'1586 ms',recordsPerPage:'5',audit:'Disabled / supported',connectivity:'Online'};
+ function cswUrl(id){return `https://wbmasonco.crm.dynamics.com/main.aspx?appid=${CSW_APP_ID}&pagetype=search&searchText=${encodeURIComponent(id||'')}`}
+ function setActiveTab(key){const labels={history:'History',dynamics:'Dynamics',mvgo:'MasonvilleGO',csw:'CSW'};document.querySelectorAll('#account-hub-tabs .act-hub-tab').forEach(b=>b.classList.remove('active'));document.getElementById('act-hub-tab-'+key)?.classList.add('active');const l=document.getElementById('account-hub-active-label');if(l)l.textContent=labels[key]||'History'}
+ function ensureCSWPanel(){const hc=document.getElementById('history-container');if(!hc)return null;let p=document.getElementById('act-csw-history-panel');if(!p){p=document.createElement('div');p.id='act-csw-history-panel';p.innerHTML=`<div class="act-csw-header"><div class="min-w-0"><div class="act-csw-title"><i class="fas fa-headset"></i><span>Customer Service Workspace</span><span class="act-d365-source-pill">HAR mapped</span></div><div id="act-csw-subtitle" class="act-csw-subtitle">CSW workspace, timeline hints, and session diagnostics.</div></div><div class="act-csw-actions"><button class="btn-secondary" onclick="window.refreshCSWPanel()">Refresh</button><button class="btn-secondary" onclick="window.openCSWExternal()">Open Tab</button><button class="btn-secondary" onclick="window.showAccountHubPane('history')">History</button></div></div><div class="act-csw-body custom-scrollbar" id="act-csw-panel-body"></div>`;hc.appendChild(p)}return p}
+ function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+ function selected(){return String(window.currentRecordId||document.getElementById('acct-number-header')?.innerText||'').trim().replace(/^--$/,'')}
+ function renderCSW(){const id=selected();const body=document.getElementById('act-csw-panel-body');if(!body)return;const url=cswUrl(id);window.__ACT_CSW_LAST_URL=url;document.getElementById('act-csw-subtitle').textContent=id?`Account ${id} loaded into CSW search context.`:'Select an account to load CSW context.';body.innerHTML=`
+ <div class="act-csw-card"><div class="act-csw-grid"><div class="act-csw-kpi"><div class="act-csw-kpi-label">Workspace App</div><div class="act-csw-kpi-value">${HAR.app}</div></div><div class="act-csw-kpi"><div class="act-csw-kpi-label">CRM / APM</div><div class="act-csw-kpi-value">${HAR.crm} / ${HAR.apm}</div></div><div class="act-csw-kpi"><div class="act-csw-kpi-label">Connectivity</div><div class="act-csw-kpi-value">${HAR.connectivity}</div></div><div class="act-csw-kpi"><div class="act-csw-kpi-label">Observed Load</div><div class="act-csw-kpi-value">Full ${HAR.load} • Timeline ${HAR.timeline}</div></div></div></div>
+ <div class="act-csw-card"><div class="text-[10px] font-black uppercase text-muted mb-2">Timeline / Productivity Signals</div><div class="act-csw-chiprow"><span class="act-csw-chip">Email</span><span class="act-csw-chip">Phone Call</span><span class="act-csw-chip">Task</span><span class="act-csw-chip">Chat</span><span class="act-csw-chip">Incident Resolution</span><span class="act-csw-chip">Attachments Preview On</span><span class="act-csw-chip">${HAR.recordsPerPage} records/page</span></div><p class="act-csw-note mt-2">HAR shows TimelineWall activity types plus productivity/session events, so this section keeps CSW context beside ACT history instead of forcing another floating panel.</p></div>
+ <div class="act-csw-card"><div class="text-[10px] font-black uppercase text-muted mb-2">Session + Diagnostics From HAR</div><div class="act-csw-grid"><div class="act-csw-kpi"><div class="act-csw-kpi-label">Session Events</div><div class="act-csw-kpi-value">GET_ALL_TABS • REFRESH_SESSION • ON_TAB_SWITCH</div></div><div class="act-csw-kpi"><div class="act-csw-kpi-label">Tab Metrics</div><div class="act-csw-kpi-value">CreateTab ${HAR.createTab} • Onload ${HAR.onload}</div></div><div class="act-csw-kpi"><div class="act-csw-kpi-label">Audit</div><div class="act-csw-kpi-value">${HAR.audit}</div></div><div class="act-csw-kpi"><div class="act-csw-kpi-label">Org / Geo / TZ</div><div class="act-csw-kpi-value">${HAR.geo} • ${HAR.tz}</div></div></div></div>
+ <div class="act-csw-card"><div class="flex justify-between items-center mb-2"><div class="text-[10px] font-black uppercase text-muted">CSW Search Preview</div><button class="btn-secondary text-[10px]" onclick="window.openCSWExternal()">Open full workspace</button></div>${id?`<iframe class="act-csw-frame" src="${esc(url)}"></iframe>`:`<div class="act-csw-note italic">Select an account to load the CSW search frame.</div>`}</div>`}
+ window.showAccountHubPane=function(key){const preview=document.getElementById('qb-notes-preview'),d365=document.getElementById('act-d365-history-panel'),mvgo=document.getElementById('act-sales-history-panel'),csw=ensureCSWPanel();if(preview)preview.style.display=key==='history'?'':'none';if(d365)d365.classList.toggle('open',key==='dynamics');if(mvgo)mvgo.classList.toggle('open',key==='mvgo');if(csw)csw.classList.toggle('open',key==='csw');setActiveTab(key);if(key==='csw')renderCSW()};
+ function wire(){if(window.__ACT_V460_HUB_WIRED)return;if(typeof window.openDynamicsFieldsPanel!=='function'||typeof window.openSalesReportPanel!=='function')return;window.__ACT_V460_HUB_WIRED=true;const od=window.openDynamicsFieldsPanel;window.openDynamicsFieldsPanel=function(){const r=od.apply(this,arguments);window.showAccountHubPane('dynamics');if(typeof window.refreshDynamicsFieldsPanel==='function')window.refreshDynamicsFieldsPanel();return r};const cd=window.closeDynamicsFieldsPanel;window.closeDynamicsFieldsPanel=function(){if(typeof cd==='function')cd.apply(this,arguments);window.showAccountHubPane('history')};const om=window.openSalesReportPanel;window.openSalesReportPanel=function(){const r=om.apply(this,arguments);window.showAccountHubPane('mvgo');return r};const cm=window.closeSalesReportPanel;window.closeSalesReportPanel=function(){if(typeof cm==='function')cm.apply(this,arguments);window.showAccountHubPane('history')}}
+ window.openCSWPanel=function(accountNumber){ensureCSWPanel();window.showAccountHubPane('csw')};window.refreshCSWPanel=function(){renderCSW()};window.openCSWExternal=function(){window.open(window.__ACT_CSW_LAST_URL||cswUrl(selected()),'_blank')};
+ function init(){ensureCSWPanel();wire();window.showAccountHubPane('history');setTimeout(wire,500);setTimeout(wire,1500)}if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+})();
+</script>
+
+<!-- ACT UX Pass v1.0
+     Purpose: prevent Account Hub / Dynamics / CSW / Sales Order displays from being cut off,
+     add clear expand/restore controls, improve responsive behavior, and keep tables/iframes scrollable.
+-->
+<style id="act-ux-pass-v1-style">
+  :root { --act-hub-preferred-width: 430px; }
+
+  /* Give the merged Account Hub enough breathing room without breaking the base layout. */
+  .app-grid:not(.sidebar-collapsed) {
+    grid-template-columns: minmax(320px, 360px) minmax(520px, 1fr) minmax(360px, var(--history-width, var(--act-hub-preferred-width))) !important;
+  }
+  .app-grid.sidebar-collapsed {
+    grid-template-columns: 50px minmax(520px, 1fr) minmax(360px, var(--history-width, var(--act-hub-preferred-width))) !important;
+  }
+
+  .col-left, .col-middle, .col-history, .card, .workspace, #history-container,
+  #act-d365-history-panel, #act-sales-history-panel, #act-csw-history-panel {
+    min-height: 0 !important;
+  }
+
+  .col-history {
+    min-width: 340px;
+    overflow: hidden !important;
+  }
+
+  #history-column > .card {
+    overflow: hidden !important;
+  }
+
+  #history-container {
+    overflow: hidden !important;
+    display: flex;
+    flex-direction: column;
+  }
+
+  #qb-notes-preview,
+  #act-d365-history-panel .act-d365-panel-body,
+  #act-sales-history-panel .act-mvgo-body,
+  #act-csw-history-panel .act-csw-body {
+    min-height: 0 !important;
+    overflow: auto !important;
+  }
+
+  #act-sales-history-panel iframe,
+  #act-csw-history-panel iframe,
+  #act-d365-history-panel iframe,
+  .sidebar-iframe-container iframe {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 360px;
+    border: 0;
+  }
+
+  /* Sales-report/MVGO tables should scroll instead of stretching/cutting the hub. */
+  #act-sales-history-panel table,
+  #act-csw-history-panel table,
+  #act-d365-history-panel table {
+    min-width: 620px;
+  }
+  #act-sales-history-panel .act-report-table-wrap,
+  #act-sales-history-panel .act-mvgo-table-wrap,
+  #act-csw-history-panel .act-csw-table-wrap,
+  #act-d365-history-panel .act-d365-table-wrap {
+    overflow: auto !important;
+    max-width: 100%;
+  }
+
+  /* Unified compact expand buttons. */
+  .act-ux-expand-btn {
+    height: 26px;
+    min-width: 26px;
+    padding: 0 8px !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px;
+    background: var(--bg-input) !important;
+    color: var(--text-main) !important;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    font-size: 10px !important;
+    font-weight: 900;
+    line-height: 1;
+    cursor: pointer;
+    white-space: nowrap;
+    box-shadow: none !important;
+  }
+  .act-ux-expand-btn:hover {
+    border-color: var(--primary) !important;
+    color: var(--primary) !important;
+    transform: translateY(-1px);
+  }
+  .act-ux-expand-btn i { pointer-events: none; }
+
+  #account-hub-header .act-ux-header-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  #account-hub-header .act-ux-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  /* Fullscreen/drawer expansion for the entire Account Hub column. */
+  body.act-ux-lock-scroll { overflow: hidden !important; }
+  .act-ux-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 9298;
+    background: rgba(15, 23, 42, 0.48);
+    backdrop-filter: blur(2px);
+    display: none;
+  }
+  .act-ux-backdrop.open { display: block; }
+
+  #history-column.act-ux-expanded-column {
+    position: fixed !important;
+    inset: 0.75rem !important;
+    width: auto !important;
+    min-width: 0 !important;
+    height: auto !important;
+    z-index: 9299 !important;
+    display: flex !important;
+    background: var(--bg-app) !important;
+    border-radius: 0.9rem;
+    box-shadow: 0 22px 70px rgba(0,0,0,0.35);
+    padding: 0 !important;
+  }
+  #history-column.act-ux-expanded-column > .card {
+    width: 100% !important;
+    height: 100% !important;
+    max-height: calc(100vh - 1.5rem) !important;
+  }
+  #history-column.act-ux-expanded-column #history-container {
+    height: 100% !important;
+  }
+
+  /* Fullscreen expansion for active sub-panels (Dynamics, MVGO/Sales Order, CSW). */
+  .act-ux-panel-fullscreen {
+    position: fixed !important;
+    inset: 0.75rem !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none !important;
+    max-height: none !important;
+    z-index: 9400 !important;
+    display: flex !important;
+    flex-direction: column !important;
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 0.9rem !important;
+    box-shadow: 0 22px 70px rgba(0,0,0,0.38) !important;
+    overflow: hidden !important;
+  }
+  .act-ux-panel-fullscreen .act-d365-panel-body,
+  .act-ux-panel-fullscreen .act-mvgo-body,
+  .act-ux-panel-fullscreen .act-csw-body {
+    height: 100% !important;
+    max-height: none !important;
+    overflow: auto !important;
+  }
+  .act-ux-panel-fullscreen iframe {
+    min-height: calc(100vh - 150px) !important;
+  }
+
+  /* The main app can still be used at normal desktop sizes; smaller widths turn the hub into a drawer. */
+  .act-ux-mobile-hub-toggle { display: none; }
+  @media (max-width: 1240px) {
+    .app-grid:not(.sidebar-collapsed) {
+      grid-template-columns: minmax(300px, 340px) minmax(0, 1fr) !important;
+    }
+    .app-grid.sidebar-collapsed {
+      grid-template-columns: 50px minmax(0, 1fr) !important;
+    }
+    .col-history {
+      position: fixed !important;
+      right: 0.5rem;
+      top: 4.25rem;
+      bottom: 0.5rem;
+      width: min(94vw, 560px) !important;
+      min-width: 0 !important;
+      z-index: 9250;
+      transform: translateX(calc(100% + 1rem));
+      transition: transform 0.22s ease;
+      box-shadow: -14px 0 40px rgba(0,0,0,0.22);
+      border-radius: 0.75rem;
+    }
+    .col-history.act-ux-drawer-open,
+    .col-history.act-ux-expanded-column {
+      transform: translateX(0) !important;
+    }
+    .act-ux-mobile-hub-toggle { display: inline-flex; }
+  }
+
+  @media (max-width: 760px) {
+    body { padding: 0.35rem !important; }
+    .app-grid:not(.sidebar-collapsed), .app-grid.sidebar-collapsed {
+      grid-template-columns: minmax(0, 1fr) !important;
+    }
+    .col-left:not(.collapsed) {
+      min-width: 0 !important;
+    }
+    #history-column.act-ux-expanded-column,
+    .act-ux-panel-fullscreen {
+      inset: 0.35rem !important;
+      border-radius: 0.65rem !important;
+    }
+    #account-hub-tabs {
+      grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+      gap: 0.35rem !important;
+    }
+    .act-hub-tab span { display: inline !important; }
+    .act-main-sales-order-search {
+      width: 100% !important;
+      min-width: 0 !important;
+      margin-left: 0 !important;
+    }
+    .act-main-sales-order-search input { width: 100% !important; min-width: 0 !important; }
+  }
+</style>
+<script id="act-ux-pass-v1-script">
+(function(){
+  if (window.__ACT_UX_PASS_V1__) return;
+  window.__ACT_UX_PASS_V1__ = true;
+
+  function $(id){ return document.getElementById(id); }
+  function makeBtn(id, icon, label, title, handler){
+    var existing = $(id);
+    if (existing) return existing;
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = id;
+    btn.className = 'act-ux-expand-btn';
+    btn.title = title || label;
+    btn.setAttribute('aria-label', title || label);
+    btn.innerHTML = '<i class="fas ' + icon + '"></i><span>' + label + '</span>';
+    btn.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); handler(btn); });
+    return btn;
+  }
+
+  function ensureBackdrop(){
+    var bd = $('act-ux-backdrop');
+    if (!bd) {
+      bd = document.createElement('div');
+      bd.id = 'act-ux-backdrop';
+      bd.className = 'act-ux-backdrop';
+      bd.addEventListener('click', closeAllExpanded);
+      document.body.appendChild(bd);
+    }
+    return bd;
+  }
+  function anyExpanded(){
+    return document.querySelector('.act-ux-expanded-column, .act-ux-panel-fullscreen, .act-ux-drawer-open');
+  }
+  function syncBackdrop(){
+    var bd = ensureBackdrop();
+    var open = !!anyExpanded();
+    bd.classList.toggle('open', open);
+    document.body.classList.toggle('act-ux-lock-scroll', open);
+  }
+  function closeAllExpanded(){
+    var hub = $('history-column');
+    if (hub) {
+      hub.classList.remove('act-ux-expanded-column');
+      hub.classList.remove('act-ux-drawer-open');
+    }
+    document.querySelectorAll('.act-ux-panel-fullscreen').forEach(function(p){ p.classList.remove('act-ux-panel-fullscreen'); });
+    document.querySelectorAll('.act-ux-expand-btn[data-expanded="true"]').forEach(function(b){
+      b.dataset.expanded = 'false';
+      var span = b.querySelector('span');
+      var icon = b.querySelector('i');
+      if (span && b.dataset.defaultLabel) span.textContent = b.dataset.defaultLabel;
+      if (icon) { icon.classList.remove('fa-compress'); icon.classList.add(b.dataset.defaultIcon || 'fa-expand'); }
+    });
+    syncBackdrop();
+  }
+
+  function toggleHub(btn){
+    var hub = $('history-column');
+    if (!hub) return;
+    var willOpen = !hub.classList.contains('act-ux-expanded-column');
+    hub.classList.toggle('act-ux-expanded-column', willOpen);
+    hub.classList.remove('act-ux-drawer-open');
+    btn.dataset.expanded = String(willOpen);
+    var span = btn.querySelector('span');
+    var icon = btn.querySelector('i');
+    if (span) span.textContent = willOpen ? 'Restore' : 'Expand';
+    if (icon) { icon.classList.toggle('fa-expand', !willOpen); icon.classList.toggle('fa-compress', willOpen); }
+    syncBackdrop();
+  }
+
+  function toggleMobileHub(btn){
+    var hub = $('history-column');
+    if (!hub) return;
+    var willOpen = !hub.classList.contains('act-ux-drawer-open');
+    hub.classList.toggle('act-ux-drawer-open', willOpen);
+    btn.dataset.expanded = String(willOpen);
+    var span = btn.querySelector('span');
+    if (span) span.textContent = willOpen ? 'Hide Hub' : 'Hub';
+    syncBackdrop();
+  }
+
+  function togglePanel(panel, btn){
+    if (!panel) return;
+    var willOpen = !panel.classList.contains('act-ux-panel-fullscreen');
+    panel.classList.toggle('act-ux-panel-fullscreen', willOpen);
+    btn.dataset.expanded = String(willOpen);
+    var span = btn.querySelector('span');
+    var icon = btn.querySelector('i');
+    if (span) span.textContent = willOpen ? 'Restore' : 'Expand';
+    if (icon) { icon.classList.toggle('fa-expand', !willOpen); icon.classList.toggle('fa-compress', willOpen); }
+    syncBackdrop();
+  }
+
+  function addHubHeaderButtons(){
+    var header = $('account-hub-header');
+    if (!header) return;
+    var firstRow = header.querySelector('.flex.items-center.justify-between') || header.firstElementChild;
+    if (!firstRow) return;
+    firstRow.classList.add('act-ux-header-row');
+    var actions = firstRow.querySelector('.act-ux-header-actions');
+    if (!actions) {
+      actions = document.createElement('span');
+      actions.className = 'act-ux-header-actions';
+      firstRow.appendChild(actions);
+    }
+    var expand = makeBtn('act-ux-expand-account-hub', 'fa-expand', 'Expand', 'Expand Account Hub', toggleHub);
+    expand.dataset.defaultLabel = 'Expand';
+    expand.dataset.defaultIcon = 'fa-expand';
+    actions.appendChild(expand);
+  }
+
+  function addMobileHubButton(){
+    var host = $('topbar-utility-controls') || $('filter-bar-container') || document.querySelector('.card-header') || document.body;
+    if (!host || $('act-ux-mobile-hub-toggle')) return;
+    var btn = makeBtn('act-ux-mobile-hub-toggle', 'fa-layer-group', 'Hub', 'Open Account Hub drawer', toggleMobileHub);
+    btn.classList.add('act-ux-mobile-hub-toggle');
+    btn.dataset.defaultLabel = 'Hub';
+    btn.dataset.defaultIcon = 'fa-layer-group';
+    host.appendChild(btn);
+  }
+
+  function addPanelButtons(){
+    var configs = [
+      { panel: 'act-d365-history-panel', header: '#act-d365-history-panel .act-d365-panel-header', id: 'act-ux-expand-dynamics', label: 'Expand Dynamics' },
+      { panel: 'act-sales-history-panel', header: '#act-sales-history-panel .act-mvgo-actions', id: 'act-ux-expand-sales', label: 'Expand Sales' },
+      { panel: 'act-csw-history-panel', header: '#act-csw-history-panel .act-csw-header', id: 'act-ux-expand-csw', label: 'Expand CSW' }
+    ];
+    configs.forEach(function(c){
+      var panel = $(c.panel);
+      var header = document.querySelector(c.header);
+      if (!panel || !header || $(c.id)) return;
+      var btn = makeBtn(c.id, 'fa-expand', 'Expand', c.label, function(b){ togglePanel(panel, b); });
+      btn.dataset.defaultLabel = 'Expand';
+      btn.dataset.defaultIcon = 'fa-expand';
+      header.appendChild(btn);
+    });
+  }
+
+  function wrapWideTables(){
+    ['act-sales-history-panel','act-csw-history-panel','act-d365-history-panel'].forEach(function(id){
+      var panel = $(id);
+      if (!panel) return;
+      panel.querySelectorAll('table').forEach(function(tbl){
+        if (tbl.parentElement && /act-.*table-wrap/.test(tbl.parentElement.className)) return;
+        var wrap = document.createElement('div');
+        wrap.className = id === 'act-sales-history-panel' ? 'act-report-table-wrap' : (id === 'act-csw-history-panel' ? 'act-csw-table-wrap' : 'act-d365-table-wrap');
+        tbl.parentNode.insertBefore(wrap, tbl);
+        wrap.appendChild(tbl);
+      });
+    });
+  }
+
+  function setBetterHistoryDefault(){
+    try {
+      var current = localStorage.getItem('daytona_history_width');
+      if (!current) {
+        document.documentElement.style.setProperty('--history-width', '430px');
+      }
+    } catch(e) {}
+  }
+
+  function runUXPass(){
+    setBetterHistoryDefault();
+    ensureBackdrop();
+    addHubHeaderButtons();
+    addMobileHubButton();
+    addPanelButtons();
+    wrapWideTables();
+  }
+
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape' && anyExpanded()) closeAllExpanded();
+  });
+
+  var observer = new MutationObserver(function(){ runUXPass(); });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function(){ runUXPass(); observer.observe(document.body, {childList:true, subtree:true}); });
+  } else {
+    runUXPass();
+    observer.observe(document.body, {childList:true, subtree:true});
+  }
+
+  window.ACT_UXPass = { refresh: runUXPass, close: closeAllExpanded, toggleHub: toggleHub };
+})();
+</script>
+
+
+<!-- ACT Sales Order Panel UX Pass v1.0
+     Purpose: make the MVGO/Sales Order panel easier to scan, harder to cut off,
+     and give reps clear order search, open, copy, expand, and restore controls.
+-->
+<style id="act-sales-order-ux-pass-v1-style">
+  /* Sales panel gets its own layout rules, layered after the general UX pass. */
+  #act-sales-history-panel {
+    container-type: inline-size;
+  }
+
+  #act-sales-history-panel.open {
+    min-height: 0 !important;
+    overflow: hidden !important;
+  }
+
+  #act-sales-history-panel .act-mvgo-header {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    gap: 0.65rem !important;
+    background:
+      linear-gradient(135deg, rgba(34,197,94,.22), rgba(14,165,233,.14)),
+      var(--bg-card) !important;
+  }
+
+  #act-sales-history-panel .act-mvgo-title {
+    min-width: 0;
+  }
+
+  #act-sales-history-panel .act-mvgo-subtitle {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+    line-height: 1.25;
+  }
+
+  #act-sales-history-panel .act-mvgo-actions {
+    flex-wrap: wrap !important;
+    justify-content: flex-end;
+    max-width: min(390px, 44vw);
+  }
+
+  #act-sales-history-panel .act-mvgo-actions button,
+  #act-sales-history-panel .act-sales-order-ux-btn {
+    min-height: 28px !important;
+    border-radius: 8px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 5px !important;
+  }
+
+  #act-sales-history-panel .act-mvgo-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 10px !important;
+    min-height: 0 !important;
+    overflow: auto !important;
+  }
+
+  .act-sales-order-ux-search-card {
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    padding: 10px;
+    background:
+      linear-gradient(135deg, rgba(34,197,94,.11), rgba(59,130,246,.075)),
+      var(--bg-input);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, .10);
+    flex-shrink: 0;
+  }
+
+  .act-sales-order-ux-search-row {
+    display: grid;
+    grid-template-columns: minmax(160px, 1fr) auto auto auto;
+    gap: 7px;
+    align-items: center;
+  }
+
+  .act-sales-order-ux-search-row input {
+    height: 34px !important;
+    min-width: 0 !important;
+    font-size: 13px !important;
+    font-weight: 800;
+    letter-spacing: .015em;
+  }
+
+  .act-sales-order-ux-btn {
+    height: 34px !important;
+    padding: 0 10px !important;
+    border: 1px solid var(--border-color) !important;
+    background: var(--bg-card) !important;
+    color: var(--text-main) !important;
+    font-size: 11px !important;
+    font-weight: 900;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .act-sales-order-ux-btn.primary {
+    border-color: rgba(34,197,94,.55) !important;
+    color: var(--accent-success) !important;
+  }
+
+  .act-sales-order-ux-btn.info {
+    border-color: rgba(59,130,246,.45) !important;
+    color: var(--primary) !important;
+  }
+
+  .act-sales-order-ux-btn:hover {
+    border-color: var(--primary) !important;
+    transform: translateY(-1px);
+  }
+
+  .act-sales-order-ux-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+    font-size: 10.5px;
+    color: var(--text-muted);
+    line-height: 1.35;
+  }
+
+  .act-sales-order-ux-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 22px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    color: var(--text-main);
+    font-size: 10px;
+    font-weight: 900;
+    max-width: 100%;
+  }
+
+  .act-sales-order-ux-chip span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .act-sales-order-ux-toolbar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+
+  .act-sales-order-ux-toolbar .act-ux-expand-btn span {
+    display: inline;
+  }
+
+  #act-sales-history-panel .act-mvgo-picker {
+    grid-template-columns: minmax(180px, 300px) minmax(0, 1fr) !important;
+    align-items: stretch !important;
+    flex-shrink: 0;
+  }
+
+  #act-sales-history-panel .act-mvgo-current-chip {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  #act-sales-history-panel .act-mvgo-card {
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  #act-sales-history-panel .act-mvgo-frame-card,
+  #act-sales-history-panel .act-report-frame-card,
+  #act-sales-history-panel .act-sales-order-frame-card {
+    flex: 1 1 520px;
+    min-height: 420px;
+    display: flex;
+    flex-direction: column;
+    padding: 0 !important;
+  }
+
+  #act-sales-history-panel .act-mvgo-frame-card iframe,
+  #act-sales-history-panel iframe {
+    flex: 1 1 auto;
+    min-height: 420px !important;
+    height: 100% !important;
+    width: 100% !important;
+  }
+
+  #act-sales-history-panel.act-ux-panel-fullscreen .act-mvgo-frame-card,
+  #act-sales-history-panel.act-ux-panel-fullscreen .act-report-frame-card,
+  #act-sales-history-panel.act-ux-panel-fullscreen .act-sales-order-frame-card {
+    min-height: calc(100vh - 230px) !important;
+  }
+
+  #act-sales-history-panel.act-ux-panel-fullscreen iframe {
+    min-height: calc(100vh - 245px) !important;
+  }
+
+  #act-sales-history-panel .act-report-table-wrap,
+  #act-sales-history-panel .act-mvgo-table-wrap,
+  #act-sales-history-panel .act-sales-order-table-wrap {
+    overflow: auto !important;
+    max-width: 100%;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+  }
+
+  #act-sales-history-panel table {
+    min-width: 720px !important;
+  }
+
+  .act-sales-order-ux-empty {
+    border: 1px dashed rgba(34,197,94,.45);
+    border-radius: 14px;
+    padding: 14px;
+    background: rgba(34,197,94,.07);
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  @container (max-width: 520px) {
+    #act-sales-history-panel .act-mvgo-header {
+      grid-template-columns: 1fr !important;
+    }
+    #act-sales-history-panel .act-mvgo-actions {
+      justify-content: flex-start;
+      max-width: none;
+    }
+    .act-sales-order-ux-search-row {
+      grid-template-columns: 1fr 1fr;
+    }
+    .act-sales-order-ux-search-row input {
+      grid-column: 1 / -1;
+    }
+    #act-sales-history-panel .act-mvgo-picker {
+      grid-template-columns: 1fr !important;
+    }
+  }
+
+  @media (max-width: 760px) {
+    .act-sales-order-ux-search-row {
+      grid-template-columns: 1fr 1fr;
+    }
+    .act-sales-order-ux-search-row input {
+      grid-column: 1 / -1;
+    }
+    .act-sales-order-ux-btn {
+      width: 100%;
+    }
+  }
+</style>
+<script id="act-sales-order-ux-pass-v1-script">
+(function(){
+  if (window.__ACT_SALES_ORDER_UX_PASS_V1__) return;
+  window.__ACT_SALES_ORDER_UX_PASS_V1__ = true;
+
+  function $(id){ return document.getElementById(id); }
+  function panel(){ return $('act-sales-history-panel'); }
+  function getAccount(){
+    return (window.currentRecordId || window.currentSelectedRecord?.cr714_id || '').toString().trim();
+  }
+  function getOrder(){
+    return ($('act-sales-order-ux-input')?.value || $('act-mvgo-order-input')?.value || $('act-main-sales-order-input')?.value || '').toString().trim();
+  }
+  function setAllOrderInputs(value){
+    ['act-sales-order-ux-input','act-mvgo-order-input','act-main-sales-order-input'].forEach(function(id){
+      var el = $(id);
+      if (el) el.value = value || '';
+    });
+  }
+  function toast(msg, type){
+    if (window.showToast) window.showToast(msg, type || 'info');
+  }
+
+  function makeButton(cls, icon, text, title, handler){
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = cls || 'act-sales-order-ux-btn';
+    btn.title = title || text;
+    btn.setAttribute('aria-label', title || text);
+    btn.innerHTML = '<i class="fas ' + icon + '"></i><span>' + text + '</span>';
+    btn.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); handler(btn); });
+    return btn;
+  }
+
+  function ensureSearchCard(){
+    var p = panel();
+    var body = p?.querySelector('.act-mvgo-body');
+    if (!p || !body) return;
+    var existing = $('act-sales-order-ux-search-card');
+    if (existing && existing.parentElement === body) return;
+
+    var card = existing || document.createElement('div');
+    card.id = 'act-sales-order-ux-search-card';
+    card.className = 'act-sales-order-ux-search-card';
+    card.innerHTML = '';
+
+    var row = document.createElement('div');
+    row.className = 'act-sales-order-ux-search-row';
+
+    var input = document.createElement('input');
+    input.id = 'act-sales-order-ux-input';
+    input.placeholder = 'Sales order #';
+    input.inputMode = 'numeric';
+    input.autocomplete = 'off';
+    input.value = getOrder();
+    input.addEventListener('keydown', function(e){ if (e.key === 'Enter') runOrderSearch(); });
+
+    row.appendChild(input);
+    row.appendChild(makeButton('act-sales-order-ux-btn primary', 'fa-magnifying-glass', 'Load', 'Load sales order in the panel', runOrderSearch));
+    row.appendChild(makeButton('act-sales-order-ux-btn info', 'fa-arrow-up-right-from-square', 'Open', 'Open current sales order view in a new tab', openCurrentSalesOrder));
+    row.appendChild(makeButton('act-sales-order-ux-btn', 'fa-copy', 'Copy', 'Copy sales order number', copyOrder));
+
+    var hint = document.createElement('div');
+    hint.className = 'act-sales-order-ux-hint';
+    hint.innerHTML = '<span class="act-sales-order-ux-chip"><i class="fas fa-user"></i><span id="act-sales-order-ux-account-chip">Account: --</span></span>' +
+                     '<span class="act-sales-order-ux-chip"><i class="fas fa-receipt"></i><span id="act-sales-order-ux-order-chip">Order: --</span></span>' +
+                     '<span>Tip: use <b>Expand</b> for full-width order details; tables and iframes scroll inside the panel.</span>';
+
+    card.appendChild(row);
+    card.appendChild(hint);
+    body.insertBefore(card, body.firstChild);
+    refreshChips();
+  }
+
+  function refreshChips(){
+    var acct = getAccount() || '--';
+    var order = getOrder() || '--';
+    var acctChip = $('act-sales-order-ux-account-chip');
+    var orderChip = $('act-sales-order-ux-order-chip');
+    if (acctChip) acctChip.textContent = 'Account: ' + acct;
+    if (orderChip) orderChip.textContent = 'Order: ' + order;
+  }
+
+  function runOrderSearch(){
+    var order = getOrder();
+    var acct = getAccount();
+    if (!order) {
+      toast('Enter a sales order number', 'error');
+      $('act-sales-order-ux-input')?.focus();
+      return;
+    }
+    if (!acct) {
+      toast('Select an account first', 'error');
+      return;
+    }
+    setAllOrderInputs(order);
+    refreshChips();
+    // Prefer the existing v4.60 order drilldown function when the in-panel input exists.
+    if (typeof window.setMvgoOrderDrilldown === 'function' && $('act-mvgo-order-input')) {
+      window.setMvgoOrderDrilldown();
+    } else if (typeof window.searchMvgoSalesOrderFromMain === 'function') {
+      window.searchMvgoSalesOrderFromMain();
+    } else {
+      toast('Sales order search function was not found', 'error');
+    }
+    setTimeout(function(){ enhanceSalesPanel(); }, 80);
+  }
+
+  function currentIframeUrl(){
+    var p = panel();
+    var activeFrame = p?.querySelector('iframe[src]:not([src="about:blank"])');
+    return activeFrame?.src || '';
+  }
+
+  function openCurrentSalesOrder(){
+    var url = currentIframeUrl();
+    var order = getOrder();
+    if (!url && order && typeof window.generateMVGOUrl === 'function') {
+      try { url = window.generateMVGOUrl('orderdrill', getAccount(), order); } catch(e) {}
+    }
+    if (url) window.open(url, '_blank');
+    else toast('Load a sales order first, then use Open.', 'error');
+  }
+
+  async function copyOrder(){
+    var order = getOrder();
+    if (!order) { toast('No sales order number to copy', 'error'); return; }
+    try {
+      await navigator.clipboard.writeText(order);
+      toast('Sales order copied', 'success');
+    } catch(e) {
+      toast('Copy failed; select the order number manually.', 'error');
+    }
+  }
+
+  function ensureHeaderToolbar(){
+    var p = panel();
+    var actions = p?.querySelector('.act-mvgo-actions');
+    if (!p || !actions || $('act-sales-order-ux-toolbar')) return;
+    var toolbar = document.createElement('span');
+    toolbar.id = 'act-sales-order-ux-toolbar';
+    toolbar.className = 'act-sales-order-ux-toolbar';
+    toolbar.appendChild(makeButton('act-sales-order-ux-btn info', 'fa-arrow-up-right-from-square', 'Open', 'Open current sales panel view in a new tab', openCurrentSalesOrder));
+    toolbar.appendChild(makeButton('act-sales-order-ux-btn', 'fa-copy', 'Copy Order', 'Copy the current sales order number', copyOrder));
+    actions.appendChild(toolbar);
+  }
+
+  function markFrameCards(){
+    var p = panel();
+    if (!p) return;
+    p.querySelectorAll('.act-mvgo-card').forEach(function(card){
+      if (card.querySelector('iframe')) {
+        card.classList.add('act-sales-order-frame-card');
+      }
+    });
+    p.querySelectorAll('table').forEach(function(tbl){
+      if (tbl.parentElement && /act-.*table-wrap/.test(tbl.parentElement.className)) return;
+      var wrap = document.createElement('div');
+      wrap.className = 'act-sales-order-table-wrap';
+      tbl.parentNode.insertBefore(wrap, tbl);
+      wrap.appendChild(tbl);
+    });
+  }
+
+  function addEmptyStateIfNeeded(){
+    var p = panel();
+    var body = p?.querySelector('.act-mvgo-body');
+    if (!p || !body || body.querySelector('iframe, table, .act-mvgo-card:not(#act-sales-order-ux-search-card)')) return;
+    if ($('act-sales-order-ux-empty')) return;
+    var empty = document.createElement('div');
+    empty.id = 'act-sales-order-ux-empty';
+    empty.className = 'act-sales-order-ux-empty';
+    empty.innerHTML = '<b>Sales Order Panel</b><br>Select an account, enter a sales order number, and click <b>Load</b>. Use <b>Expand</b> if the order detail view needs more room.';
+    body.appendChild(empty);
+  }
+
+  function enhanceSalesPanel(){
+    ensureHeaderToolbar();
+    ensureSearchCard();
+    markFrameCards();
+    addEmptyStateIfNeeded();
+    refreshChips();
+  }
+
+  // Wrap existing functions so the UX refresh runs after the sales panel rerenders.
+  function wrap(name){
+    var original = window[name];
+    if (typeof original !== 'function' || original.__salesOrderUXWrapped) return;
+    var wrapped = function(){
+      var result = original.apply(this, arguments);
+      setTimeout(enhanceSalesPanel, 80);
+      setTimeout(enhanceSalesPanel, 350);
+      return result;
+    };
+    wrapped.__salesOrderUXWrapped = true;
+    window[name] = wrapped;
+  }
+
+  function init(){
+    wrap('openSalesReportPanel');
+    wrap('searchMvgoSalesOrderFromMain');
+    wrap('setMvgoOrderDrilldown');
+    wrap('openMvgoDisplay');
+    enhanceSalesPanel();
+  }
+
+  var observer = new MutationObserver(function(){
+    if (panel()?.classList.contains('open')) enhanceSalesPanel();
+  });
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function(){ init(); observer.observe(document.body, { childList:true, subtree:true }); });
+  } else {
+    init();
+    observer.observe(document.body, { childList:true, subtree:true });
+  }
+
+  window.ACT_SalesOrderUXPass = { refresh: enhanceSalesPanel, load: runOrderSearch, copy: copyOrder, open: openCurrentSalesOrder };
 })();
 </script>
 
