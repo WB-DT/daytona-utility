@@ -861,8 +861,71 @@
         return res;
     }
 
-    window.pushToMasonvilleSilent = async function(accountId, notesPayload, type = "ISCall") {
+    window.createMasonvilleSalesCallDirect = async function({ accountId, notesPayload, type = "ISReq", companyName = "", repOwnerName = "" }) {
+        const MASONVILLE_API_BASE = "https://wbmasonco.crm.dynamics.com/api/data/v9.2";
+        // Mirrors the existing Power Automate CreateRecord owner bind for MVGO Catalog ISREQ records.
+        const MVGO_ISREQ_OWNER_ID = "a7df50fb-7d16-e811-a953-000d3a34ecdb";
+        const cleanGuid = (guid) => String(guid || "").replace(/[{}]/g, "").trim();
+        const regardingGuid = cleanGuid(currentAccountGuid);
+        const finalRepName = repOwnerName || currentUserRepName || (msalAccount && msalAccount.name) || "";
+        const finalNotes = notesPayload || "";
+        const subjectBase = `${companyName || ""}/${accountId || ""}`.replace(/^\//, "").replace(/\/$/, "");
+
+        const d365Token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+        const payload = {
+            mss_salescalltriggerdetails: `${finalRepName}: ${finalNotes}`,
+            mss_dateofcall: new Date().toISOString(),
+            description: `${finalRepName}: ${finalNotes}`,
+            "ownerid_mss_salescall@odata.bind": `/systemusers(${MVGO_ISREQ_OWNER_ID})`,
+            mss_salescalltrigger: type,
+            subject: `${subjectBase} - ${type}`
+        };
+
+        if (regardingGuid) {
+            payload["regardingobjectid_account_mss_salescall@odata.bind"] = `/accounts(${regardingGuid})`;
+        }
+
+        const response = await fetch(`${MASONVILLE_API_BASE}/mss_salescalls`, {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${d365Token}`,
+                "Content-Type": "application/json",
+                Accept: "application/json",
+                "OData-MaxVersion": "4.0",
+                "OData-Version": "4.0",
+                Prefer: "return=representation"
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errText = await response.text().catch(() => "");
+            throw new Error(`Dataverse Create mss_salescalls failed: ${response.status} ${errText}`);
+        }
+
+        console.log("MVGO ISREQ Dataverse Sync Successful");
+        return true;
+    };
+
+    window.pushToMasonvilleSilent = async function(accountId, notesPayload, type = "ISLead") {
         try {
+            const companyName = currentSelectedRecord ? currentSelectedRecord.cr714_company : "";
+            const repOwnerName = currentUserRepName || (msalAccount && msalAccount.name) || "";
+            const normalizedType = String(type || "").trim();
+
+            // MVGO Catalog ISREQ requests should bypass the old assignment Flow and write directly to Masonville/D365.
+            if (normalizedType.toLowerCase() === "isreq") {
+                return await window.createMasonvilleSalesCallDirect({
+                    accountId,
+                    notesPayload,
+                    type: "ISReq",
+                    companyName,
+                    repOwnerName
+                });
+            }
+
+            // Existing Power Automate path remains for the other activity types (ISLead/ISCall/ISEmail/etc.).
+            // If we split these later, add new branches above this fallback.
             const flowUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/9600fc61adea438ba498b1542e38cf47/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Z8KzQY52W_xgt246b_SliGmBgZLFc4MbF9OkFe01Z7Q";
             
             // 1. Fetch the logged-in user's internal Dynamics 365 System User GUID
@@ -885,14 +948,13 @@
             } catch(e) { 
                 console.warn("Failed to fetch Rep Owner GUID, Flow will fallback to default owner.", e); 
             }
-            const companyName = currentSelectedRecord ? currentSelectedRecord.cr714_company : "";
-            const repOwnerName = currentUserRepName || (msalAccount && msalAccount.name) || "";
+
             // 2. Build the payload including the newly fetched Owner GUID and logged-in rep display name
             const payload = {
                 accountId: accountId,
                 notesPayload: notesPayload,
                 subject: `${companyName}/${accountId}`,
-                activityType: type, // New dedicated property
+                activityType: normalizedType || "ISLead",
                 regardingGuid: currentAccountGuid || "",
                 repOwnerGuid: repOwnerGuid,
                 repOwnerName: repOwnerName
@@ -1974,7 +2036,7 @@ allRaw.forEach(r => {
     if (!quiet) {
       window.showToast("Saved!", "success");
 
-      let masonvilleType = "ISCall";
+      let masonvilleType = "ISLead";
       if (oppType === "Email") masonvilleType = "ISEmail";
 
       const pushNotes = note ? note : "(Metadata Update)";
