@@ -90,193 +90,198 @@
     <!-- DIRECT DATAVERSE API CHUNK QUERY SCRIPT -->
     <script>
         // CONFIGURATION: Verified Corporate Identity Environments
-        const envUrl = "https://org23279050.api.crm.dynamics.com";
-        const apiVersion = "v9.2";
-        const clientId = "c40d5d55-5f30-459e-84c4-4360cd523780"; 
-        const tenantId = "9a7c474b-f702-4ae4-a2f9-b72a1e117401";
+const envUrl = "https://org23279050.api.crm.dynamics.com";
+const apiVersion = "v9.2";
+const clientId = "c40d5d55-5f30-459e-84c4-4360cd523780"; 
+const tenantId = "9a7c474b-f702-4ae4-a2f9-b72a1e117401";
 
-        // MSAL Configuration setup for secure Azure AD handshakes
-        const msalConfig = {
-            auth: {
-                clientId: clientId,
-                authority: `https://login.microsoftonline.com/${tenantId}`,
-                redirectUri: window.location.href
-            },
-            cache: { cacheLocation: "sessionStorage" }
-        };
+// MSAL Configuration setup for secure Azure AD handshakes
+const msalConfig = {
+    auth: {
+        clientId: clientId,
+        authority: `https://login.microsoftonline.com/${tenantId}`,
+        redirectUri: window.location.href
+    },
+    cache: { cacheLocation: "sessionStorage" }
+};
 
-        let msalInstance;
-        let accessToken = null;
+let msalInstance;
+let accessToken = null;
 
-        window.addEventListener('DOMContentLoaded', async () => {
-            if (typeof lucide !== 'undefined') lucide.createIcons();
-            try {
-                msalInstance = new msal.PublicClientApplication(msalConfig);
-                await msalInstance.initialize();
-                const handleResponse = await msalInstance.handleRedirectPromise();
-                if (handleResponse !== null) {
-                    msalInstance.setActiveAccount(handleResponse.account);
-                    accessToken = handleResponse.accessToken;
-                }
-            } catch (err) {
-                console.error("Authentication framework initialization error:", err);
-            }
-        });
-
-        const bulkInput = document.getElementById('bulkInput');
-        const searchBtn = document.getElementById('searchBtn');
-        const clearBtn = document.getElementById('clearBtn');
-        const resultsStream = document.getElementById('resultsStream');
-        const emptyState = document.getElementById('emptyState');
-        const inputCount = document.getElementById('inputCount');
-        const matchCount = document.getElementById('matchCount');
-
-        bulkInput.addEventListener('input', () => {
-            const text = bulkInput.value.trim();
-            const lines = text ? text.split('\n').length : 0;
-            inputCount.textContent = `Lines parsed: ${lines}`;
-        });
-
-        clearBtn.addEventListener('click', () => {
-            bulkInput.value = '';
-            inputCount.textContent = 'Lines parsed: 0';
-            bulkInput.focus();
-        });
-
-        // Requests an active bearer token
-        async function getAuthToken() {
-            const loginRequest = { scopes: [`${envUrl}/user_impersonation`] };
-            try {
-                const account = msalInstance.getAllAccounts()[0];
-                if (!account) {
-                    const loginResponse = await msalInstance.loginPopup(loginRequest);
-                    msalInstance.setActiveAccount(loginResponse.account);
-                    return loginResponse.accessToken;
-                }
-                const tokenResponse = await msalInstance.acquireTokenSilent({
-                    ...loginRequest,
-                    account: account
-                });
-                return tokenResponse.accessToken;
-            } catch (error) {
-                const loginResponse = await msalInstance.loginPopup(loginRequest);
-                return loginResponse.accessToken;
-            }
+window.addEventListener('DOMContentLoaded', async () => {
+    if (typeof lucide !== 'undefined') lucide.createIcons();
+    try {
+        msalInstance = new msal.PublicClientApplication(msalConfig);
+        await msalInstance.initialize();
+        const handleResponse = await msalInstance.handleRedirectPromise();
+        if (handleResponse !== null) {
+            msalInstance.setActiveAccount(handleResponse.account);
+            accessToken = handleResponse.accessToken;
         }
+    } catch (err) {
+        console.error("Authentication framework initialization error:", err);
+    }
+});
 
-        // Low-level Dataverse GET request runner
-        async function fetchFromDataverse(tableName, selectColumns, filterString) {
-            if (!accessToken) accessToken = await getAuthToken();
+const bulkInput = document.getElementById('bulkInput');
+const searchBtn = document.getElementById('searchBtn');
+const clearBtn = document.getElementById('clearBtn');
+const resultsStream = document.getElementById('resultsStream');
+const emptyState = document.getElementById('emptyState');
+const inputCount = document.getElementById('inputCount');
+const matchCount = document.getElementById('matchCount');
 
-            const endpoint = `${envUrl}/api/data/${apiVersion}/${tableName}?$select=${selectColumns}&$filter=${filterString}`;
-            
-            const response = await fetch(endpoint, {
-                method: "GET",
-                headers: {
-                    "Authorization": `Bearer ${accessToken}`,
-                    "OData-MaxVersion": "4.0",
-                    "OData-Version": "4.0",
-                    "Accept": "application/json",
-                    "Content-Type": "application/json; charset=utf-8",
-                    "Prefer": "odata.include-annotations=\"*\""
-                }
-            });
+bulkInput.addEventListener('input', () => {
+    const text = bulkInput.value.trim();
+    const lines = text ? text.split('\n').length : 0;
+    inputCount.textContent = `Lines parsed: ${lines}`;
+});
 
-            if (!response.ok) throw new Error(`400/500 hit on ${tableName}`);
-            const data = await response.json();
-            return data.value;
+clearBtn.addEventListener('click', () => {
+    bulkInput.value = '';
+    inputCount.textContent = 'Lines parsed: 0';
+    bulkInput.focus();
+});
+
+// Requests an active bearer token
+async function getAuthToken() {
+    const loginRequest = { scopes: [`${envUrl}/user_impersonation`] };
+    try {
+        const account = msalInstance.getAllAccounts()[0];
+        if (!account) {
+            const loginResponse = await msalInstance.loginPopup(loginRequest);
+            msalInstance.setActiveAccount(loginResponse.account);
+            return loginResponse.accessToken;
         }
-
-        // BATCH CHUNKER: Safely splits lists into groups of 40 to protect URL lengths
-        async function queryTableInChunks(tableName, columns, accountsList) {
-            let allMatches = [];
-            const chunkSize = 40; 
-            
-            for (let i = 0; i < accountsList.length; i += chunkSize) {
-                const chunk = accountsList.slice(i, i + chunkSize);
-                const filterQuery = chunk.map(acc => `cr714_accountnum eq '${acc}'`).join(' or ');
-                
-                try {
-                    const results = await fetchFromDataverse(tableName, columns, filterQuery);
-                    if (results && results.length > 0) {
-                        allMatches = allMatches.concat(results);
-                    }
-                } catch (err) {
-                    console.error(`Error querying chunk on table ${tableName}:`, err);
-                }
-            }
-            return allMatches;
-        }
-
-        searchBtn.addEventListener('click', async () => {
-            const rawText = bulkInput.value.trim();
-            if (!rawText) return;
-
-            const targetedAccounts = [...new Set(rawText.split('\n').map(line => line.trim()).filter(line => line.length > 0))];
-            
-            searchBtn.disabled = true;
-            searchBtn.innerHTML = `<span class="animate-pulse">Processing ${targetedAccounts.length} Accounts...</span>`;
-
-            let combinedMatches = [];
-
-            try {
-                // Query endpoints simultaneously using safe chunking logic strings
-                const [mgmtData, cadenceData, louiseData, logisticsData] = await Promise.all([
-                    queryTableInChunks('cr714_accountmanagementdatasets', 'cr714_accountnum,cr714_accountname,cr714_action', targetedAccounts),
-                    queryTableInChunks('cr714_cadencedatasets', 'cr714_accountnum,cr714_accountname,cr714_action', targetedAccounts),
-                    queryTableInChunks('cr714_louisebrowndatasets', 'cr714_accountnum,cr714_accountname,cr714_action', targetedAccounts),
-                    queryTableInChunks('cr714_logisticslogs_2', 'cr714_accountnum,cr714_accountname,cr714_issue', targetedAccounts)
-                ]);
-
-                mgmtData.forEach(r => combinedMatches.push({ id: r.cr714_accountnum, src: 'Account Management', name: r.cr714_accountname, detail: r.cr714_action, type: 'mgmt' }));
-                cadenceData.forEach(r => combinedMatches.push({ id: r.cr714_accountnum, src: 'Cadence Log', name: r.cr714_accountname, detail: r.cr714_action, type: 'cadence' }));
-                louiseData.forEach(r => combinedMatches.push({ id: r.cr714_accountnum, src: 'Louise Brown Dataset', name: r.cr714_accountname, detail: r.cr714_action, type: 'louise' }));
-                logisticsData.forEach(r => combinedMatches.push({ id: r.cr714_accountnum, src: 'Logistics Log', name: r.cr714_accountname, detail: r.cr714_issue, type: 'logistics' }));
-
-                renderResults(combinedMatches);
-
-            } catch (error) {
-                console.error("Master processing thread crash: ", error);
-                alert("Batch run encountered a processing error. View developer logs.");
-            } finally {
-                searchBtn.disabled = false;
-                searchBtn.innerHTML = `<i data-lucide="play" class="w-4 h-4 fill-current"></i><span>Execute Dataverse Search</span>`;
-                if (typeof lucide !== 'undefined') lucide.createIcons();
-            }
+        const tokenResponse = await msalInstance.acquireTokenSilent({
+            ...loginRequest,
+            account: account
         });
+        return tokenResponse.accessToken;
+    } catch (error) {
+        const loginResponse = await msalInstance.loginPopup(loginRequest);
+        return loginResponse.accessToken;
+    }
+}
 
-        function renderResults(records) {
-            resultsStream.innerHTML = '';
-            matchCount.textContent = `Matches found: ${records.length}`;
+// Low-level Dataverse GET request runner
+async function fetchFromDataverse(tableName, selectColumns, filterString) {
+    if (!accessToken) accessToken = await getAuthToken();
 
-            if (!records || records.length === 0) {
-                resultsStream.appendChild(emptyState);
-                return;
-            }
-
-            records.forEach(rec => {
-                const row = document.createElement('div');
-                row.className = "grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-slate-800/40 transition border-b border-slate-800/60 text-sm text-slate-300 font-mono";
-                
-                let badgeStyle = "bg-slate-800 text-slate-400 border-slate-700";
-                if(rec.type === 'mgmt') badgeStyle = "bg-blue-950/50 text-blue-400 border-blue-900/50";
-                if(rec.type === 'cadence') badgeStyle = "bg-purple-950/50 text-purple-400 border-purple-900/50";
-                if(rec.type === 'louise') badgeStyle = "bg-teal-950/50 text-teal-400 border-teal-900/50";
-                if(rec.type === 'logistics') badgeStyle = "bg-amber-950/50 text-amber-400 border-amber-900/50";
-
-                row.innerHTML = `
-                    <div class="col-span-2 font-bold text-white">${rec.id}</div>
-                    <div class="col-span-3">
-                        <span class="px-2.5 py-0.5 rounded border text-xs font-medium tracking-wide ${badgeStyle}">
-                            ${rec.src}
-                        </span>
-                    </div>
-                    <div class="col-span-4 font-sans text-slate-200">${rec.name}</div>
-                    <div class="col-span-3 font-sans text-slate-400">${rec.detail}</div>
-                `;
-                resultsStream.appendChild(row);
-            });
+    const endpoint = `${envUrl}/api/data/${apiVersion}/${tableName}?$select=${selectColumns}&$filter=${filterString}`;
+    
+    const response = await fetch(endpoint, {
+        method: "GET",
+        headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "OData-MaxVersion": "4.0",
+            "OData-Version": "4.0",
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
+            "Prefer": "odata.include-annotations=\"*\""
         }
+    });
+
+    if (!response.ok) throw new Error(`400/500 hit on ${tableName}`);
+    const data = await response.json();
+    return data.value;
+}
+
+// BATCH CHUNKER: Safely splits lists into groups of 40 and dynamically adapts to changing column schemas
+async function queryTableInChunks(tableName, accountColumn, textColumns, accountsList) {
+    let allMatches = [];
+    const chunkSize = 40; 
+    
+    for (let i = 0; i < accountsList.length; i += chunkSize) {
+        const chunk = accountsList.slice(i, i + chunkSize);
+        // Generates correct query mapping string based on the current table's specific account column spelling
+        const filterQuery = chunk.map(acc => `${accountColumn} eq '${acc}'`).join(' or ');
+        const selectFields = `${accountColumn},${textColumns}`;
+        
+        try {
+            const results = await fetchFromDataverse(tableName, selectFields, filterQuery);
+            if (results && results.length > 0) {
+                // Keep track of which column held the account number so the mapper can read it uniformly later
+                results.forEach(row => row._matchedKey = accountColumn);
+                allMatches = allMatches.concat(results);
+            }
+        } catch (err) {
+            console.error(`Error querying chunk on table ${tableName}:`, err);
+        }
+    }
+    return allMatches;
+}
+
+searchBtn.addEventListener('click', async () => {
+    const rawText = bulkInput.value.trim();
+    if (!rawText) return;
+
+    const targetedAccounts = [...new Set(rawText.split('\n').map(line => line.trim()).filter(line => line.length > 0))];
+    
+    searchBtn.disabled = true;
+    searchBtn.innerHTML = `<span class="animate-pulse">Processing ${targetedAccounts.length} Accounts...</span>`;
+
+    let combinedMatches = [];
+
+    try {
+        // Query endpoints simultaneously using safe chunking logic and table-specific column declarations
+        const [mgmtData, cadenceData, louiseData, logisticsData] = await Promise.all([
+            queryTableInChunks('cr714_accountmanagementdatasets', 'cr714_accountnum', 'cr714_accountname,cr714_action', targetedAccounts),
+            queryTableInChunks('cr714_cadencedatasets', 'cr714_accountnum', 'cr714_accountname,cr714_action', targetedAccounts),
+            queryTableInChunks('cr714_louisebrowndatasets', 'cr714_accountnum', 'cr714_accountname,cr714_action', targetedAccounts),
+            queryTableInChunks('cr714_logisticslog_2s', 'cr714_accountnumber', 'cr714_accountname,cr714_issue', targetedAccounts)
+        ]);
+
+        // Standardize different data fields for unified UI formatting
+        mgmtData.forEach(r => combinedMatches.push({ id: r[r._matchedKey], src: 'Account Management', name: r.cr714_accountname, detail: r.cr714_action, type: 'mgmt' }));
+        cadenceData.forEach(r => combinedMatches.push({ id: r[r._matchedKey], src: 'Cadence Log', name: r.cr714_accountname, detail: r.cr714_action, type: 'cadence' }));
+        louiseData.forEach(r => combinedMatches.push({ id: r[r._matchedKey], src: 'Louise Brown Dataset', name: r.cr714_accountname, detail: r.cr714_action, type: 'louise' }));
+        logisticsData.forEach(r => combinedMatches.push({ id: r[r._matchedKey], src: 'Logistics Log', name: r.cr714_accountname, detail: r.cr714_issue, type: 'logistics' }));
+
+        renderResults(combinedMatches);
+
+    } catch (error) {
+        console.error("Master processing thread crash: ", error);
+        alert("Batch run encountered a processing error. View developer logs.");
+    } finally {
+        searchBtn.disabled = false;
+        searchBtn.innerHTML = `<i data-lucide="play" class="w-4 h-4 fill-current"></i><span>Execute Dataverse Search</span>`;
+        if (typeof lucide !== 'undefined') lucide.createIcons();
+    }
+});
+
+function renderResults(records) {
+    resultsStream.innerHTML = '';
+    matchCount.textContent = `Matches found: ${records.length}`;
+
+    if (!records || records.length === 0) {
+        resultsStream.appendChild(emptyState);
+        return;
+    }
+
+    records.forEach(rec => {
+        const row = document.createElement('div');
+        row.className = "grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-slate-800/40 transition border-b border-slate-800/60 text-sm text-slate-300 font-mono";
+        
+        let badgeStyle = "bg-slate-800 text-slate-400 border-slate-700";
+        if(rec.type === 'mgmt') badgeStyle = "bg-blue-950/50 text-blue-400 border-blue-900/50";
+        if(rec.type === 'cadence') badgeStyle = "bg-purple-950/50 text-purple-400 border-purple-900/50";
+        if(rec.type === 'louise') badgeStyle = "bg-teal-950/50 text-teal-400 border-teal-900/50";
+        if(rec.type === 'logistics') badgeStyle = "bg-amber-950/50 text-amber-400 border-amber-900/50";
+
+        row.innerHTML = `
+            <div class="col-span-2 font-bold text-white">${rec.id}</div>
+            <div class="col-span-3">
+                <span class="px-2.5 py-0.5 rounded border text-xs font-medium tracking-wide ${badgeStyle}">
+                    ${rec.src}
+                </span>
+            </div>
+            <div class="col-span-4 font-sans text-slate-200">${rec.name}</div>
+            <div class="col-span-3 font-sans text-slate-400">${rec.detail}</div>
+        `;
+        resultsStream.appendChild(row);
+    });
+}
     </script>
 </body>
 </html>
