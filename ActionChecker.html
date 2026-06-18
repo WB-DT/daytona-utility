@@ -193,14 +193,9 @@ body.ac-final-simple .view-note{margin:0 0 10px 0;padding:9px 11px;border:1px so
 
 <script id="ac-copilot-early-cache-clear-v1">
 (function(){
-  try{
-    window.__AC_COPILOT_FORCE_FRESH_OPEN = true;
-    var keys=['action_leaderboard_formatted_meta_v1','action_leaderboard_cache_v1','action_leaderboard_cache_v2','action_leaderboard_cache_v3','action_leaderboard_meta_v3','action_leaderboard_meta_v4','action_leaderboard_verified_meta_v1'];
-    keys.forEach(function(k){try{localStorage.removeItem(k)}catch(e){}});
-    if(window.indexedDB){
-      try{ indexedDB.deleteDatabase('ActionLeaderboardFormattedDB'); }catch(e){}
-    }
-  }catch(e){}
+  // COPILOT LOAD STABILITY PASS 2026-06-18: no-op on normal open.
+  // The prior block deleted IndexedDB/localStorage every time the file opened, which made load times look inconsistent.
+  window.__AC_COPILOT_FORCE_FRESH_OPEN = false;
 })();
 </script>
 
@@ -962,7 +957,7 @@ setTimeout(applyLiveEnhancements,0);
   // Clear stale cache on open, then apply Manager Console bridge if present.
   document.addEventListener('DOMContentLoaded', async()=>{
     installUi();
-    await clearActionCheckerCache('open');
+    // Load stability pass: do not clear cache on every open. Explicit Load Fresh still clears before loading.
     applyBridgeToControls();
     const b=readBridge();
     if(b.autoApply){ setTimeout(()=>applyScopeAndLoad(),250); }
@@ -4014,4 +4009,290 @@ setTimeout(applyLiveEnhancements,0);
 })();
 </script>
 <!-- === COPILOT LOADING SCREEN UI PASS 2026-06-18 END === -->
+
+<!-- === COPILOT LOAD STABILITY AND TIMING PASS 2026-06-18 START === -->
+<style id="ac-load-stability-timing-css-20260618">
+  /* Final load stability pass: one active loader, no flicker, faster post-load render, no accidental cold-start cache wipe. */
+  body.ac-load-stable-active #acBootLoading,
+  body.ac-load-stable-active.ac-boot-loading-active #acBootLoading{
+    display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;
+  }
+  body.ac-load-stable-active{overflow:hidden!important;}
+  body.ac-load-stable-active .app{filter:blur(1.15px) grayscale(.08);pointer-events:none;}
+  body.ac-load-stable-active #loadingOverlay.loading-overlay{display:flex!important;z-index:2147483800!important;}
+  #loadingOverlay .ac-load-timing-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;min-width:0;}
+  #loadingOverlay .ac-load-timing-row .pill{font-size:10.5px;height:24px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  #loadingOverlay .ac-load-warn{border-color:rgba(250,204,21,.45)!important;color:var(--warn)!important;background:rgba(250,204,21,.10)!important;}
+  #loadingOverlay .ac-load-good{border-color:rgba(74,222,128,.45)!important;color:var(--good)!important;background:rgba(74,222,128,.10)!important;}
+  #loadingOverlay .ac-load-info{border-color:rgba(56,189,248,.45)!important;color:var(--primary)!important;background:rgba(56,189,248,.10)!important;}
+  #loadingOverlay .loading-card{transform:translateZ(0);}
+  #loadingOverlay .modal-close[disabled]{opacity:.55;cursor:not-allowed;}
+</style>
+<script id="ac-load-stability-timing-js-20260618">
+(function(){
+  if(window.__AC_LOAD_STABILITY_TIMING_PASS_20260618) return;
+  window.__AC_LOAD_STABILITY_TIMING_PASS_20260618 = true;
+
+  const gid=id=>document.getElementById(id);
+  const fmt=n=>(Number(n)||0).toLocaleString();
+  const now=()=>performance.now ? performance.now() : Date.now();
+  const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const st={active:false,start:0,lastPaint:0,hideTimer:null,pendingFetch:0,explicit:0,rows:0,fetched:0,batches:0,stage:'',loadInFlight:false,filterVersion:0,rendering:false};
+
+  function silentMode(){return !!(window.__AC_SILENT_LIVE_POLL || document.body?.classList.contains('ac-live-silent-poll') || document.hidden && !st.active);}
+  function dataverseUrl(input){const url=String((input&&input.url)||input||'');return /crm\.dynamics\.com|\/api\/data\/v9\.2|cr714_dt_act_fctbls/i.test(url);}
+  function ensureTimingRow(){
+    const title=gid('loadingDetail'); if(!title) return;
+    let row=gid('acLoadTimingRow');
+    if(!row){
+      row=document.createElement('div'); row.id='acLoadTimingRow'; row.className='ac-load-timing-row';
+      row.innerHTML='<span class="pill ac-load-info" id="acLoadElapsed">0s elapsed</span><span class="pill ac-load-good" id="acLoadMode">stable load</span><span class="pill ac-load-warn" id="acLoadPending">0 active calls</span>';
+      title.insertAdjacentElement('afterend',row);
+    }
+  }
+  function setText(id,value){const el=gid(id); if(el&&el.textContent!==String(value)) el.textContent=String(value);}
+  function enforceLoader(){
+    const overlay=gid('loadingOverlay'), app=document.querySelector('.app'), boot=gid('acBootLoading');
+    document.body.classList.add('ac-load-stable-active');
+    document.body.classList.remove('ac-boot-loading-active');
+    if(boot) boot.classList.add('ac-boot-hidden');
+    if(app) app.classList.add('loading');
+    if(overlay){ overlay.classList.add('show'); overlay.setAttribute('aria-busy','true'); overlay.setAttribute('role','status'); overlay.setAttribute('aria-live','polite'); }
+    ensureTimingRow();
+  }
+  function paint(force=false){
+    if(!st.active && !force) return;
+    const t=now(); if(!force && t-st.lastPaint<180) return; st.lastPaint=t;
+    enforceLoader();
+    const elapsed=Math.max(0,Math.round((t-st.start)/1000));
+    setText('loadingRows',fmt(st.rows));
+    setText('loadingStage',st.stage||'Working...');
+    setText('acLoadElapsed',elapsed+'s elapsed');
+    setText('acLoadPending',fmt(st.pendingFetch)+' active calls');
+    setText('acLoadMode',st.rendering?'final render':(st.pendingFetch?'fetching':'stable load'));
+    setText('acLoadSaved',fmt(st.rows));
+    setText('acLoadFetched',fmt(st.fetched||st.rows));
+    setText('acLoadBatches',fmt(st.batches));
+    setText('acLoadRequests',fmt(st.pendingFetch));
+    setText('acLoadMiniRows',fmt(st.rows)+' saved');
+    setText('acLoadMiniReq',fmt(st.pendingFetch)+' requests');
+    const pct=st.pendingFetch?Math.min(96,14+Math.log10((st.rows||st.fetched||0)+1)*22):(st.rendering?97:Math.min(99,18+Math.log10((st.rows||0)+1)*22));
+    const bar=gid('acLoadBar'); if(bar) bar.style.width=Math.max(4,pct).toFixed(1)+'%';
+    setText('acLoadProgressText',Math.round(Math.max(4,pct))+'%');
+    setText('acLoadStageText',st.stage||'Working...');
+    const log=gid('acLoadLog');
+    if(log){
+      const msg='<div><b>Now:</b> '+esc(st.stage||'Working...')+'</div><div><b>Saved:</b> '+fmt(st.rows)+' rows • '+fmt(st.pendingFetch)+' active call(s)</div>';
+      if(log.innerHTML!==msg) log.innerHTML=msg;
+    }
+    document.querySelectorAll('#loadingOverlay .modal-close').forEach(btn=>{btn.disabled=st.active;btn.textContent=st.active?'Loading…':'Close';});
+  }
+  function begin(title='Loading records',detail='Getting things ready...'){
+    if(silentMode()) return;
+    if(!st.active){st.start=now(); st.rows=0; st.fetched=0; st.batches=0;}
+    st.active=true; st.explicit++;
+    if(st.hideTimer){clearTimeout(st.hideTimer); st.hideTimer=null;}
+    setText('loadingTitle',title); setText('loadingDetail',detail); st.stage='Starting engines...';
+    enforceLoader(); paint(true);
+  }
+  function update(rows=0,stage='Still working...'){
+    if(silentMode()) return;
+    if(!st.active) begin('Loading records','Work is already in progress...');
+    st.rows=Math.max(st.rows,Number(rows)||0); if(stage) st.stage=String(stage);
+    paint(false);
+  }
+  function canHide(){return st.explicit<=0 && st.pendingFetch<=0 && !st.rendering;}
+  function finishHide(){
+    if(!canHide()) return;
+    const minMs=650, wait=Math.max(0,minMs-(now()-st.start));
+    if(wait>0){st.hideTimer=setTimeout(finishHide,wait);return;}
+    st.active=false;
+    document.body.classList.remove('ac-load-stable-active');
+    document.querySelector('.app')?.classList.remove('loading');
+    const overlay=gid('loadingOverlay'); if(overlay){overlay.classList.remove('show','expanded'); overlay.setAttribute('aria-busy','false');}
+    document.querySelectorAll('#loadingOverlay .modal-close').forEach(btn=>{btn.disabled=false;btn.textContent='Close';});
+  }
+  function end(force=false){
+    if(force){st.explicit=0;st.pendingFetch=0;st.rendering=false;} else st.explicit=Math.max(0,st.explicit-1);
+    if(st.hideTimer) clearTimeout(st.hideTimer);
+    st.hideTimer=setTimeout(finishHide,220);
+  }
+
+  window.showLoading=function(title,detail){begin(title,detail);};
+  window.updateLoading=function(rows,stage){update(rows,stage);};
+  window.hideLoading=function(){end(false);};
+
+  const fetch0=window.fetch;
+  if(fetch0 && !fetch0.__acLoadStable){
+    window.fetch=function(input,init){
+      const track=dataverseUrl(input);
+      if(track && !silentMode()){
+        if(!st.active) begin('Loading records','Dataverse request started...');
+        st.pendingFetch++; st.stage='Waiting on Dataverse...'; paint(true);
+      }
+      return fetch0.apply(this,arguments).finally(()=>{
+        if(track && !silentMode()){
+          st.pendingFetch=Math.max(0,st.pendingFetch-1);
+          st.stage=st.pendingFetch?'Waiting for remaining Dataverse calls...':'Dataverse calls finished.';
+          paint(true); if(canHide()) end(false);
+        }
+      });
+    };
+    window.fetch.__acLoadStable=true;
+  }
+
+  // Silence live auto-polls so they do not pop the blocking load screen every 20 seconds.
+  try{
+    if(typeof silentAddLatestLive==='function' && !silentAddLatestLive.__acSilentWrapped){
+      const oldSilent=silentAddLatestLive;
+      silentAddLatestLive=async function(){
+        window.__AC_SILENT_LIVE_POLL=true; document.body.classList.add('ac-live-silent-poll');
+        try{return await oldSilent.apply(this,arguments);} finally{window.__AC_SILENT_LIVE_POLL=false; document.body.classList.remove('ac-live-silent-poll');}
+      };
+      silentAddLatestLive.__acSilentWrapped=true;
+      window.silentAddLatestLive=silentAddLatestLive;
+    }
+  }catch(e){console.warn('silent live wrap skipped',e);}
+
+  // Prevent double-click/double-trigger loads.
+  function guardLoad(fn,label){
+    if(typeof fn!=='function' || fn.__acGuardedLoad) return fn;
+    const wrapped=async function(){
+      if(st.loadInFlight){try{toast('A load is already running. Let this one finish first.');}catch(e){} return;}
+      st.loadInFlight=true;
+      try{return await fn.apply(this,arguments);} finally{st.loadInFlight=false; end(false);}
+    };
+    wrapped.__acGuardedLoad=true; return wrapped;
+  }
+  try{ if(typeof parallelLoad==='function'){ parallelLoad=guardLoad(parallelLoad,'parallelLoad'); window.parallelLoad=parallelLoad; } }catch(e){}
+  try{ if(typeof loadSelectedAction==='function'){ loadSelectedAction=guardLoad(loadSelectedAction,'loadSelectedAction'); window.loadSelectedAction=loadSelectedAction; } }catch(e){}
+  try{ if(typeof loadDatesActions==='function'){ loadDatesActions=guardLoad(loadDatesActions,'loadDatesActions'); window.loadDatesActions=loadDatesActions; } }catch(e){}
+
+  // Faster repeated render calls: compact/dedupe only when row version changes, and cache filter results briefly during one render pass.
+  try{
+    const baseCompact=typeof compactLoadedRows==='function'?compactLoadedRows:null;
+    let compactMeta={len:-1,version:-1,at:0};
+    compactLoadedRows=function(force=false){
+      const len=state?.rows?.length||0, ver=state.__acPerfVersion||0, t=Date.now();
+      if(!force && len===compactMeta.len && ver===compactMeta.version && t-compactMeta.at<30000) return 0;
+      let removed=0;
+      if(baseCompact) removed=baseCompact.apply(this,arguments)||0;
+      else if(typeof dedupeRows==='function' && state?.rows){const before=state.rows.length; state.rows=dedupeRows(state.rows); removed=before-state.rows.length;}
+      compactMeta={len:state?.rows?.length||0,version:state.__acPerfVersion||0,at:t};
+      return removed;
+    };
+    window.compactLoadedRows=compactLoadedRows;
+  }catch(e){console.warn('compact throttle skipped',e);}
+
+  try{
+    const baseFiltered=typeof filtered==='function'?filtered:null;
+    let fCache={key:'',at:0,rows:null};
+    function selKey(id){const el=gid(id); return el?[...el.selectedOptions].map(o=>o.value).join('\u001f'):'';}
+    function filterKey(){return [state.__acPerfVersion||0,state.rows?.length||0,gid('textFilter')?.value||'',gid('search')?.value||'',gid('actionStartDate')?.value||'',gid('actionEndDate')?.value||'',selKey('actionFilter'),selKey('repFilter')].join('\u001e');}
+    if(baseFiltered){
+      filtered=function(){
+        const key=filterKey(), t=now();
+        if(fCache.rows && fCache.key===key && t-fCache.at<450){state.filtered=fCache.rows; return fCache.rows;}
+        const rows=baseFiltered.apply(this,arguments);
+        fCache={key,at:t,rows};
+        return rows;
+      };
+      window.filtered=filtered;
+    }
+  }catch(e){console.warn('filter cache skipped',e);}
+
+  // Avoid expensive IndexedDB clear+rewrite compaction after every load. Dedupe in memory; compact DB only on explicit cache reset.
+  try{
+    if(typeof idbGetAll==='function' && typeof dedupeRows==='function'){
+      reloadRows=async function(){
+        try{
+          state.rows=dedupeRows(await idbGetAll());
+          state.storageMode='IndexedDB';
+          state.__acPerfVersion=(state.__acPerfVersion||0)+1;
+        }catch(e){
+          console.warn(e); state.storageMode='Memory only'; state.rows=dedupeRows(state.rows||[]); state.__acPerfVersion=(state.__acPerfVersion||0)+1;
+        }
+      };
+      window.reloadRows=reloadRows;
+    }
+  }catch(e){console.warn('reloadRows optimization skipped',e);}
+
+  // Bulk-write Dataverse pages instead of opening an IndexedDB transaction for every single page.
+  function repFilterODataStable(){
+    try{
+      const reps=(typeof selectedValues==='function'?selectedValues('repFilter'):[]).filter(Boolean);
+      if(!reps.length) return '';
+      return '('+reps.map(r=>{const s=String(r).replace(/'/g,"''");return `${FACT.repFromNote} eq '${s}' or ${FACT.accountRep} eq '${s}'`;}).join(' or ')+')';
+    }catch(e){return '';}
+  }
+  async function flushBuffer(buffer){
+    if(!buffer.length) return;
+    st.batches++; st.stage='Saving rows to local cache...'; paint(false);
+    await saveRows(buffer.splice(0,buffer.length));
+    state.__acPerfVersion=(state.__acPerfVersion||0)+1;
+  }
+  try{
+    if(typeof dvFetch==='function' && typeof saveRows==='function' && typeof normalize==='function' && typeof makeSegments==='function'){
+      fetchSegment=async function(seg,token,appendAfter){
+        let filters=[`${FACT.activityDate} ge ${seg.start}`,`${FACT.activityDate} le ${seg.end}`];
+        const rf=repFilterODataStable(); if(rf) filters.push(rf);
+        if(appendAfter) filters.push(`${FACT.modified} gt ${appendAfter}`);
+        let url=`${DATAVERSE_URL}/${ENTITY_SET}?$select=${API_SELECT.join(',')}&$filter=${encodeURIComponent(filters.join(' and '))}&$orderby=${FACT.activityDate} desc`;
+        let count=0, buffer=[];
+        while(url){
+          const j=await dvFetch(url,token), page=(j.value||[]).map(normalize);
+          count+=page.length; st.fetched+=page.length; st.rows=Math.max(st.rows,st.fetched); st.stage='Fetching detail rows...'; update(st.rows,st.stage);
+          buffer.push(...page);
+          if(buffer.length>=10000) await flushBuffer(buffer);
+          url=j['@odata.nextLink']||'';
+        }
+        await flushBuffer(buffer);
+        return count;
+      };
+      window.fetchSegment=fetchSegment;
+    }
+  }catch(e){console.warn('fetchSegment bulk patch skipped',e);}
+
+  try{
+    if(typeof dvFetch==='function' && typeof saveRows==='function' && typeof normalize==='function'){
+      fetchUrlPaged=async function(url,token,statusPrefix){
+        let count=0, buffer=[];
+        while(url){
+          const j=await dvFetch(url,token), page=(j.value||[]).map(normalize);
+          count+=page.length; st.fetched+=page.length; st.rows=Math.max(st.rows,count); buffer.push(...page);
+          if(gid('rowStatus')) gid('rowStatus').textContent=`${statusPrefix} ${fmt(count)} fetched/saved`;
+          update(count,`${statusPrefix} • fetching rows...`);
+          if(buffer.length>=10000) await flushBuffer(buffer);
+          url=j['@odata.nextLink']||'';
+        }
+        await flushBuffer(buffer);
+        return count;
+      };
+      window.fetchUrlPaged=fetchUrlPaged;
+    }
+  }catch(e){console.warn('fetchUrlPaged bulk patch skipped',e);}
+
+  // Keep loader up for final render, then hide once the browser has painted the results.
+  try{
+    if(typeof renderAll==='function' && !renderAll.__acStableRender){
+      const baseRenderAll=renderAll;
+      renderAll=function(){
+        st.rendering=true; st.stage='Rendering dashboards and tables...'; paint(true);
+        try{return baseRenderAll.apply(this,arguments);} finally{
+          requestAnimationFrame(()=>requestAnimationFrame(()=>{st.rendering=false; st.stage='Ready.'; paint(true); if(canHide()) end(false);}));
+        }
+      };
+      renderAll.__acStableRender=true; window.renderAll=renderAll;
+    }
+  }catch(e){console.warn('renderAll stability patch skipped',e);}
+
+  document.addEventListener('click',e=>{
+    if(e.target.closest('#loadingOverlay .modal-close') && st.active){e.preventDefault();e.stopPropagation();try{toast('Still loading. This will close automatically once the final render is done.');}catch(_e){}}
+  },true);
+
+  document.addEventListener('DOMContentLoaded',()=>{ensureTimingRow(); paint(true);});
+  window.acLoadStabilityPass={state:st,begin,update,end,paint:()=>paint(true)};
+})();
+</script>
+<!-- === COPILOT LOAD STABILITY AND TIMING PASS 2026-06-18 END === -->
 </body></html>
