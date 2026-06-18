@@ -13687,9 +13687,24 @@ window.selectAccount=async function(id){
   }
   function computeReady(){
     if(!employeeMapReady()) return {ok:false, reason:'Loading employee and team filter lists...'};
-    if(!topFiltersReady()) return {ok:false, reason:'Building filter dropdown options...'};
-    if(!accountMapReady()) return {ok:false, reason:'Loading account data for the selected scope...'};
-    if(!scopedFiltersReady()) return {ok:false, reason:'Preparing scoped filter picker...'};
+
+    // HOTFIX 2026-06-18:
+    // The filter picker is supposed to appear BEFORE account data is loaded.
+    // The old guard waited for accountMapReady(), which creates a deadlock:
+    // popup opens -> blur shield appears -> account data cannot be loaded because filters cannot be clicked.
+    // Once employee/team data exists and the scoped picker has rendered, filters are usable.
+    const modal = $('sniper-load-modal');
+    const scopedModalOpen = !!(modal && modal.style.display !== 'none' && !modal.classList.contains('hidden-force'));
+    if(scopedModalOpen){
+      if(!scopedFiltersReady()) return {ok:false, reason:'Preparing scoped filter picker...'};
+      return {ok:true, reason:'Filters ready'};
+    }
+
+    // Top horizontal filters are optional during the scoped-load-first boot path.
+    // If they exist, validate them; if they do not exist yet, do not keep the app blurred.
+    const hasTopFilterShell = document.querySelectorAll('#filter-container .multiselect-container').length > 0;
+    if(hasTopFilterShell && !topFiltersReady()) return {ok:false, reason:'Building filter dropdown options...'};
+
     return {ok:true, reason:'Filters ready'};
   }
 
@@ -13971,6 +13986,88 @@ window.selectAccount=async function(id){
 })();
 </script>
 <!-- === COPILOT SQL-STYLE DELEGATED QUERY PATCH 2026-06-18 END === -->
+
+
+<!-- === COPILOT FILTER BLUR DEADLOCK HOTFIX 2026-06-18 START === -->
+<style id="copilot-filter-blur-deadlock-hotfix-css-20260618">
+  /* Safety override: the scoped filter picker must remain clickable while it is used to choose the load scope. */
+  body.ac-filters-loading #filter-container,
+  body.ac-filters-loading .multiselect-container,
+  body.ac-filters-loading #scoped-popup-filter-panel,
+  body.ac-filters-loading .act-v251-scope {
+    pointer-events: auto !important;
+    user-select: auto !important;
+    filter: none !important;
+    opacity: 1 !important;
+  }
+  body.ac-filters-loading #sniper-load-modal .ac-filter-load-shield,
+  #sniper-load-modal .ac-filter-load-shield.ac-force-hide {
+    display: none !important;
+    pointer-events: none !important;
+  }
+  body:not(.ac-filters-loading) .ac-filter-load-lock { display: none !important; }
+</style>
+<script id="copilot-filter-blur-deadlock-hotfix-js-20260618">
+(function(){
+  if(window.__COPILOT_FILTER_BLUR_DEADLOCK_HOTFIX_20260618) return;
+  window.__COPILOT_FILTER_BLUR_DEADLOCK_HOTFIX_20260618 = true;
+
+  const guardedNames = ['applyFilters','updateFilterState','toggleAllFilter','clearAllFilters','setQuickFilter','renderAccountList'];
+
+  function employeeReady(){ return Array.isArray(window.employeesData) && window.employeesData.length > 0; }
+  function scopedPickerOpen(){
+    const modal=document.getElementById('sniper-load-modal');
+    return !!(modal && modal.style.display !== 'none' && !modal.classList.contains('hidden-force'));
+  }
+  function scopedPickerRendered(){
+    const panel=document.getElementById('scoped-popup-filter-panel');
+    return !!(panel && (panel.querySelector('.act-v251-scope') || panel.querySelector('.sf-grid') || panel.children.length));
+  }
+
+  function restoreGuardedFunctions(){
+    guardedNames.forEach(name=>{
+      const fn=window[name];
+      if(fn && fn.__acOriginal){
+        window[name]=fn.__acOriginal;
+      }
+    });
+  }
+
+  function enableFilterControls(){
+    document.querySelectorAll('#horizontal-filters input,#horizontal-filters select,#horizontal-filters button,#filter-container input,#filter-container button,#filter-container select,#scoped-popup-filter-panel input,#scoped-popup-filter-panel button,#scoped-popup-filter-panel select').forEach(el=>{
+      if(el.dataset && el.dataset.acFilterGuardPrevDisabled !== undefined){
+        el.disabled = el.dataset.acFilterGuardPrevDisabled === '1';
+        delete el.dataset.acFilterGuardPrevDisabled;
+      }else if(el.hasAttribute('aria-disabled')){
+        el.disabled = false;
+      }
+      el.removeAttribute('aria-disabled');
+    });
+  }
+
+  function unlockIfPickerReady(){
+    if(employeeReady() && (!scopedPickerOpen() || scopedPickerRendered())){
+      document.body.classList.remove('ac-filters-loading');
+      enableFilterControls();
+      restoreGuardedFunctions();
+      const shield=document.getElementById('ac-filter-load-shield');
+      if(shield){ shield.classList.add('ac-force-hide'); shield.style.setProperty('display','none','important'); }
+      const lock=document.getElementById('ac-filter-load-lock');
+      if(lock){ lock.style.setProperty('display','none','important'); }
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', unlockIfPickerReady);
+  window.addEventListener('load', unlockIfPickerReady);
+  document.addEventListener('click', ()=>setTimeout(unlockIfPickerReady,0), true);
+  const mo=new MutationObserver(unlockIfPickerReady);
+  try{ mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['class','style','disabled','aria-disabled']}); }catch(e){}
+  [0,100,250,500,1000,1500,2500,4000,7000,10000].forEach(ms=>setTimeout(unlockIfPickerReady,ms));
+  const timer=setInterval(unlockIfPickerReady,750);
+  setTimeout(()=>clearInterval(timer),30000);
+})();
+</script>
+<!-- === COPILOT FILTER BLUR DEADLOCK HOTFIX 2026-06-18 END === -->
 
 </body>
 </html>
