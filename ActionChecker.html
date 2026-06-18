@@ -4075,4 +4075,202 @@ setTimeout(applyLiveEnhancements,0);
 <!-- === COPILOT LOADING SCREEN SIMPLE BACKPLATE PATCH 2026-06-18 END === -->
 
 <!-- === COPILOT ACCOUNT-SCOPE QUERY SIMPLIFICATION 2026-06-18 === -->
+
+<!-- === COPILOT SQL-STYLE DELEGATED QUERY PATCH 2026-06-18 START === -->
+<script id="ac-copilot-sql-style-delegated-query-20260618">
+(function(){
+  if(window.__AC_SQL_STYLE_DELEGATED_QUERY_20260618) return;
+  window.__AC_SQL_STYLE_DELEGATED_QUERY_20260618 = true;
+
+  const $id = id => document.getElementById(id);
+  const clean = v => String(v ?? '').replace(/\s+/g,' ').trim();
+  const norm = v => clean(v).toLowerCase();
+  const od = v => String(v ?? '').replace(/'/g,"''");
+  const uniq = arr => Array.from(new Map((arr||[]).map(v=>[norm(v),clean(v)])).values()).filter(Boolean);
+
+  function bridgePayload(){
+    const keys = ['act_manager_scope_payload_v1','act_scope_payload_v1','ac_scope_payload_v1'];
+    for(const k of keys){
+      try{ const p = JSON.parse(localStorage.getItem(k)||'null'); if(p && typeof p === 'object') return p; }catch(e){}
+    }
+    return {};
+  }
+
+  function selectedSafe(id){
+    try{ return typeof selectedValues === 'function' ? selectedValues(id) : []; }catch(e){ return []; }
+  }
+
+  function currentUserName(){
+    return clean((window.msalAccount && window.msalAccount.name) || (window.msalInstance && window.msalInstance.getActiveAccount && window.msalInstance.getActiveAccount()?.name) || window.currentUserName || '');
+  }
+
+  function employees(){
+    try{ return Array.isArray(window.EMPLOYEES) ? window.EMPLOYEES : (typeof EMPLOYEES !== 'undefined' ? EMPLOYEES : []); }catch(e){ return []; }
+  }
+
+  function defaultTeamReps(){
+    const user = currentUserName();
+    if(!user) return [];
+    const n = norm(user);
+    const rows = employees();
+    const team = rows.filter(e => [e.Name, e['Rep Name'], e.Manager, e['SR Manager']].some(x => norm(x) === n)).map(e => e.Name || e['Rep Name']);
+    return uniq(team.length ? team : rows.filter(e => norm(e.Name) === n || norm(e['Rep Name']) === n).map(e => e.Name || e['Rep Name']));
+  }
+
+  function delegatedReps(){
+    const bridge = bridgePayload();
+    const fromSelect = selectedSafe('repFilter');
+    const fromBridge = bridge.effectiveReps || bridge.selectedReps || bridge.allowedReps || bridge.reps || [];
+    return uniq([].concat(fromSelect || [], fromBridge || [], fromSelect.length || (fromBridge && fromBridge.length) ? [] : defaultTeamReps()));
+  }
+
+  function delegatedActions(){
+    return uniq(selectedSafe('actionFilter'));
+  }
+
+  function ensureOption(selectId,value){
+    const sel=$id(selectId); if(!sel || !value) return;
+    let opt=Array.from(sel.options).find(o=>norm(o.value)===norm(value));
+    if(!opt){ opt=document.createElement('option'); opt.value=value; opt.textContent=value; sel.appendChild(opt); }
+    opt.selected=true;
+  }
+
+  function applyDelegatedScopeToControls(){
+    const reps = delegatedReps();
+    const sel=$id('repFilter');
+    if(sel && reps.length && !selectedSafe('repFilter').length){
+      reps.forEach(r=>ensureOption('repFilter',r));
+      try{ sel.dispatchEvent(new Event('change',{bubbles:true})); }catch(e){}
+      try{ if(typeof refreshFilterDropdowns === 'function') refreshFilterDropdowns(); }catch(e){}
+    }
+    return reps;
+  }
+
+  function repPredicate(reps){
+    reps = uniq(reps);
+    if(!reps.length || typeof FACT === 'undefined') return '';
+    return '(' + reps.map(r => {
+      const s=od(r);
+      return `${FACT.repFromNote} eq '${s}' or ${FACT.accountRep} eq '${s}'`;
+    }).join(' or ') + ')';
+  }
+
+  function actionPredicate(actions){
+    actions = uniq(actions);
+    if(!actions.length) return '';
+    if(typeof actionFilterOData === 'function') return '(' + actions.map(actionFilterOData).join(' or ') + ')';
+    if(typeof FACT === 'undefined') return '';
+    return '(' + actions.map(a => {
+      const s=od(a);
+      return `contains(${FACT.effectiveAction},'${s}') or contains(${FACT.action},'${s}') or contains(${FACT.emailAction},'${s}') or contains(${FACT.actionFromNote},'${s}')`;
+    }).join(' or ') + ')';
+  }
+
+  function accountPredicate(){
+    const bridge = bridgePayload();
+    const ids = uniq(bridge.accountNumbers || bridge.accounts || bridge.accountIds || bridge.selectedMassIds || []);
+    if(!ids.length || typeof FACT === 'undefined') return '';
+    return '(' + ids.slice(0,90).map(x => `${FACT.accountNumber} eq '${od(x)}'`).join(' or ') + ')';
+  }
+
+  window.acBuildDelegatedODataFilter = function(extraParts){
+    const parts = (extraParts||[]).filter(Boolean);
+    const rp = repPredicate(delegatedReps()); if(rp) parts.push(rp);
+    const ap = actionPredicate(delegatedActions()); if(ap) parts.push(ap);
+    const acp = accountPredicate(); if(acp) parts.push(acp);
+    return parts.filter(Boolean).join(' and ');
+  };
+
+  window.acGetDelegatedScopeSummary = function(){
+    return { reps: delegatedReps(), actions: delegatedActions(), hasAccountScope: !!accountPredicate() };
+  };
+
+  function setStatusText(text){
+    const el=$id('rowStatus'); if(el) el.textContent=text;
+  }
+
+  const previousFetchSegment = (typeof fetchSegment === 'function') ? fetchSegment : null;
+  if(previousFetchSegment){
+    fetchSegment = async function(seg,token,appendAfter){
+      applyDelegatedScopeToControls();
+      const filters=[`${FACT.activityDate} ge ${seg.start}`,`${FACT.activityDate} le ${seg.end}`];
+      if(appendAfter) filters.push(`${FACT.modified} gt ${appendAfter}`);
+      const delegated = window.acBuildDelegatedODataFilter(filters);
+      const scope = window.acGetDelegatedScopeSummary();
+      if(!scope.reps.length && !scope.actions.length && !scope.hasAccountScope){
+        throw new Error('Delegated query guard blocked an unscoped full-table load. Select a team, action, account scope, or open from Manager Console.');
+      }
+      let url=`${DATAVERSE_URL}/${ENTITY_SET}?$select=${API_SELECT.join(',')}&$filter=${encodeURIComponent(delegated)}&$orderby=${FACT.activityDate} desc`, count=0;
+      while(url){
+        const j=await dvFetch(url,token), page=(j.value||[]).map(normalize);
+        count += page.length;
+        if(page.length) await saveRows(page);
+        url=j['@odata.nextLink']||'';
+      }
+      return count;
+    };
+  }
+
+  const previousLoadSelectedAction = (typeof loadSelectedAction === 'function') ? loadSelectedAction : null;
+  if(previousLoadSelectedAction){
+    loadSelectedAction = async function(){
+      applyDelegatedScopeToControls();
+      syncDateInputs();
+      const actions=delegatedActions();
+      if(!actions.length) return previousLoadSelectedAction.apply(this,arguments);
+      showLoading('Loading delegated action query','Pushing Action / Team / Account scope to Dataverse before rows download...');
+      try{
+        if($id('empty')) $id('empty').style.display='none';
+        if($id('authStatus')) $id('authStatus').textContent='Signing in...';
+        const token=await getToken();
+        if($id('authStatus')) $id('authStatus').textContent='Signed in';
+        const as=$id('actionStartDate')?.value, ae=$id('actionEndDate')?.value;
+        const parts=[];
+        if(as) parts.push(`${FACT.activityDate} ge ${new Date(as+'T00:00:00Z').toISOString()}`);
+        if(ae) parts.push(`${FACT.activityDate} le ${new Date(ae+'T23:59:59Z').toISOString()}`);
+        const filter = window.acBuildDelegatedODataFilter(parts);
+        let url=`${DATAVERSE_URL}/${ENTITY_SET}?$select=${API_SELECT.join(',')}&$filter=${encodeURIComponent(filter)}&$orderby=${FACT.activityDate} desc`;
+        const labelText=actions.length===1?actions[0]:`${actions.length} actions`;
+        const total=await fetchUrlPaged(url,token,`Delegated query: ${labelText}`);
+        updateLoading(total,'Rendering delegated result set...');
+        await reloadRows();
+        state.lastRange=null;
+        try{ saveMeta({delegatedSqlStyle:true, actionLoaded:actions, actionStart:as, actionEnd:ae, scope:window.acGetDelegatedScopeSummary()}); }catch(e){}
+        renderAll();
+        toast(`Loaded ${num(total)} delegated rows for ${labelText}`);
+      } finally { hideLoading(); }
+    };
+  }
+
+  const previousParallelLoad = (typeof parallelLoad === 'function') ? parallelLoad : null;
+  if(previousParallelLoad){
+    parallelLoad = async function(append=false){
+      const reps = applyDelegatedScopeToControls();
+      const scope = window.acGetDelegatedScopeSummary();
+      if(!scope.reps.length && !scope.actions.length && !scope.hasAccountScope){
+        toast('Delegated query mode is protecting the browser from a full dataset load. Select a team/action/account scope first.');
+        return;
+      }
+      setStatusText(`Delegated query mode • ${scope.reps.length || 'All'} reps • ${scope.actions.length || 'All'} actions`);
+      return previousParallelLoad.call(this,append);
+    };
+  }
+
+  function addDelegatedUiNote(){
+    const host=$id('ac-copilot-command') || document.querySelector('.load-group .group-controls') || document.querySelector('.side');
+    if(!host || $id('ac-delegated-query-pill')) return;
+    const pill=document.createElement('span');
+    pill.id='ac-delegated-query-pill';
+    pill.className='pill ac-ui-health';
+    pill.title='Large dataset guard: filters are translated into source-side OData/SQL-style predicates before rows are downloaded.';
+    pill.textContent='Delegated SQL-style queries';
+    try{ host.appendChild(pill); }catch(e){}
+  }
+
+  document.addEventListener('DOMContentLoaded',()=>{applyDelegatedScopeToControls(); addDelegatedUiNote();});
+  window.addEventListener('load',()=>{applyDelegatedScopeToControls(); addDelegatedUiNote();});
+})();
+</script>
+<!-- === COPILOT SQL-STYLE DELEGATED QUERY PATCH 2026-06-18 END === -->
+
 </body></html>
