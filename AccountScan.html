@@ -19,7 +19,7 @@
         <div class="flex items-center space-x-4 text-sm text-slate-400">
             <span class="flex items-center"><i data-lucide="shield-check" class="w-4 h-4 mr-1.5 text-emerald-400"></i> Active Microsoft Entra Session</span>
             <div class="h-4 w-px bg-slate-800"></div>
-            <span id="versionBadge" class="bg-slate-900 border border-slate-800 px-2.5 py-1 rounded text-xs font-mono text-gray-400">v105.04</span>
+            <span id="versionBadge" class="bg-slate-900 border border-slate-800 px-2.5 py-1 rounded text-xs font-mono text-gray-400">v105.05</span>
         </div>
     </header>
 
@@ -195,7 +195,6 @@
     </div>
 
     <script>
-        // CONFIGURATION: Verified Corporate Identity Environments
         const envUrl = "https://org23279050.api.crm.dynamics.com";
         const apiVersion = "v9.2";
         const clientId = "c40d5d55-5f30-459e-84c4-4360cd523780"; 
@@ -212,6 +211,7 @@
 
         let msalInstance;
         let accessToken = null;
+        let isLoggingIn = false; // NEW Authentication throttle variable 
 
         let storeMgmt = [], storeCadence = [], storeLouise = [], storeLogistics = [];
 
@@ -260,20 +260,49 @@
             bulkInput.focus();
         });
 
+        // Smart async helper to stall token requests while an interactive prompt is open
+        function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
         async function getAuthToken() {
             const loginRequest = { scopes: [`${envUrl}/user_impersonation`] };
+            
+            // If another thread opened a login popup, wait here until it finishes
+            while (isLoggingIn) {
+                await sleep(250);
+            }
+
             try {
                 const account = msalInstance.getAllAccounts()[0];
                 if (!account) {
+                    isLoggingIn = true;
                     const loginResponse = await msalInstance.loginPopup(loginRequest);
                     msalInstance.setActiveAccount(loginResponse.account);
+                    isLoggingIn = false;
                     return loginResponse.accessToken;
                 }
                 const tokenResponse = await msalInstance.acquireTokenSilent({ ...loginRequest, account: account });
                 return tokenResponse.accessToken;
             } catch (error) {
-                const loginResponse = await msalInstance.loginPopup(loginRequest);
-                return loginResponse.accessToken;
+                // Silent fetch failed, try an interactive token popup with proper variable locking
+                if (!isLoggingIn) {
+                    try {
+                        isLoggingIn = true;
+                        const loginResponse = await msalInstance.loginPopup(loginRequest);
+                        isLoggingIn = false;
+                        return loginResponse.accessToken;
+                    } catch (err) {
+                        isLoggingIn = false;
+                        throw err;
+                    }
+                } else {
+                    while (isLoggingIn) { await sleep(250); }
+                    const account = msalInstance.getAllAccounts()[0];
+                    if (account) {
+                        const tokenResponse = await msalInstance.acquireTokenSilent({ ...loginRequest, account: account });
+                        return tokenResponse.accessToken;
+                    }
+                }
+                throw error;
             }
         }
 
@@ -327,6 +356,9 @@
             searchBtn.innerHTML = `<span class="animate-pulse">Processing ${targetedAccounts.length} Accounts...</span>`;
 
             try {
+                // Ensure active authentication happens before loading the chunk threads
+                accessToken = await getAuthToken();
+
                 const [mgmtData, cadenceData, louiseData, logisticsData] = await Promise.all([
                     queryTableInChunks('cr714_accountmanagementdatasets', 'cr714_accountnum', 'cr714_accountname,cr714_rep,cr714_action', targetedAccounts),
                     queryTableInChunks('cr714_cadencedatasets', 'cr714_accountnum', 'cr714_company,cr714_retentionrep,cr714_action', targetedAccounts),
@@ -346,14 +378,13 @@
 
                 matchCount.textContent = `Total records: ${storeMgmt.length + storeCadence.length + storeLouise.length + storeLogistics.length}`;
                 
-                // Activate the export engine if any rows were successfully retrieved
                 if(storeMgmt.length || storeCadence.length || storeLouise.length || storeLogistics.length) {
                     exportBtn.disabled = false;
                 }
 
             } catch (error) {
                 console.error("Master processing thread crash: ", error);
-                alert("Batch run encountered a processing error. View developer logs.");
+                alert("Scan failed. Ensure popups are allowed and try clicking search again.");
             } finally {
                 searchBtn.disabled = false;
                 searchBtn.innerHTML = `<i data-lucide="play" class="w-4 h-4 fill-current"></i><span>Execute Dataverse Search</span>`;
@@ -514,73 +545,63 @@
             if (typeof lucide !== 'undefined') lucide.createIcons();
         }
 
-        // COMPILER ENGINE: Bundles data states into clean, preformatted multi-tab Excel Worksheets
-function executeExcelExport() {
-    // Build raw object arrays with friendly, clean column headers
-    const exportMgmt = storeMgmt.map(r => ({
-        "Account Number": r.cr714_accountnum,
-        "Account Name": r.cr714_accountname || '—',
-        "Representative": r.cr714_rep || '—',
-        "Required Action": r.cr714_action || '—'
-    }));
+        function executeExcelExport() {
+            const exportMgmt = storeMgmt.map(r => ({
+                "Account Number": r.cr714_accountnum,
+                "Account Name": r.cr714_accountname || '—',
+                "Representative": r.cr714_rep || '—',
+                "Required Action": r.cr714_action || '—'
+            }));
 
-    const exportCadence = storeCadence.map(r => ({
-        "Account Number": r.cr714_accountnum,
-        "Company": r.cr714_company || '—',
-        "Retention Representative": r.cr714_retentionrep || '—',
-        "Cadence Action": r.cr714_action || '—'
-    }));
+            const exportCadence = storeCadence.map(r => ({
+                "Account Number": r.cr714_accountnum,
+                "Company": r.cr714_company || '—',
+                "Retention Representative": r.cr714_retentionrep || '—',
+                "Cadence Action": r.cr714_action || '—'
+            }));
 
-    const exportLouise = storeLouise.map(r => ({
-        "Account Number": r.cr714_accountnum,
-        "Account Name": r.cr714_accountname || '—',
-        "Assigned Representative": r.cr714_assignedrep || '—',
-        "Account Status Action": r.cr714_action || '—'
-    }));
+            const exportLouise = storeLouise.map(r => ({
+                "Account Number": r.cr714_accountnum,
+                "Account Name": r.cr714_accountname || '—',
+                "Assigned Representative": r.cr714_assignedrep || '—',
+                "Account Status Action": r.cr714_action || '—'
+            }));
 
-    const exportLogistics = storeLogistics.map(r => ({
-        "Account Number": r.cr714_accountnumber,
-        "Delivery Name": r.cr714_companyordeliveryname || '—',
-        "Logistics Issue": r.cr714_issue || '—',
-        "Log Date": r.cr714_starttime ? new Date(r.cr714_starttime).toLocaleDateString() : '—',
-        "Warehouse": r.cr714_warehouse || '—'
-    }));
+            const exportLogistics = storeLogistics.map(r => ({
+                "Account Number": r.cr714_accountnumber,
+                "Delivery Name": r.cr714_companyordeliveryname || '—',
+                "Logistics Issue": r.cr714_issue || '—',
+                "Log Date": r.cr714_starttime ? new Date(r.cr714_starttime).toLocaleDateString() : '—',
+                "Warehouse": r.cr714_warehouse || '—'
+            }));
 
-    const workbook = XLSX.utils.book_new();
+            const workbook = XLSX.utils.book_new();
 
-    // Helper utility to convert json data, inject native filters, and calculate fluid column widths
-    function createFormattedSheet(dataData) {
-        const worksheet = XLSX.utils.json_to_sheet(dataData);
-        
-        if (dataData.length > 0) {
-            // 1. Injects native header dropdown filters by reading the range array boundary limits
-            const range = XLSX.utils.decode_range(worksheet['!ref']);
-            worksheet['!autofilter'] = { ref: XLSX.utils.encode_range(range) };
+            function createFormattedSheet(dataData) {
+                const worksheet = XLSX.utils.json_to_sheet(dataData);
+                if (dataData.length > 0) {
+                    const range = XLSX.utils.decode_range(worksheet['!ref']);
+                    worksheet['!autofilter'] = { ref: XLSX.utils.encode_range(range) };
+                    const colWidths = Object.keys(dataData[0]).map(key => {
+                        let maxLen = key.length;
+                        dataData.forEach(row => {
+                            const cellValue = String(row[key] || '');
+                            if (cellValue.length > maxLen) maxLen = cellValue.length;
+                        });
+                        return { wch: maxLen + 3 };
+                    });
+                    worksheet['!cols'] = colWidths;
+                }
+                return worksheet;
+            }
 
-            // 2. Auto-Fit Column calculations
-            const colWidths = Object.keys(dataData[0]).map(key => {
-                // Calculate the max length between the header title name and the longest data row item string
-                let maxLen = key.length;
-                dataData.forEach(row => {
-                    const cellValue = String(row[key] || '');
-                    if (cellValue.length > maxLen) maxLen = cellValue.length;
-                });
-                return { wch: maxLen + 3 }; // Adds a safe cell margin padding block of 3 characters
-            });
-            worksheet['!cols'] = colWidths;
+            XLSX.utils.book_append_sheet(workbook, createFormattedSheet(exportMgmt), "Account Management");
+            XLSX.utils.book_append_sheet(workbook, createFormattedSheet(exportCadence), "Cadence Log");
+            XLSX.utils.book_append_sheet(workbook, createFormattedSheet(exportLouise), "Louise Brown");
+            XLSX.utils.book_append_sheet(workbook, createFormattedSheet(exportLogistics), "Logistics Log");
+
+            XLSX.writeFile(workbook, "Account_Scanner_Export.xlsx");
         }
-        return worksheet;
-    }
-
-    // Compile worksheets using the formatting wrapper engine
-    XLSX.utils.book_append_sheet(workbook, createFormattedSheet(exportMgmt), "Account Management");
-    XLSX.utils.book_append_sheet(workbook, createFormattedSheet(exportCadence), "Cadence Log");
-    XLSX.utils.book_append_sheet(workbook, createFormattedSheet(exportLouise), "Louise Brown");
-    XLSX.utils.book_append_sheet(workbook, createFormattedSheet(exportLogistics), "Logistics Log");
-
-    // Execute save transmission
-    XLSX.writeFile(workbook, "Account_Scanner_Export.xlsx");
-}
     </script>
 </body>
 </html>
