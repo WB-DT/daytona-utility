@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+/* ACT Action Performance Reports SPA
+   Auth and service locations intentionally mirror ACT6.15.26.html. */
+const DATAVERSE_URL = "https://org23279050.crm.dynamics.com/api/data/v9.2";
+const GRAPH_URL = "https://graph.microsoft.com/v1.0";
+const PRIMARY_CRM_URL = "https://wbmasonco.crm.dynamics.com/api/data/v9.2";
+const ACT_AUTHORITY = "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401";
+const ACT_CLIENT_ID = "afe649b6-9c70-4b1a-8592-78588284c8ee";
+const ACT_REDIRECT_URI = "https://WB-DT.github.io/daytona-utility/";
+const ACT_DATAVERSE_SCOPE = "https://org23279050.crm.dynamics.com//user_impersonation";
+const ACT_PRIMARY_CRM_SCOPE = "https://wbmasonco.crm.dynamics.com//user_impersonation";
+
+const msalConfig = { auth: { clientId: ACT_CLIENT_ID, authority: ACT_AUTHORITY, redirectUri: ACT_REDIRECT_URI }, cache: { cacheLocation: "localStorage", storeAuthStateInCookie: false } };
+const msalInstance = new msal.PublicClientApplication(msalConfig);
+let msalAccount = null;
+let currentUserRepName = null;
+
+const DEFAULTS = { factLogical:'cr714_dt_act_fctbl', empLogical:'cr714_employeeinformation', maxPages:50 };
+const FACT_COLUMNS = ['cr714_dt_act_fctblid','cr714_accountnumber','cr714_accountrep','cr714_action','cr714_actionemailsentdate','cr714_actionfromnotetag','cr714_actionmessage','cr714_activitydate','cr714_activitydateonly','cr714_activitymonth','cr714_activitytype','cr714_companyname','cr714_contactname','cr714_effectiveaction','cr714_emailaction','cr714_emaildate','cr714_emailstatus','cr714_emailsubject','cr714_emailtemplate','cr714_followupdate','cr714_isemailactivity','cr714_notedate','cr714_notetext','cr714_notetextraw','cr714_primaryemail','cr714_primaryphone','cr714_recordstatus','cr714_repfromnote','cr714_sourcetable','cr714_sourcetype','cr714_employeeinformation1','cr714_employeeinformation1name','cr714_touchtype'];
+const EMP_COLUMNS = ['cr714_employeeinformationid','cr714_name','cr714_status','cr714_department','cr714_emailaddress','cr714_employee','cr714_location','cr714_managerassigned','cr714_repname','cr714_srmanager','cr714_supervisors','cr714_title','cr714_statusreason'];
+const EXCEL_EMP_MAP = {'Name':'cr714_name','Status':'cr714_status','Department':'cr714_department','Email Address':'cr714_emailaddress','Employee':'cr714_employee','Location':'cr714_location','Manager Assigned':'cr714_managerassigned','Rep Name':'cr714_repname','SR Manager':'cr714_srmanager','Supervisors':'cr714_supervisors','Title':'cr714_title','Status Reason':'cr714_statusreason'};
+let settings = loadSettings();
+let entitySets = {}, activeFactColumns=[...FACT_COLUMNS], activeEmpColumns=[...EMP_COLUMNS];
+let state = { factRows:[], empRows:[], joinedRows:[], filteredRows:[], actionSummary:[], repSummary:[], repFocus:[], rawPreview:[], mode:'live' };
+let sortState = {};
+
+const $ = id => document.getElementById(id);
+const fmt = new Intl.NumberFormat();
+const pct = n => Number.isFinite(n) && n ? `${(n*100).toFixed(1)}%` : '0.0%';
+const todayIso = () => new Date().toISOString().slice(0,10);
+const daysAgoIso = d => { const x=new Date(); x.setDate(x.getDate()-d); return x.toISOString().slice(0,10); };
+function escapeHtml(v){ return String(v ?? '').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function normalizeText(v){ return String(v ?? '').trim(); }
+function lower(v){ return normalizeText(v).toLowerCase(); }
+function dateOnly(v){ if(!v) return ''; const d=new Date(v); return Number.isNaN(d.getTime()) ? String(v).slice(0,10) : d.toISOString().slice(0,10); }
+function dateTime(v){ if(!v) return ''; const d=new Date(v); return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString(); }
+function loadSettings(){ try{return {...DEFAULTS,...JSON.parse(localStorage.getItem('actReportSpaSettings')||'{}')}}catch{return {...DEFAULTS}} }
+function saveSettings(){ localStorage.setItem('actReportSpaSettings', JSON.stringify(settings)); }
+function setProgress(show,text='',ratio=0){ $('progress').classList.toggle('hidden',!show); $('progressText').textContent=text; $('progressBar').style.width=`${Math.max(0,Math.min(100,ratio*100))}%`; }
+
+window.setConnectionStatus = function(status, message){
+  const badge=$('connection-status-badge'), icon=$('connection-status-icon'), text=$('connection-status-text'); if(!badge||!icon||!text) return;
+  badge.classList.remove('text-status-success','text-status-warning','text-status-danger','text-status-info'); icon.className='fas mr-1';
+  if(status==='connected'){ badge.classList.add('text-status-success'); icon.classList.add('fa-circle-check'); }
+  else if(status==='refreshing'){ badge.classList.add('text-status-info'); icon.classList.add('fa-arrows-rotate','fa-spin'); }
+  else if(status==='warning'){ badge.classList.add('text-status-warning'); icon.classList.add('fa-triangle-exclamation'); }
+  else { badge.classList.add('text-status-danger'); icon.classList.add('fa-circle-xmark'); }
+  text.innerText=message; badge.title=message;
+};
+
+// Graceful getToken from ACT: exact account + authority, silent first, popup fallback.
+window.getToken = async function(scopeStr, silentFallback = false){
+  let account = msalAccount || null;
+  if(!account){ const activeAccounts = msalInstance.getAllAccounts(); if(activeAccounts.length>0) account=activeAccounts[0]; }
+  const request = { scopes: scopeStr.split(' '), account, authority: ACT_AUTHORITY };
+  try { return (await msalInstance.acquireTokenSilent(request)).accessToken; }
+  catch(e){
+    if(silentFallback){ console.warn(`Silent token fetch failed for ${scopeStr}.`, e); throw e; }
+    console.log(`Interactive token request needed for ${scopeStr}`);
+    return (await msalInstance.acquireTokenPopup(request)).accessToken;
+  }
+};
+
+window.refreshSessionTokens = async function(){
+  window.setConnectionStatus('refreshing','Refreshing session...');
+  try{
+    let account=msalAccount; if(!account){ const accounts=msalInstance.getAllAccounts(); if(accounts.length>0) account=accounts[0]; }
+    if(!account){ window.setConnectionStatus('warning','Not signed in'); return false; }
+    const refreshRequests = [["User.Read"],["Mail.Send"],[ACT_DATAVERSE_SCOPE],[ACT_PRIMARY_CRM_SCOPE]];
+    const results = await Promise.allSettled(refreshRequests.map(scopes => msalInstance.acquireTokenSilent({ scopes, account, authority:ACT_AUTHORITY, forceRefresh:true })));
+    const failed = results.filter(r=>r.status==='rejected');
+    if(failed.length){ console.warn('One or more session token refreshes failed:', failed.map(f=>f.reason)); window.setConnectionStatus('warning',`Session partly refreshed (${refreshRequests.length-failed.length}/${refreshRequests.length})`); return false; }
+    sessionStorage.setItem('daytona_session_tokens_refreshed', new Date().toISOString());
+    window.setConnectionStatus('connected','Connected - session refreshed'); return true;
+  }catch(e){ console.warn('Session refresh failed:',e); window.setConnectionStatus('warning','Session refresh needed'); return false; }
+};
+
+window.login = function(){
+  msalInstance.loginPopup({ scopes:["User.Read","Mail.Send"] }).then(async resp => {
+    msalAccount = resp.account; currentUserRepName = msalAccount.name;
+    $('btnLogin').classList.add('hidden'); $('btnLogout').classList.remove('hidden'); $('btnRefreshSession').classList.remove('hidden');
+    window.setConnectionStatus('connected', `Connected: ${msalAccount.username || msalAccount.name}`);
+    await window.refreshSessionTokens().catch(()=>{});
+  }).catch(e => { console.error(e); window.setConnectionStatus('error', e.message || 'Login failed'); alert(e.message || 'Login failed'); });
+};
+window.logout = function(){ msalInstance.logoutPopup().then(()=>window.location.reload()); };
+async function acquireDataverseToken(){ return window.getToken(ACT_DATAVERSE_SCOPE); }
+
+async function dvGet(pathOrUrl, prefer='odata.maxpagesize=5000'){
+  const token = await acquireDataverseToken();
+  const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${DATAVERSE_URL}/${pathOrUrl}`;
+  const res = await fetch(url,{headers:{'Authorization':`Bearer ${token}`,'Accept':'application/json','OData-MaxVersion':'4.0','OData-Version':'4.0','Prefer':prefer}});
+  if(!res.ok){ const body=await res.text(); throw new Error(`${res.status} ${res.statusText}: ${body}`); }
+  return res.json();
+}
+async function getEntitySet(logicalName,fallback){
+  if(entitySets[logicalName]) return entitySets[logicalName];
+  try{ const meta=await dvGet(`EntityDefinitions(LogicalName='${logicalName}')?$select=LogicalName,EntitySetName`); entitySets[logicalName]=meta.EntitySetName||fallback; }
+  catch(e){ console.warn('Entity set lookup failed; using fallback', logicalName, e); entitySets[logicalName]=fallback; }
+  return entitySets[logicalName];
+}
+async function getAvailableColumns(logicalName, desiredColumns){
+  try{ const meta=await dvGet(`EntityDefinitions(LogicalName='${logicalName}')/Attributes?$select=LogicalName`, 'odata.maxpagesize=5000'); const available=new Set((meta.value||[]).map(a=>a.LogicalName)); const filtered=desiredColumns.filter(c=>available.has(c)); if(filtered.length) return filtered; }
+  catch(e){ console.warn('Column metadata lookup failed; using configured list', logicalName, e); }
+  return desiredColumns;
+}
+function buildFactQuery(entitySet){
+  const params=new URLSearchParams(); params.append('$select', activeFactColumns.join(',')); params.append('$orderby','cr714_activitydate desc');
+  const filters=[], start=$('startDate').value, end=$('endDate').value;
+  if(start) filters.push(`cr714_activitydate ge ${start}T00:00:00Z`); if(end) filters.push(`cr714_activitydate le ${end}T23:59:59Z`);
+  if(filters.length) params.append('$filter', filters.join(' and ')); return `${entitySet}?${params.toString()}`;
+}
+async function fetchAll(path,label){
+  let all=[], next=path, page=0, maxPages=Number(settings.maxPages||50);
+  while(next && page<maxPages){ page++; setProgress(true,`${label}: page ${page}...`,Math.min(page/maxPages,.95)); const json=await dvGet(next); all.push(...(json.value||[])); next=json['@odata.nextLink']||''; }
+  if(next) console.warn(`Stopped at maxPages=${maxPages}; more rows exist.`); return all;
+}
+async function loadLiveData(){
+  state.mode='live'; setProgress(true,'Discovering Dataverse table names...',.03);
+  const factSet=await getEntitySet(settings.factLogical,`${settings.factLogical}s`), empSet=await getEntitySet(settings.empLogical,`${settings.empLogical}s`);
+  setProgress(true,'Checking available columns...',.06); activeEmpColumns=await getAvailableColumns(settings.empLogical,EMP_COLUMNS); activeFactColumns=await getAvailableColumns(settings.factLogical,FACT_COLUMNS);
+  setProgress(true,'Loading employee information...',.10); const empParams=new URLSearchParams(); empParams.append('$select', activeEmpColumns.join(',')); state.empRows=await fetchAll(`${empSet}?${empParams.toString()}`,'Employees');
+  state.factRows=await fetchAll(buildFactQuery(factSet),'ACT fact rows'); setProgress(true,'Aggregating reports...',.96); prepareAndRender(); setProgress(false);
+}
+
+function getAction(r){ return normalizeText(r.cr714_action || r['Normalized Action from cr714_action'] || r['Normalized Action'] || r.cr714_effectiveaction || r.cr714_actionfromnotetag || 'No Action') || 'No Action'; }
+function getRep(r){ return normalizeText(r.cr714_accountrep || r.cr714_repfromnote || r.cr714_employeeinformation1name || 'Unassigned') || 'Unassigned'; }
+function getAccount(r){ return normalizeText(r.cr714_accountnumber || ''); }
+function isEmailSent(r){ const typ=lower(r.cr714_activitytype), status=lower(r.cr714_emailstatus); return typ==='email sent'||status==='sent'||(!!r.cr714_emaildate&&status==='sent')||!!r.cr714_actionemailsentdate; }
+function cleanNoteText(r){ return normalizeText(r.cr714_notetext || r.cr714_notetextraw || '').replace(/^Note:\s*/i,'').trim(); }
+function isSystemNote(txt){ const t=lower(txt); return !t||t==='note:'||t==='note'||t.startsWith('[email sent]')||t.startsWith('summary link generated')||t.startsWith('sales link generated')||t.startsWith('csw link generated')||t.startsWith('subject: follow up')||t.startsWith('[downauto tracking]'); }
+function isNoteLeft(r){ if(isEmailSent(r)) return false; const txt=cleanNoteText(r); return !!txt && !isSystemNote(txt); }
+function employeeKey(name){ return lower(String(name).replace(/,\s*/g,' ').replace(/\s+/g,' ').trim()); }
+function indexEmployees(rows){ const map=new Map(); rows.forEach(e=>{ const names=[e.cr714_name,e.cr714_repname,e.Name,e['Rep Name']].filter(Boolean); names.forEach(n=>map.set(employeeKey(n),e)); if(e.cr714_repname&&String(e.cr714_repname).includes(',')){ const [last,first]=String(e.cr714_repname).split(',').map(s=>s.trim()); map.set(employeeKey(`${first} ${last}`),e); } }); return map; }
+function joinRows(){ const emp=indexEmployees(state.empRows); state.joinedRows=state.factRows.map(r=>{ const rep=getRep(r), e=emp.get(employeeKey(rep))||{}; return {...r,__action:getAction(r),__rep:rep,__account:getAccount(r),__date:dateOnly(r.cr714_activitydate||r.cr714_activitydateonly),__isEmail:isEmailSent(r),__isNote:isNoteLeft(r),__employee:e,__empStatus:normalizeText(e.cr714_status||e.cr714_statusreason||e.Status||'')}; }); }
+function passFilters(r){ const action=$('actionFilter').value, rep=$('repFilter').value, status=$('statusFilter').value; if(action&&r.__action!==action) return false; if(rep&&r.__rep!==rep) return false; if(status!=='all'){ const active=lower(r.__empStatus||'active')==='active'; if(status==='active'&&!active) return false; if(status==='inactive'&&active) return false; } return true; }
+function summarize(rows,keyFn){ const m=new Map(); rows.forEach(r=>{ const k=keyFn(r)||'—'; if(!m.has(k)) m.set(k,{name:k,total:0,emails:0,notes:0,accounts:new Set(),reps:new Set(),last:''}); const a=m.get(k); a.total++; if(r.__isEmail) a.emails++; if(r.__isNote) a.notes++; if(r.__account) a.accounts.add(r.__account); if(r.__rep) a.reps.add(r.__rep); if(r.__date>a.last) a.last=r.__date; }); return [...m.values()].map(x=>({...x,uniqueAccounts:x.accounts.size,uniqueReps:x.reps.size,emailPct:x.total?x.emails/x.total:0,notePct:x.total?x.notes/x.total:0,accounts:undefined,reps:undefined})).sort((a,b)=>b.total-a.total); }
+function refreshFilterOptions(){ const curA=$('actionFilter').value, curR=$('repFilter').value; const actions=[...new Set(state.joinedRows.map(r=>r.__action))].sort(), reps=[...new Set(state.joinedRows.map(r=>r.__rep))].sort(); $('actionFilter').innerHTML='<option value="">All actions</option>'+actions.map(a=>`<option>${escapeHtml(a)}</option>`).join(''); $('repFilter').innerHTML='<option value="">All reps</option>'+reps.map(r=>`<option>${escapeHtml(r)}</option>`).join(''); if(actions.includes(curA)) $('actionFilter').value=curA; if(reps.includes(curR)) $('repFilter').value=curR; }
+function prepareAndRender(){ joinRows(); refreshFilterOptions(); applyFiltersAndRender(); $('btnExport').disabled=state.filteredRows.length===0; }
+function applyFiltersAndRender(){ state.filteredRows=state.joinedRows.filter(passFilters); state.actionSummary=summarize(state.filteredRows,r=>r.__action); const selectedAction=$('actionFilter').value; const repBase=selectedAction?state.filteredRows.filter(r=>r.__action===selectedAction):state.filteredRows; state.repSummary=summarize(repBase,r=>r.__rep).map(x=>{ const match=repBase.find(r=>r.__rep===x.name)?.__employee||{}; return {...x,department:match.cr714_department||'',manager:match.cr714_managerassigned||match.cr714_supervisors||'',status:match.cr714_status||match.cr714_statusreason||''}; }); const selectedRep=$('repFilter').value; state.repFocus=selectedRep?summarize(state.filteredRows.filter(r=>r.__rep===selectedRep),r=>r.__action):[]; state.rawPreview=state.filteredRows.slice().sort((a,b)=>String(b.cr714_activitydate||'').localeCompare(String(a.cr714_activitydate||''))).slice(0,250); renderAll(); }
+function filteredSummary(summary, searchId){ const q=lower($(searchId).value); return q?summary.filter(x=>lower(JSON.stringify(x)).includes(q)):summary; }
+function renderAll(){ renderKpis(); renderActionBars(); renderActionTable(); renderRepTable(); renderRepFocus(); renderTrend(); renderRawTable(); }
+function renderKpis(){ const rows=state.filteredRows, emails=rows.filter(r=>r.__isEmail).length, notes=rows.filter(r=>r.__isNote).length; $('kpiTotal').textContent=fmt.format(rows.length); $('kpiActions').textContent=fmt.format(new Set(rows.map(r=>r.__action)).size); $('kpiReps').textContent=fmt.format(new Set(rows.map(r=>r.__rep)).size); $('kpiEmails').textContent=fmt.format(emails); $('kpiNotes').textContent=fmt.format(notes); $('kpiRates').textContent=`${pct(emails/rows.length)} / ${pct(notes/rows.length)}`; }
+function renderActionBars(){ const top=filteredSummary(state.actionSummary,'actionSearch').slice(0,12), max=Math.max(...top.map(x=>x.total),1); $('actionBars').innerHTML=top.map(x=>`<div class="bar-row"><div class="bar-label linkish" data-action="${escapeHtml(x.name)}">${escapeHtml(x.name)}</div><div class="bar-track"><div class="bar-fill" style="width:${(x.total/max)*100}%"></div></div><div class="bar-value">${fmt.format(x.total)}</div></div>`).join('')||'<p class="muted">No action data.</p>'; $('actionBars').querySelectorAll('[data-action]').forEach(el=>el.onclick=()=>{$('actionFilter').value=el.dataset.action; applyFiltersAndRender();}); }
+function tableHtml(columns,rows,tableKey){ const head=`<thead><tr>${columns.map(c=>`<th data-sort="${c.key}">${escapeHtml(c.label)}</th>`).join('')}</tr></thead>`; const body=`<tbody>${rows.map(r=>`<tr>${columns.map(c=>`<td class="${c.cls||''}">${c.render?c.render(r):escapeHtml(r[c.key])}</td>`).join('')}</tr>`).join('')}</tbody>`; setTimeout(()=>document.querySelectorAll(`#${tableKey} th`).forEach(th=>th.onclick=()=>sortBy(tableKey,th.dataset.sort)),0); return head+body; }
+function sortRows(rows,tableKey){ const s=sortState[tableKey]; if(!s) return rows; return rows.slice().sort((a,b)=>{ const av=a[s.key], bv=b[s.key]; const n=(typeof av==='number'||typeof bv==='number')?(Number(av||0)-Number(bv||0)):String(av||'').localeCompare(String(bv||'')); return s.dir==='asc'?n:-n; }); }
+function sortBy(tableKey,key){ sortState[tableKey]={key,dir:sortState[tableKey]?.key===key&&sortState[tableKey]?.dir==='desc'?'asc':'desc'}; renderAll(); }
+function renderActionTable(){ const cols=[{key:'name',label:'Action',render:r=>`<span class="linkish" data-action="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>`},{key:'total',label:'Total',cls:'num',render:r=>fmt.format(r.total)},{key:'uniqueReps',label:'Reps',cls:'num'},{key:'uniqueAccounts',label:'Accounts',cls:'num'},{key:'emails',label:'Emails Sent',cls:'num',render:r=>`<span class="pill email">${fmt.format(r.emails)}</span>`},{key:'emailPct',label:'Email %',cls:'num pct',render:r=>pct(r.emailPct)},{key:'notes',label:'Notes Left',cls:'num',render:r=>`<span class="pill note">${fmt.format(r.notes)}</span>`},{key:'notePct',label:'Note %',cls:'num pct',render:r=>pct(r.notePct)},{key:'last',label:'Latest'}]; const rows=sortRows(filteredSummary(state.actionSummary,'actionSearch'),'actionTable'); $('actionTable').innerHTML=tableHtml(cols,rows,'actionTable'); $('actionTable').querySelectorAll('[data-action]').forEach(el=>el.onclick=()=>{$('actionFilter').value=el.dataset.action; applyFiltersAndRender();}); }
+function renderRepTable(){ const cols=[{key:'name',label:'Rep',render:r=>`<span class="linkish" data-rep="${escapeHtml(r.name)}">${escapeHtml(r.name)}</span>`},{key:'status',label:'Status'},{key:'department',label:'Dept'},{key:'manager',label:'Manager/Sup'},{key:'total',label:'Total',cls:'num',render:r=>fmt.format(r.total)},{key:'uniqueAccounts',label:'Accounts',cls:'num'},{key:'emails',label:'Emails Sent',cls:'num',render:r=>fmt.format(r.emails)},{key:'emailPct',label:'Email %',cls:'num pct',render:r=>pct(r.emailPct)},{key:'notes',label:'Notes Left',cls:'num',render:r=>fmt.format(r.notes)},{key:'notePct',label:'Note %',cls:'num pct',render:r=>pct(r.notePct)},{key:'last',label:'Latest'}]; const rows=sortRows(filteredSummary(state.repSummary,'repSearch'),'repTable'); $('repTable').innerHTML=tableHtml(cols,rows,'repTable'); $('repTable').querySelectorAll('[data-rep]').forEach(el=>el.onclick=()=>{$('repFilter').value=el.dataset.rep; applyFiltersAndRender();}); }
+function renderRepFocus(){ const rep=$('repFilter').value; if(!rep){ $('repFocus').className='focus-card empty'; $('repFocus').textContent='Select a rep to see details.'; return; } const rows=state.filteredRows.filter(r=>r.__rep===rep), emails=rows.filter(r=>r.__isEmail).length, notes=rows.filter(r=>r.__isNote).length; const actionList=state.repFocus.slice(0,10).map(a=>`<tr><td>${escapeHtml(a.name)}</td><td class="num">${fmt.format(a.total)}</td><td class="num">${fmt.format(a.emails)}</td><td class="num">${fmt.format(a.notes)}</td><td class="num">${pct(a.emailPct)}</td><td class="num">${pct(a.notePct)}</td></tr>`).join(''); $('repFocus').className='focus-card'; $('repFocus').innerHTML=`<h3>${escapeHtml(rep)}</h3><div class="mini-grid"><div class="mini"><span>Total</span><strong>${fmt.format(rows.length)}</strong></div><div class="mini"><span>Actions</span><strong>${fmt.format(new Set(rows.map(r=>r.__action)).size)}</strong></div><div class="mini"><span>Emails</span><strong>${fmt.format(emails)}</strong></div><div class="mini"><span>Notes</span><strong>${fmt.format(notes)}</strong></div></div><div class="table-wrap"><table><thead><tr><th>Action</th><th>Total</th><th>Emails</th><th>Notes</th><th>Email %</th><th>Note %</th></tr></thead><tbody>${actionList}</tbody></table></div>`; }
+function renderTrend(){ const m=new Map(); state.filteredRows.forEach(r=>{ const d=r.__date||'No Date'; m.set(d,(m.get(d)||0)+1); }); const data=[...m.entries()].sort((a,b)=>a[0].localeCompare(b[0])), max=Math.max(...data.map(x=>x[1]),1); $('trendChart').innerHTML=data.map(([d,v])=>`<div class="trend-bar" style="height:${Math.max(3,(v/max)*260)}px" data-tip="${escapeHtml(d)}: ${fmt.format(v)}"></div>`).join('')||'<p class="muted">No trend data.</p>'; }
+function renderRawTable(){ const q=lower($('rawSearch').value); const rows=(q?state.rawPreview.filter(r=>lower(JSON.stringify(r)).includes(q)):state.rawPreview).slice(0,250); const cols=[{key:'cr714_activitydate',label:'Activity Date',render:r=>dateTime(r.cr714_activitydate)},{key:'__action',label:'Action'},{key:'__rep',label:'Rep'},{key:'cr714_activitytype',label:'Activity Type'},{key:'cr714_accountnumber',label:'Account #'},{key:'cr714_companyname',label:'Company'},{key:'cr714_emailstatus',label:'Email Status'},{key:'note',label:'Note Preview',render:r=>escapeHtml(cleanNoteText(r)).slice(0,220)}]; $('rawTable').innerHTML=tableHtml(cols,rows,'rawTable'); }
+function exportXlsx(){ const wb=XLSX.utils.book_new(); const meta=[{Generated:new Date().toLocaleString(),Mode:state.mode,Dataverse:DATAVERSE_URL,PrimaryCRM:PRIMARY_CRM_URL,Graph:GRAPH_URL,Start:$('startDate').value,End:$('endDate').value,Action:$('actionFilter').value||'All',Rep:$('repFilter').value||'All',Rows:state.filteredRows.length}]; const actionRows=state.actionSummary.map(r=>({'Action':r.name,'Total':r.total,'Unique Reps':r.uniqueReps,'Unique Accounts':r.uniqueAccounts,'Emails Sent':r.emails,'Email %':r.emailPct,'Notes Left':r.notes,'Note %':r.notePct,'Latest Activity':r.last})); const repRows=state.repSummary.map(r=>({'Rep':r.name,'Status':r.status,'Department':r.department,'Manager/Sup':r.manager,'Total':r.total,'Unique Accounts':r.uniqueAccounts,'Emails Sent':r.emails,'Email %':r.emailPct,'Notes Left':r.notes,'Note %':r.notePct,'Latest Activity':r.last})); const focusRows=state.repFocus.map(r=>({'Action':r.name,'Total':r.total,'Unique Accounts':r.uniqueAccounts,'Emails Sent':r.emails,'Email %':r.emailPct,'Notes Left':r.notes,'Note %':r.notePct,'Latest Activity':r.last})); const rawRows=state.filteredRows.map(r=>({'Activity Date':dateTime(r.cr714_activitydate),'Date':r.__date,'Action':r.__action,'Rep':r.__rep,'Activity Type':r.cr714_activitytype,'Account #':r.cr714_accountnumber,'Company':r.cr714_companyname,'Contact':r.cr714_contactname,'Email Sent':r.__isEmail,'Note Left':r.__isNote,'Email Status':r.cr714_emailstatus,'Email Template':r.cr714_emailtemplate,'Email Subject':r.cr714_emailsubject,'Note':cleanNoteText(r),'Primary Email':r.cr714_primaryemail,'Primary Phone':r.cr714_primaryphone})); [['Report Metadata',meta],['Action Performance',actionRows],['Reps for Action',repRows],['Rep Focus',focusRows],['Raw Filtered Rows',rawRows]].forEach(([name,data])=>XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(data),name.slice(0,31))); XLSX.writeFile(wb,`ACT_Action_Performance_${todayIso()}.xlsx`); }
+
+function normalizeEmployeeExcel(rows){ return rows.map(r=>{ const o={}; Object.entries(r).forEach(([k,v])=>o[EXCEL_EMP_MAP[k]||k]=v); return o; }); }
+async function readXlsxFile(file){ const data=await file.arrayBuffer(); const wb=XLSX.read(data,{type:'array'}); const ws=wb.Sheets[wb.SheetNames[0]]; return XLSX.utils.sheet_to_json(ws,{defval:''}); }
+async function loadDemoMode(){ alert('Demo mode: choose Daytona ACT Fact Table.xlsx first, then cr714_employeeinformation.xlsx.'); const factInput=$('demoFileFact'), empInput=$('demoFileEmp'); factInput.onchange=async()=>{ if(!factInput.files[0]) return; setProgress(true,'Reading fact XLSX...',.2); state.factRows=await readXlsxFile(factInput.files[0]); empInput.click(); }; empInput.onchange=async()=>{ if(!empInput.files[0]) return; setProgress(true,'Reading employee XLSX...',.5); state.empRows=normalizeEmployeeExcel(await readXlsxFile(empInput.files[0])); state.mode='demo'; window.setConnectionStatus('warning','Demo XLSX mode'); prepareAndRender(); setProgress(false); }; factInput.click(); }
+
+function hydrate(){ $('displayDataverseUrl').value=DATAVERSE_URL; $('displayGraphUrl').value=GRAPH_URL; $('displayPrimaryCrmUrl').value=PRIMARY_CRM_URL; $('displayClientId').value=ACT_CLIENT_ID; $('displayAuthority').value=ACT_AUTHORITY; $('displayRedirectUri').value=ACT_REDIRECT_URI; $('factLogical').value=settings.factLogical; $('empLogical').value=settings.empLogical; $('maxPages').value=settings.maxPages; $('startDate').value=daysAgoIso(30); $('endDate').value=todayIso(); }
+function bindEvents(){ $('btnSettings').onclick=()=>$('setupPanel').classList.toggle('hidden'); $('btnSaveSettings').onclick=()=>{ settings={...settings,factLogical:$('factLogical').value.trim(),empLogical:$('empLogical').value.trim(),maxPages:Number($('maxPages').value||50)}; saveSettings(); window.setConnectionStatus('connected','Table settings saved'); }; $('btnLogin').onclick=window.login; $('btnLogout').onclick=window.logout; $('btnRefreshSession').onclick=window.refreshSessionTokens; $('btnLoad').onclick=()=>loadLiveData().catch(e=>{ setProgress(false); console.error(e); window.setConnectionStatus('error','Load failed'); alert(`Load failed:\n${e.message}`); }); $('btnExport').onclick=exportXlsx; $('btnClear').onclick=()=>{ $('actionFilter').value=''; $('repFilter').value=''; $('statusFilter').value='active'; $('actionSearch').value=''; $('repSearch').value=''; $('rawSearch').value=''; applyFiltersAndRender(); }; $('btnUseLocalDemo').onclick=loadDemoMode; ['actionFilter','repFilter','statusFilter'].forEach(id=>$(id).onchange=applyFiltersAndRender); ['actionSearch','repSearch','rawSearch'].forEach(id=>$(id).oninput=renderAll); }
+async function boot(){ hydrate(); bindEvents(); window.setConnectionStatus('refreshing','Checking sign-in...'); try{ const resp=await msalInstance.handleRedirectPromise(); if(resp&&resp.account){ msalAccount=resp.account; currentUserRepName=msalAccount.name; } else { const accounts=msalInstance.getAllAccounts(); if(accounts.length>0){ msalAccount=accounts[0]; currentUserRepName=msalAccount.name; } } if(msalAccount){ $('btnLogin').classList.add('hidden'); $('btnLogout').classList.remove('hidden'); $('btnRefreshSession').classList.remove('hidden'); window.setConnectionStatus('connected',`Connected: ${msalAccount.username||msalAccount.name}`); } else { window.setConnectionStatus('warning','Not signed in'); } }catch(e){ console.error(e); window.setConnectionStatus('error','Authentication check failed'); } }
+document.addEventListener('DOMContentLoaded', boot);
+
+:root{--bg:#0d1117;--panel:#151b23;--panel2:#1b2330;--muted:#9fb0c3;--text:#e9f0f8;--line:#2b3545;--primary:#69b7ff;--accent:#8cf2c3;--warn:#ffd36a;--danger:#ff8a8a;--shadow:0 18px 48px rgba(0,0,0,.28);--radius:18px}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#152033 0,#0d1117 42%,#090c11 100%);color:var(--text);font:14px/1.45 "Segoe UI",system-ui,sans-serif}.app-header{display:flex;justify-content:space-between;align-items:center;gap:24px;padding:28px 34px;border-bottom:1px solid var(--line);position:sticky;top:0;background:rgba(13,17,23,.88);backdrop-filter:blur(14px);z-index:10}h1{margin:.1rem 0;font-size:clamp(24px,3vw,38px)}h2{margin:0 0 6px;font-size:20px}.eyebrow{text-transform:uppercase;letter-spacing:.16em;color:var(--accent);font-size:12px;font-weight:700}.muted{color:var(--muted);margin:.2rem 0 .6rem}.hidden{display:none!important}main{max-width:1500px;margin:0 auto;padding:26px}.panel{background:linear-gradient(180deg,var(--panel),#111821);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:22px;margin-bottom:22px}.setup-panel{border-color:#31516e}.controls-panel{background:linear-gradient(180deg,#172131,#111821)}.grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.grid-5{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}.advanced-grid{margin-top:14px}.split-panel{display:grid;grid-template-columns:1fr 1fr;gap:22px}.control-top,.section-header{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:14px}.header-actions,.button-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px}label{display:flex;flex-direction:column;gap:7px;color:#c9d7e7;font-weight:600}input,select{width:100%;border:1px solid var(--line);background:#0d141e;color:var(--text);border-radius:12px;padding:11px 12px;outline:none}input[readonly]{color:#bcd3eb;background:#0a1018}input:focus,select:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(105,183,255,.15)}.search{max-width:320px}button{border:0;border-radius:13px;padding:11px 16px;font-weight:800;cursor:pointer;color:#06101a;transition:.15s transform,.15s opacity}button:hover{transform:translateY(-1px)}button:disabled{opacity:.45;cursor:not-allowed;transform:none}.primary{background:var(--primary)}.accent{background:var(--accent)}.ghost{background:#253142;color:var(--text);border:1px solid var(--line)}.notice{margin-top:16px;background:#101b29;border:1px dashed #406182;border-radius:14px;padding:12px;color:#cfe3fb}code{background:#0b121b;border:1px solid var(--line);border-radius:8px;padding:2px 6px;color:#bce3ff}.status-pill{border:1px solid var(--line);border-radius:999px;padding:9px 13px;background:#0d141e;color:var(--muted);white-space:nowrap;display:flex;gap:6px;align-items:center}.text-status-success{color:var(--accent)!important}.text-status-warning{color:var(--warn)!important}.text-status-danger{color:var(--danger)!important}.text-status-info{color:var(--primary)!important}.kpi-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:14px;margin-bottom:22px}.kpi{background:linear-gradient(180deg,var(--panel2),#111821);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:var(--shadow)}.kpi span{display:block;color:var(--muted);font-weight:700}.kpi strong{font-size:28px;display:block;margin-top:6px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px}table{width:100%;border-collapse:collapse;min-width:900px;background:#0f151d}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;background:#182230;z-index:2;color:#cfe3fb;white-space:nowrap;cursor:pointer}tr:hover td{background:#121c28}.num{text-align:right}.pct{font-variant-numeric:tabular-nums}.linkish{color:var(--primary);cursor:pointer;font-weight:800}.pill{display:inline-flex;border-radius:999px;padding:3px 8px;background:#203149;color:#cfe3fb;font-size:12px;font-weight:700}.pill.email{background:#17392d;color:#bdf8d7}.pill.note{background:#3a2f13;color:#ffe4a1}.bar-chart{display:grid;gap:8px;margin:10px 0 16px}.bar-row{display:grid;grid-template-columns:220px 1fr 90px;gap:10px;align-items:center}.bar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cfe3fb}.bar-track{height:14px;background:#0b121b;border-radius:999px;overflow:hidden;border:1px solid var(--line)}.bar-fill{height:100%;background:linear-gradient(90deg,var(--primary),var(--accent));border-radius:999px}.bar-value{text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}.focus-card{border:1px solid var(--line);border-radius:14px;background:#0f151d;padding:16px;min-height:260px}.focus-card.empty{display:flex;align-items:center;justify-content:center;color:var(--muted)}.mini-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:12px 0}.mini{background:#121c28;border:1px solid var(--line);border-radius:12px;padding:12px}.mini span{display:block;color:var(--muted)}.mini strong{font-size:20px}.trend-chart{height:300px;border:1px solid var(--line);border-radius:14px;background:#0f151d;padding:14px;display:flex;align-items:end;gap:5px;overflow-x:auto}.trend-bar{min-width:18px;background:linear-gradient(180deg,var(--accent),var(--primary));border-radius:8px 8px 0 0;position:relative}.trend-bar:hover::after{content:attr(data-tip);position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:#0b121b;border:1px solid var(--line);padding:6px 8px;border-radius:8px;white-space:nowrap;color:var(--text);z-index:3}.progress{height:28px;background:#0b121b;border:1px solid var(--line);border-radius:999px;overflow:hidden;position:relative;margin-top:14px}.progress div{height:100%;width:0;background:linear-gradient(90deg,var(--primary),var(--accent));transition:width .2s}.progress span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;text-shadow:0 1px 3px #000}footer{text-align:center;color:var(--muted);padding:20px 0 36px}@media(max-width:1050px){.grid-5,.grid-3,.kpi-grid,.split-panel{grid-template-columns:1fr 1fr}.app-header{position:static;flex-direction:column;align-items:flex-start}.kpi-grid{grid-template-columns:1fr 1fr 1fr}}@media(max-width:700px){main{padding:14px}.grid-5,.grid-3,.kpi-grid,.split-panel{grid-template-columns:1fr}.control-top,.section-header{flex-direction:column}.search{max-width:none}.bar-row{grid-template-columns:1fr}.bar-value{text-align:left}}
+
+
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ACT Action Performance Reports</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <div class="eyebrow">Dataverse SPA • ACT Auth</div>
+      <h1>ACT Action Performance Reports</h1>
+      <p>Reports on <strong>cr714_dt_act_fctbl</strong> joined to <strong>cr714_employeeinformation</strong>.</p>
+    </div>
+    <div class="header-actions">
+      <button id="btnSettings" class="ghost">Settings</button>
+      <button id="btnLogin" class="primary">Sign in with Microsoft</button>
+      <button id="btnRefreshSession" class="ghost hidden">Refresh session</button>
+      <button id="btnLogout" class="ghost hidden">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="setupPanel" class="panel setup-panel">
+      <h2>Connection Locations from ACT</h2>
+      <p class="muted">This SPA now uses the same MSAL app registration, authority, redirect URI, and service locations as <code>ACT6.15.26.html</code>.</p>
+      <div class="grid-3 readonly-grid">
+        <label>Dataverse API URL<input id="displayDataverseUrl" readonly /></label>
+        <label>Graph URL<input id="displayGraphUrl" readonly /></label>
+        <label>Primary CRM URL<input id="displayPrimaryCrmUrl" readonly /></label>
+        <label>Client ID<input id="displayClientId" readonly /></label>
+        <label>Authority<input id="displayAuthority" readonly /></label>
+        <label>Redirect URI<input id="displayRedirectUri" readonly /></label>
+      </div>
+      <details>
+        <summary>Advanced table settings</summary>
+        <div class="grid-3 advanced-grid">
+          <label>Fact table logical name<input id="factLogical" value="cr714_dt_act_fctbl" /></label>
+          <label>Employee table logical name<input id="empLogical" value="cr714_employeeinformation" /></label>
+          <label>Max Dataverse pages<input id="maxPages" type="number" min="1" max="300" value="50" /></label>
+        </div>
+      </details>
+      <div class="button-row">
+        <button id="btnSaveSettings" class="primary">Save table settings</button>
+        <button id="btnUseLocalDemo" class="ghost">Use uploaded XLSX demo mode</button>
+      </div>
+      <div class="notice">
+        <strong>Auth note:</strong> MSAL redirect URI is locked to the ACT app location above. If this is hosted elsewhere and login fails, add this SPA URL as an allowed redirect URI or update the ACT app registration redirect list.
+      </div>
+    </section>
+
+    <section class="panel controls-panel">
+      <div class="control-top">
+        <div>
+          <h2>Report Filters</h2>
+          <p class="muted">Default load is the last 30 days for quick performance.</p>
+        </div>
+        <div id="connection-status-badge" class="status-pill"><i id="connection-status-icon" class="fas"></i><span id="connection-status-text">Not signed in</span></div>
+      </div>
+      <div class="grid-5">
+        <label>Start date<input type="date" id="startDate" /></label>
+        <label>End date<input type="date" id="endDate" /></label>
+        <label>Action<select id="actionFilter"><option value="">All actions</option></select></label>
+        <label>Rep<select id="repFilter"><option value="">All reps</option></select></label>
+        <label>Employee status<select id="statusFilter"><option value="active">Active employees</option><option value="all">All employees</option><option value="inactive">Inactive employees</option></select></label>
+      </div>
+      <div class="button-row">
+        <button id="btnLoad" class="primary">Load / Refresh</button>
+        <button id="btnExport" class="accent" disabled>Export XLSX</button>
+        <button id="btnClear" class="ghost">Clear filters</button>
+      </div>
+      <div id="progress" class="progress hidden"><div id="progressBar"></div><span id="progressText"></span></div>
+    </section>
+
+    <section class="kpi-grid">
+      <div class="kpi"><span>Total Activities</span><strong id="kpiTotal">—</strong></div>
+      <div class="kpi"><span>Unique Actions</span><strong id="kpiActions">—</strong></div>
+      <div class="kpi"><span>Unique Reps</span><strong id="kpiReps">—</strong></div>
+      <div class="kpi"><span>Emails Sent</span><strong id="kpiEmails">—</strong></div>
+      <div class="kpi"><span>Notes Left</span><strong id="kpiNotes">—</strong></div>
+      <div class="kpi"><span>Email / Note Rate</span><strong id="kpiRates">—</strong></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-header"><div><h2>Action Performance</h2><p class="muted">How each <code>cr714_action</code> is doing overall.</p></div><input id="actionSearch" class="search" placeholder="Search actions..." /></div>
+      <div id="actionBars" class="bar-chart"></div>
+      <div class="table-wrap"><table id="actionTable"></table></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-header"><div><h2>Reps for Selected Action</h2><p class="muted">Pick an action to see rep totals, emails, notes, and percentages.</p></div><input id="repSearch" class="search" placeholder="Search reps..." /></div>
+      <div class="table-wrap"><table id="repTable"></table></div>
+    </section>
+
+    <section class="panel split-panel">
+      <div><h2>Rep Focus</h2><p class="muted">Breakdown for the selected rep across actions.</p><div id="repFocus" class="focus-card empty">Select a rep to see details.</div></div>
+      <div><h2>Daily Trend</h2><p class="muted">Activity volume by day for current filters.</p><div id="trendChart" class="trend-chart"></div></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-header"><div><h2>Recent Activity Detail</h2><p class="muted">Most recent filtered records. Export includes all filtered rows.</p></div><input id="rawSearch" class="search" placeholder="Search detail..." /></div>
+      <div class="table-wrap"><table id="rawTable"></table></div>
+    </section>
+  </main>
+
+  <footer>No data is stored outside your browser. MSAL cache uses localStorage, matching the ACT app.</footer>
+  <input type="file" id="demoFileFact" class="hidden" accept=".xlsx,.xls" />
+  <input type="file" id="demoFileEmp" class="hidden" accept=".xlsx,.xls" />
+  <script src="app.js"></script>
+</body>
+</html>
