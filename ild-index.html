@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
+<head><script type='text/javascript' src='https://wbmasonco-my.sharepoint.com/_ozaFUQeyJURRn_bwxuY3KMGRTgFBb9VDrnVnC0Fv8L17ICkT-y9y2P8elYpkShpGVHW4myK8e3Q7qFBxMt9Euiq2S8Lcr5WjOXgWiUCjqqGaKTazZmCoW6R7wekvqn1Uam85cmO2pf89SBNCSbrlyZKd-1f1kfTsCIEgVSodWZhbbBPh100yW7yhe-gOdda_pbs8K45E4K3Qsg8pVkgn4Jci0uaD0yElpNuE5sKVQnuQy5DTGV32k8tFOVK-Qodo6fRpM55uzGKdijjCowosiTkQV0rXh7yzndgt9Us2YL2z2qeqqaKdj3PxQa7hT-L4C0pq7wfdDkAuZrnTpe7W_eTlxQE4mlEA627qS6i0jygRIDkDlcKIxoU3GdDrpDWaUs7Sgchvs5LOW3609CCT0KR1GWg53cGMieVM1v0AEzRV7uI3xNE8lNt9Tc8LC8gcHR3j0qoGe3-cv22wPcPj2APXgcDVhkG2TheDtPqQ36GmOXFWg9_soYC5Rtwq9K8PUd8fOYF09WmDy3ZrWkwAb_-JUIir70mf64DCfKb0ca8LO91LZV5rkH5wwEDIo7MYzCJbXvYZV46OjAgoubcvZaXZo-_RsRpTWoKHJYryGPpMZwQElys53hDTe3AhKWfONHiGuyCxDg3'></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>A.C.T. Manager Console V2.4 - Fact + Employee Filters Dialed</title>
@@ -14104,6 +14104,312 @@ window.selectAccount=async function(id){
   };
 
   console.info('[ACT] ILD account history date fix installed: cr714_activitydate is now the display/sort source.');
+})();
+</script>
+
+
+
+<!-- COPILOT PATCH 2026-06-23B: FINAL Account History Date Hydration
+     Fixes the actual observed issue where older fact-history fetches request only
+     cr714_dt_act_fctblid, cr714_accountnumber, cr714_companyname, cr714_effectiveaction,
+     cr714_notetext, cr714_notetextraw, so history cards have no date to render.
+     This final wrapper guarantees cr714_activitydate is selected and also derives a
+     visible date from note text if existing rows still arrive without the field. -->
+<script id="actIldHistoryDateHydrationFinal20260623B">
+(function(){
+  if(window.__ACT_ILD_HISTORY_DATE_HYDRATION_FINAL_20260623B) return;
+  window.__ACT_ILD_HISTORY_DATE_HYDRATION_FINAL_20260623B = true;
+
+  const FACT_SET = 'cr714_dt_act_fctbls';
+  const MUST_SELECT = [
+    'cr714_dt_act_fctblid','cr714_accountnumber','cr714_companyname','cr714_effectiveaction',
+    'cr714_action','cr714_actionfromnotetag','cr714_actionmessage','cr714_activitydate',
+    'cr714_activitytype','cr714_accountrep','cr714_repfromnote','cr714_emaildate','cr714_emailtemplate',
+    'cr714_emailstatus','cr714_notedate','cr714_notetext','cr714_notetextraw','createdon','modifiedon'
+  ];
+  const FV='@OData.Community.Display.V1.FormattedValue';
+  const esc=v=>(window.escapeHTML?window.escapeHTML(v):String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m])));
+  const clean=v=>String(v??'').replace(/\r/g,'').trim();
+  const lineClean=v=>String(v??'').replace(/[\[\]\{\}]/g,'').replace(/\s*\|\s*/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+
+  function parseAnyDate(v){
+    if(v===null||v===undefined||v==='') return 0;
+    if(typeof v==='number') return Number.isFinite(v)?v:0;
+    const s=String(v).trim();
+    const ms=s.match(/\/Date\((\d+)\)\//); if(ms) return Number(ms[1])||0;
+    const t=Date.parse(s); return Number.isFinite(t)?t:0;
+  }
+  function extractTextDate(row){
+    const txt=[row?.cr714_notetextraw,row?.cr714_notetext,row?.cr714_actionmessage,row?.cr714_emailstatus].filter(Boolean).join('\n');
+    if(!txt) return '';
+    const candidates=[];
+    const patterns=[
+      /(?:Modified On|Created On|mss_DateOfCall)[:=]\s*([0-9]{1,2}[\/\-][0-9]{1,2}[\/\-][0-9]{2,4}(?:[ T,]+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?\s*(?:AM|PM)?)?)/ig,
+      /(?:Modified On|Created On|mss_DateOfCall)[:=]\s*([0-9]{4}-[0-9]{2}-[0-9]{2}(?:[ T][0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)?)/ig,
+      /\b([0-9]{1,2}[\/\-][0-9]{1,2}[\/\-][0-9]{2,4}(?:\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?\s*(?:AM|PM)?)?)\b/ig
+    ];
+    patterns.forEach(re=>{ let m; while((m=re.exec(txt))){ const raw=decodeURIComponent(String(m[1]||'').replace(/\+/g,' ')); const t=parseAnyDate(raw); if(t) candidates.push({raw,t}); }});
+    if(!candidates.length) return '';
+    candidates.sort((a,b)=>b.t-a.t);
+    return new Date(candidates[0].t).toISOString();
+  }
+  function rawActivityDate(row){
+    return row?.cr714_activitydate || row?.['cr714_activitydate'+FV] || row?.cr714_activitydate_formatted ||
+           row?.cr714_emaildate || row?.cr714_notedate || row?.modifiedon || row?.createdon || extractTextDate(row) || '';
+  }
+  function activityMs(row){ return parseAnyDate(rawActivityDate(row)); }
+  function displayDate(row){
+    const raw=row?.cr714_activitydate || row?.['cr714_activitydate'+FV] || row?.cr714_activitydate_formatted || extractTextDate(row) || row?.cr714_emaildate || row?.cr714_notedate || row?.modifiedon || row?.createdon || '';
+    const ms=parseAnyDate(raw);
+    if(ms) return new Date(ms).toLocaleString();
+    return raw ? esc(clean(raw)) : '--';
+  }
+  function hydrate(row){
+    const r={...(row||{})};
+    r.__actActivityDateRaw=rawActivityDate(r);
+    r.__actActivityMs=activityMs(r);
+    r.__actActivityDisplay=displayDate(r);
+    // Important: make legacy renderers that call dateOf(r) work too.
+    if(!r.cr714_activitydate && r.__actActivityDateRaw) r.cr714_activitydate=r.__actActivityDateRaw;
+    return r;
+  }
+  function inRange(row,start,end){
+    const ms=row.__actActivityMs||activityMs(row);
+    if(!ms) return true;
+    const s=start?Date.parse(start+'T00:00:00'):0;
+    const e=end?Date.parse(end+'T23:59:59'):0;
+    return (!s||ms>=s)&&(!e||ms<=e);
+  }
+  function ensureFactSelectInUrl(input){
+    try{
+      const raw=typeof input==='string'?input:(input&&input.url)||'';
+      if(!raw || !raw.includes('/'+FACT_SET)) return input;
+      const u=new URL(raw, window.location.href);
+      const selected=(u.searchParams.get('$select')||'').split(',').map(x=>x.trim()).filter(Boolean);
+      const merged=Array.from(new Set([...(selected.length?selected:[]), ...MUST_SELECT]));
+      u.searchParams.set('$select', merged.join(','));
+      // If a legacy request has no useful order, make cr714_activitydate primary.
+      if(!u.searchParams.get('$orderby')) u.searchParams.set('$orderby','cr714_activitydate desc,createdon desc');
+      const next=u.href;
+      if(typeof input==='string') return next;
+      try{return new Request(next,input);}catch{return next;}
+    }catch(e){console.warn('[ACT history date hydration] URL select guard skipped',e); return input;}
+  }
+
+  // Last fetch wrapper wins: guarantees even older fetchFactHistorySlice/loadFactTimeline calls select cr714_activitydate.
+  const priorFetch=window.fetch;
+  if(typeof priorFetch==='function' && !priorFetch.__actHistoryDateHydrationFinal){
+    const wrapped=function(input,init){ return priorFetch.call(this, ensureFactSelectInUrl(input), init); };
+    wrapped.__actHistoryDateHydrationFinal=true;
+    window.fetch=wrapped;
+  }
+
+  async function getToken(){
+    if(typeof window.getToken==='function') return await window.getToken();
+    if(window.accessToken) return window.accessToken;
+    throw new Error('No Dataverse token provider available.');
+  }
+  const fmtIso=d=>{try{return d.toISOString().slice(0,10)}catch{return''}};
+  const addMonths=(d,m)=>{const x=new Date(d);x.setMonth(x.getMonth()+m);return x;};
+  const rowKey=r=>r.cr714_dt_act_fctblid||r.cr714_activitynaturalkey||[r.__actActivityMs,r.cr714_notetext,r.cr714_notetextraw,r.cr714_actionmessage].join('|');
+  const textOf=r=>lineClean(r.cr714_notetext||r.cr714_notetextraw||r.cr714_managernotes||r.cr714_actionmessage||r.cr714_emailstatus||'');
+  const typeOf=r=>{const t=lineClean(r.cr714_activitytype||r.cr714_sourcetype||'Activity'); const all=t+' '+textOf(r); if(r.cr714_emaildate||/email/i.test(all))return'Email'; if(r.cr714_managernotes)return'Manager Response'; if(/note/i.test(t)||r.cr714_notetext)return'Note'; return t||'Activity';};
+  const safeId=id=>String(id??'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  function bodyHtml(r){return esc(textOf(r)||'(No note text)').replace(/\n/g,'<br>');}
+
+  window.fetchFactHistorySlice=async function(accountId,start,end){
+    const token=await getToken();
+    const acct=String(accountId||'').replace(/'/g,"''");
+    let url=`${window.DATAVERSE_URL}/${FACT_SET}?$select=${MUST_SELECT.join(',')}&$filter=${encodeURIComponent(`cr714_accountnumber eq '${acct}'`)}&$orderby=cr714_activitydate desc,createdon desc`;
+    const rows=[];
+    while(url){
+      const res=await fetch(url,{headers:{Authorization:`Bearer ${token}`,Accept:'application/json','OData-Version':'4.0','OData-MaxVersion':'4.0',Prefer:'odata.include-annotations="OData.Community.Display.V1.FormattedValue", odata.maxpagesize=5000'}});
+      if(!res.ok) throw new Error(await res.text());
+      const json=await res.json();
+      rows.push(...(json.value||[]).map(hydrate));
+      url=json['@odata.nextLink']||'';
+      await new Promise(r=>setTimeout(r,0));
+    }
+    return rows.filter(r=>inRange(r,start,end));
+  };
+
+  window.renderFactHistory=function(accountId){
+    const state=(window.__actFactHistoryState&&window.__actFactHistoryState[accountId])||{rows:[],loading:false,months:Number(localStorage.getItem('act_mgr_fact_history_months')||3),sort:localStorage.getItem('act_mgr_fact_history_sort')||'desc'};
+    const host=document.getElementById('fv-history'); if(!host) return;
+    const sortDir=state.sort==='asc'?'asc':'desc';
+    const rows=(state.rows||[]).map(hydrate).sort((a,b)=>sortDir==='asc'?(a.__actActivityMs||0)-(b.__actActivityMs||0):(b.__actActivityMs||0)-(a.__actActivityMs||0));
+    const id=safeId(accountId);
+    const rangeButtons=[3,6,12].map(m=>`<button type="button" class="fact-range-btn ${Number(state.months)===m?'active':''}" onclick="window.setFactHistoryRange('${id}',${m})">${m}M</button>`).join('');
+    const sortLabel=sortDir==='desc'?'Newest first':'Oldest first';
+    host.innerHTML=`<div class="fact-history-toolbar"><div class="fact-toolbar-left"><b>Fact Table History</b><span class="fact-chip">${rows.length.toLocaleString()} rows</span><span class="fact-chip" title="Date source">Date: cr714_activitydate</span></div><div class="fact-toolbar-controls"><span class="fact-range-label">Range</span>${rangeButtons}<button type="button" class="fact-sort-btn" onclick="window.setFactHistorySort('${id}','${sortDir==='desc'?'asc':'desc'}')"><i class="fas fa-sort mr-1"></i>${sortLabel}</button></div></div>`+
+      (state.loading?`<div class="p-4 text-center text-muted font-bold"><i class="fas fa-spinner fa-spin mr-2"></i>Loading ${state.months}-month fact-table history...</div>`:'')+
+      (!state.loading&&rows.length?rows.map(r=>{const action=lineClean(r.cr714_effectiveaction||r.cr714_action||r.cr714_actionfromnotetag||'');const rep=lineClean(r.cr714_repfromnote||r.cr714_accountrep||'System');const template=lineClean(r.cr714_emailtemplate||'');const status=lineClean(r.cr714_emailstatus||'');const meta=[rep?`Rep: ${rep}`:'',template?`Template: ${template}`:'',status?`Status: ${status}`:''].filter(Boolean).map(v=>`<span class="fact-meta-pill">${esc(v)}</span>`).join('');return `<div class="fact-history-card" data-activity-ms="${r.__actActivityMs||0}"><div class="fact-history-head"><span class="fact-history-type"><span class="fact-chip">${esc(typeOf(r))}</span>${action?`<span class="fact-action-label">${esc(action)}</span>`:''}</span><span class="fact-date" title="cr714_activitydate">${r.__actActivityDisplay}</span></div><div class="fact-history-meta">${meta}</div><div class="fact-history-body">${bodyHtml(r)}</div></div>`;}).join(''):'')+
+      (!state.loading&&!rows.length?`<div class="p-4 text-center text-muted font-bold">No fact-table history found for the selected ${state.months}-month range.</div>`:'')+
+      `<div class="fact-history-foot">Source: cr714_dt_act_fctbls • date/sort: cr714_activitydate • ${state.months} months • ${sortLabel}</div>`;
+  };
+
+  window.loadFactHistoryRange=async function(accountId){
+    const months=Number(localStorage.getItem('act_mgr_fact_history_months')||3);
+    const sort=localStorage.getItem('act_mgr_fact_history_sort')||'desc';
+    window.__actFactHistoryState=window.__actFactHistoryState||{};
+    const st=window.__actFactHistoryState[accountId]||(window.__actFactHistoryState[accountId]={rows:[],loading:false,months,sort});
+    if(st.loading) return;
+    st.loading=true; st.months=months; st.sort=sort; st.rows=[];
+    window.renderFactHistory(accountId);
+    try{
+      const end=new Date(), start=addMonths(end,-months);
+      const rows=await window.fetchFactHistorySlice(accountId,fmtIso(start),fmtIso(end));
+      const seen=new Set(); st.rows=[];
+      rows.forEach(row=>{const r=hydrate(row), k=rowKey(r); if(!seen.has(k)){seen.add(k); st.rows.push(r);}});
+      window.currentModalHistory=st.rows.map(r=>({date:r.__actActivityDateRaw,author:lineClean(r.cr714_repfromnote||r.cr714_accountrep||'System'),src:'Fact Table',touchType:typeOf(r),text:textOf(r),historicalAction:lineClean(r.cr714_effectiveaction||r.cr714_action||''),emailSubject:lineClean(r.cr714_emailtemplate||''),tags:[]}));
+    }catch(e){console.error(e); if(window.showToast) window.showToast('Fact-table history load failed: '+(e.message||e),'error');}
+    finally{st.loading=false; window.renderFactHistory(accountId);}
+  };
+
+  window.ACT_HISTORY_DATE_HYDRATION={hydrate,activityMs,displayDate,extractTextDate,ensureFactSelectInUrl};
+  console.info('[ACT] Final history date hydration installed. Fact requests now force-select cr714_activitydate and cards parse fallback dates from note text.');
+})();
+</script>
+
+
+
+<!-- COPILOT PATCH 2026-06-23C: Column Self-Healing Restore + Fact Date Safety
+     Restores the dynamic self-healing column behavior for Dataverse $select requests.
+     If Dataverse reports an invalid/missing property, the column is removed, remembered per entity set,
+     and the request is retried automatically. Fact-history requests still force cr714_activitydate when valid. -->
+<script id="actColumnSelfHealingRestore20260623C">
+(function(){
+  if(window.__ACT_COLUMN_SELF_HEALING_RESTORE_20260623C) return;
+  window.__ACT_COLUMN_SELF_HEALING_RESTORE_20260623C = true;
+
+  const BAD_COLS_KEY = 'act_dataverse_self_heal_bad_columns_v1';
+  const FACT_SET = 'cr714_dt_act_fctbls';
+  const FACT_REQUIRED = [
+    'cr714_activitydate','cr714_activitytype','cr714_accountrep','cr714_repfromnote',
+    'cr714_emaildate','cr714_emailtemplate','cr714_emailstatus','cr714_notedate',
+    'createdon','modifiedon'
+  ];
+  const MAX_RETRIES = 14;
+
+  function clean(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim(); }
+  function readBad(){ try { return JSON.parse(localStorage.getItem(BAD_COLS_KEY) || '{}') || {}; } catch { return {}; } }
+  function writeBad(map){ try { localStorage.setItem(BAD_COLS_KEY, JSON.stringify(map || {})); } catch {} }
+  function rememberBad(entity, col){
+    entity = clean(entity); col = clean(col);
+    if(!entity || !col) return;
+    const map = readBad();
+    map[entity] = Array.from(new Set([...(map[entity] || []), col])).sort();
+    writeBad(map);
+  }
+  function badSet(entity){ return new Set((readBad()[entity] || []).map(clean).filter(Boolean)); }
+  function entityFromUrl(u){
+    try{
+      const parts = String(u.pathname || '').split('/').filter(Boolean);
+      const ix = parts.findIndex(p => p.toLowerCase() === 'v9.2');
+      const seg = ix >= 0 ? parts[ix+1] : parts[parts.length-1];
+      return clean(decodeURIComponent(String(seg || '').split('(')[0]));
+    }catch{return '';}
+  }
+  function splitSelect(v){ return clean(v).split(',').map(x=>x.trim()).filter(Boolean); }
+  function setSelect(u, cols){
+    const uniq = Array.from(new Set((cols || []).map(clean).filter(Boolean)));
+    if(uniq.length) u.searchParams.set('$select', uniq.join(','));
+    else u.searchParams.delete('$select');
+  }
+  function selectedColumns(u){ return splitSelect(u.searchParams.get('$select') || ''); }
+  function applyKnownBadAndRequired(input){
+    try{
+      const raw = typeof input === 'string' ? input : (input && input.url) || '';
+      if(!raw || !raw.includes('/api/data/') || !raw.includes('$select')) return input;
+      const u = new URL(raw, window.location.href);
+      const entity = entityFromUrl(u);
+      const bad = badSet(entity);
+      let cols = selectedColumns(u).filter(c => !bad.has(c));
+
+      // Critical: history cards need cr714_activitydate, but never re-add it if the environment explicitly rejected it.
+      if(entity === FACT_SET){
+        FACT_REQUIRED.forEach(c => { if(!bad.has(c) && !cols.includes(c)) cols.push(c); });
+        if(!u.searchParams.get('$orderby') && !bad.has('cr714_activitydate')) u.searchParams.set('$orderby','cr714_activitydate desc,createdon desc');
+      }
+      setSelect(u, cols);
+      const next = u.href;
+      if(typeof input === 'string') return next;
+      try { return new Request(next, input); } catch { return next; }
+    }catch(e){ console.warn('[ACT column self-heal] preflight skipped:', e); return input; }
+  }
+  function removeColumnFromInput(input, badCol){
+    try{
+      const raw = typeof input === 'string' ? input : (input && input.url) || '';
+      const u = new URL(raw, window.location.href);
+      const cols = selectedColumns(u).filter(c => c !== badCol);
+      setSelect(u, cols);
+      const next = u.href;
+      if(typeof input === 'string') return next;
+      try { return new Request(next, input); } catch { return next; }
+    }catch(e){ return input; }
+  }
+  function extractBadColumn(text){
+    const s = String(text || '');
+    const patterns = [
+      /property named ['"]([^'"]+)['"]/i,
+      /Could not find a property named ['"]([^'"]+)['"]/i,
+      /Could not find.*?property.*?['"]([^'"]+)['"]/i,
+      /Could not find.*?attribute.*?['"]([^'"]+)['"]/i,
+      /No property ['"]([^'"]+)['"] exists/i,
+      /Could not find a property named ([A-Za-z0-9_]+)/i
+    ];
+    for(const p of patterns){ const m = s.match(p); if(m && m[1]) return clean(m[1]); }
+    return '';
+  }
+  function methodOf(input, init){ return String((init && init.method) || (input && input.method) || 'GET').toUpperCase(); }
+  function canHeal(input, init){
+    const raw = typeof input === 'string' ? input : (input && input.url) || '';
+    return methodOf(input, init) === 'GET' && raw.includes('/api/data/') && raw.includes('$select');
+  }
+
+  const previousFetch = window.fetch;
+  if(typeof previousFetch === 'function' && !previousFetch.__actColumnSelfHealingRestore){
+    const healedFetch = async function(input, init){
+      if(!canHeal(input, init)) return previousFetch.call(this, input, init);
+
+      let currentInput = applyKnownBadAndRequired(input);
+      let lastText = '';
+      let lastStatus = 0;
+      for(let attempt = 0; attempt <= MAX_RETRIES; attempt++){
+        const response = await previousFetch.call(this, currentInput, init);
+        if(response.ok) return response;
+
+        lastStatus = response.status;
+        try { lastText = await response.clone().text(); } catch { try { lastText = await response.text(); } catch { lastText = response.statusText || ''; } }
+        const badCol = extractBadColumn(lastText);
+        if(!badCol) return new Response(lastText, {status: response.status, statusText: response.statusText, headers: response.headers});
+
+        try{
+          const raw = typeof currentInput === 'string' ? currentInput : (currentInput && currentInput.url) || '';
+          const entity = entityFromUrl(new URL(raw, window.location.href));
+          rememberBad(entity, badCol);
+          console.warn(`[ACT column self-heal] Removed unavailable column ${badCol} from ${entity || 'Dataverse request'} and retrying (${attempt+1}/${MAX_RETRIES}).`);
+        }catch{}
+
+        currentInput = applyKnownBadAndRequired(removeColumnFromInput(currentInput, badCol));
+      }
+      return new Response(lastText || 'Dataverse column self-heal retry limit exceeded.', {status:lastStatus || 400, statusText:'Dataverse column self-heal failed'});
+    };
+    healedFetch.__actColumnSelfHealingRestore = true;
+    window.fetch = healedFetch;
+  }
+
+  window.ACT_COLUMN_SELF_HEAL = {
+    badColumns: readBad,
+    clearBadColumns: function(entity){
+      if(entity){ const map = readBad(); delete map[entity]; writeBad(map); }
+      else localStorage.removeItem(BAD_COLS_KEY);
+      console.info('[ACT column self-heal] Cleared remembered bad columns.', entity || 'all entities');
+    },
+    rememberBadColumn: rememberBad
+  };
+
+  console.info('[ACT column self-heal] Restored dynamic $select healing. Use ACT_COLUMN_SELF_HEAL.badColumns() to inspect remembered removals.');
 })();
 </script>
 
