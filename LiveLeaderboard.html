@@ -5363,7 +5363,7 @@ body.command-center-ui .bar-row{min-height:72px!important;border-radius:18px!imp
       const label = chunks.length > 1 ? `Activity table scoped ${i+1}/${chunks.length}` : 'Activity table';
       const rows = await fetchAll(scopedFactQuery(set, chunks[i]), label, total, idx);
       rows.forEach(r => {
-        const recordKey = r.cr714_dt_act_fctblid || `${r.cr714_accountnumber}|${r.cr714_activitydateonly}|${r.cr714_action}|${r.cr714_accountrep || r.cr714_repfromnote}`;
+        const recordKey = r.cr714_dt_act_fctblid || `${r.cr714_accountnumber}|${r.cr714_activitydate}|${r.cr714_action}|${r.cr714_accountrep || r.cr714_repfromnote}`;
         if(recordKey && seen.has(recordKey)) return;
         if(recordKey) seen.add(recordKey);
         out.push(r);
@@ -5515,98 +5515,122 @@ body.command-center-ui .bar-row{min-height:72px!important;border-radius:18px!imp
 
 
 
-<!-- COPILOT PATCH 2026-06-23: Final self-healing + manager-filter readiness for LiveLeaderboard
-     Adds a global Dataverse $select self-heal wrapper and keeps Manager scope filters visibly pinned
-     before/during filter preview and loading-screen autoload. -->
-<script id="actLiveLeaderboardFinalSelfHealAndScopeReady20260623">
+<!-- COPILOT PATCH 2026-06-23D: Dataverse filter self-heal
+     Fixes the failure where a bad field was removed from $select but was still left inside $filter,
+     causing the same Dataverse 0x80060888 error to repeat. -->
+<script id="actDataverseFilterSelfHeal20260623D">
 (function(){
-  if(window.__ACT_LIVE_LEADERBOARD_FINAL_SELF_HEAL_SCOPE_READY_20260623) return;
-  window.__ACT_LIVE_LEADERBOARD_FINAL_SELF_HEAL_SCOPE_READY_20260623 = true;
+  if(window.__ACT_DATAVERSE_FILTER_SELF_HEAL_20260623D) return;
+  window.__ACT_DATAVERSE_FILTER_SELF_HEAL_20260623D = true;
 
-  const BAD_KEY='act_live_leaderboard_bad_columns_v1';
-  const DEFAULT_BRIDGE_KEY='act_manager_reporting_bridge_v1';
+  const BAD_KEY='act_live_leaderboard_bad_columns_v2';
   const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
-  const split=v=>Array.from(new Set(clean(v).split(/[|,;\n\r\t]+/).map(clean).filter(Boolean)));
-  const readJson=k=>{try{return JSON.parse(localStorage.getItem(k)||'null')||null;}catch{return null;}};
-  const params=()=>new URLSearchParams(location.search||'');
-  const val=(p,...keys)=>{for(const k of keys){const v=p.get(k);if(v!==null&&clean(v)!=='')return clean(v);}return'';};
+  const escRe=s=>String(s).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
   const readBad=()=>{try{return JSON.parse(localStorage.getItem(BAD_KEY)||'{}')||{};}catch{return{};}};
   const writeBad=m=>{try{localStorage.setItem(BAD_KEY,JSON.stringify(m||{}));}catch{}};
   function entityFromUrl(u){try{const parts=String(u.pathname||'').split('/').filter(Boolean);const ix=parts.findIndex(p=>p.toLowerCase()==='v9.2');const seg=ix>=0?parts[ix+1]:parts[parts.length-1];return clean(decodeURIComponent(String(seg||'').split('(')[0]));}catch{return'';}}
   function remember(entity,col){entity=clean(entity);col=clean(col);if(!entity||!col)return;const m=readBad();m[entity]=Array.from(new Set([...(m[entity]||[]),col])).sort();writeBad(m);}
-  function badSet(entity){return new Set((readBad()[entity]||[]).map(clean));}
-  function cols(u){return clean(u.searchParams.get('$select')||'').split(',').map(clean).filter(Boolean);}
-  function setCols(u,c){c=Array.from(new Set((c||[]).map(clean).filter(Boolean))); if(c.length)u.searchParams.set('$select',c.join(',')); else u.searchParams.delete('$select');}
-  function extractBad(text){const s=String(text||'');const pats=[/property named ['"]([^'"]+)['"]/i,/Could not find a property named ['"]([^'"]+)['"]/i,/Could not find.*?property.*?['"]([^'"]+)['"]/i,/No property ['"]([^'"]+)['"] exists/i,/Could not find a property named ([A-Za-z0-9_]+)/i];for(const p of pats){const m=s.match(p);if(m&&m[1])return clean(m[1]);}return'';}
-  function prepInput(input){try{const raw=typeof input==='string'?input:(input&&input.url)||'';if(!raw||!raw.includes('/api/data/')||!raw.includes('$select='))return input;const u=new URL(raw,location.href);const entity=entityFromUrl(u);const bad=badSet(entity);setCols(u,cols(u).filter(c=>!bad.has(c)));const next=u.href;if(typeof input==='string')return next;try{return new Request(next,input);}catch{return next;}}catch{return input;}}
-  function removeFromInput(input,badCol){try{const raw=typeof input==='string'?input:(input&&input.url)||'';const u=new URL(raw,location.href);setCols(u,cols(u).filter(c=>c!==badCol));const next=u.href;if(typeof input==='string')return next;try{return new Request(next,input);}catch{return next;}}catch{return input;}}
-  function canHeal(input,init){const raw=typeof input==='string'?input:(input&&input.url)||'';const method=String((init&&init.method)||(input&&input.method)||'GET').toUpperCase();return method==='GET'&&raw.includes('/api/data/')&&raw.includes('$select=');}
+  function badSet(entity){return new Set((readBad()[entity]||[]).map(clean).filter(Boolean));}
+  function splitSelect(v){return clean(v).split(',').map(clean).filter(Boolean);}
+  function setSelect(u,cols){cols=Array.from(new Set((cols||[]).map(clean).filter(Boolean))); if(cols.length)u.searchParams.set('$select',cols.join(',')); else u.searchParams.delete('$select');}
+  function removeBadOrderBy(orderBy,badCol){
+    if(!orderBy) return orderBy;
+    const bad=badCol.toLowerCase();
+    return orderBy.split(',').map(x=>x.trim()).filter(x=>!x.toLowerCase().startsWith(bad+' ') && x.toLowerCase()!==bad).join(',');
+  }
+  function removeBadFilter(filter,badCol){
+    if(!filter) return filter;
+    let s=String(filter);
+    const bad=escRe(badCol);
+    const pred=`${bad}\\s+(?:eq|ne|gt|ge|lt|le|like)\\s+(?:'(?:''|[^'])*'|[^\\s)]+)`;
+    const funcs=[
+      `contains\\s*\\(\\s*${bad}\\s*,\\s*'(?:''|[^'])*'\\s*\\)`,
+      `startswith\\s*\\(\\s*${bad}\\s*,\\s*'(?:''|[^'])*'\\s*\\)`,
+      `endswith\\s*\\(\\s*${bad}\\s*,\\s*'(?:''|[^'])*'\\s*\\)`
+    ];
+    const atom=`(?:${pred}|${funcs.join('|')})`;
+    const flags='ig';
+    for(let i=0;i<20;i++){
+      const before=s;
+      s=s.replace(new RegExp(`\\s+(or|and)\\s+${atom}`,flags),'');
+      s=s.replace(new RegExp(`${atom}\\s+(or|and)\\s+`,flags),'');
+      s=s.replace(new RegExp(`${atom}`,flags),'');
+      s=s.replace(/\(\s*(?:or|and)\s*/ig,'(').replace(/\s*(?:or|and)\s*\)/ig,')');
+      s=s.replace(/\(\s*\)/g,'');
+      s=s.replace(/\s+(and|or)\s+(and|or)\s+/ig,' $2 ');
+      s=s.replace(/^\s*(and|or)\s+/ig,'').replace(/\s+(and|or)\s*$/ig,'');
+      s=s.replace(/\s{2,}/g,' ').trim();
+      if(s===before) break;
+    }
+    return s;
+  }
+  function extractBad(text){
+    const s=String(text||'');
+    const pats=[/property named ['"]([^'"]+)['"]/i,/Could not find a property named ['"]([^'"]+)['"]/i,/Could not find.*?property.*?['"]([^'"]+)['"]/i,/No property ['"]([^'"]+)['"] exists/i,/Could not find a property named ([A-Za-z0-9_]+)/i];
+    for(const p of pats){const m=s.match(p); if(m&&m[1]) return clean(m[1]);}
+    return '';
+  }
+  function sanitizeInput(input,badCol){
+    try{
+      const raw=typeof input==='string'?input:(input&&input.url)||'';
+      if(!raw||!raw.includes('/api/data/')) return input;
+      const u=new URL(raw,location.href);
+      const entity=entityFromUrl(u);
+      const bads=new Set([...badSet(entity), ...(badCol?[badCol]:[])]);
+      if(u.searchParams.has('$select')) setSelect(u,splitSelect(u.searchParams.get('$select')).filter(c=>!bads.has(c)));
+      if(u.searchParams.has('$filter')){
+        let f=u.searchParams.get('$filter')||'';
+        bads.forEach(c=>{f=removeBadFilter(f,c);});
+        if(clean(f)) u.searchParams.set('$filter',f); else u.searchParams.delete('$filter');
+      }
+      if(u.searchParams.has('$orderby')){
+        let o=u.searchParams.get('$orderby')||'';
+        bads.forEach(c=>{o=removeBadOrderBy(o,c);});
+        if(clean(o)) u.searchParams.set('$orderby',o); else u.searchParams.delete('$orderby');
+      }
+      const next=u.href;
+      if(typeof input==='string') return next;
+      try{return new Request(next,input);}catch{return next;}
+    }catch(e){console.warn('[ACT Dataverse filter self-heal] sanitize skipped',e); return input;}
+  }
+  function canHeal(input,init){
+    const raw=typeof input==='string'?input:(input&&input.url)||'';
+    const method=String((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
+    return method==='GET'&&raw.includes('/api/data/')&&(raw.includes('$select=')||raw.includes('$filter=')||raw.includes('$orderby='));
+  }
 
-  const previousFetch=window.fetch;
-  if(typeof previousFetch==='function'&&!previousFetch.__actLiveLeaderboardSelfHealFinal){
+  // Patch the legacy helper used by fetchAll(), so local retries remove the bad field from $filter too.
+  try{
+    const previousRemove = typeof removeSelectColumn==='function' ? removeSelectColumn : null;
+    window.ACT_REMOVE_BAD_DATAVERSE_FIELD_FROM_URL = function(path,badCol){ return sanitizeInput(path,badCol); };
+    removeSelectColumn = function(path,badCol){ return sanitizeInput(previousRemove ? previousRemove(path,badCol) : path,badCol); };
+  }catch(e){console.warn('[ACT Dataverse filter self-heal] removeSelectColumn hook skipped',e);}
+
+  // Patch fetch as a second safety net for direct Dataverse calls and repeated retry responses.
+  const priorFetch=window.fetch;
+  if(typeof priorFetch==='function'&&!priorFetch.__actDataverseFilterSelfHeal20260623D){
     const healed=async function(input,init){
-      if(!canHeal(input,init)) return previousFetch.call(this,input,init);
-      let current=prepInput(input), lastText='', lastStatus=0;
-      for(let attempt=0;attempt<16;attempt++){
-        const res=await previousFetch.call(this,current,init);
+      if(!canHeal(input,init)) return priorFetch.call(this,input,init);
+      let current=sanitizeInput(input);
+      let lastText='',lastStatus=0;
+      for(let attempt=0;attempt<24;attempt++){
+        const res=await priorFetch.call(this,current,init);
         if(res.ok) return res;
         lastStatus=res.status;
         try{lastText=await res.clone().text();}catch{try{lastText=await res.text();}catch{lastText=res.statusText||'';}}
         const bad=extractBad(lastText);
         if(!bad) return new Response(lastText,{status:res.status,statusText:res.statusText,headers:res.headers});
-        try{const raw=typeof current==='string'?current:(current&&current.url)||'';const entity=entityFromUrl(new URL(raw,location.href));remember(entity,bad);console.warn(`[ACT LiveLeaderboard self-heal] Removed ${bad} from ${entity||'Dataverse request'} and retrying.`);window.ACTLoadingScreen?.log?.(`Self-healed unavailable field ${bad}`);}catch{}
-        current=prepInput(removeFromInput(current,bad));
+        try{const raw=typeof current==='string'?current:(current&&current.url)||'';const entity=entityFromUrl(new URL(raw,location.href));remember(entity,bad);console.warn(`[ACT Dataverse filter self-heal] Removed ${bad} from $select/$filter/$orderby for ${entity||'request'} and retrying.`);window.ACTLoadingScreen?.log?.(`Removed unavailable field ${bad} from request filter`);}catch{}
+        current=sanitizeInput(current,bad);
       }
-      return new Response(lastText||'Self-heal retry limit exceeded',{status:lastStatus||400,statusText:'Self-heal failed'});
+      return new Response(lastText||'Dataverse filter self-heal retry limit exceeded',{status:lastStatus||400,statusText:'Dataverse filter self-heal failed'});
     };
-    healed.__actLiveLeaderboardSelfHealFinal=true;
+    healed.__actDataverseFilterSelfHeal20260623D=true;
     window.fetch=healed;
   }
 
-  function currentScope(){
-    const p=params();
-    if(window.ACT_READ_MANAGER_SCOPE) return window.ACT_READ_MANAGER_SCOPE();
-    const key=val(p,'bridgeKey','scopeKey')||DEFAULT_BRIDGE_KEY;
-    const b=readJson(key)||readJson(DEFAULT_BRIDGE_KEY)||{};
-    return {active:!!(p.has('bridgeKey')||p.has('bridgeId')||val(p,'source','from').toLowerCase().includes('manager')||b.source||b.bridgeId),reps:[...(Array.isArray(b.reps)?b.reps:split(b.reps)),...split(val(p,'reps','rep','selectedReps'))],actions:[...(Array.isArray(b.actions)?b.actions:split(b.actions)),...split(val(p,'actions','action','selectedActions'))],accountIds:[...(Array.isArray(b.accountIds)?b.accountIds:split(b.accountIds||b.accounts)),...split(val(p,'accounts','accountIds','ids'))],startDate:val(p,'start','startDate','fromDate')||b.startDate||'',endDate:val(p,'end','endDate','toDate')||b.endDate||'',bridgeKey:key,source:b.source||val(p,'source','from')};
-  }
-  function ensureOption(id,value,label){
-    const el=document.getElementById(id); value=clean(value); if(!el||!value)return false;
-    let opt=Array.from(el.options||[]).find(o=>clean(o.value).toLowerCase()===value.toLowerCase()||clean(o.textContent).toLowerCase()===value.toLowerCase());
-    if(!opt){opt=document.createElement('option');opt.value=value;opt.textContent=label||value;opt.dataset.managerScopeInjected='1';el.appendChild(opt);}
-    el.value=opt.value; el.dispatchEvent(new Event('change',{bubbles:true})); el.dispatchEvent(new Event('input',{bubbles:true})); return true;
-  }
-  function applyScopeToControls(){
-    const scope=currentScope(); if(!scope||!scope.active)return scope;
-    if(scope.startDate&&document.getElementById('startDate')) document.getElementById('startDate').value=String(scope.startDate).slice(0,10);
-    if(scope.endDate&&document.getElementById('endDate')) document.getElementById('endDate').value=String(scope.endDate).slice(0,10);
-    if(scope.actions&&scope.actions.length===1) ensureOption('actionFilter',scope.actions[0],`Manager scope: ${scope.actions[0]}`);
-    const summary=document.getElementById('filterPreviewSummary');
-    if(summary){
-      const bits=[]; if(scope.reps&&scope.reps.length)bits.push(`${scope.reps.length} rep${scope.reps.length===1?'':'s'}`); if(scope.accountIds&&scope.accountIds.length)bits.push(`${scope.accountIds.length} account${scope.accountIds.length===1?'':'s'}`); if(scope.actions&&scope.actions.length)bits.push(`${scope.actions.length} action${scope.actions.length===1?'':'s'}`); if(scope.startDate||scope.endDate)bits.push(`${scope.startDate||'Any'} → ${scope.endDate||'Any'}`);
-      if(bits.length&&!summary.dataset.fullLoadStarted){summary.className='guided-preview-summary good';summary.innerHTML=`Manager scope accepted: <strong>${bits.join(' • ')}</strong>. Full load will apply these filters during the loading screen.`;}
-    }
-    try{window.ACTLoadingScreen?.update?.({scope:scope});window.ACTLoadingScreen?.log?.('Manager scope filters applied to load controls');}catch{}
-    return scope;
-  }
-
-  const boot=()=>{
-    const scope=applyScopeToControls();
-    const oldLoadFilter=window.loadFilterOptions;
-    if(typeof oldLoadFilter==='function'&&!oldLoadFilter.__actManagerScopeReapplyFinal){
-      window.loadFilterOptions=async function(){applyScopeToControls();const result=await oldLoadFilter.apply(this,arguments);applyScopeToControls();return result;};
-      window.loadFilterOptions.__actManagerScopeReapplyFinal=true;
-      try{loadFilterOptions=window.loadFilterOptions;}catch{}
-    }
-    const btn=document.getElementById('btnLoad');
-    if(btn&&!btn.__actManagerScopeReadyClick){btn.__actManagerScopeReadyClick=true;btn.addEventListener('click',()=>{const s=applyScopeToControls();const summary=document.getElementById('filterPreviewSummary');if(summary){summary.dataset.fullLoadStarted='1';}},true);}
-    if(scope&&scope.active){
-      const dock=document.getElementById('ccStatusDock');
-      if(dock&&!document.getElementById('actFinalScopeReadyBadge')){const b=document.createElement('span');b.id='actFinalScopeReadyBadge';b.className='cc-status-chip good';b.innerHTML='<i class="fas fa-filter"></i> Filters ready for load';dock.appendChild(b);}
-    }
-  };
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',()=>setTimeout(boot,140)); else setTimeout(boot,140);
-  window.ACT_LIVE_LEADERBOARD_SELF_HEAL={badColumns:readBad,clearBadColumns:function(entity){if(entity){const m=readBad();delete m[entity];writeBad(m);}else localStorage.removeItem(BAD_KEY);},applyManagerScopeToControls:applyScopeToControls};
+  window.ACT_DATAVERSE_FILTER_SELF_HEAL={badColumns:readBad,clearBadColumns:function(entity){if(entity){const m=readBad();delete m[entity];writeBad(m);}else localStorage.removeItem(BAD_KEY);},sanitizeUrl:function(url,badCol){return sanitizeInput(url,badCol);},removeBadFilter};
+  console.info('[ACT Dataverse filter self-heal] Installed $select + $filter bad-column recovery.');
 })();
 </script>
 
