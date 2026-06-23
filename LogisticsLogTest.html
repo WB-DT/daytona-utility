@@ -2522,6 +2522,7 @@ allRaw.forEach(r => {
 
     window.saveToAuditLog("Save", `Note: ${note}`);
     currentSelectedRecord.cr714_followup = iso;
+    currentSelectedRecord._cachedNoteDate = Date.now(); // Instantly update local cache!
 
     document.querySelectorAll(".empty-field-warning").forEach((el) => el.classList.remove("empty-field-warning"));
 
@@ -3580,15 +3581,25 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                         } 
                     }
 
+                    // --- NOTE DATE LOGIC (CACHED FOR SPEED) ---
+                    if (r._cachedNoteDate === undefined) {
+                        let newestNoteDate = null;
+                        r.sources.forEach(src => {
+                            let parsedHistory = window.parseNotes(src.rawNotes || '');
+                            if (parsedHistory.length > 0) {
+                                let nd = new Date(parsedHistory[0].date).getTime();
+                                if (!isNaN(nd) && (!newestNoteDate || nd > newestNoteDate)) newestNoteDate = nd;
+                            }
+                        });
+                        r._cachedNoteDate = newestNoteDate;
+                    }
+                    
                     let noteDateHtml = '';
-                    if (r.cr714_lastnotedate && r.cr714_lastnotedate !== 'Unknown Date') {
-                        let nd = new Date(r.cr714_lastnotedate);
-                        if (!isNaN(nd.getTime())) {
-                            let ndStr = nd.toLocaleDateString(undefined, {month:'short', day:'numeric'});
-                            let daysOld = (new Date() - nd) / (1000 * 60 * 60 * 24);
-                            let colorClass = (daysOld <= 30) ? 'text-muted' : 'text-status-warning';
-                            noteDateHtml = `<span class="text-[9px] ${colorClass} font-bold">Note Date: ${ndStr}</span>`;
-                        }
+                    if (r._cachedNoteDate) {
+                        let ndObj = new Date(r._cachedNoteDate);
+                        let daysOld = (Date.now() - r._cachedNoteDate) / (1000 * 60 * 60 * 24);
+                        let colorClass = (daysOld <= 30) ? 'text-muted' : 'text-status-warning';
+                        noteDateHtml = `<span class="text-[9px] ${colorClass} font-bold">Note Date: ${ndObj.toLocaleDateString(undefined, {month:'short', day:'numeric'})}</span>`;
                     }
                     
                     let sourcesHtml = r.sources.map(s => {
@@ -3597,14 +3608,20 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                         return `<span class="px-1.5 py-0.5 rounded border text-[8px] font-bold ${badgeClass}">${abbr}</span>`;
                     }).join('');
 
-                    let actionsHtml = r.sources.map(s => {
-                        if (!s.action || s.action === 'No Action') return '';
+                    // --- ACTIONS SIDE-BY-SIDE (DEDUPLICATED) ---
+                    let uniqueActions = [];
+                    r.sources.forEach(s => {
+                        if (!s.action || s.action === 'No Action') return;
+                        if (!uniqueActions.some(ua => ua.action === s.action)) uniqueActions.push({action: s.action, type: s.type});
+                    });
+                    
+                    let actionsHtml = uniqueActions.map(s => {
                         let badgeClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : (s.type === 'LB' ? 'badge-lb' : 'badge-psp'));
-                        return `<div class="text-[9px] font-bold ${badgeClass} border px-1 rounded max-w-full truncate text-right mb-0.5" title="${s.type}">${window.escapeHTML(s.action)}</div>`;
+                        return `<span class="px-1.5 py-0.5 rounded border text-[8px] font-bold ${badgeClass} max-w-[100px] truncate" title="${s.type}">${window.escapeHTML(s.action)}</span>`;
                     }).join('');
                     
                     if (!actionsHtml && r.cr714_action && r.cr714_action !== 'No Action') {
-                        actionsHtml = `<div class="text-[9px] font-bold badge-action border px-1 rounded max-w-full truncate text-right mb-0.5">${window.escapeHTML(r.cr714_action)}</div>`;
+                        actionsHtml = `<span class="px-1.5 py-0.5 rounded border text-[8px] font-bold badge-action max-w-[100px] truncate">${window.escapeHTML(r.cr714_action)}</span>`;
                     }
 
                     div.innerHTML = `
@@ -3615,6 +3632,7 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                             </div>
                             <div class="flex flex-col items-end text-[10px] flex-shrink-0 whitespace-nowrap">
                                 ${followUpHtml}
+                                ${noteDateHtml}
                                 ${emailHtml}
                             </div>
                         </div>
@@ -3627,7 +3645,7 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                             </div>
                             <div class="flex flex-col items-end gap-1 flex-shrink-0 max-w-[70%]">
                                 <div class="flex flex-wrap justify-end gap-1">${sourcesHtml}</div>
-                                <div class="flex flex-col items-end w-full">${actionsHtml}</div>
+                                <div class="flex flex-wrap justify-end gap-1">${actionsHtml}</div>
                             </div>
                         </div>
                     `;
