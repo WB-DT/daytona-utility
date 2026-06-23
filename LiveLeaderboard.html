@@ -5515,369 +5515,98 @@ body.command-center-ui .bar-row{min-height:72px!important;border-radius:18px!imp
 
 
 
-<!-- COPILOT PATCH 2026-06-23: DAX / SQL Fast Query Accelerator
-     Replaces wide Dataverse OData downloads with server-side DAX or SQL-proxy reads when configured.
-     Safe fallback: if no DAX/SQL config is present, the existing Dataverse loaders run unchanged. -->
-<script id="actDaxSqlFastQueryAccelerator">
+<!-- COPILOT PATCH 2026-06-23: Final self-healing + manager-filter readiness for LiveLeaderboard
+     Adds a global Dataverse $select self-heal wrapper and keeps Manager scope filters visibly pinned
+     before/during filter preview and loading-screen autoload. -->
+<script id="actLiveLeaderboardFinalSelfHealAndScopeReady20260623">
 (function(){
-  if (window.__ACT_DAX_SQL_FAST_QUERY_ACCELERATOR_20260623) return;
-  window.__ACT_DAX_SQL_FAST_QUERY_ACCELERATOR_20260623 = true;
+  if(window.__ACT_LIVE_LEADERBOARD_FINAL_SELF_HEAL_SCOPE_READY_20260623) return;
+  window.__ACT_LIVE_LEADERBOARD_FINAL_SELF_HEAL_SCOPE_READY_20260623 = true;
 
-  const STORAGE_KEY = 'actFastQueryConfig';
-  const PBI_SCOPE = 'https://analysis.windows.net/powerbi/api/Dataset.Read.All';
-  const clean = v => String(v ?? '').replace(/\s+/g,' ').trim();
-  const low = v => clean(v).toLowerCase();
-  const uniq = arr => Array.from(new Set((arr||[]).map(clean).filter(Boolean)));
-  const fmt = n => (Number(n)||0).toLocaleString();
-  const escDax = v => String(v ?? '').replace(/"/g,'""');
-  const qDax = v => `"${escDax(v)}"`;
-  const dateOnly = v => {
-    if(!v) return '';
-    const d = new Date(v);
-    return Number.isNaN(d.getTime()) ? String(v).slice(0,10) : d.toISOString().slice(0,10);
-  };
-  const daxDate = v => {
-    const s = dateOnly(v); if(!s) return '';
-    const [y,m,d] = s.split('-').map(Number);
-    return (y && m && d) ? `DATE(${y},${m},${d})` : '';
-  };
-  const listDax = arr => `{${uniq(arr).map(qDax).join(',')}}`;
-  const col = (table, column) => `'${String(table).replace(/'/g,"''")}'[${column}]`;
-  const p = () => new URLSearchParams(window.location.search || '');
+  const BAD_KEY='act_live_leaderboard_bad_columns_v1';
+  const DEFAULT_BRIDGE_KEY='act_manager_reporting_bridge_v1';
+  const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
+  const split=v=>Array.from(new Set(clean(v).split(/[|,;\n\r\t]+/).map(clean).filter(Boolean)));
+  const readJson=k=>{try{return JSON.parse(localStorage.getItem(k)||'null')||null;}catch{return null;}};
+  const params=()=>new URLSearchParams(location.search||'');
+  const val=(p,...keys)=>{for(const k of keys){const v=p.get(k);if(v!==null&&clean(v)!=='')return clean(v);}return'';};
+  const readBad=()=>{try{return JSON.parse(localStorage.getItem(BAD_KEY)||'{}')||{};}catch{return{};}};
+  const writeBad=m=>{try{localStorage.setItem(BAD_KEY,JSON.stringify(m||{}));}catch{}};
+  function entityFromUrl(u){try{const parts=String(u.pathname||'').split('/').filter(Boolean);const ix=parts.findIndex(p=>p.toLowerCase()==='v9.2');const seg=ix>=0?parts[ix+1]:parts[parts.length-1];return clean(decodeURIComponent(String(seg||'').split('(')[0]));}catch{return'';}}
+  function remember(entity,col){entity=clean(entity);col=clean(col);if(!entity||!col)return;const m=readBad();m[entity]=Array.from(new Set([...(m[entity]||[]),col])).sort();writeBad(m);}
+  function badSet(entity){return new Set((readBad()[entity]||[]).map(clean));}
+  function cols(u){return clean(u.searchParams.get('$select')||'').split(',').map(clean).filter(Boolean);}
+  function setCols(u,c){c=Array.from(new Set((c||[]).map(clean).filter(Boolean))); if(c.length)u.searchParams.set('$select',c.join(',')); else u.searchParams.delete('$select');}
+  function extractBad(text){const s=String(text||'');const pats=[/property named ['"]([^'"]+)['"]/i,/Could not find a property named ['"]([^'"]+)['"]/i,/Could not find.*?property.*?['"]([^'"]+)['"]/i,/No property ['"]([^'"]+)['"] exists/i,/Could not find a property named ([A-Za-z0-9_]+)/i];for(const p of pats){const m=s.match(p);if(m&&m[1])return clean(m[1]);}return'';}
+  function prepInput(input){try{const raw=typeof input==='string'?input:(input&&input.url)||'';if(!raw||!raw.includes('/api/data/')||!raw.includes('$select='))return input;const u=new URL(raw,location.href);const entity=entityFromUrl(u);const bad=badSet(entity);setCols(u,cols(u).filter(c=>!bad.has(c)));const next=u.href;if(typeof input==='string')return next;try{return new Request(next,input);}catch{return next;}}catch{return input;}}
+  function removeFromInput(input,badCol){try{const raw=typeof input==='string'?input:(input&&input.url)||'';const u=new URL(raw,location.href);setCols(u,cols(u).filter(c=>c!==badCol));const next=u.href;if(typeof input==='string')return next;try{return new Request(next,input);}catch{return next;}}catch{return input;}}
+  function canHeal(input,init){const raw=typeof input==='string'?input:(input&&input.url)||'';const method=String((init&&init.method)||(input&&input.method)||'GET').toUpperCase();return method==='GET'&&raw.includes('/api/data/')&&raw.includes('$select=');}
 
-  const DEFAULT_CONFIG = {
-    enabled:false,
-    mode:'powerbi-dax',
-    fallbackToDataverse:true,
-    maxRows:100000,
-    powerBi:{ workspaceId:'', datasetId:'' },
-    sql:{ endpoint:'', includeBearerToken:true },
-    model:{
-      sourceTable:'ACT Source Rows',
-      factTable:'ACT Activity Facts',
-      managerAccountTable:'ACT Manager Accounts',
-      employeeTable:'ACT Employees',
-      columns:{
-        dataset:'Dataset', datasetLabel:'Dataset Label', tableName:'Table', id:'Record ID',
-        account:'Account Number', company:'Company', rep:'Rep', action:'Action', normalizedAction:'Normalized Action',
-        date:'Activity Date', isEmail:'Is Email', isNote:'Is Note',
-        modifiedon:'Modified On', createdon:'Created On', emailDate:'Email Date', helpStatus:'Help Status',
-        message:'Action Message', managerNotes:'Manager Notes', contact:'Contact', phone:'Phone', email:'Email',
-        address:'Address', intro:'Intro', statecode:'State Code',
-        manager:'Manager', srManager:'Sr Manager', supervisor:'Supervisor', department:'Department', employeeName:'Employee Name', employeeStatus:'Employee Status'
+  const previousFetch=window.fetch;
+  if(typeof previousFetch==='function'&&!previousFetch.__actLiveLeaderboardSelfHealFinal){
+    const healed=async function(input,init){
+      if(!canHeal(input,init)) return previousFetch.call(this,input,init);
+      let current=prepInput(input), lastText='', lastStatus=0;
+      for(let attempt=0;attempt<16;attempt++){
+        const res=await previousFetch.call(this,current,init);
+        if(res.ok) return res;
+        lastStatus=res.status;
+        try{lastText=await res.clone().text();}catch{try{lastText=await res.text();}catch{lastText=res.statusText||'';}}
+        const bad=extractBad(lastText);
+        if(!bad) return new Response(lastText,{status:res.status,statusText:res.statusText,headers:res.headers});
+        try{const raw=typeof current==='string'?current:(current&&current.url)||'';const entity=entityFromUrl(new URL(raw,location.href));remember(entity,bad);console.warn(`[ACT LiveLeaderboard self-heal] Removed ${bad} from ${entity||'Dataverse request'} and retrying.`);window.ACTLoadingScreen?.log?.(`Self-healed unavailable field ${bad}`);}catch{}
+        current=prepInput(removeFromInput(current,bad));
       }
-    },
-    daxTemplates:{
-      liveSource:'', liveFact:'', managerAccounts:'', employees:''
-    },
-    sqlTemplates:{
-      liveSource:'', liveFact:'', managerAccounts:'', employees:''
+      return new Response(lastText||'Self-heal retry limit exceeded',{status:lastStatus||400,statusText:'Self-heal failed'});
+    };
+    healed.__actLiveLeaderboardSelfHealFinal=true;
+    window.fetch=healed;
+  }
+
+  function currentScope(){
+    const p=params();
+    if(window.ACT_READ_MANAGER_SCOPE) return window.ACT_READ_MANAGER_SCOPE();
+    const key=val(p,'bridgeKey','scopeKey')||DEFAULT_BRIDGE_KEY;
+    const b=readJson(key)||readJson(DEFAULT_BRIDGE_KEY)||{};
+    return {active:!!(p.has('bridgeKey')||p.has('bridgeId')||val(p,'source','from').toLowerCase().includes('manager')||b.source||b.bridgeId),reps:[...(Array.isArray(b.reps)?b.reps:split(b.reps)),...split(val(p,'reps','rep','selectedReps'))],actions:[...(Array.isArray(b.actions)?b.actions:split(b.actions)),...split(val(p,'actions','action','selectedActions'))],accountIds:[...(Array.isArray(b.accountIds)?b.accountIds:split(b.accountIds||b.accounts)),...split(val(p,'accounts','accountIds','ids'))],startDate:val(p,'start','startDate','fromDate')||b.startDate||'',endDate:val(p,'end','endDate','toDate')||b.endDate||'',bridgeKey:key,source:b.source||val(p,'source','from')};
+  }
+  function ensureOption(id,value,label){
+    const el=document.getElementById(id); value=clean(value); if(!el||!value)return false;
+    let opt=Array.from(el.options||[]).find(o=>clean(o.value).toLowerCase()===value.toLowerCase()||clean(o.textContent).toLowerCase()===value.toLowerCase());
+    if(!opt){opt=document.createElement('option');opt.value=value;opt.textContent=label||value;opt.dataset.managerScopeInjected='1';el.appendChild(opt);}
+    el.value=opt.value; el.dispatchEvent(new Event('change',{bubbles:true})); el.dispatchEvent(new Event('input',{bubbles:true})); return true;
+  }
+  function applyScopeToControls(){
+    const scope=currentScope(); if(!scope||!scope.active)return scope;
+    if(scope.startDate&&document.getElementById('startDate')) document.getElementById('startDate').value=String(scope.startDate).slice(0,10);
+    if(scope.endDate&&document.getElementById('endDate')) document.getElementById('endDate').value=String(scope.endDate).slice(0,10);
+    if(scope.actions&&scope.actions.length===1) ensureOption('actionFilter',scope.actions[0],`Manager scope: ${scope.actions[0]}`);
+    const summary=document.getElementById('filterPreviewSummary');
+    if(summary){
+      const bits=[]; if(scope.reps&&scope.reps.length)bits.push(`${scope.reps.length} rep${scope.reps.length===1?'':'s'}`); if(scope.accountIds&&scope.accountIds.length)bits.push(`${scope.accountIds.length} account${scope.accountIds.length===1?'':'s'}`); if(scope.actions&&scope.actions.length)bits.push(`${scope.actions.length} action${scope.actions.length===1?'':'s'}`); if(scope.startDate||scope.endDate)bits.push(`${scope.startDate||'Any'} → ${scope.endDate||'Any'}`);
+      if(bits.length&&!summary.dataset.fullLoadStarted){summary.className='guided-preview-summary good';summary.innerHTML=`Manager scope accepted: <strong>${bits.join(' • ')}</strong>. Full load will apply these filters during the loading screen.`;}
+    }
+    try{window.ACTLoadingScreen?.update?.({scope:scope});window.ACTLoadingScreen?.log?.('Manager scope filters applied to load controls');}catch{}
+    return scope;
+  }
+
+  const boot=()=>{
+    const scope=applyScopeToControls();
+    const oldLoadFilter=window.loadFilterOptions;
+    if(typeof oldLoadFilter==='function'&&!oldLoadFilter.__actManagerScopeReapplyFinal){
+      window.loadFilterOptions=async function(){applyScopeToControls();const result=await oldLoadFilter.apply(this,arguments);applyScopeToControls();return result;};
+      window.loadFilterOptions.__actManagerScopeReapplyFinal=true;
+      try{loadFilterOptions=window.loadFilterOptions;}catch{}
+    }
+    const btn=document.getElementById('btnLoad');
+    if(btn&&!btn.__actManagerScopeReadyClick){btn.__actManagerScopeReadyClick=true;btn.addEventListener('click',()=>{const s=applyScopeToControls();const summary=document.getElementById('filterPreviewSummary');if(summary){summary.dataset.fullLoadStarted='1';}},true);}
+    if(scope&&scope.active){
+      const dock=document.getElementById('ccStatusDock');
+      if(dock&&!document.getElementById('actFinalScopeReadyBadge')){const b=document.createElement('span');b.id='actFinalScopeReadyBadge';b.className='cc-status-chip good';b.innerHTML='<i class="fas fa-filter"></i> Filters ready for load';dock.appendChild(b);}
     }
   };
-
-  function deepMerge(a,b){
-    const out = Array.isArray(a) ? [...a] : {...(a||{})};
-    Object.keys(b||{}).forEach(k=>{
-      if(b[k] && typeof b[k]==='object' && !Array.isArray(b[k])) out[k]=deepMerge(out[k]||{}, b[k]);
-      else out[k]=b[k];
-    });
-    return out;
-  }
-  function readJson(key){ try{return JSON.parse(localStorage.getItem(key)||'null')||null;}catch{return null;} }
-  function getConfig(){
-    let cfg = deepMerge(DEFAULT_CONFIG, readJson(STORAGE_KEY)||{});
-    const qs = p();
-    const mode = clean(qs.get('fastQuery') || qs.get('queryMode'));
-    if(mode){ cfg.enabled = mode !== 'dataverse' && mode !== 'off'; cfg.mode = mode === 'dax' ? 'powerbi-dax' : mode; }
-    ['workspaceId','datasetId'].forEach(k=>{ if(qs.get(k)) cfg.powerBi[k]=clean(qs.get(k)); });
-    if(qs.get('sqlEndpoint')) cfg.sql.endpoint = clean(qs.get('sqlEndpoint'));
-    return cfg;
-  }
-  function saveConfig(partial){ const next=deepMerge(getConfig(), partial||{}); localStorage.setItem(STORAGE_KEY, JSON.stringify(next)); return next; }
-  function isFastEnabled(cfg){
-    cfg = cfg || getConfig();
-    if(!cfg.enabled) return false;
-    if(cfg.mode === 'powerbi-dax') return !!(cfg.powerBi && cfg.powerBi.datasetId);
-    if(cfg.mode === 'sql-proxy' || cfg.mode === 'sql') return !!(cfg.sql && cfg.sql.endpoint);
-    return false;
-  }
-  window.ACT_FAST_QUERY = window.ACT_FAST_QUERY || {};
-  Object.assign(window.ACT_FAST_QUERY, {
-    getConfig, saveConfig,
-    enableDax: (workspaceId,datasetId,extra={}) => saveConfig({enabled:true,mode:'powerbi-dax',powerBi:{workspaceId,datasetId},...extra}),
-    enableSqlProxy: (endpoint,extra={}) => saveConfig({enabled:true,mode:'sql-proxy',sql:{endpoint,includeBearerToken:true},...extra}),
-    disable: () => saveConfig({enabled:false,mode:'dataverse'}),
-    explain: () => console.info('ACT fast query config lives in localStorage key', STORAGE_KEY, getConfig())
-  });
-
-  function scopeFromApp(){
-    const s = (window.ACT_READ_MANAGER_SCOPE ? window.ACT_READ_MANAGER_SCOPE() : window.ACT_MANAGER_SCOPE) || {};
-    const repsFromFilters = (()=>{ try{ const x=window.activeFilters && window.activeFilters['cr714_employeename']; return x && x.size ? Array.from(x) : []; }catch{return [];} })();
-    const actionsFromFilters = (()=>{ try{ const x=window.activeFilters && window.activeFilters['action']; return x && x.size ? Array.from(x) : []; }catch{return [];} })();
-    return {
-      reps: uniq([...(s.reps||[]), ...repsFromFilters]),
-      actions: uniq([...(s.actions||[]), ...actionsFromFilters]),
-      accountIds: uniq(s.accountIds || []),
-      startDate: dateOnly(s.startDate || window.reportStartDate || (document.getElementById('startDate')||{}).value || window.globalMinDate),
-      endDate: dateOnly(s.endDate || window.reportEndDate || (document.getElementById('endDate')||{}).value || window.globalMaxDate)
-    };
-  }
-  function replaceTokens(tpl, scope, cfg){
-    const c = cfg.model.columns;
-    const repl = {
-      '{startDate}': scope.startDate || '', '{endDate}': scope.endDate || '',
-      '{startDateDax}': daxDate(scope.startDate) || 'DATE(1900,1,1)', '{endDateDax}': daxDate(scope.endDate) || 'DATE(9999,12,31)',
-      '{repsDax}': listDax(scope.reps), '{actionsDax}': listDax(scope.actions), '{accountsDax}': listDax(scope.accountIds),
-      '{repsJson}': JSON.stringify(scope.reps), '{actionsJson}': JSON.stringify(scope.actions), '{accountsJson}': JSON.stringify(scope.accountIds),
-      '{maxRows}': String(cfg.maxRows || 100000),
-      '{sourceTable}': cfg.model.sourceTable, '{factTable}': cfg.model.factTable,
-      '{managerAccountTable}': cfg.model.managerAccountTable, '{employeeTable}': cfg.model.employeeTable
-    };
-    Object.keys(c).forEach(k=>{ repl[`{${k}}`] = c[k]; });
-    let out = String(tpl||'');
-    Object.keys(repl).forEach(k=>{ out = out.split(k).join(repl[k]); });
-    return out;
-  }
-  async function getPowerBiToken(){
-    const acct = window.msalAccount || (typeof msalAccount !== 'undefined' ? msalAccount : null);
-    const req = { scopes:[PBI_SCOPE], account:acct, authority:(window.msalConfig && window.msalConfig.auth && window.msalConfig.auth.authority) || undefined };
-    try { return (await window.msalInstance.acquireTokenSilent(req)).accessToken; }
-    catch(e){ return (await window.msalInstance.acquireTokenPopup(req)).accessToken; }
-  }
-  async function runDax(query, cfg){
-    const token = await getPowerBiToken();
-    const g = clean(cfg.powerBi.workspaceId);
-    const d = clean(cfg.powerBi.datasetId);
-    const url = g
-      ? `https://api.powerbi.com/v1.0/myorg/groups/${encodeURIComponent(g)}/datasets/${encodeURIComponent(d)}/executeQueries`
-      : `https://api.powerbi.com/v1.0/myorg/datasets/${encodeURIComponent(d)}/executeQueries`;
-    const res = await fetch(url, {method:'POST', headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'}, body:JSON.stringify({queries:[{query}], serializerSettings:{includeNulls:true}})});
-    if(!res.ok) throw new Error(`Power BI DAX query failed (${res.status}): ${await res.text()}`);
-    return rowsFromDax(await res.json());
-  }
-  function rowsFromDax(j){ return (((j||{}).results||[])[0]||{}).tables?.[0]?.rows || []; }
-  async function runSql(query, params, cfg){
-    const headers = {'Content-Type':'application/json'};
-    if(cfg.sql.includeBearerToken !== false && typeof window.getToken === 'function'){
-      try{ headers.Authorization = `Bearer ${await window.getToken()}`; }catch{}
-    }
-    const res = await fetch(cfg.sql.endpoint, {method:'POST', headers, body:JSON.stringify({query, params, app:'ACT', requestedAt:new Date().toISOString()})});
-    if(!res.ok) throw new Error(`SQL proxy query failed (${res.status}): ${await res.text()}`);
-    const j = await res.json();
-    return Array.isArray(j) ? j : (j.rows || j.value || []);
-  }
-  async function runNamedQuery(name, defaultDaxBuilder, defaultSqlBuilder){
-    const cfg = getConfig(), scope = scopeFromApp();
-    if(!isFastEnabled(cfg)) throw new Error('Fast query mode is not configured.');
-    if(cfg.mode === 'powerbi-dax'){
-      const tpl = cfg.daxTemplates && cfg.daxTemplates[name];
-      const query = tpl ? replaceTokens(tpl, scope, cfg) : defaultDaxBuilder(scope, cfg);
-      console.info(`[ACT Fast Query] DAX ${name}`, {scope, query});
-      return runDax(query, cfg);
-    }
-    const tpl = cfg.sqlTemplates && cfg.sqlTemplates[name];
-    const query = tpl ? replaceTokens(tpl, scope, cfg) : defaultSqlBuilder(scope, cfg);
-    console.info(`[ACT Fast Query] SQL ${name}`, {scope, query});
-    return runSql(query, scope, cfg);
-  }
-  function rowVal(r, ...names){
-    const keys = Object.keys(r||{});
-    for(const n of names){
-      if(r[n] !== undefined) return r[n];
-      const ln = low(n).replace(/[\[\]]/g,'');
-      const k = keys.find(x => low(x).replace(/^.*\[/,'').replace(/\]$/,'') === ln || low(x) === ln || low(x).endsWith(`[${ln}]`));
-      if(k) return r[k];
-    }
-    return '';
-  }
-  function boolVal(v){ return v === true || v === 1 || ['true','yes','1','email','note'].includes(low(v)); }
-  function normalizeAction(v){
-    try{ if(typeof normActivityAction === 'function') return normActivityAction(v); }catch{}
-    try{ if(typeof normSrcAction === 'function') return normSrcAction(v); }catch{}
-    return clean(v);
-  }
-
-  function filterArgs(scope, table, cfg, includeDate){
-    const c = cfg.model.columns;
-    const args=[];
-    if(scope.reps.length) args.push(`TREATAS(${listDax(scope.reps)}, ${col(table,c.rep)})`);
-    if(scope.actions.length) args.push(`TREATAS(${listDax(scope.actions)}, ${col(table,c.normalizedAction || c.action)})`);
-    if(scope.accountIds.length) args.push(`TREATAS(${listDax(scope.accountIds)}, ${col(table,c.account)})`);
-    if(includeDate && (scope.startDate || scope.endDate)){
-      const min = daxDate(scope.startDate) || 'DATE(1900,1,1)';
-      const max = daxDate(scope.endDate) || 'DATE(9999,12,31)';
-      args.push(`FILTER(ALL(${col(table,c.date)}), ${col(table,c.date)} >= ${min} && ${col(table,c.date)} <= ${max})`);
-    }
-    return args.length ? ',\n    ' + args.join(',\n    ') : '';
-  }
-  function daxSelect(table, aliasMap, filterArgsText, maxRows){
-    const selects = Object.entries(aliasMap).map(([alias,column]) => `"${alias}", ${col(table,column)}`).join(',\n      ');
-    return `EVALUATE\nTOPN(${maxRows || 100000},\n  SELECTCOLUMNS(\n    CALCULATETABLE('${String(table).replace(/'/g,"''")}'${filterArgsText}),\n      ${selects}\n  )\n)`;
-  }
-  function buildLiveSourceDax(scope,cfg){ const c=cfg.model.columns, t=cfg.model.sourceTable; return daxSelect(t,{dataset:c.dataset,datasetLabel:c.datasetLabel,table:c.tableName,id:c.id,account:c.account,company:c.company,rep:c.rep,rawAction:c.action,action:c.normalizedAction||c.action},filterArgs(scope,t,cfg,false),cfg.maxRows); }
-  function buildLiveFactDax(scope,cfg){ const c=cfg.model.columns, t=cfg.model.factTable; return daxSelect(t,{account:c.account,company:c.company,rep:c.rep,rawAction:c.action,action:c.normalizedAction||c.action,date:c.date,isEmail:c.isEmail,isNote:c.isNote},filterArgs(scope,t,cfg,true),cfg.maxRows); }
-  function buildManagerAccountsDax(scope,cfg){ const c=cfg.model.columns, t=cfg.model.managerAccountTable; return daxSelect(t,{account:c.account,company:c.company,rep:c.rep,action:c.action,modifiedon:c.modifiedon,createdon:c.createdon,emailDate:c.emailDate,helpStatus:c.helpStatus,message:c.message,managerNotes:c.managerNotes,contact:c.contact,phone:c.phone,email:c.email,address:c.address,intro:c.intro,statecode:c.statecode,dataset:c.dataset,recordId:c.id},filterArgs(scope,t,cfg,false),cfg.maxRows); }
-  function buildEmployeesDax(scope,cfg){ const c=cfg.model.columns, t=cfg.model.employeeTable; return daxSelect(t,{cr714_employeename:c.employeeName,cr714_managerassigned:c.manager,cr714_srmanager:c.srManager,cr714_supervisors:c.supervisor,cr714_departmentname:c.department,statecode:c.employeeStatus},'',cfg.maxRows); }
-
-  function buildSql(name, scope, cfg){
-    const c=cfg.model.columns;
-    const table = name==='liveFact' ? cfg.model.factTable : name==='employees' ? cfg.model.employeeTable : name==='managerAccounts' ? cfg.model.managerAccountTable : cfg.model.sourceTable;
-    return `/* ACT ${name} fast-query. The SQL proxy should parameterize @startDate, @endDate, @repsJson, @actionsJson, @accountsJson. */\nSELECT *\nFROM ${table}\nWHERE 1=1\n  AND (@repsJson IS NULL OR ${c.rep} IN (SELECT value FROM OPENJSON(@repsJson)))\n  AND (@actionsJson IS NULL OR ${c.action} IN (SELECT value FROM OPENJSON(@actionsJson)))\n  AND (@accountsJson IS NULL OR ${c.account} IN (SELECT value FROM OPENJSON(@accountsJson)))` + (name==='liveFact' ? `\n  AND (@startDate IS NULL OR ${c.date} >= @startDate)\n  AND (@endDate IS NULL OR ${c.date} <= @endDate)` : '');
-  }
-
-  function mapLiveSourceRows(rows){
-    return (rows||[]).map(r=>({
-      dataset:clean(rowVal(r,'dataset','Dataset')) || 'Source',
-      datasetLabel:clean(rowVal(r,'datasetLabel','Dataset Label','dataset')) || clean(rowVal(r,'dataset')) || 'Source',
-      table:clean(rowVal(r,'table','Table','tableName')),
-      id:clean(rowVal(r,'id','Record ID','recordId')),
-      account:clean(rowVal(r,'account','Account Number','Account')),
-      company:clean(rowVal(r,'company','Company')),
-      rep:clean(rowVal(r,'rep','Rep')),
-      rawAction:clean(rowVal(r,'rawAction','Action')),
-      action:normalizeAction(rowVal(r,'action','Normalized Action','rawAction','Action'))
-    })).filter(r=>r.account || r.rep || r.action);
-  }
-  function mapLiveFactRows(rows){
-    return (rows||[]).map(r=>({
-      ...r,
-      account:clean(rowVal(r,'account','Account Number','Account')),
-      company:clean(rowVal(r,'company','Company')),
-      rep:clean(rowVal(r,'rep','Rep')),
-      rawAction:clean(rowVal(r,'rawAction','Action')),
-      action:normalizeAction(rowVal(r,'action','Normalized Action','rawAction','Action')),
-      date:dateOnly(rowVal(r,'date','Activity Date')),
-      isEmail:boolVal(rowVal(r,'isEmail','Is Email','Email')),
-      isNote:boolVal(rowVal(r,'isNote','Is Note','Note'))
-    })).filter(r=>r.account || r.rep || r.action || r.date);
-  }
-  function mapEmployees(rows){
-    return (rows||[]).map(r=>{
-      const status = clean(rowVal(r,'statecode','Employee Status','Rep Status'));
-      return {
-        ...r,
-        cr714_employeename: clean(rowVal(r,'cr714_employeename','Employee Name','Rep','Rep Name')),
-        cr714_managerassigned: clean(rowVal(r,'cr714_managerassigned','Manager')),
-        cr714_srmanager: clean(rowVal(r,'cr714_srmanager','Sr Manager')),
-        cr714_supervisors: clean(rowVal(r,'cr714_supervisors','Supervisor')),
-        cr714_departmentname: clean(rowVal(r,'cr714_departmentname','Department')) || 'Corporate',
-        _mappedStatecode: low(status).startsWith('inactive') || status === '1' ? 'Inactive' : 'Active'
-      };
-    }).filter(e=>e.cr714_employeename);
-  }
-  function mapManagerAccounts(rows){
-    const map = new Map();
-    (rows||[]).forEach(r=>{
-      const id = clean(rowVal(r,'account','Account Number','Account','cr714_id'));
-      if(!id) return;
-      const modified = rowVal(r,'modifiedon','Modified On') || rowVal(r,'createdon','Created On') || new Date().toISOString();
-      const rep = clean(rowVal(r,'rep','Rep')) || 'Unassigned';
-      const action = clean(rowVal(r,'action','Action','Normalized Action'));
-      const msg = clean(rowVal(r,'message','Action Message'));
-      const help = clean(rowVal(r,'helpStatus','Help Status'));
-      if(!map.has(id)){
-        map.set(id,{
-          cr714_id:id, company:clean(rowVal(r,'company','Company')) || 'Unknown Company', rep,
-          _latestRepDate:new Date(modified||0), action, message:msg,
-          managerNotes:clean(rowVal(r,'managerNotes','Manager Notes')), modifiedon:modified,
-          emailDate:rowVal(r,'emailDate','Email Date'), contact:clean(rowVal(r,'contact','Contact'))||'--',
-          phone:clean(rowVal(r,'phone','Phone'))||'--', email:clean(rowVal(r,'email','Email'))||'--', address:clean(rowVal(r,'address','Address'))||'--',
-          sources:[], isHelp:false, isClose:false, intro:boolVal(rowVal(r,'intro','Intro')), helpStatus:help,
-          statecode:clean(rowVal(r,'statecode','State Code')) || 'Active', importantInfo:'', _historyLoaded:false, _d365Loaded:false, _introAcknowledged:false
-        });
-      }
-      const x=map.get(id);
-      if(new Date(modified||0) > x._latestRepDate){ x._latestRepDate=new Date(modified||0); x.rep=rep; x.modifiedon=modified; }
-      if(action) x.action = action;
-      if(help && help !== 'Clear' && help !== 'Resolved') x.helpStatus = help;
-      const up = `${msg} ${help}`.toUpperCase();
-      if(up.includes('HELP REQUEST')) x.isHelp = true;
-      if(up.includes('CLOSE REQUEST') || up.includes('[CLOSED]')) x.isClose = true;
-      x.sources.push({type:clean(rowVal(r,'dataset','Dataset'))||'FastQuery', table:'fast-query', id:clean(rowVal(r,'recordId','Record ID')), rawNotes:'', managerNotesRaw:x.managerNotes, message:msg, rep});
-    });
-    return Array.from(map.values());
-  }
-
-  async function fastLiveLoad(){
-    const source = mapLiveSourceRows(await runNamedQuery('liveSource', buildLiveSourceDax, (s,c)=>buildSql('liveSource',s,c)));
-    const fact = mapLiveFactRows(await runNamedQuery('liveFact', buildLiveFactDax, (s,c)=>buildSql('liveFact',s,c)));
-    return {source, fact};
-  }
-  async function fastManagerAccounts(){ return mapManagerAccounts(await runNamedQuery('managerAccounts', buildManagerAccountsDax, (s,c)=>buildSql('managerAccounts',s,c))); }
-  async function fastEmployees(){ return mapEmployees(await runNamedQuery('employees', buildEmployeesDax, (s,c)=>buildSql('employees',s,c))); }
-
-  // Live Leaderboard override
-  try{
-    if(typeof loadAll === 'function' && !window.__ACT_ORIGINAL_LOADALL_BEFORE_FAST_QUERY){
-      window.__ACT_ORIGINAL_LOADALL_BEFORE_FAST_QUERY = loadAll;
-      loadAll = async function(){
-        const cfg=getConfig();
-        if(!isFastEnabled(cfg)) return window.__ACT_ORIGINAL_LOADALL_BEFORE_FAST_QUERY();
-        try{
-          if(typeof prog==='function') prog(true, `Fast ${cfg.mode} query: loading scoped rows...`, .05);
-          window.setConnectionStatus?.('refreshing', `Fast ${cfg.mode} query running...`);
-          const out = await fastLiveLoad();
-          sourceRows = out.source; factRows = out.fact;
-          buildReports();
-          if(typeof prog==='function') prog(false);
-          window.setConnectionStatus?.('connected', `Fast query loaded ${fmt(sourceRows.length)} source rows + ${fmt(factRows.length)} activity rows`);
-          const btn=document.getElementById('btnExport'); if(btn) btn.disabled=false;
-        }catch(e){
-          console.warn('Fast query failed; falling back to Dataverse loader.', e);
-          window.setConnectionStatus?.('warning', 'Fast query failed. Falling back to Dataverse...');
-          if(cfg.fallbackToDataverse !== false) return window.__ACT_ORIGINAL_LOADALL_BEFORE_FAST_QUERY();
-          throw e;
-        }
-      };
-    }
-  }catch(e){ console.warn('Live fast-query override skipped.', e); }
-
-  // Manager Console overrides
-  try{
-    if(typeof window.fetchEmployees === 'function' && !window.__ACT_ORIGINAL_FETCH_EMPLOYEES_BEFORE_FAST_QUERY){
-      window.__ACT_ORIGINAL_FETCH_EMPLOYEES_BEFORE_FAST_QUERY = window.fetchEmployees;
-      window.fetchEmployees = async function(){
-        const cfg=getConfig();
-        if(!isFastEnabled(cfg)) return window.__ACT_ORIGINAL_FETCH_EMPLOYEES_BEFORE_FAST_QUERY();
-        try{
-          window.updateLoader?.(8, `Fast ${cfg.mode} query: loading employees...`);
-          window.employeesData = await fastEmployees();
-          if(!window.employeesData.length) throw new Error('Fast employee query returned 0 rows.');
-        }catch(e){
-          console.warn('Fast employee query failed; falling back to Dataverse employees.', e);
-          if(cfg.fallbackToDataverse !== false) return window.__ACT_ORIGINAL_FETCH_EMPLOYEES_BEFORE_FAST_QUERY();
-          throw e;
-        }
-      };
-    }
-    if(typeof window.fetchAllData === 'function' && !window.__ACT_ORIGINAL_FETCH_ALL_DATA_BEFORE_FAST_QUERY){
-      window.__ACT_ORIGINAL_FETCH_ALL_DATA_BEFORE_FAST_QUERY = window.fetchAllData;
-      window.fetchAllData = async function(){
-        const cfg=getConfig();
-        if(!isFastEnabled(cfg)) return window.__ACT_ORIGINAL_FETCH_ALL_DATA_BEFORE_FAST_QUERY();
-        const loader=document.getElementById('global-loader');
-        if(loader) loader.style.display='flex';
-        try{
-          window.updateLoader?.(20, `Fast ${cfg.mode} query: loading scoped accounts...`, 0);
-          window.mergedAccounts = await fastManagerAccounts();
-          window.totalLoadedRecords = window.mergedAccounts.length;
-          window.populateDynamicActionSet?.();
-          window.initDateSlider?.();
-          window.reportsDirty = true;
-          window.updateLoader?.(100, `Fast query synced ${fmt(window.mergedAccounts.length)} accounts.`, window.mergedAccounts.length);
-          setTimeout(()=>{ if(loader) loader.style.display='none'; }, 250);
-        }catch(e){
-          console.warn('Fast account query failed; falling back to Dataverse full load.', e);
-          window.showToast?.('Fast query failed; falling back to Dataverse load.', 'warning');
-          if(cfg.fallbackToDataverse !== false) return window.__ACT_ORIGINAL_FETCH_ALL_DATA_BEFORE_FAST_QUERY();
-          if(loader) loader.style.display='none';
-          throw e;
-        }
-      };
-    }
-  }catch(e){ console.warn('Manager fast-query overrides skipped.', e); }
-
-  console.info('[ACT Fast Query] DAX / SQL accelerator installed. Run ACT_FAST_QUERY.explain() for config.');
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',()=>setTimeout(boot,140)); else setTimeout(boot,140);
+  window.ACT_LIVE_LEADERBOARD_SELF_HEAL={badColumns:readBad,clearBadColumns:function(entity){if(entity){const m=readBad();delete m[entity];writeBad(m);}else localStorage.removeItem(BAD_KEY);},applyManagerScopeToControls:applyScopeToControls};
 })();
 </script>
 
