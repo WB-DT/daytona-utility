@@ -5515,122 +5515,142 @@ body.command-center-ui .bar-row{min-height:72px!important;border-radius:18px!imp
 
 
 
-<!-- COPILOT PATCH 2026-06-23D: Dataverse filter self-heal
-     Fixes the failure where a bad field was removed from $select but was still left inside $filter,
-     causing the same Dataverse 0x80060888 error to repeat. -->
-<script id="actDataverseFilterSelfHeal20260623D">
+<!-- COPILOT PATCH 2026-06-23E: Acceptance-pass schema map for LiveLeaderboard source queries
+     Uses the stable source-field pattern from the working Reporting Link Acceptance Pass app.
+     The key fix: do not let fallback candidate fields leak into Dataverse $select or Manager $filter.
+     Each source dataset gets only its real primary rep/company/account fields. -->
+<script id="actSourceSchemaAcceptancePass20260623E">
 (function(){
-  if(window.__ACT_DATAVERSE_FILTER_SELF_HEAL_20260623D) return;
-  window.__ACT_DATAVERSE_FILTER_SELF_HEAL_20260623D = true;
+  if(window.__ACT_SOURCE_SCHEMA_ACCEPTANCE_PASS_20260623E) return;
+  window.__ACT_SOURCE_SCHEMA_ACCEPTANCE_PASS_20260623E = true;
 
-  const BAD_KEY='act_live_leaderboard_bad_columns_v2';
-  const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
-  const escRe=s=>String(s).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-  const readBad=()=>{try{return JSON.parse(localStorage.getItem(BAD_KEY)||'{}')||{};}catch{return{};}};
-  const writeBad=m=>{try{localStorage.setItem(BAD_KEY,JSON.stringify(m||{}));}catch{}};
-  function entityFromUrl(u){try{const parts=String(u.pathname||'').split('/').filter(Boolean);const ix=parts.findIndex(p=>p.toLowerCase()==='v9.2');const seg=ix>=0?parts[ix+1]:parts[parts.length-1];return clean(decodeURIComponent(String(seg||'').split('(')[0]));}catch{return'';}}
-  function remember(entity,col){entity=clean(entity);col=clean(col);if(!entity||!col)return;const m=readBad();m[entity]=Array.from(new Set([...(m[entity]||[]),col])).sort();writeBad(m);}
-  function badSet(entity){return new Set((readBad()[entity]||[]).map(clean).filter(Boolean));}
-  function splitSelect(v){return clean(v).split(',').map(clean).filter(Boolean);}
-  function setSelect(u,cols){cols=Array.from(new Set((cols||[]).map(clean).filter(Boolean))); if(cols.length)u.searchParams.set('$select',cols.join(',')); else u.searchParams.delete('$select');}
-  function removeBadOrderBy(orderBy,badCol){
-    if(!orderBy) return orderBy;
-    const bad=badCol.toLowerCase();
-    return orderBy.split(',').map(x=>x.trim()).filter(x=>!x.toLowerCase().startsWith(bad+' ') && x.toLowerCase()!==bad).join(',');
+  const SCHEMA = {
+    cr714_accountmanagementdatasets: {
+      id:'cr714_accountmanagementdatasetid',
+      account:['cr714_accountnum'],
+      company:['cr714_accountname'],
+      rep:['cr714_rep'],
+      extra:['cr714_action','statecode']
+    },
+    cr714_cadencedatasets: {
+      id:'cr714_cadencedatasetid',
+      account:['cr714_accountnum'],
+      company:['cr714_accountname'],
+      rep:['cr714_retentionrep'],
+      extra:['cr714_action','statecode']
+    },
+    cr714_prospectingdatasets: {
+      id:'cr714_prospectingdatasetid',
+      account:['cr714_accountnum'],
+      company:['cr714_accountname'],
+      rep:['cr714_repassigned'],
+      extra:['cr714_action','statecode']
+    },
+    cr714_louisebrowndatasets: {
+      id:'cr714_louisebrowndatasetid',
+      account:['cr714_accountnum'],
+      company:['cr714_accountname'],
+      rep:['cr714_assignedrep'],
+      extra:['cr714_action','statecode']
+    }
+  };
+  const clean = v => String(v ?? '').replace(/\s+/g,' ').trim();
+  const uniq = arr => Array.from(new Set((arr||[]).map(clean).filter(Boolean)));
+  const byTable = ds => SCHEMA[clean(ds && ds.table)] || null;
+
+  function applySchemaToDataset(ds){
+    const s = byTable(ds);
+    if(!s || !ds) return ds;
+    ds.id = s.id || ds.id;
+    ds.accountFields = [...s.account];
+    ds.companyFields = [...s.company];
+    ds.repFields = [...s.rep];
+    ds.__acceptedSourceColumns = uniq([s.id, ...s.account, ...s.company, ...s.rep, ...s.extra]);
+    return ds;
   }
+
+  try{
+    if(Array.isArray(window.DATASETS)) window.DATASETS.forEach(applySchemaToDataset);
+  }catch{}
+  try{
+    if(typeof DATASETS !== 'undefined' && Array.isArray(DATASETS)) DATASETS.forEach(applySchemaToDataset);
+  }catch{}
+
+  const previousSourceSelectColumns = (typeof sourceSelectColumns === 'function') ? sourceSelectColumns : null;
+  sourceSelectColumns = function(ds){
+    applySchemaToDataset(ds);
+    const s = byTable(ds);
+    if(s) return [...(ds.__acceptedSourceColumns || uniq([s.id, ...s.account, ...s.company, ...s.rep, ...s.extra]))];
+    return previousSourceSelectColumns ? previousSourceSelectColumns(ds) : [];
+  };
+
+  // Make metadata fallback safe. If the metadata call fails, do NOT return every candidate field.
+  // Return the accepted schema for source tables, otherwise preserve the original behavior.
+  const previousAvailCols = (typeof availCols === 'function') ? availCols : null;
+  if(previousAvailCols){
+    availCols = async function(logical,wanted){
+      const s = SCHEMA[clean(logical)];
+      if(s){
+        const safe = uniq([s.id, ...s.account, ...s.company, ...s.rep, ...s.extra]);
+        try{
+          const got = await previousAvailCols(logical, safe);
+          // If metadata worked, got is safe. If it fell back, it is still only the safe list.
+          return uniq((got && got.length ? got : safe).filter(c => safe.includes(c)));
+        }catch(e){
+          console.warn('[ACT Source Schema Acceptance] Metadata lookup failed; using accepted safe columns for', logical, e);
+          return safe;
+        }
+      }
+      return previousAvailCols(logical,wanted);
+    };
+  }
+
+  // Upgrade removeSelectColumn so legacy retries remove a rejected property from $select, $filter, and $orderby.
+  function escRe(s){ return String(s).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'); }
   function removeBadFilter(filter,badCol){
-    if(!filter) return filter;
+    if(!filter || !badCol) return filter;
     let s=String(filter);
     const bad=escRe(badCol);
     const pred=`${bad}\\s+(?:eq|ne|gt|ge|lt|le|like)\\s+(?:'(?:''|[^'])*'|[^\\s)]+)`;
-    const funcs=[
-      `contains\\s*\\(\\s*${bad}\\s*,\\s*'(?:''|[^'])*'\\s*\\)`,
-      `startswith\\s*\\(\\s*${bad}\\s*,\\s*'(?:''|[^'])*'\\s*\\)`,
-      `endswith\\s*\\(\\s*${bad}\\s*,\\s*'(?:''|[^'])*'\\s*\\)`
-    ];
+    const funcs=[`contains\\s*\\(\\s*${bad}\\s*,\\s*'(?:''|[^'])*'\\s*\\)`,`startswith\\s*\\(\\s*${bad}\\s*,\\s*'(?:''|[^'])*'\\s*\\)`,`endswith\\s*\\(\\s*${bad}\\s*,\\s*'(?:''|[^'])*'\\s*\\)`];
     const atom=`(?:${pred}|${funcs.join('|')})`;
-    const flags='ig';
-    for(let i=0;i<20;i++){
+    for(let i=0;i<12;i++){
       const before=s;
-      s=s.replace(new RegExp(`\\s+(or|and)\\s+${atom}`,flags),'');
-      s=s.replace(new RegExp(`${atom}\\s+(or|and)\\s+`,flags),'');
-      s=s.replace(new RegExp(`${atom}`,flags),'');
+      s=s.replace(new RegExp(`\\s+(or|and)\\s+${atom}`,'ig'),'');
+      s=s.replace(new RegExp(`${atom}\\s+(or|and)\\s+`,'ig'),'');
+      s=s.replace(new RegExp(`${atom}`,'ig'),'');
       s=s.replace(/\(\s*(?:or|and)\s*/ig,'(').replace(/\s*(?:or|and)\s*\)/ig,')');
-      s=s.replace(/\(\s*\)/g,'');
-      s=s.replace(/\s+(and|or)\s+(and|or)\s+/ig,' $2 ');
-      s=s.replace(/^\s*(and|or)\s+/ig,'').replace(/\s+(and|or)\s*$/ig,'');
-      s=s.replace(/\s{2,}/g,' ').trim();
+      s=s.replace(/\(\s*\)/g,'').replace(/^\s*(and|or)\s+/ig,'').replace(/\s+(and|or)\s*$/ig,'').replace(/\s{2,}/g,' ').trim();
       if(s===before) break;
     }
     return s;
   }
-  function extractBad(text){
-    const s=String(text||'');
-    const pats=[/property named ['"]([^'"]+)['"]/i,/Could not find a property named ['"]([^'"]+)['"]/i,/Could not find.*?property.*?['"]([^'"]+)['"]/i,/No property ['"]([^'"]+)['"] exists/i,/Could not find a property named ([A-Za-z0-9_]+)/i];
-    for(const p of pats){const m=s.match(p); if(m&&m[1]) return clean(m[1]);}
-    return '';
-  }
-  function sanitizeInput(input,badCol){
+  const previousRemoveSelectColumn = (typeof removeSelectColumn === 'function') ? removeSelectColumn : null;
+  removeSelectColumn = function(path,badCol){
     try{
-      const raw=typeof input==='string'?input:(input&&input.url)||'';
-      if(!raw||!raw.includes('/api/data/')) return input;
-      const u=new URL(raw,location.href);
-      const entity=entityFromUrl(u);
-      const bads=new Set([...badSet(entity), ...(badCol?[badCol]:[])]);
-      if(u.searchParams.has('$select')) setSelect(u,splitSelect(u.searchParams.get('$select')).filter(c=>!bads.has(c)));
+      const u = new URL(String(path), location.href);
+      if(u.searchParams.has('$select')){
+        const cols=(u.searchParams.get('$select')||'').split(',').map(clean).filter(Boolean).filter(c=>c!==badCol);
+        if(cols.length) u.searchParams.set('$select',cols.join(',')); else u.searchParams.delete('$select');
+      }
       if(u.searchParams.has('$filter')){
-        let f=u.searchParams.get('$filter')||'';
-        bads.forEach(c=>{f=removeBadFilter(f,c);});
+        const f=removeBadFilter(u.searchParams.get('$filter'),badCol);
         if(clean(f)) u.searchParams.set('$filter',f); else u.searchParams.delete('$filter');
       }
       if(u.searchParams.has('$orderby')){
-        let o=u.searchParams.get('$orderby')||'';
-        bads.forEach(c=>{o=removeBadOrderBy(o,c);});
-        if(clean(o)) u.searchParams.set('$orderby',o); else u.searchParams.delete('$orderby');
+        const bad=String(badCol||'').toLowerCase();
+        const o=(u.searchParams.get('$orderby')||'').split(',').map(x=>x.trim()).filter(x=>x && x.toLowerCase()!==bad && !x.toLowerCase().startsWith(bad+' ')).join(',');
+        if(o) u.searchParams.set('$orderby',o); else u.searchParams.delete('$orderby');
       }
-      const next=u.href;
-      if(typeof input==='string') return next;
-      try{return new Request(next,input);}catch{return next;}
-    }catch(e){console.warn('[ACT Dataverse filter self-heal] sanitize skipped',e); return input;}
-  }
-  function canHeal(input,init){
-    const raw=typeof input==='string'?input:(input&&input.url)||'';
-    const method=String((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
-    return method==='GET'&&raw.includes('/api/data/')&&(raw.includes('$select=')||raw.includes('$filter=')||raw.includes('$orderby='));
-  }
+      const out = path.startsWith('http') ? u.href : (u.pathname.split('/').pop() + (u.search||''));
+      return out;
+    }catch(e){
+      return previousRemoveSelectColumn ? previousRemoveSelectColumn(path,badCol) : path;
+    }
+  };
 
-  // Patch the legacy helper used by fetchAll(), so local retries remove the bad field from $filter too.
-  try{
-    const previousRemove = typeof removeSelectColumn==='function' ? removeSelectColumn : null;
-    window.ACT_REMOVE_BAD_DATAVERSE_FIELD_FROM_URL = function(path,badCol){ return sanitizeInput(path,badCol); };
-    removeSelectColumn = function(path,badCol){ return sanitizeInput(previousRemove ? previousRemove(path,badCol) : path,badCol); };
-  }catch(e){console.warn('[ACT Dataverse filter self-heal] removeSelectColumn hook skipped',e);}
-
-  // Patch fetch as a second safety net for direct Dataverse calls and repeated retry responses.
-  const priorFetch=window.fetch;
-  if(typeof priorFetch==='function'&&!priorFetch.__actDataverseFilterSelfHeal20260623D){
-    const healed=async function(input,init){
-      if(!canHeal(input,init)) return priorFetch.call(this,input,init);
-      let current=sanitizeInput(input);
-      let lastText='',lastStatus=0;
-      for(let attempt=0;attempt<24;attempt++){
-        const res=await priorFetch.call(this,current,init);
-        if(res.ok) return res;
-        lastStatus=res.status;
-        try{lastText=await res.clone().text();}catch{try{lastText=await res.text();}catch{lastText=res.statusText||'';}}
-        const bad=extractBad(lastText);
-        if(!bad) return new Response(lastText,{status:res.status,statusText:res.statusText,headers:res.headers});
-        try{const raw=typeof current==='string'?current:(current&&current.url)||'';const entity=entityFromUrl(new URL(raw,location.href));remember(entity,bad);console.warn(`[ACT Dataverse filter self-heal] Removed ${bad} from $select/$filter/$orderby for ${entity||'request'} and retrying.`);window.ACTLoadingScreen?.log?.(`Removed unavailable field ${bad} from request filter`);}catch{}
-        current=sanitizeInput(current,bad);
-      }
-      return new Response(lastText||'Dataverse filter self-heal retry limit exceeded',{status:lastStatus||400,statusText:'Dataverse filter self-heal failed'});
-    };
-    healed.__actDataverseFilterSelfHeal20260623D=true;
-    window.fetch=healed;
-  }
-
-  window.ACT_DATAVERSE_FILTER_SELF_HEAL={badColumns:readBad,clearBadColumns:function(entity){if(entity){const m=readBad();delete m[entity];writeBad(m);}else localStorage.removeItem(BAD_KEY);},sanitizeUrl:function(url,badCol){return sanitizeInput(url,badCol);},removeBadFilter};
-  console.info('[ACT Dataverse filter self-heal] Installed $select + $filter bad-column recovery.');
+  window.ACT_SOURCE_SCHEMA_ACCEPTANCE_PASS = {version:'2026-06-23E', schema:SCHEMA, sourceSelectColumns: ds => sourceSelectColumns(ds)};
+  console.info('[ACT Source Schema Acceptance] Installed safe source schema map and filter-aware retry cleanup.');
 })();
 </script>
 
