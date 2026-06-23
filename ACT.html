@@ -2522,6 +2522,7 @@ allRaw.forEach(r => {
 
     window.saveToAuditLog("Save", `Note: ${note}`);
     currentSelectedRecord.cr714_followup = iso;
+    currentSelectedRecord._cachedNoteDate = Date.now(); // Instantly update local cache!
 
     document.querySelectorAll(".empty-field-warning").forEach((el) => el.classList.remove("empty-field-warning"));
 
@@ -3576,17 +3577,29 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                         const parts = r.cr714_followup.substring(0, 10).split('-'); 
                         if(parts.length === 3) { 
                             const d = new Date(parts[0], parts[1]-1, parts[2]); 
-                            followUpHtml = `<span class="text-[9px] text-status-info font-bold">Follow Up: ${d.toLocaleDateString(undefined, {month:'short', day:'numeric'})}</span>`; 
+                            followUpHtml = `<div class="text-[9px] text-status-info font-bold">Follow Up: ${d.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'})}</div>`; 
                         } 
                     }
 
-                    let lastNoteHtml = '';
-                    const noteInfoForCard = window.getRecordNoteInfo(r);
-                    if (noteInfoForCard.timestamp > 0) {
-                        const nDate = new Date(noteInfoForCard.timestamp);
-                        lastNoteHtml = `<span class="gallery-date-pill gallery-date-note-present text-[9px] font-bold"><i class="fas fa-note-sticky mr-1"></i>Last Note: ${nDate.toLocaleDateString(undefined, {month:'short', day:'numeric'})}</span>`;
-                    } else {
-                        lastNoteHtml = `<span class="gallery-date-pill gallery-date-note-empty text-[9px] font-bold"><i class="far fa-note-sticky mr-1"></i>Last Note: --</span>`;
+                    // --- NOTE DATE LOGIC (CACHED FOR SPEED) ---
+                    if (r._cachedNoteDate === undefined) {
+                        let newestNoteDate = null;
+                        r.sources.forEach(src => {
+                            let parsedHistory = window.parseNotes(src.rawNotes || '');
+                            if (parsedHistory.length > 0) {
+                                let nd = new Date(parsedHistory[0].date).getTime();
+                                if (!isNaN(nd) && (!newestNoteDate || nd > newestNoteDate)) newestNoteDate = nd;
+                            }
+                        });
+                        r._cachedNoteDate = newestNoteDate;
+                    }
+                    
+                    let actNoteDateHtml = '';
+                    if (r._cachedNoteDate) {
+                        let ndObj = new Date(r._cachedNoteDate);
+                        let daysOld = (Date.now() - r._cachedNoteDate) / (1000 * 60 * 60 * 24);
+                        let colorClass = (daysOld <= 30) ? 'text-muted' : 'text-status-warning';
+                        actNoteDateHtml = `<div class="text-[9px] ${colorClass} font-bold">Note Date: ${ndObj.toLocaleDateString(undefined, {year:'numeric', month:'short', day:'numeric'})}</div>`;
                     }
                     
                     let sourcesHtml = r.sources.map(s => {
@@ -3595,6 +3608,22 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                         return `<span class="px-1.5 py-0.5 rounded border text-[8px] font-bold ${badgeClass}">${abbr}</span>`;
                     }).join('');
 
+                    // --- ACTIONS SIDE-BY-SIDE (DEDUPLICATED) ---
+                    let uniqueActions = [];
+                    r.sources.forEach(s => {
+                        if (!s.action || s.action === 'No Action') return;
+                        if (!uniqueActions.some(ua => ua.action === s.action)) uniqueActions.push({action: s.action, type: s.type});
+                    });
+                    
+                    let actionsHtml = uniqueActions.map(s => {
+                        let badgeClass = s.type === 'AM' ? 'badge-am' : (s.type === 'Cadence' ? 'badge-cad' : (s.type === 'LB' ? 'badge-lb' : 'badge-psp'));
+                        return `<span class="px-1.5 py-0.5 rounded border text-[8px] font-bold ${badgeClass} max-w-[100px] truncate" title="${s.type}">${window.escapeHTML(s.action)}</span>`;
+                    }).join('');
+                    
+                    if (!actionsHtml && r.cr714_action && r.cr714_action !== 'No Action') {
+                        actionsHtml = `<span class="px-1.5 py-0.5 rounded border text-[8px] font-bold badge-action max-w-[100px] truncate">${window.escapeHTML(r.cr714_action)}</span>`;
+                    }
+
                     div.innerHTML = `
                         <div class="flex justify-between items-start w-full mb-1 gap-2">
                             <div class="flex items-center gap-1 min-w-0">
@@ -3602,21 +3631,21 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                                 ${displayIntroStr ? `<i class="fas fa-handshake text-status-warning text-sm flex-shrink-0" title="Intro: ${window.escapeHTML(displayIntroStr)}"></i>` : ''}
                             </div>
                             <div class="flex flex-col items-end text-[10px] flex-shrink-0 whitespace-nowrap">
-                                ${followUpHtml}
+                                ${actNoteDateHtml}
                                 ${emailHtml}
-                                ${lastNoteHtml}
                             </div>
                         </div>
                         <div class="gallery-item-company truncate font-bold" title="${window.escapeHTML(r.cr714_company)}">
                             ${window.escapeHTML(r.cr714_company)}
                         </div>
                         <div class="flex justify-between items-end mt-1 gap-2">
-                            <div class="text-[9px] text-muted truncate">
-                                ${pref.showRep ? window.escapeHTML(r.cr714_rep) : ''}
+                            <div class="flex flex-col items-start min-w-0 truncate">
+                                ${followUpHtml ? `<div class="mb-0.5">${followUpHtml}</div>` : ''}
+                                <span class="text-[9px] text-muted truncate mt-0.5">${pref.showRep ? window.escapeHTML(r.cr714_rep) : ''}</span>
                             </div>
                             <div class="flex flex-col items-end gap-1 flex-shrink-0 max-w-[70%]">
                                 <div class="flex flex-wrap justify-end gap-1">${sourcesHtml}</div>
-                                ${r.cr714_action ? `<div class="text-[9px] font-bold badge-action border px-1 rounded max-w-full truncate text-right">${window.escapeHTML(r.cr714_action)}</div>` : ''}
+                                <div class="flex flex-wrap justify-end gap-1">${actionsHtml}</div>
                             </div>
                         </div>
                     `;
@@ -3797,7 +3826,14 @@ window.populateForm = function(rec) {
             return `<span class="px-1.5 py-0.5 rounded border text-[9px] font-bold ${badgeClass}">${abbr}: ${s.action || 'No Action'}</span>`;
         }).join('');
         document.getElementById('form-action-value').innerHTML = sourcesFormHtml;
-        document.getElementById('form-msg-value').innerText = rec.cr714_actionmessage || '--';
+
+        let msgHtml = rec.sources.map(s => {
+            let abbr = s.type === 'AM' ? 'AM' : (s.type === 'Cadence' ? 'CAD' : (s.type === 'LB' ? 'LB' : 'PSP'));
+            let colorClass = s.type === 'AM' ? 'text-green-600' : (s.type === 'Cadence' ? 'text-blue-600' : (s.type === 'LB' ? 'text-pink-600' : 'text-orange-500'));
+            let msg = s.message && s.message.trim() !== '' ? s.message : 'No message';
+            return `<div class="mb-1 last:mb-0"><span class="font-black ${colorClass} mr-1">[${abbr}]</span>${window.escapeHTML(msg)}</div>`;
+        }).join('');
+        document.getElementById('form-msg-value').innerHTML = msgHtml || '--';
         document.getElementById('d365-address-display').innerText = rec.cr714_billingaddress || '--'; 
         
         let sentRecs = []; try { sentRecs = JSON.parse(localStorage.getItem('daytona_sent_records') || '[]'); } catch(e) {} const isSent = sentRecs.includes(String(rec.cr714_id)); const sentBadge = document.getElementById('profile-sent-badge'); if(isSent) sentBadge.classList.remove('hidden'); else sentBadge.classList.add('hidden');
@@ -5210,7 +5246,7 @@ document.getElementById('script-modal').style.display='flex';
             
         </div>
         
-        <div id="filter-legend-container" class="w-full flex items-center text-[11px] text-muted px-4 py-1.5 border-t bg-black/5 hidden" style="border-color: var(--border-color);">
+        <div id="filter-legend-container" class="w-full flex items-center text-[11px] text-muted px-4 py-2 mt-3 rounded-md bg-black/5 hidden" style="border-color: var(--border-color);">
             <button onclick="window.clearAllFilters()" id="clear-filters-btn" class="hidden items-center gap-1 px-2 py-1 rounded border text-[10px] font-bold cursor-pointer transition-all hover:bg-red-50 text-red-600 border-red-200 bg-white mr-3 shadow-sm">
                 <i class="fas fa-times"></i> Clear Filters
             </button> 
