@@ -719,9 +719,11 @@
                         zip3: zipExtracted,
                         lat: lat,
                         lng: lng,
+                        isCoachingResolved: (() => {
+                            const val = r.cr714_coachingresolved || r['cr714_coachingresolved@OData.Community.Display.V1.FormattedValue'];
+                            return (val === true || val === 1 || String(val).toLowerCase() === 'true' || val === 'Yes');
+                        })(),
                         isCoaching: (() => {
-                            const val = r.cr714_coachingopp || r.cr714_coachingopportunity || r['cr714_coachingopp@OData.Community.Display.V1.FormattedValue'] || r['cr714_coachingopportunity@OData.Community.Display.V1.FormattedValue'];
-                            const isCoaching = (
                                 r.cr714_coachingopp === true || 
                                 r.cr714_coachingopp === 1 || 
                                 String(r.cr714_coachingopp).toLowerCase() === 'true' ||
@@ -930,7 +932,6 @@
         let msalAccount = null;
         let activeConflicts = [];
         let ignoredConflicts = new Set();
-        let resolvedCoachingGuids = new Set();
         
         let totalRecordsToFetch = 0;
         let recordsFetched = 0;
@@ -1144,7 +1145,7 @@
 
                 // 2. Build the URL and Fetch Initial Batch
                 // Added cr714_warehouse and cr714_route to select fields
-                const selectFields = "$select=createdon,cr714_rep,cr714_disposition,cr714_logisticsowner,cr714_salesordernumber,cr714_companyordeliveryname,cr714_shippingaddress,cr714_accountnumber,cr714_warehouse,cr714_route,cr714_issue,cr714_description,cr714_receivedemailfromwarehousenotes,cr714_receivedtextfromdrivernotes,cr714_repemaildatestamp,cr714_warehouseemaildatestamp,cr714_managerappemailtimestamp,modifiedon,cr714_coachingopp,cr714_coachingfeedback";
+                const selectFields = "$select=createdon,cr714_rep,cr714_disposition,cr714_logisticsowner,cr714_salesordernumber,cr714_companyordeliveryname,cr714_shippingaddress,cr714_accountnumber,cr714_warehouse,cr714_route,cr714_issue,cr714_description,cr714_receivedemailfromwarehousenotes,cr714_receivedtextfromdrivernotes,cr714_repemaildatestamp,cr714_warehouseemaildatestamp,cr714_managerappemailtimestamp,modifiedon,cr714_coachingopp,cr714_coachingfeedback,cr714_coachingresolved";
                 
                 const initUrl = `${DATA_API}/${ENTITY_SET}?$count=true&$top=500000${fParam}&${selectFields}&$orderby=createdon desc`;
                 
@@ -2434,8 +2435,9 @@
         function renderCoaching() {
             if (document.getElementById('container-coaching').classList.contains('hidden')) return;
         
-            const coachingData = fullData.filter(t => t.isCoaching === true && !resolvedCoachingGuids.has(t.guid))
-                                         .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+            // Filter out items that are marked resolved in Dataverse
+        const coachingData = fullData.filter(t => t.isCoaching === true && t.isCoachingResolved !== true)
+                                 .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
             
             document.getElementById('coaching-count').innerText = coachingData.length;
             
@@ -2495,7 +2497,7 @@
                             <div><span class="opacity-50 block">Account</span><span class="font-bold truncate text-[var(--brand)] block">${t.company}</span></div>
                             <div class="text-right"><span class="opacity-50 block">Logistics</span><span class="font-bold truncate block text-white">${t.owner}</span></div>
                         </div>
-                        <button onclick="hideCoachingItem('${t.guid}')" class="w-full py-1.5 bg-black/40 border border-[var(--border)] hover:bg-[var(--success)] hover:text-black transition text-[9px] font-black uppercase tracking-widest">
+                        <button onclick="resolveCoachingItem('${t.guid}')" class="w-full py-1.5 bg-black/40 border border-[var(--border)] hover:bg-[var(--success)] hover:text-black transition text-[9px] font-black uppercase tracking-widest">
                             RESOLVE
                         </button>
                     </div>
@@ -3370,10 +3372,27 @@
             } catch(e) { console.warn("Failed to send audit email", e); }
         }
 
-        function hideCoachingItem(guid) {
-            resolvedCoachingGuids.add(guid);
+        async function resolveCoachingItem(guid) {
+            const t = fullData.find(x => x.guid === guid);
+            if (t) t.isCoachingResolved = true; // Instantly hide it in the UI
             renderCoaching();
-            Toastify({text: "Coaching opportunity hidden", style: {background: "#10b981"}}).showToast();
+            
+            Toastify({text: "Marking as resolved...", style: {background: "#fbbf24"}}).showToast();
+            try {
+                const token = await getToken(ENV_DATA);
+                const res = await fetch(`${DATA_API}/${ENTITY_SET}(${guid})`, {
+                    method: 'PATCH',
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ "cr714_coachingresolved": true })
+                });
+                if (res.ok) {
+                    Toastify({text: "Resolved in Dataverse", style: {background: "#10b981"}}).showToast();
+                } else throw new Error("API Failed");
+            } catch(e) {
+                if (t) t.isCoachingResolved = false; // Put it back in the UI if the API fails
+                renderCoaching();
+                Toastify({text: "Failed to resolve on backend", style: {background: "#ef4444"}}).showToast();
+            }
         }
 
         async function triggerFurnitureEmail(t) {
