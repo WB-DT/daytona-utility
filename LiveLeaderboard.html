@@ -5691,4 +5691,198 @@ body.command-center-ui .bar-row{min-height:72px!important;border-radius:18px!imp
 })();
 </script>
 
+
+
+<!-- COPILOT PERFORMANCE PASS 2026-06-28-C: Manager fast load + scoped fact hydration
+     Purpose: stop manager reporting loads from feeling stuck by rendering state immediately,
+     skipping confirmed-missing source entities, and applying Manager scope (accounts/actions/dates)
+     directly inside Dataverse fact queries before pagination. -->
+<style id="actManagerPerformancePass20260628CStyles">
+  body.command-center-ui.act-manager-fast-pass #reportSection::before{
+    content:"Manager performance pass active — scoped account/action query is being prepared.";
+    display:block;margin:0 0 12px;padding:10px 12px;border-radius:16px;
+    background:color-mix(in srgb,var(--theme-teal,#14b8a6) 10%,var(--theme-card,#fff) 90%);
+    border:1px solid color-mix(in srgb,var(--theme-teal,#14b8a6) 24%,var(--theme-line,#d8e1ee) 76%);
+    color:var(--theme-muted,#667085);font-weight:800;font-size:12.5px;
+  }
+  body.command-center-ui.act-manager-fast-pass .act-perf-chip{display:inline-flex;align-items:center;gap:7px;margin:0 0 10px;padding:7px 10px;border-radius:999px;background:#ecfdf5;border:1px solid #bbf7d0;color:#166534;font-size:12px;font-weight:900;}
+</style>
+<script id="actManagerPerformancePass20260628C">
+(function(){
+  if (window.__ACT_MANAGER_PERFORMANCE_PASS_20260628C) return;
+  window.__ACT_MANAGER_PERFORMANCE_PASS_20260628C = true;
+
+  const PASS='ACT Manager Performance Pass 2026-06-28-C';
+  const BRIDGE_KEY='act_manager_reporting_bridge_v1';
+  const SNAPSHOT_KEY='act_live_leaderboard_manager_scope_v1';
+  const MISSING_ENTITY_CACHE='act_missing_entity_cache_v1';
+  const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
+  const low=v=>clean(v).toLowerCase();
+  const uniq=arr=>Array.from(new Map((arr||[]).flat(Infinity).map(clean).filter(Boolean).map(v=>[low(v),v])).values());
+  const split=v=>uniq(Array.isArray(v)?v:String(v||'').split(/[|,;\n\r\t]+/));
+  const escO=v=>String(v).replace(/'/g,"''");
+  const p=()=>new URLSearchParams(location.search||'');
+  const get=(params,...keys)=>{ for(const k of keys){ const v=params.get(k); if(v!==null && clean(v)) return clean(v); } return ''; };
+  const isMissingEntityError=e=>/EntityMetadata.*does not exist|EntityMetadata With Id|Resource not found for the segment|does not exist/i.test(String(e&&e.message||e||''));
+  function readJson(k){ try{return JSON.parse(localStorage.getItem(k)||'null')||null;}catch{return null;} }
+  function writeJson(k,v){ try{localStorage.setItem(k,JSON.stringify(v));}catch{} }
+  function cache(){ return readJson(MISSING_ENTITY_CACHE)||{}; }
+  function markMissing(logical){ const c=cache(); c[logical]={ts:Date.now(),reason:'metadata-missing'}; writeJson(MISSING_ENTITY_CACHE,c); }
+  function isCachedMissing(logical){ const c=cache()[logical]; return !!(c && Date.now()-Number(c.ts||0)<24*60*60*1000); }
+  function iso(v){ if(!v) return ''; const d=new Date(v); return Number.isNaN(d.getTime())?String(v).slice(0,10):d.toISOString().slice(0,10); }
+  function arrFromStored(stored,...keys){ return uniq(keys.flatMap(k=>split(stored&&stored[k]))); }
+  function readPerfScope(){
+    const q=p(), stored=readJson(get(q,'bridgeKey','scopeKey')||BRIDGE_KEY)||readJson(BRIDGE_KEY)||readJson(SNAPSHOT_KEY)||{};
+    const source=low(get(q,'source','from','origin') || stored.source || '');
+    const scope={
+      active: source.includes('manager') || q.has('bridgeKey') || q.has('bridgeId') || q.has('autoApply') || q.has('autoLoad') || !!stored.bridgeId,
+      bridgeId:get(q,'bridgeId')||clean(stored.bridgeId),
+      reps:uniq([arrFromStored(stored,'effectiveReps','selectedReps','reps'), split(get(q,'reps','rep','selectedReps'))]),
+      actions:uniq([arrFromStored(stored,'effectiveActions','selectedActions','actions'), split(get(q,'actions','action','selectedActions'))]),
+      accountIds:uniq([arrFromStored(stored,'effectiveAccounts','selectedAccounts','accountNumbers','accountIds','accounts','ids'), split(get(q,'accountNumbers','accounts','accountIds','ids'))]),
+      startDate:iso(get(q,'startDate','start','fromDate') || stored.startDate),
+      endDate:iso(get(q,'endDate','end','toDate') || stored.endDate),
+      accountCount:Number(stored.accountCount || stored.rowCount || q.get('accountCount') || q.get('rowCount') || 0),
+      autoLoad:/^(1|true|yes)$/i.test(get(q,'autoLoad','autoload')||String(stored.autoLoad||'')),
+      autoApply:/^(1|true|yes)$/i.test(get(q,'autoApply','autoapply')||String(stored.autoApply||''))
+    };
+    scope.hasScope=!!(scope.reps.length||scope.actions.length||scope.accountIds.length||scope.startDate||scope.endDate);
+    window.ACT_MANAGER_PERF_SCOPE=scope;
+    return scope;
+  }
+  function orEq(fields, values){ fields=(fields||[]).filter(Boolean); values=uniq(values||[]); if(!fields.length||!values.length)return''; return '('+fields.flatMap(f=>values.map(v=>`${f} eq '${escO(v)}'`)).join(' or ')+')'; }
+  function and(parts){ return (parts||[]).filter(Boolean).join(' and '); }
+  function chunks(arr,size){ const a=uniq(arr||[]), out=[]; for(let i=0;i<a.length;i+=size) out.push(a.slice(i,i+size)); return out.length?out:[[]]; }
+  function label(msg){ try{ window.ACTLoadingScreen?.log?.(msg); }catch{} try{ prog(true,msg,.05); }catch{} }
+  function shell(scope){
+    document.body.classList.add('act-manager-fast-pass');
+    try{ window.ACTLoadingScreen?.show?.('Manager reporting scope detected'); }catch{}
+    const counts=[scope.accountIds.length?`${scope.accountIds.length.toLocaleString()} account ids`:scope.accountCount?`${scope.accountCount.toLocaleString()} scoped accounts`:'manager accounts', scope.reps.length?`${scope.reps.length} rep(s)`:'' , scope.actions.length?`${scope.actions.length} action(s)`:'' ].filter(Boolean).join(' • ');
+    const insight=document.getElementById('reportPageInsight');
+    if(insight && !insight.dataset.perfPrimed){ insight.dataset.perfPrimed='1'; insight.innerHTML=`<span class="act-perf-chip"><i class="fas fa-bolt"></i>${PASS}</span><br>Loading scoped report first (${counts}). Heavy tables will hydrate after the shell is available.`; }
+    ['kpiSourceRows','kpiFactRows','kpiSourceActions','kpiFactActions','kpiEmails','kpiNotes'].forEach(id=>{const el=document.getElementById(id); if(el && el.textContent==='—') el.textContent='…';});
+  }
+  async function resolveEntitySetFast(logical,fallback){
+    if(window.entitySets && window.entitySets[logical]) return window.entitySets[logical];
+    if(isCachedMissing(logical)) return '';
+    try{
+      const m=await dvGet(`EntityDefinitions(LogicalName='${logical}')?$select=EntitySetName`, 'odata.maxpagesize=1', {timeoutMs:20000});
+      const set=m.EntitySetName||fallback;
+      try{ entitySets[logical]=set; }catch{}
+      return set;
+    }catch(e){
+      if(isMissingEntityError(e)){ markMissing(logical); console.warn(`[${PASS}] Skipping missing source entity`, logical); return ''; }
+      console.warn(`[${PASS}] Entity lookup fallback`, logical, e);
+      return fallback;
+    }
+  }
+  function sourceRow(row,ds){ return {dataset:ds.key,datasetLabel:ds.label,table:ds.table,id:row[ds.id]||'',account:String(getFirst(row,ds.accountFields)).trim(),company:getFirst(row,ds.companyFields),rep:getFirst(row,ds.repFields),rawAction:row.cr714_action||'',action:normSrcAction(row.cr714_action)}; }
+  async function fetchSourcePerf(ds,total,idx){
+    const scope=readPerfScope();
+    const set=await resolveEntitySetFast(ds.table,ds.table);
+    if(!set) return [];
+    const cols=await availCols(ds.table, sourceSelectColumns(ds));
+    const filters=[];
+    if(settings.sourceFilterMode==='active' && cols.includes('statecode')) filters.push('statecode eq 0');
+    const repFields=(ds.repFields||[]).filter(f=>cols.includes(f));
+    const acctFields=(ds.accountFields||[]).filter(f=>cols.includes(f));
+    const actionFields=cols.includes('cr714_action')?['cr714_action']:[];
+    // For Manager links, account scope is safest/selective; reps are a fallback only.
+    let accountChunks = scope.active && scope.accountIds.length && acctFields.length ? chunks(scope.accountIds,85) : [[]];
+    let actionFilter = scope.active && scope.actions.length && actionFields.length ? orEq(actionFields, scope.actions) : '';
+    let repFilter = (!scope.accountIds.length && scope.reps.length && repFields.length) ? orEq(repFields, scope.reps) : '';
+    const out=[], seen=new Set();
+    for(let i=0;i<accountChunks.length;i++){
+      const pms=new URLSearchParams(); pms.append('$select',cols.join(','));
+      const f=and([...filters, accountChunks[i].length?orEq(acctFields,accountChunks[i]):'', repFilter, actionFilter]);
+      if(f) pms.append('$filter',f);
+      const labelName=(accountChunks.length>1)?`${ds.key} scoped ${i+1}/${accountChunks.length}`:`${ds.key} scoped`;
+      try{
+        const rows=await fetchAll(`${set}?${pms.toString()}`, labelName, total, idx,{prefer:'odata.maxpagesize=1000',timeoutMs:45000,maxRetries:1,pagePauseMs:0});
+        rows.forEach(r=>{const rk=r[ds.id]||`${getFirst(r,ds.accountFields)}|${getFirst(r,ds.repFields)}|${r.cr714_action||''}`; if(rk&&seen.has(rk))return; if(rk)seen.add(rk); out.push(r);});
+      }catch(e){ if(isMissingEntityError(e)){ markMissing(ds.table); return []; } throw e; }
+    }
+    return (window.clientScopeSourceRows?clientScopeSourceRows(out.map(r=>sourceRow(r,ds)),scope):out.map(r=>sourceRow(r,ds)));
+  }
+  function scopedFactUrls(set){
+    const scope=readPerfScope();
+    const s=(document.getElementById('startDate')&&document.getElementById('startDate').value)||scope.startDate;
+    const e=(document.getElementById('endDate')&&document.getElementById('endDate').value)||scope.endDate;
+    const base=[]; if(s)base.push(`cr714_activitydate ge ${s}T00:00:00Z`); if(e)base.push(`cr714_activitydate le ${e}T23:59:59Z`);
+    const actionFilter=scope.actions.length && activeFactColumns.includes('cr714_action') ? orEq(['cr714_action'],scope.actions) : '';
+    const repFields=['cr714_accountrep','cr714_repfromnote'].filter(f=>activeFactColumns.includes(f));
+    const acctFields=['cr714_accountnumber'].filter(f=>activeFactColumns.includes(f));
+    let scopeParts=[];
+    if(scope.accountIds.length && acctFields.length){ scopeParts = chunks(scope.accountIds,85).map(c=>orEq(acctFields,c)); }
+    else if(scope.reps.length && repFields.length){ scopeParts = chunks(scope.reps,35).map(c=>orEq(repFields,c)); }
+    else scopeParts=[''];
+    return scopeParts.map((chunkFilter,i)=>{
+      const pms=new URLSearchParams(); pms.append('$select', activeFactColumns.join(',')); pms.append('$orderby','cr714_activitydate desc');
+      const f=and([...base, chunkFilter, actionFilter]); if(f)pms.append('$filter',f);
+      return {url:`${set}?${pms.toString()}`, label:scopeParts.length>1?`Activity scoped ${i+1}/${scopeParts.length}`:'Activity scoped'};
+    });
+  }
+  async function fetchFactPerf(total,idx){
+    const scope=readPerfScope();
+    const set=await resolveEntitySetFast(settings.factLogical,`${settings.factLogical}s`);
+    activeFactColumns=await availCols(settings.factLogical, FACT_COLUMNS);
+    const urls=scope.active?scopedFactUrls(set):[{url:factQuery(set),label:'Activity table'}];
+    const out=[], seen=new Set();
+    for(const u of urls){
+      label(`${u.label}: loading scoped Dataverse page...`);
+      const rows=await fetchAll(u.url,u.label,total,idx,{prefer:'odata.maxpagesize=2000',timeoutMs:60000,maxRetries:2,pagePauseMs:0});
+      rows.forEach(r=>{const rk=r.cr714_dt_act_fctblid||`${r.cr714_accountnumber}|${r.cr714_activitydate}|${r.cr714_action}|${r.cr714_accountrep||r.cr714_repfromnote}`; if(rk&&seen.has(rk))return; if(rk)seen.add(rk); out.push(r);});
+    }
+    const mapped=out.map(r=>({...r,account:String(r.cr714_accountnumber||'').trim(),company:r.cr714_companyname||'',rep:r.cr714_accountrep||r.cr714_repfromnote||'',rawAction:r.cr714_action||'',action:normActivityAction(r.cr714_action),date:dateOnly(r.cr714_activitydate||r.cr714_activitydateonly),isEmail:isEmail(r),isNote:isNote(r)}));
+    return (window.clientScopeFactRows?clientScopeFactRows(mapped,scope):mapped);
+  }
+  async function loadAllPerf(){
+    const scope=readPerfScope();
+    shell(scope);
+    try{ if(scope.startDate && document.getElementById('startDate')) document.getElementById('startDate').value=scope.startDate; if(scope.endDate && document.getElementById('endDate')) document.getElementById('endDate').value=scope.endDate; }catch{}
+    prog(true,'Starting manager performance load...',.01);
+    window.setConnectionStatus?.('refreshing','Loading scoped manager report...');
+    const datasets=(scope.active?DATASETS:DATASETS).filter(ds=>!isCachedMissing(ds.table));
+    const total=datasets.length+1;
+    const parts=[];
+    for(let i=0;i<datasets.length;i++){
+      try{ parts.push(await fetchSourcePerf(datasets[i],total,i)); }
+      catch(e){ console.warn(`[${PASS}] Source list skipped after error`, datasets[i].key, e); parts.push([]); }
+      try{ sourceRows=parts.flat(); publishReportState?.(); renderKpis?.(); }catch{}
+    }
+    sourceRows=parts.flat();
+    factRows=await fetchFactPerf(total,datasets.length);
+    buildReports();
+    prog(false);
+    window.setConnectionStatus?.('connected',`Loaded ${fmt.format(sourceRows.length)} source rows + ${fmt.format(factRows.length)} scoped activity rows`);
+    const btn=document.getElementById('btnExport'); if(btn)btn.disabled=false;
+    try{ window.ACTLoadingScreen?.hide?.(); }catch{}
+  }
+  try{
+    fetchSource=fetchSourcePerf;
+    fetchFact=fetchFactPerf;
+    loadAll=loadAllPerf;
+    window.loadAll=loadAllPerf;
+    console.info(`[${PASS}] installed`, readPerfScope());
+  }catch(e){ console.warn(`[${PASS}] install failed`, e); }
+  document.addEventListener('DOMContentLoaded',()=>{
+    const scope=readPerfScope();
+    if(scope.active) shell(scope);
+    // Last-mile click capture so old handlers cannot start the slower wide-ish path.
+    document.getElementById('btnLoad')?.addEventListener('click',function(evt){
+      if(!readPerfScope().active) return;
+      evt.preventDefault(); evt.stopPropagation(); evt.stopImmediatePropagation?.();
+      loadAllPerf().catch(e=>{ prog(false); console.error(e); window.setConnectionStatus?.('error','Scoped load failed'); alert(`Scoped load failed:\n${e.message||e}`); try{window.ACTLoadingScreen?.hide?.();}catch{} });
+    }, true);
+    setTimeout(()=>{
+      const s=readPerfScope();
+      if(s.active && (s.autoLoad || s.autoApply) && !window.__ACT_MANAGER_PERF_AUTOLOAD_DONE){
+        window.__ACT_MANAGER_PERF_AUTOLOAD_DONE=true;
+        loadAllPerf().catch(e=>{ console.error(e); window.setConnectionStatus?.('error','Auto-load failed'); try{window.ACTLoadingScreen?.hide?.();}catch{} });
+      }
+    }, 900);
+  });
+})();
+</script>
+
 </body></html>
