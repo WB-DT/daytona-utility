@@ -156,9 +156,23 @@
         .day-event-item { font-size: 0.95rem; }
         .day-event-reason { color: var(--text-muted); font-size: 0.85rem; }
 
+        /* Add this to your <style> section */
+        #holiday-modal { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: var(--bg-card); padding: 2rem; border-radius: 12px; border: 1px solid var(--border-color); z-index: 1000; box-shadow: 0 10px 25px rgba(0,0,0,0.3); width: 300px; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 999; }
+        .badge.holiday { background-color: var(--status-holiday-bg); color: var(--status-holiday-text); }
+
     </style>
 </head>
 <body>
+
+    <div class="modal-overlay" id="modal-overlay" onclick="closeModal()"></div>
+    <div id="holiday-modal">
+        <h3>Add Observed Holiday</h3>
+        <p id="selected-date-text"></p>
+        <input type="text" id="holiday-name" placeholder="Name (e.g. Observed July 4th)" style="width: 90%; margin-bottom: 1rem; padding: 0.5rem;">
+        <button onclick="saveHoliday()" style="padding: 0.5rem 1rem; cursor:pointer;">Save Holiday</button>
+        <button onclick="closeModal()" style="padding: 0.5rem 1rem; cursor:pointer;">Cancel</button>
+    </div>
 
     <nav>
         <div class="nav-left">
@@ -261,6 +275,24 @@
     </div>
 
     <script>
+
+        // Add these to your script's variables
+        const federalHolidays = {
+            "2026-01-01": "New Year's Day",
+            "2026-01-19": "MLK Jr. Day",
+            "2026-02-16": "Presidents' Day",
+            "2026-05-25": "Memorial Day",
+            "2026-06-19": "Juneteenth",
+            "2026-07-04": "Independence Day",
+            "2026-09-07": "Labor Day",
+            "2026-10-12": "Columbus Day",
+            "2026-11-11": "Veterans Day",
+            "2026-11-26": "Thanksgiving",
+            "2026-12-25": "Christmas Day"
+        };
+        let customHolidays = {};
+
+        
         // --- 1. DUMMY DATA (Shifted to current week 6/28 - 7/4) ---
         const dummyDataset = [
             // June 29th (Monday)
@@ -434,7 +466,7 @@
 
         function renderCalendarView() {
             const baseDate = new Date(document.getElementById('cal-base-date').value);
-            baseDate.setMinutes(baseDate.getMinutes() + baseDate.getTimezoneOffset()); // Fix timezone offset
+            baseDate.setMinutes(baseDate.getMinutes() + baseDate.getTimezoneOffset());
             
             const calGrid = document.getElementById('calendar-grid');
             const calHeader = document.getElementById('calendar-days-header');
@@ -442,136 +474,92 @@
             let html = '';
             let startDate, endDate, labelText;
             let daysToRender = [];
-
-            // Calculate Date Range based on Mode
+        
+            // Date Range Logic
             if (currentCalendarMode === 'day') {
                 startDate = new Date(baseDate);
                 endDate = new Date(baseDate);
-                labelText = formatMMDDYYYY(baseDate.toISOString().split('T')[0]);
+                labelText = baseDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
                 daysToRender.push(new Date(baseDate));
+                calHeader.style.display = 'none'; // Compact view
+                calGrid.style.gridTemplateColumns = '1fr';
             } 
             else if (currentCalendarMode === 'week') {
                 startDate = new Date(baseDate);
-                startDate.setDate(baseDate.getDate() - baseDate.getDay()); 
-                endDate = new Date(startDate);
-                endDate.setDate(startDate.getDate() + 6);
-                labelText = `${formatMMDDYYYY(startDate.toISOString().split('T')[0])} – ${formatMMDDYYYY(endDate.toISOString().split('T')[0])}`;
-                
+                startDate.setDate(baseDate.getDate() - baseDate.getDay());
                 for(let i=0; i<7; i++) {
                     let d = new Date(startDate);
                     d.setDate(startDate.getDate() + i);
                     daysToRender.push(d);
                 }
+                labelText = `${formatMMDDYYYY(startDate.toISOString().split('T')[0])} – ${formatMMDDYYYY(daysToRender[6].toISOString().split('T')[0])}`;
+                calHeader.style.display = 'grid';
+                calGrid.style.gridTemplateColumns = 'repeat(7, 1fr)';
             }
             else if (currentCalendarMode === 'month') {
                 startDate = new Date(baseDate.getFullYear(), baseDate.getMonth(), 1);
                 endDate = new Date(baseDate.getFullYear(), baseDate.getMonth() + 1, 0);
                 labelText = baseDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-                
                 for(let i=0; i < startDate.getDay(); i++) daysToRender.push(null);
                 for(let i=1; i <= endDate.getDate(); i++) daysToRender.push(new Date(baseDate.getFullYear(), baseDate.getMonth(), i));
                 while(daysToRender.length % 7 !== 0) daysToRender.push(null);
+                calHeader.style.display = 'grid';
+                calGrid.style.gridTemplateColumns = 'repeat(7, 1fr)';
             }
-            else if (currentCalendarMode === 'quarter') {
-                const quarter = Math.floor(baseDate.getMonth() / 3);
-                startDate = new Date(baseDate.getFullYear(), quarter * 3, 1);
-                endDate = new Date(baseDate.getFullYear(), startDate.getMonth() + 3, 0);
-                labelText = `Q${quarter + 1} ${baseDate.getFullYear()}`;
-                
-                for(let i=0; i < startDate.getDay(); i++) daysToRender.push(null);
-                for(let d = new Date(startDate); d <= endDate; d.setDate(d.getDate() + 1)) { daysToRender.push(new Date(d)); }
-                while(daysToRender.length % 7 !== 0) daysToRender.push(null);
-            }
-
+        
             document.getElementById('cal-range-label').innerText = labelText;
-
             let rangeEvents = [];
-
-            // --- BUILD: DAY VIEW (Compact Grouped List) ---
-            if (currentCalendarMode === 'day') {
-                calHeader.style.display = 'none';
-                calGrid.style.gridTemplateColumns = '1fr';
-                
-                const dateStr = daysToRender[0].toISOString().split('T')[0];
+        
+            daysToRender.forEach(day => {
+                if (!day) {
+                    html += `<div class="cal-cell padding"></div>`;
+                    return;
+                }
+        
+                const dateStr = day.toISOString().split('T')[0];
                 const dayEvents = dummyDataset.filter(e => e.date === dateStr);
                 rangeEvents.push(...dayEvents);
-
-                html += `<div class="day-view-summary">`;
-                const statuses = ['Present', 'Absent', 'PTO', 'Short Shift', 'Makeup', 'Holiday'];
+        
+                // Check for Holidays
+                const holidayName = federalHolidays[dateStr] || customHolidays[dateStr];
+        
+                html += `<div class="cal-cell"><div class="cal-date-num">${day.getDate()}</div>`;
                 
-                statuses.forEach(status => {
-                    const evts = dayEvents.filter(e => e.status === status);
-                    if(evts.length > 0) {
-                        html += `<div class="day-status-group">
-                            <h4 class="day-status-title"><span class="badge ${status.toLowerCase().replace(' ', '-')}">${status}</span></h4>
-                            <div class="day-event-list">`;
-                        
-                        evts.forEach(e => {
-                            let reason = e.occurrence || (e.notes !== '—' ? e.notes : '');
-                            let reasonHtml = reason ? `<span class="day-event-reason"> &mdash; ${reason}</span>` : '';
-                            html += `<div class="day-event-item"><strong>${e.name}</strong>${reasonHtml}</div>`;
-                        });
-                        html += `</div></div>`;
-                    }
-                });
-
-                if(dayEvents.length === 0) {
-                    html += `<div style="color:var(--text-muted); width:100%; text-align:center;">No records for this date.</div>`;
+                if(holidayName) {
+                    html += `<span class="badge holiday">${holidayName}</span>`;
                 }
-                html += `</div>`;
-                calGrid.innerHTML = html;
-            } 
-            // --- BUILD: GRID VIEWS (Week/Month/Quarter) ---
-            else {
-                calHeader.style.display = 'grid';
-                calHeader.style.gridTemplateColumns = 'repeat(7, 1fr)';
-                calGrid.style.gridTemplateColumns = 'repeat(7, 1fr)';
-
-                daysToRender.forEach(day => {
-                    if (!day) {
-                        html += `<div class="cal-cell padding"></div>`;
-                        return;
-                    }
-
-                    const dateStr = day.toISOString().split('T')[0];
-                    const dayEvents = dummyDataset.filter(e => e.date === dateStr);
-                    rangeEvents.push(...dayEvents);
-
-                    html += `<div class="cal-cell"><div class="cal-date-num">${day.getDate()}</div>`;
-
-                    let displayed = 0;
-                    dayEvents.forEach(evt => {
+        
+                let displayed = 0;
+                dayEvents.forEach(evt => {
+                    if(displayed < 4) {
                         let dotVar = '--dot-present';
                         if(evt.status === 'Absent') dotVar = '--dot-absent';
                         if(evt.status === 'PTO') dotVar = '--dot-pto';
                         if(evt.status === 'Short Shift') dotVar = '--dot-short';
                         if(evt.status === 'Makeup') dotVar = '--dot-makeup';
-                        if(evt.status === 'Holiday') dotVar = '--dot-holiday';
-
-                        const firstName = evt.name === 'Company Holiday' ? 'Holiday' : evt.name.split(' ')[0];
+        
+                        const firstName = evt.name.split(' ')[0];
                         const tooltipText = `Status: ${evt.status} | Hrs: ${evt.hours} ${evt.occurrence ? ' | Note: ' + evt.occurrence : ''}`;
-
-                        // If it's beyond the 4th item, hide it initially
-                        const hiddenClass = displayed >= 4 ? 'hidden-evt' : '';
-                        const displayStyle = displayed >= 4 ? 'display:none;' : '';
-
-                        html += `<div class="cal-event ${hiddenClass}" style="${displayStyle}">
-                            <div class="cal-dot" style="background-color: var(${dotVar});"></div>${firstName}
-                            <div class="cal-tooltip">${tooltipText}</div>
-                        </div>`;
-                        
-                        displayed++;
-                    });
-
-                    // Add the clickable expansion button
-                    if(dayEvents.length > 4) {
-                        html += `<div class="cal-event-more" onclick="expandCalCell(this, event)">+${dayEvents.length - 4} more</div>`;
+        
+                        html += `<div class="cal-event">
+                                    <div class="cal-dot" style="background-color: var(${dotVar});"></div>${firstName}
+                                    <div class="cal-tooltip">${tooltipText}</div>
+                                </div>`;
+                    } else {
+                        html += `<div class="cal-event hidden-evt" style="display:none;">
+                                    <div class="cal-dot" style="background-color: var(--text-muted);"></div>${evt.name.split(' ')[0]}
+                                </div>`;
                     }
-                    html += `</div>`;
+                    displayed++;
                 });
-                calGrid.innerHTML = html;
-            }
-
+        
+                if(dayEvents.length > 4) {
+                    html += `<div class="cal-event-more" onclick="expandCalCell(this, event)">+${dayEvents.length - 4} more</div>`;
+                }
+                html += `</div>`;
+            });
+        
+            calGrid.innerHTML = html;
             renderCalendarBadges(rangeEvents);
             renderCalendarTable(rangeEvents);
         }
