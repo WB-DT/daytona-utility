@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Account Reconciliation Tool</title>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --container-bg: #1e1e1e;
+            --text-main: #e0e0e0;
+            --text-muted: #a0a0a0;
+            --accent: #4CAF50;
+            --accent-hover: #45a049;
+            --border-color: #333;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        .container {
+            background-color: var(--container-bg);
+            padding: 2.5rem;
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+            width: 100%;
+            max-width: 500px;
+            border: 1px solid var(--border-color);
+        }
+
+        h1 {
+            margin-top: 0;
+            font-size: 1.5rem;
+            text-align: center;
+            margin-bottom: 0.5rem;
+        }
+
+        p.subtitle {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 2rem;
+        }
+
+        .file-upload-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .file-upload-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+            font-size: 0.95rem;
+        }
+
+        input[type="file"] {
+            display: block;
+            width: 100%;
+            padding: 0.75rem;
+            background-color: var(--bg-color);
+            border: 1px dashed var(--border-color);
+            border-radius: 6px;
+            color: var(--text-main);
+            cursor: pointer;
+            box-sizing: border-box;
+        }
+
+        input[type="file"]:hover {
+            border-color: var(--accent);
+        }
+
+        button {
+            width: 100%;
+            padding: 1rem;
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+            margin-top: 1rem;
+        }
+
+        button:hover {
+            background-color: var(--accent-hover);
+        }
+
+        #status {
+            margin-top: 1.5rem;
+            text-align: center;
+            font-size: 0.9rem;
+            min-height: 1.2rem;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Account Reconciliation Tool</h1>
+        <p class="subtitle">Compare AM Dataset against Power BI Export</p>
+
+        <div class="file-upload-group">
+            <label for="amFile">1. Upload AM Dataset (Excel)</label>
+            <input type="file" id="amFile" accept=".xlsx, .xls, .csv">
+        </div>
+
+        <div class="file-upload-group">
+            <label for="pbiFile">2. Upload Power BI Data (Excel)</label>
+            <input type="file" id="pbiFile" accept=".xlsx, .xls, .csv">
+        </div>
+
+        <button onclick="runComparison()">Run Comparison & Export</button>
+
+        <div id="status"></div>
+    </div>
+
+    <script>
+        // Helper function to read file asynchronously using FileReader and SheetJS
+        function readExcelFile(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                
+                reader.onload = (e) => {
+                    try {
+                        const data = new Uint8Array(e.target.result);
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        // Grab the first sheet in the workbook
+                        const firstSheetName = workbook.SheetNames[0];
+                        const worksheet = workbook.Sheets[firstSheetName];
+                        // Convert sheet to JSON array
+                        const json = XLSX.utils.sheet_to_json(worksheet);
+                        resolve(json);
+                    } catch (error) {
+                        reject(error);
+                    }
+                };
+                
+                reader.onerror = (error) => reject(error);
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        async function runComparison() {
+            const statusEl = document.getElementById('status');
+            const amFileInput = document.getElementById('amFile').files[0];
+            const pbiFileInput = document.getElementById('pbiFile').files[0];
+
+            if (!amFileInput || !pbiFileInput) {
+                statusEl.innerText = '⚠️ Please upload both files to proceed.';
+                statusEl.style.color = '#ff9800';
+                return;
+            }
+
+            statusEl.innerText = 'Processing data...';
+            statusEl.style.color = 'var(--text-muted)';
+
+            try {
+                // 1. Parse both files into JSON arrays
+                const amData = await readExcelFile(amFileInput);
+                const pbiData = await readExcelFile(pbiFileInput);
+
+                // 2. Build lookup maps for faster comparison
+                // We use String() and trim() to ensure a perfect match even if Excel formats numbers differently
+                const amMap = new Map();
+                amData.forEach(row => {
+                    if(row.AccountNum) {
+                        amMap.set(String(row.AccountNum).trim(), String(row.Rep || '').trim());
+                    }
+                });
+
+                const pbiMap = new Map();
+                pbiData.forEach(row => {
+                    if(row.AccountNum) {
+                        pbiMap.set(String(row.AccountNum).trim(), String(row.Rep || '').trim());
+                    }
+                });
+
+                // 3. Prepare the arrays for our final output sheets
+                const newAccounts = [];
+                const removedAccounts = [];
+                const repUpdates = [];
+
+                // 4. Logic: Find Additions and Updates by looping through Power BI Data
+                pbiMap.forEach((rep, accountNum) => {
+                    if (!amMap.has(accountNum)) {
+                        newAccounts.push({ AccountNum: accountNum, Rep: rep });
+                    } else {
+                        const amRep = amMap.get(accountNum);
+                        if (amRep !== rep) {
+                            repUpdates.push({
+                                AccountNum: accountNum,
+                                Old_Rep: amRep,
+                                New_Rep: rep
+                            });
+                        }
+                    }
+                });
+
+                // 5. Logic: Find Removals by looping through AM Dataset
+                amMap.forEach((rep, accountNum) => {
+                    if (!pbiMap.has(accountNum)) {
+                        removedAccounts.push({ AccountNum: accountNum, Rep: rep });
+                    }
+                });
+
+                // 6. Generate the New Excel Workbook
+                const newWorkbook = XLSX.utils.book_new();
+
+                // Convert our JSON arrays back into Excel sheets
+                // If an array is empty, we add a dummy row so the sheet still creates successfully
+                const wsAdditions = XLSX.utils.json_to_sheet(newAccounts.length ? newAccounts : [{ Message: "No new accounts" }]);
+                const wsRemovals = XLSX.utils.json_to_sheet(removedAccounts.length ? removedAccounts : [{ Message: "No removals" }]);
+                const wsUpdates = XLSX.utils.json_to_sheet(repUpdates.length ? repUpdates : [{ Message: "No rep updates" }]);
+
+                // Append the sheets to the workbook
+                XLSX.utils.book_append_sheet(newWorkbook, wsAdditions, "New Accounts");
+                XLSX.utils.book_append_sheet(newWorkbook, wsRemovals, "Removals");
+                XLSX.utils.book_append_sheet(newWorkbook, wsUpdates, "Rep Updates");
+
+                // 7. Trigger the download
+                const today = new Date().toISOString().split('T')[0];
+                XLSX.writeFile(newWorkbook, `Reconciliation_Results_${today}.xlsx`);
+
+                statusEl.innerText = '✅ Comparison complete! File downloaded.';
+                statusEl.style.color = '#4CAF50';
+
+            } catch (error) {
+                console.error(error);
+                statusEl.innerText = '❌ Error processing files. Check the console.';
+                statusEl.style.color = '#f44336';
+            }
+        }
+    </script>
+</body>
+</html>
