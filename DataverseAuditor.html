@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dataverse Auditor Pro v1.20 Mapping Pass</title>
+  <title>Dataverse Auditor Pro v1.21 Field-Safe Lookup</title>
 
   <script src="https://alcdn.msauth.net/browser/2.38.2/js/msal-browser.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
@@ -230,9 +230,6 @@
     .pill { display: inline-flex; align-items: center; min-height: 28px; padding: 4px 10px; border-radius: 999px; font-weight: 900; font-size: 13px; font-family: Consolas, monospace; }
     .acct-pill { color: #bae6fd; background: rgba(56,189,248,0.13); border: 1px solid rgba(56,189,248,0.34); }
     .status-pill { color: #ddd6fe; background: rgba(192,132,252,0.13); border: 1px solid rgba(192,132,252,0.34); }
-
-    .field-pill { color: #fef3c7; background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.32); }
-    .record-name { color: var(--text-soft); font-weight: 850; }
     .muted-text { color: var(--muted); }
     .dim { opacity: 0.72; }
 
@@ -321,7 +318,7 @@
       <div class="brand">
         <div class="logo">DA</div>
         <div>
-          <h1>Dataverse Auditor Pro <span class="muted-text" style="font-size:13px;">v1.20 Mapping</span></h1>
+          <h1>Dataverse Auditor Pro <span class="muted-text" style="font-size:13px;">v1.21 Field-Safe</span></h1>
           <div class="subtitle">Readable audit review with accountnum lookup, export, filters, and corrected redirect behavior.</div>
         </div>
       </div>
@@ -355,7 +352,7 @@
           <div class="field span-3"><label>Account # Lookup</label><div class="toggle-row"><input type="checkbox" id="lookupAccount" checked /> <span>Resolve actual accountnum</span></div></div>
           <div class="field span-2"><label>Lookup Cap</label><input type="number" id="lookupCap" value="2500" min="0" /></div>
           <div class="field span-2"><label>Concurrency</label><input type="number" id="lookupConcurrency" value="8" min="1" max="20" /></div>
-          <div class="field span-4"><label>Account Fields To Try</label><input type="text" id="accountFields" value="accountnum,accountnumber" /></div>
+          <div class="field span-4"><label>Account Fields To Try</label><input type="text" id="accountFields" value="cr714_accountnum" /></div>
           <div class="field span-4"><label>Record Name Field</label><input type="text" id="recordNameField" placeholder="Optional, e.g. name" /></div>
         </div>
         <div class="hint"><strong>Tip:</strong> Account # first comes from audit changedata if present. If enabled, the app then does a throttled live lookup against the audited record. Deleted records may not be resolvable unless accountnum is in changedata.</div>
@@ -406,6 +403,8 @@
     let lookupCount = 0;
     const entitySetCache = new Map();
     const accountNumCache = new Map();
+    const entityAttributeCache = new Map();
+    const invalidFieldCache = new Set();
 
     function setStatus(message, type = "normal") {
       const el = document.getElementById("status");
@@ -451,16 +450,19 @@
       return item?.[`${fieldName}@OData.Community.Display.V1.FormattedValue`] || item?.[fieldName] || "";
     }
 
-    function cleanRecordName(value, objectId) {
-      const text = clean(value || "");
-      if (!text || text === clean(objectId) || text.toLowerCase() === String(objectId || "").toLowerCase()) return "";
-      return text;
+    function looksLikeAccountNumber(value) {
+      return /^C\d{4,}$/i.test(String(value || "").trim());
     }
 
-    function applyRecordLabel(row) {
-      const recordPart = row.recordName || row.objectId || "record unavailable";
-      row.cLab = `${row.actionLabel || row.action || "Event"} - ${recordPart}`;
-      return row;
+    function extractAccountFromFormattedObject(item) {
+      const formatted = formattedValue(item, "_objectid_value");
+      return looksLikeAccountNumber(formatted) ? formatted.trim() : "";
+    }
+
+    function cleanLookupName(value, objectId) {
+      const text = clean(value || "");
+      if (!text || text.toLowerCase() === String(objectId || "").toLowerCase()) return "";
+      return text;
     }
 
     function getGuid(value) {
@@ -511,17 +513,14 @@
         placeholder: "No audit records loaded.",
         columns: [
           { title: "Timestamp", field: "createdon", width: 185, formatter: c => safeDate(c.getValue()) },
-          { title: "Action", field: "actionLabel", width: 105, headerFilter: "input" },
-          { title: "Account #", field: "accountNum", width: 155, headerFilter: "input", formatter: accountFormatter },
+          { title: "Account #", field: "accountNum", width: 160, headerFilter: "input", formatter: accountFormatter },
           { title: "Lookup", field: "accountLookupStatus", width: 125, headerFilter: "input", formatter: lookupStatusFormatter },
-          { title: "Record Name", field: "recordName", width: 245, headerFilter: "input", formatter: recordNameFormatter },
+          { title: "Event - Record", field: "cLab", width: 290, headerFilter: "input" },
           { title: "User", field: "uName", width: 185, headerFilter: "input" },
-          { title: "Entity", field: "eClean", width: 145, headerFilter: "input" },
-          { title: "Entity Logical", field: "entityLogicalName", width: 160, headerFilter: "input", visible: false },
+          { title: "Entity", field: "eClean", width: 150, headerFilter: "input" },
           { title: "Record Id", field: "objectId", width: 260, headerFilter: "input", visible: false },
-          { title: "Changed Fields", field: "fieldList", width: 160, headerFilter: "input", formatter: fieldListFormatter },
-          { title: "Old Values", field: "oldH", widthGrow: 2.25, formatter: "html", headerFilter: "input", vertAlign: "top" },
-          { title: "New Values", field: "newH", widthGrow: 2.25, formatter: "html", headerFilter: "input", vertAlign: "top" },
+          { title: "Field & Old Value", field: "oldH", widthGrow: 2.25, formatter: "html", headerFilter: "input", vertAlign: "top" },
+          { title: "New Value", field: "newH", widthGrow: 2.25, formatter: "html", headerFilter: "input", vertAlign: "top" },
           { title: "Prev Note", field: "onH", widthGrow: 2, formatter: "html", headerFilter: "input", vertAlign: "top" },
           { title: "New Note", field: "nnH", widthGrow: 2, formatter: "html", headerFilter: "input", vertAlign: "top" }
         ]
@@ -538,18 +537,6 @@
     function lookupStatusFormatter(cell) {
       const v = cell.getValue() || "not checked";
       return `<span class="pill status-pill">${escapeHtml(v)}</span>`;
-    }
-
-    function recordNameFormatter(cell) {
-      const v = cell.getValue();
-      return v ? `<span class="record-name">${escapeHtml(v)}</span>` : `<span class="muted-text">Record name unavailable</span>`;
-    }
-
-    function fieldListFormatter(cell) {
-      const v = cell.getValue();
-      if (!v) return `<span class="muted-text">No parsed fields</span>`;
-      const count = String(v).split(",").filter(Boolean).length;
-      return `<span class="pill field-pill">${count} field${count === 1 ? "" : "s"}</span>`;
     }
 
     function buildColumnPanel() {
@@ -643,59 +630,53 @@
     function prepareAuditRow(item) {
       const changes = processSplit(item.changedata);
       const objectId = getGuid(item._objectid_value);
-      const formattedRecord = formattedValue(item, "_objectid_value");
-      const recordName = cleanRecordName(formattedRecord, objectId);
-      const accountNum = changes.accountNumFromChange || "";
-      const row = {
+      const formattedObject = formattedValue(item, "_objectid_value") || item._objectid_value || "(record unavailable)";
+      const accountFromObject = extractAccountFromFormattedObject(item);
+      const accountNum = changes.accountNumFromChange || accountFromObject || "";
+      const recordName = cleanLookupName(formattedObject, objectId) || (accountNum ? accountNum : "(record unavailable)");
+      return {
         ...item,
         objectId,
-        recordName,
         accountNum,
-        accountLookupStatus: accountNum ? "from audit" : "pending",
-        actionLabel: actMap[item.action] || String(item.action || "Unknown"),
+        accountLookupStatus: changes.accountNumFromChange ? "from audit" : (accountFromObject ? "from record label" : "pending"),
         uName: formattedValue(item, "_userid_value") || "System",
-        entityLogicalName: item.objecttypecode || "",
         eClean: clean(item.objecttypecode),
+        cLab: `${actMap[item.action] || item.action} - ${recordName}`,
         ...changes
       };
-      return applyRecordLabel(row);
     }
 
     async function resolveAccountNumbersForBatch(rows, token) {
       if (!accountLookupEnabled()) {
-        return rows.map(r => applyRecordLabel({ ...r, accountLookupStatus: r.accountNum ? "from audit" : "off" }));
+        return rows.map(r => ({ ...r, accountLookupStatus: r.accountNum ? "from audit" : "off" }));
       }
 
       const cap = lookupCap();
-      const fields = parseCsvInput("accountFields", "accountnum,accountnumber");
+      const fields = parseCsvInput("accountFields", "cr714_accountnum");
       const nameField = (document.getElementById("recordNameField").value || "").trim();
-      const targets = rows.filter(r => (!r.accountNum || !r.recordName) && r.objecttypecode && r.objectId && r.action !== 3);
+      const targets = rows.filter(r => !r.accountNum && r.objecttypecode && r.objectId && r.action !== 3);
       const allowed = targets.slice(0, Math.max(0, cap - lookupCount));
       const skippedSet = new Set(targets.slice(allowed.length).map(r => `${r.objecttypecode}:${r.objectId}`.toLowerCase()));
 
       rows.forEach(r => {
         const key = `${r.objecttypecode}:${r.objectId}`.toLowerCase();
-        if ((!r.accountNum || !r.recordName) && skippedSet.has(key)) r.accountLookupStatus = r.accountLookupStatus === "from audit" ? "acct from audit / name cap hit" : "cap hit";
+        if (!r.accountNum && skippedSet.has(key)) r.accountLookupStatus = "cap hit";
         if (!r.accountNum && r.action === 3) r.accountLookupStatus = "deleted";
       });
 
-      if (allowed.length === 0) return rows.map(applyRecordLabel);
+      if (allowed.length === 0) return rows;
 
-      document.getElementById("p-log").innerText = `Resolving mapped fields for ${allowed.length.toLocaleString()} records...\nLookups used this pull: ${lookupCount.toLocaleString()} / ${cap.toLocaleString()}`;
+      document.getElementById("p-log").innerText = `Resolving accountnum for ${allowed.length.toLocaleString()} records...\nLookups used this pull: ${lookupCount.toLocaleString()} / ${cap.toLocaleString()}`;
 
       await mapWithConcurrency(allowed, lookupConcurrency(), async row => {
         if (!isFetching) return;
         const result = await getAccountNumForRecord(row.objecttypecode, row.objectId, token, fields, nameField);
-        if (!row.accountNum && result.value) row.accountNum = result.value;
-        if (!row.recordName && result.recordName) row.recordName = result.recordName;
-        row.accountLookupStatus = row.accountNum
-          ? (result.didNetworkLookup ? (result.value ? "live" : "from audit") : "from audit")
-          : result.status;
+        row.accountNum = result.value;
+        row.accountLookupStatus = result.status;
         lookupCount += result.didNetworkLookup ? 1 : 0;
-        applyRecordLabel(row);
       });
 
-      return rows.map(applyRecordLabel);
+      return rows;
     }
 
     async function mapWithConcurrency(items, concurrency, worker) {
@@ -746,76 +727,125 @@
       }
     }
 
+    async function getValidAttributeSet(logicalName, token) {
+      const key = String(logicalName || "").toLowerCase();
+      if (!key) return null;
+      if (entityAttributeCache.has(key)) return entityAttributeCache.get(key);
+      try {
+        const url = `${orgUrl}/api/data/v9.2/EntityDefinitions(LogicalName='${key.replace(/'/g, "''")}')/Attributes?$select=LogicalName`;
+        const resp = await fetch(url, { headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json" } });
+        if (!resp.ok) throw new Error(await resp.text());
+        const json = await resp.json();
+        const set = new Set((json.value || []).map(a => String(a.LogicalName || "").toLowerCase()).filter(Boolean));
+        entityAttributeCache.set(key, set);
+        return set;
+      } catch (e) {
+        console.warn("Attribute metadata lookup failed; using guarded fallback:", logicalName, e);
+        entityAttributeCache.set(key, null);
+        return null;
+      }
+    }
+
+    function filterValidFieldsForEntity(logicalName, fields, attributeSet) {
+      const entityKey = String(logicalName || "").toLowerCase();
+      const cleaned = Array.from(new Set((fields || []).map(f => String(f || "").trim()).filter(Boolean)));
+      if (attributeSet) return cleaned.filter(f => attributeSet.has(f.toLowerCase()));
+      return cleaned.filter(f => !invalidFieldCache.has(`${entityKey}:${f.toLowerCase()}`));
+    }
+
+    async function fetchSingleField(entitySet, id, field, token) {
+      const url = `${orgUrl}/api/data/v9.2/${entitySet}(${id})?$select=${encodeURIComponent(field)}`;
+      return fetch(url, { headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json", "Prefer": 'odata.include-annotations="*"' } });
+    }
+
     async function getAccountNumForRecord(logicalName, id, token, fieldsToTry, nameField) {
       const cacheKey = `${logicalName}:${id}:${fieldsToTry.join("|")}:${nameField}`.toLowerCase();
       if (accountNumCache.has(cacheKey)) return { ...accountNumCache.get(cacheKey), didNetworkLookup: false };
 
       const entitySet = await getEntitySetName(logicalName, token);
       if (!entitySet) {
-        const result = { value: "", recordName: "", status: "no entityset", didNetworkLookup: false };
+        const result = { value: "", status: "no entityset", didNetworkLookup: false };
         accountNumCache.set(cacheKey, result);
         return result;
       }
 
-      const selectFields = Array.from(new Set([...fieldsToTry, nameField].filter(Boolean))).join(",");
-      if (!selectFields) {
-        const result = { value: "", recordName: "", status: "no fields", didNetworkLookup: false };
+      const attributeSet = await getValidAttributeSet(logicalName, token);
+      const validAccountFields = filterValidFieldsForEntity(logicalName, fieldsToTry, attributeSet);
+      const validNameFields = filterValidFieldsForEntity(logicalName, [nameField].filter(Boolean), attributeSet);
+      const fields = Array.from(new Set([...validAccountFields, ...validNameFields]));
+      if (fields.length === 0) {
+        const result = { value: "", status: "no acct field", didNetworkLookup: false };
         accountNumCache.set(cacheKey, result);
         return result;
       }
 
       try {
-        const url = `${orgUrl}/api/data/v9.2/${entitySet}(${id})?$select=${encodeURIComponent(selectFields).replace(/%2C/g, ",")}`;
+        const url = `${orgUrl}/api/data/v9.2/${entitySet}(${id})?$select=${encodeURIComponent(fields.join(",")).replace(/%2C/g, ",")}`;
         const resp = await fetch(url, { headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json", "Prefer": 'odata.include-annotations="*"' } });
-        if (!resp.ok) {
-          const result = { value: "", recordName: "", status: resp.status === 404 ? "missing" : `error ${resp.status}`, didNetworkLookup: true };
+        if (resp.ok) {
+          const json = await resp.json();
+          let value = "";
+          for (const field of validAccountFields) {
+            value = json[`${field}@OData.Community.Display.V1.FormattedValue`] || json[field] || "";
+            if (value) break;
+          }
+          const result = { value: value || "", status: value ? "live" : "not found", didNetworkLookup: true };
           accountNumCache.set(cacheKey, result);
           return result;
         }
 
-        const json = await resp.json();
-        let value = "";
-        for (const field of fieldsToTry) {
-          value = json[`${field}@OData.Community.Display.V1.FormattedValue`] || json[field] || "";
-          if (value) break;
+        const rawText = await resp.text();
+        if (resp.status !== 400) {
+          const result = { value: "", status: resp.status === 404 ? "missing" : `error ${resp.status}`, didNetworkLookup: true };
+          accountNumCache.set(cacheKey, result);
+          return result;
         }
-        const recordName = nameField ? cleanRecordName(json[`${nameField}@OData.Community.Display.V1.FormattedValue`] || json[nameField] || "", id) : "";
-        const result = { value: value || "", recordName, status: value ? "live" : "not found", didNetworkLookup: true };
+
+        console.warn("Combined mapped lookup rejected; trying one account field at a time:", logicalName, rawText);
+        for (const field of validAccountFields) {
+          const invKey = `${String(logicalName || "").toLowerCase()}:${field.toLowerCase()}`;
+          if (invalidFieldCache.has(invKey)) continue;
+          const single = await fetchSingleField(entitySet, id, field, token);
+          const text = await single.text();
+          if (single.ok) {
+            const json = JSON.parse(text || "{}");
+            const value = json[`${field}@OData.Community.Display.V1.FormattedValue`] || json[field] || "";
+            if (value) {
+              const result = { value, status: "live", didNetworkLookup: true };
+              accountNumCache.set(cacheKey, result);
+              return result;
+            }
+          } else if (single.status === 400 && text.toLowerCase().includes("could not find a property")) {
+            invalidFieldCache.add(invKey);
+          }
+        }
+
+        const result = { value: "", status: "not found", didNetworkLookup: true };
         accountNumCache.set(cacheKey, result);
         return result;
       } catch (e) {
-        console.warn("Mapped field lookup failed:", logicalName, id, e);
-        const result = { value: "", recordName: "", status: "lookup err", didNetworkLookup: true };
+        console.warn("Account # lookup failed:", logicalName, id, e);
+        const result = { value: "", status: "lookup err", didNetworkLookup: true };
         accountNumCache.set(cacheKey, result);
         return result;
       }
     }
 
     function processSplit(json) {
-      const r = {
-        oldH: "", newH: "", oldR: "", newR: "",
-        onH: "", nnH: "", onR: "", nnR: "",
-        fieldList: "", fieldListR: "",
-        isRem: false,
-        accountNumFromChange: ""
-      };
+      const r = { oldH: "", newH: "", oldR: "", newR: "", onH: "", nnH: "", onR: "", nnR: "", isRem: false, accountNumFromChange: "" };
       if (!json) return r;
-
       try {
         const d = JSON.parse(json);
         if (!d.changedAttributes || !Array.isArray(d.changedAttributes)) return r;
-
-        const generalOldHtml = [], generalNewHtml = [], noteOldHtml = [], noteNewHtml = [], fields = [];
-        const accountFields = parseCsvInput("accountFields", "accountnum,accountnumber").map(x => x.toLowerCase());
+        const generalOldHtml = [], generalNewHtml = [], noteOldHtml = [], noteNewHtml = [];
+        const accountFields = parseCsvInput("accountFields", "cr714_accountnum").map(x => x.toLowerCase());
 
         d.changedAttributes.forEach(a => {
           const logicalName = a.logicalName || "";
           const logicalLower = logicalName.toLowerCase();
           const isNoteField = logicalName.startsWith("cr714_") && logicalLower.includes("note");
-          const fieldNameRaw = clean(logicalName) || logicalName || "Unknown Field";
+          const fieldNameRaw = clean(logicalName);
           const fieldNameHtml = escapeHtml(fieldNameRaw);
-          fields.push(fieldNameRaw);
-
           const oldExists = a.oldValue !== null && a.oldValue !== undefined && a.oldValue !== "";
           const newExists = a.newValue !== null && a.newValue !== undefined && a.newValue !== "";
           const oldText = valueToText(a.oldValue);
@@ -827,7 +857,6 @@
 
           const oldLine = `<div class="diff-box"><div class="diff-field">${fieldNameHtml}</div><div class="diff-value old">${escapeHtml(oldText)}</div></div>`;
           const newLine = `<div class="diff-box"><div class="diff-field">${fieldNameHtml}</div><div class="diff-value new">${escapeHtml(newText)}</div></div>`;
-
           if (isNoteField) {
             noteOldHtml.push(oldLine); noteNewHtml.push(newLine);
             r.onR += `${fieldNameRaw}: ${oldText}\n`; r.nnR += `${fieldNameRaw}: ${newText}\n`;
@@ -837,8 +866,6 @@
           }
         });
 
-        r.fieldList = fields.join(", ");
-        r.fieldListR = fields.join("\n");
         r.oldH = generalOldHtml.join(""); r.newH = generalNewHtml.join("");
         r.onH = noteOldHtml.join(""); r.nnH = noteNewHtml.join("");
       } catch (e) {
@@ -982,41 +1009,26 @@
       const cols = table.getColumns().filter(c => c.isVisible());
       const activeData = table.getData("active");
       if (!activeData.length) { alert("No rows to export."); return; }
-
-      const exportFormatters = {
-        createdon: r => safeDate(r.createdon),
-        actionLabel: r => r.actionLabel,
-        accountNum: r => r.accountNum,
-        accountLookupStatus: r => r.accountLookupStatus,
-        recordName: r => r.recordName,
-        uName: r => r.uName,
-        eClean: r => r.eClean,
-        entityLogicalName: r => r.entityLogicalName || r.objecttypecode,
-        objectId: r => r.objectId,
-        fieldList: r => r.fieldListR || r.fieldList,
-        oldH: r => r.oldR,
-        newH: r => r.newR,
-        onH: r => r.onR,
-        nnH: r => r.nnR,
-        cLab: r => r.cLab
-      };
-
       const data = activeData.map(r => {
         const row = {};
         cols.forEach(c => {
           const f = c.getField();
+          const title = c.getDefinition().title;
           if (!f) return;
-          const title = c.getDefinition().title || f;
-          row[title] = exportFormatters[f] ? exportFormatters[f](r) : r[f];
+          if (f === "createdon") row["Timestamp"] = safeDate(r[f]);
+          else if (f === "oldH") row["Field/Old"] = r.oldR;
+          else if (f === "newH") row["New Value"] = r.newR;
+          else if (f === "onH") row["Prev Note"] = r.onR;
+          else if (f === "nnH") row["New Note"] = r.nnR;
+          else row[title] = r[f];
         });
         return row;
       });
-
       const ws = XLSX.utils.json_to_sheet(data);
       ws["!cols"] = Object.keys(data[0] || {}).map(key => ({ wch: Math.min(Math.max(key.length + 4, 18), 90) }));
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Audits");
-      XLSX.writeFile(wb, "Dataverse_Audit_v1.20.xlsx");
+      XLSX.writeFile(wb, "Dataverse_Audit_v1.21.xlsx");
     }
   </script>
 </body>
