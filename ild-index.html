@@ -12773,5 +12773,264 @@ const prevRenderReports = window.renderReports;
 </script>
 <!-- === ACT REPORTING SCOPE + FAST HISTORY PASS END === -->
 
+
+
+<!-- === ACT BEHAVIOR STABILIZATION PASS START === -->
+<style id="act-behavior-stabilization-style-20260707">
+  body.act-data-ready #sniper-load-modal.act-auto-suppressed,
+  body.act-data-ready #no-data-scope-prompt.act-auto-suppressed{
+    display:none!important;
+    visibility:hidden!important;
+    pointer-events:none!important;
+  }
+  .act-behavior-mini-badge{
+    display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;
+    border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-muted);
+    font-size:9px;font-weight:1000;text-transform:uppercase;letter-spacing:.06em;
+  }
+</style>
+<script id="act-behavior-stabilization-pass-20260707">
+(function(){
+  if(window.__ACT_BEHAVIOR_STABILIZATION_PASS_20260707__) return;
+  window.__ACT_BEHAVIOR_STABILIZATION_PASS_20260707__ = true;
+
+  const S = window.ACTBehaviorStabilizer = window.ACTBehaviorStabilizer || {};
+  const clean = v => String(v == null ? '' : v).replace(/\s+/g,' ').trim();
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const $ = id => document.getElementById(id);
+
+  S.state = {
+    booting: false,
+    allowingManualScopedPrompt: false,
+    lastDataReadyAt: 0,
+    lastPromptSuppressedAt: 0,
+    lastSelfCheck: null
+  };
+
+  S.accountCount = function(){
+    const team = Array.isArray(window.teamFilteredAccounts) ? window.teamFilteredAccounts.filter(Boolean).length : 0;
+    const merged = Array.isArray(window.mergedAccounts) ? window.mergedAccounts.filter(Boolean).length : 0;
+    return Math.max(team, merged, Number(window.totalLoadedRecords || 0));
+  };
+
+  S.hasData = function(){ return S.accountCount() > 0; };
+
+  S.isGlobalLoaderVisible = function(){
+    const loader = $('global-loader');
+    return !!loader && loader.style.display !== 'none' && getComputedStyle(loader).display !== 'none';
+  };
+
+  S.markDataReady = function(reason){
+    if(!S.hasData()) return false;
+    S.state.lastDataReadyAt = Date.now();
+    document.body.classList.add('act-data-ready');
+    document.documentElement.setAttribute('data-act-data-ready','true');
+    try { sessionStorage.setItem('act_data_ready_v1','1'); } catch(e) {}
+    S.hideScopePrompts(reason || 'data-ready');
+    return true;
+  };
+
+  S.hideScopePrompts = function(reason){
+    ['sniper-load-modal','no-data-scope-prompt'].forEach(id => {
+      const el = $(id);
+      if(!el) return;
+      el.classList.add('act-auto-suppressed');
+      el.classList.add('hidden-force');
+      el.style.setProperty('display','none','important');
+      el.style.setProperty('visibility','hidden','important');
+      el.style.setProperty('pointer-events','none','important');
+      el.dataset.autoSuppressedReason = reason || 'data-ready';
+    });
+  };
+
+  S.releasePromptForManualOpen = function(){
+    ['sniper-load-modal','no-data-scope-prompt'].forEach(id => {
+      const el = $(id);
+      if(!el) return;
+      el.classList.remove('act-auto-suppressed');
+      el.classList.remove('hidden-force');
+      el.style.removeProperty('visibility');
+      el.style.removeProperty('pointer-events');
+    });
+  };
+
+  S.waitForInitialData = async function(timeoutMs){
+    const started = Date.now();
+    while(Date.now() - started < timeoutMs){
+      if(S.hasData()) return true;
+      // A background fetch may be in progress from the existing cache/delta layer; give it a small window.
+      await sleep(200);
+    }
+    return S.hasData();
+  };
+
+  S.runSelfCheck = function(){
+    const modal = $('sniper-load-modal');
+    const reports = $('tab-reports');
+    const dashboard = $('tab-dashboard');
+    const checks = [
+      { component:'Auth/User', ok: !!window.msalAccount || !!window.currentUserName, detail: clean(window.currentUserName || 'not signed in yet') },
+      { component:'Employee filters', ok: Array.isArray(window.employeesData) && window.employeesData.length > 0, count: (window.employeesData || []).length },
+      { component:'Downloaded account scope', ok: S.hasData(), count: S.accountCount() },
+      { component:'Scoped selection modal', ok: !S.hasData() || !modal || getComputedStyle(modal).display === 'none', detail: modal ? getComputedStyle(modal).display : 'not built' },
+      { component:'Dashboard tab', ok: !!dashboard, active: dashboard ? dashboard.classList.contains('active') : false },
+      { component:'Account gallery', ok: !!$('account-list-container'), renderedCards: document.querySelectorAll('#account-list-container .list-item').length },
+      { component:'Account detail form', ok: !!$('active-form') && !!$('fv-history') && !!$('fv-manager-note') },
+      { component:'Reports shell', ok: !!reports && typeof window.renderReports === 'function', active: reports ? reports.classList.contains('active') : false },
+      { component:'Reporting data source', ok: !!window.ACTFactReporting || Array.isArray(window.reportingFacts), factRows: window.ACTFactReporting && Array.isArray(window.ACTFactReporting.rows) ? window.ACTFactReporting.rows.length : ((window.reportingFacts || []).length) },
+      { component:'Fast note history wrapper', ok: !!(window.selectAccount && window.selectAccount.__fastHistoryWrapped) || !!window.__ACT_REPORTING_SCOPE_FAST_HISTORY_PASS_20260707__ },
+      { component:'Live sync', ok: typeof window.pollLiveUpdates === 'function' }
+    ];
+    S.state.lastSelfCheck = { at: new Date().toISOString(), checks };
+    try { console.table(checks); } catch(e) { console.log(checks); }
+    return S.state.lastSelfCheck;
+  };
+
+  // --- Stop the selection window from re-opening once data is already loaded. ---
+  const originalOpenScopedLoadPrompt = window.openScopedLoadPrompt;
+  if(typeof originalOpenScopedLoadPrompt === 'function' && !originalOpenScopedLoadPrompt.__actBehaviorStabilized){
+    const wrappedOpen = function(options){
+      const force = options === true || (options && options.force === true) || S.state.allowingManualScopedPrompt;
+      if(!force && (S.state.booting || S.hasData())){
+        S.state.lastPromptSuppressedAt = Date.now();
+        S.markDataReady(S.state.booting ? 'boot-suppressed' : 'data-already-loaded');
+        return false;
+      }
+      S.releasePromptForManualOpen();
+      return originalOpenScopedLoadPrompt.apply(this, arguments);
+    };
+    wrappedOpen.__actBehaviorStabilized = true;
+    window.openScopedLoadPrompt = wrappedOpen;
+    window.forceOpenScopedLoadPrompt = function(){
+      S.state.allowingManualScopedPrompt = true;
+      try { return originalOpenScopedLoadPrompt.call(window, {force:true}); }
+      finally { setTimeout(() => { S.state.allowingManualScopedPrompt = false; }, 250); }
+    };
+  }
+
+  const originalShowNoDataMainPrompt = window.showNoDataMainPrompt;
+  if(typeof originalShowNoDataMainPrompt === 'function' && !originalShowNoDataMainPrompt.__actBehaviorStabilized){
+    const wrappedNoData = function(msg){
+      if(S.hasData()){
+        S.markDataReady('ignore-no-data-prompt-after-load');
+        return false;
+      }
+      return originalShowNoDataMainPrompt.apply(this, arguments);
+    };
+    wrappedNoData.__actBehaviorStabilized = true;
+    window.showNoDataMainPrompt = wrappedNoData;
+  }
+
+  const originalBeginScopedLoad = window.beginScopedLoad;
+  if(typeof originalBeginScopedLoad === 'function' && !originalBeginScopedLoad.__actBehaviorStabilized){
+    const wrappedBegin = async function(){
+      S.releasePromptForManualOpen();
+      const result = await originalBeginScopedLoad.apply(this, arguments);
+      if(S.hasData()) S.markDataReady('scoped-load-complete');
+      setTimeout(() => S.hasData() && S.markDataReady('post-load-confirm'), 50);
+      setTimeout(() => S.hasData() && S.markDataReady('post-load-confirm-late'), 800);
+      return result;
+    };
+    wrappedBegin.__actBehaviorStabilized = true;
+    window.beginScopedLoad = wrappedBegin;
+  }
+
+  const originalFetchAllData = window.fetchAllData;
+  if(typeof originalFetchAllData === 'function' && !originalFetchAllData.__actBehaviorStabilized){
+    const wrappedFetchAll = async function(){
+      const result = await originalFetchAllData.apply(this, arguments);
+      if(S.hasData()) S.markDataReady('fetch-all-data-complete');
+      return result;
+    };
+    wrappedFetchAll.__actBehaviorStabilized = true;
+    window.fetchAllData = wrappedFetchAll;
+  }
+
+  const originalApplyFilters = window.applyFilters;
+  if(typeof originalApplyFilters === 'function' && !originalApplyFilters.__actBehaviorStabilized){
+    const wrappedApply = function(){
+      const result = originalApplyFilters.apply(this, arguments);
+      if(S.hasData()) S.markDataReady('filters-applied');
+      return result;
+    };
+    wrappedApply.__actBehaviorStabilized = true;
+    window.applyFilters = wrappedApply;
+  }
+
+  const originalRenderAccountList = window.renderAccountList;
+  if(typeof originalRenderAccountList === 'function' && !originalRenderAccountList.__actBehaviorStabilized){
+    const wrappedRenderList = function(){
+      const result = originalRenderAccountList.apply(this, arguments);
+      if(S.hasData()) S.markDataReady('account-list-rendered');
+      return result;
+    };
+    wrappedRenderList.__actBehaviorStabilized = true;
+    window.renderAccountList = wrappedRenderList;
+  }
+
+  const originalInitApp = window.initApp;
+  if(typeof originalInitApp === 'function' && !originalInitApp.__actBehaviorStabilized){
+    const wrappedInit = async function(){
+      S.state.booting = true;
+      document.body.classList.add('act-booting');
+      try{
+        const result = await originalInitApp.apply(this, arguments);
+        const loaded = await S.waitForInitialData(3500);
+        if(loaded){
+          S.markDataReady('init-data-present');
+        } else if(!S.hasData()){
+          // Only show the selector when there is genuinely no account slice available.
+          S.state.booting = false;
+          document.body.classList.remove('act-booting');
+          if(typeof originalOpenScopedLoadPrompt === 'function') originalOpenScopedLoadPrompt.call(window, {force:true});
+        }
+        return result;
+      } finally {
+        S.state.booting = false;
+        document.body.classList.remove('act-booting');
+        if(S.hasData()) S.markDataReady('init-finally');
+        setTimeout(() => S.hasData() && S.markDataReady('init-late-confirm'), 1000);
+      }
+    };
+    wrappedInit.__actBehaviorStabilized = true;
+    window.initApp = wrappedInit;
+  }
+
+  // Keep stubborn legacy wrappers from re-showing the modal after data is loaded.
+  S.guardTimer = setInterval(function(){
+    if(S.hasData()) S.markDataReady('periodic-guard');
+  }, 1000);
+
+  // Add a very small status badge in Reports once the shell exists.
+  S.addReportsHealthBadge = function(){
+    const reports = $('tab-reports');
+    if(!reports || $('act-behavior-health-badge')) return;
+    const top = reports.querySelector('.act-rpt2-status') || reports.querySelector('.act-rpt2-top');
+    if(!top) return;
+    const badge = document.createElement('span');
+    badge.id = 'act-behavior-health-badge';
+    badge.className = 'act-behavior-mini-badge';
+    badge.innerHTML = '<i class="fas fa-shield-check" style="color:var(--primary)"></i> Behavior Guard Active';
+    top.appendChild(badge);
+  };
+
+  const originalRenderReports = window.renderReports;
+  if(typeof originalRenderReports === 'function' && !originalRenderReports.__actBehaviorStabilized){
+    const wrappedReports = function(){
+      const result = originalRenderReports.apply(this, arguments);
+      setTimeout(S.addReportsHealthBadge, 0);
+      if(S.hasData()) S.markDataReady('reports-rendered');
+      return result;
+    };
+    wrappedReports.__actBehaviorStabilized = true;
+    window.renderReports = wrappedReports;
+  }
+
+  window.runACTBehaviorCheck = S.runSelfCheck;
+  setTimeout(() => { S.hasData() && S.markDataReady('startup-guard'); S.runSelfCheck(); }, 1800);
+})();
+</script>
+<!-- === ACT BEHAVIOR STABILIZATION PASS END === -->
+
 </body>
 </html>
