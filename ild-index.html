@@ -13724,5 +13724,550 @@ const prevRenderReports = window.renderReports;
 </script>
 <!-- === COPILOT PATCH: REPORTING PAGE PASS + FILTER/SCROLL FIXES 2026-07-08 END === -->
 
+
+
+<!-- === COPILOT PATCH: COUNT ACCURACY PASS 2026-07-08 START === -->
+<style id="act-count-accuracy-pass-20260708-style">
+  #act-rpt2-count-audit{
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+    padding:8px 10px;border:1px solid color-mix(in srgb,var(--primary) 35%,var(--border-color));
+    border-radius:14px;background:color-mix(in srgb,var(--primary) 8%,var(--bg-card));
+    color:var(--text-muted);font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;
+  }
+  #act-rpt2-count-audit b{color:var(--primary);font-weight:1000;}
+  #act-rpt2-count-audit .warn{color:var(--accent-warning)}
+</style>
+<script id="act-count-accuracy-pass-20260708-script">
+(function(){
+  if(window.__ACT_COUNT_ACCURACY_PASS_20260708__) return;
+  window.__ACT_COUNT_ACCURACY_PASS_20260708__ = true;
+
+  function R(){ return window.ACTFactReporting || null; }
+  function clean(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim(); }
+  function norm(v){ return clean(v).toLowerCase(); }
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
+  function nfmt(v){ return Number(v || 0).toLocaleString(); }
+  function pct(a,b){ return b ? ((a / b) * 100).toFixed(1) + '%' : '0.0%'; }
+  function dt(v){ const d = v ? new Date(v) : null; return d && !isNaN(d.getTime()) ? d : null; }
+  function fmtDate(v){ const d = dt(v); return d ? d.toISOString().slice(0,10) : ''; }
+  function monthKey(v){ const d = dt(v); return d ? `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}` : 'Unknown'; }
+  function sourceVal(row){ return clean(row.SourceTable || row.SourceType || row.TouchType || 'Downloaded'); }
+  function rowIsEmail(row){ return !!row.IsEmailActivity || /email/i.test(`${row.ActivityType||''} ${row.TouchType||''} ${row.EmailSubject||''} ${row.EmailStatus||''}`); }
+  function rowIsIntro(row){ return !!row.HasIntro || /intro/i.test(`${row.Action||''} ${row.NoteText||''} ${row.EmailSubject||''} ${row.ActivityType||''}`); }
+  function rowIsMasonville(row){ return /mason|link/i.test(`${row.ActivityType||''} ${row.TouchType||''} ${row.SourceType||''}`); }
+  function stableAccount(row){ return clean(row.AccountNumber || row.accountNumber || row.cr714_accountnumber || ''); }
+  function stableRep(row){ return clean(row['Action Rep'] || row.ActionRep || row.rep || 'Unknown Rep') || 'Unknown Rep'; }
+  function stableAction(row){ return clean(row.Action || row.action || 'No Action') || 'No Action'; }
+  function stableType(row){ return clean(row.ActivityType || row.activityType || 'Unknown Activity Type') || 'Unknown Activity Type'; }
+  function stableDate(row){ return clean(row.ActivityDate || row.ActivityDateOnly || row.ModifiedOn || row.CreatedOn || ''); }
+  function rowKey(row){
+    const explicit = clean(row.DtActFctblId || row.cr714_dt_act_fctblid || row.cr714_activitynaturalkey || row.ActivityNaturalKey);
+    if(explicit && !row.__downloadedScopeRow) return `fact:${explicit}`;
+    const acct = stableAccount(row) || '(blank)';
+    const rep = stableRep(row);
+    const action = stableAction(row);
+    const type = stableType(row);
+    const date = stableDate(row);
+    const source = sourceVal(row);
+    /* Downloaded manager-scope rows can create one email row per dataset source. Count one email per account/date/action. */
+    if(rowIsEmail(row)) return `email:${acct}|${date}|${action}|${clean(row.EmailSubject || '')}`.toLowerCase();
+    return `row:${acct}|${rep}|${action}|${type}|${date}|${source}|${clean(row.NoteText || '')}`.toLowerCase();
+  }
+  function normalizeRow(row){
+    const out = Object.assign({}, row || {});
+    out.AccountNumber = stableAccount(out);
+    out['Action Rep'] = stableRep(out);
+    out.Action = stableAction(out);
+    out.ActivityType = stableType(out);
+    out.ActivityDate = clean(out.ActivityDate || out.ActivityDateOnly || out.ModifiedOn || out.CreatedOn || '');
+    out.ActivityDateOnly = clean(out.ActivityDateOnly || fmtDate(out.ActivityDate));
+    out.ActivityMonth = clean(out.ActivityMonth || monthKey(out.ActivityDate));
+    out.SourceTable = sourceVal(out);
+    out.SourceType = clean(out.SourceType || out.SourceTable);
+    out.IsEmailActivity = rowIsEmail(out);
+    out.HasIntro = rowIsIntro(out);
+    out.__countKey = rowKey(out);
+    return out;
+  }
+  function dedupeRows(rows){
+    const arr = Array.isArray(rows) ? rows : [];
+    const map = new Map();
+    arr.forEach(raw => {
+      const row = normalizeRow(raw);
+      const key = row.__countKey;
+      if(!map.has(key)) map.set(key,row);
+      else {
+        const prev = map.get(key);
+        /* Prefer row with more completed fields, but keep the same count. */
+        const prevScore = Object.values(prev).filter(v => clean(v)).length;
+        const rowScore = Object.values(row).filter(v => clean(v)).length;
+        if(rowScore > prevScore) map.set(key,Object.assign({}, prev, row));
+      }
+    });
+    return Array.from(map.values());
+  }
+  function trackDate(obj,row){
+    const d = dt(row.ActivityDate || row.ActivityDateOnly);
+    if(!d) return;
+    if(!obj.FirstDate || d < obj.FirstDate) obj.FirstDate = d;
+    if(!obj.LastDate || d > obj.LastDate) obj.LastDate = d;
+  }
+  function sortDesc(rows, field){ return [...rows].sort((a,b)=>(Number(b[field]||0)-Number(a[field]||0)) || String(a[Object.keys(a)[0]]||'').localeCompare(String(b[Object.keys(b)[0]]||''))); }
+
+  function computeAccurateAggregates(){
+    const r = R(); if(!r) return false;
+    r.rows = dedupeRows(r.rows);
+    r.filtered = dedupeRows(r.filtered && r.filtered.length ? r.filtered : r.rows);
+    const typeSet = Array.from(new Set(r.filtered.map(x => x.ActivityType).filter(Boolean))).sort();
+    r.activityTypes = typeSet;
+    const piv = new Map(), reps = new Map(), acts = new Map(), accts = new Map(), months = new Map();
+    const dq = {unknownRep:0,unknownType:0,noAction:0,noAccount:0,missingDate:0,emailRows:0,introRows:0,introAccounts:0,duplicateRowsRemoved:0,sourceRows:(Array.isArray(r.rows)?r.rows.length:0)};
+    const introAccounts = new Set(), introRows = new Set();
+    r.filtered.forEach(row => {
+      const rep = row['Action Rep'], action = row.Action, type = row.ActivityType, acct = row.AccountNumber;
+      const isEmail = rowIsEmail(row), isIntro = rowIsIntro(row), isMason = rowIsMasonville(row);
+      const pkey = `${rep}||${action}`;
+      if(!piv.has(pkey)) piv.set(pkey, {'Action Rep':rep, Action:action, 'Total Actions':0});
+      const pr = piv.get(pkey); pr[type] = (pr[type] || 0) + 1; pr['Total Actions']++;
+
+      if(!reps.has(rep)) reps.set(rep, {'Action Rep':rep,'Total Actions':0,Accounts:new Set(),Actions:new Set(),Emails:0,IntroAccounts:new Set(),FirstDate:null,LastDate:null});
+      const rr = reps.get(rep); rr['Total Actions']++; if(acct) rr.Accounts.add(acct); rr.Actions.add(action); if(isEmail) rr.Emails++; if(isIntro) rr.IntroAccounts.add(acct || row.__countKey); trackDate(rr,row);
+
+      if(!acts.has(action)) acts.set(action,{Action:action,'Total Actions':0,Reps:new Set(),Accounts:new Set(),Emails:0,IntroAccounts:new Set()});
+      const ar = acts.get(action); ar['Total Actions']++; ar.Reps.add(rep); if(acct) ar.Accounts.add(acct); if(isEmail) ar.Emails++; if(isIntro) ar.IntroAccounts.add(acct || row.__countKey);
+
+      const acctKey = acct || '(blank)';
+      if(!accts.has(acctKey)) accts.set(acctKey,{AccountNumber:acctKey,CompanyName:row.CompanyName||'', 'Total Actions':0, Reps:new Set(), Actions:new Set(), Emails:0, Intros:0, FirstDate:null, LastDate:null});
+      const ac = accts.get(acctKey); ac['Total Actions']++; ac.Reps.add(rep); ac.Actions.add(action); if(isEmail) ac.Emails++; if(isIntro) ac.Intros = 1; trackDate(ac,row);
+
+      const mk = row.ActivityMonth || monthKey(row.ActivityDate);
+      if(!months.has(mk)) months.set(mk,{ActivityMonth:mk,'Total Actions':0,Emails:0,Notes:0,Masonville:0,Accounts:new Set(),Reps:new Set(),IntroAccounts:new Set()});
+      const mr = months.get(mk); mr['Total Actions']++; if(isEmail) mr.Emails++; else if(isMason) mr.Masonville++; else mr.Notes++; if(acct) mr.Accounts.add(acct); mr.Reps.add(rep); if(isIntro) mr.IntroAccounts.add(acct || row.__countKey);
+
+      if(!rep || /unknown/i.test(rep)) dq.unknownRep++;
+      if(!type || type === 'Unknown Activity Type') dq.unknownType++;
+      if(!action || action === 'No Action') dq.noAction++;
+      if(!acct) dq.noAccount++;
+      if(!row.ActivityDateOnly) dq.missingDate++;
+      if(isEmail) dq.emailRows++;
+      if(isIntro){ dq.introRows++; introRows.add(row.__countKey); introAccounts.add(acct || row.__countKey); }
+    });
+    typeSet.forEach(t => { piv.forEach(row => { row[t] = row[t] || 0; }); });
+    r.pivot = Array.from(piv.values());
+    r.repSummary = Array.from(reps.values()).map(x => ({'Action Rep':x['Action Rep'],'Total Actions':x['Total Actions'],'Unique Accounts':x.Accounts.size,'Unique Actions':x.Actions.size,'Emails':x.Emails,'Intros':x.IntroAccounts.size,'Actions / Account':x.Accounts.size ? (x['Total Actions']/x.Accounts.size).toFixed(2) : '0.00','First Activity':fmtDate(x.FirstDate),'Last Activity':fmtDate(x.LastDate)}));
+    r.actionSummary = Array.from(acts.values()).map(x => ({Action:x.Action,'Total Actions':x['Total Actions'],'Unique Reps':x.Reps.size,'Unique Accounts':x.Accounts.size,'Emails':x.Emails,'Email %':pct(x.Emails,x['Total Actions']),'Intro Accounts':x.IntroAccounts.size}));
+    r.accountSummary = Array.from(accts.values()).map(x => ({AccountNumber:x.AccountNumber,CompanyName:x.CompanyName,'Total Actions':x['Total Actions'],'Unique Reps':x.Reps.size,'Unique Actions':x.Actions.size,'Emails':x.Emails,'Intro Flag':x.Intros ? 'Yes' : 'No','First Activity':fmtDate(x.FirstDate),'Last Activity':fmtDate(x.LastDate)}));
+    r.monthlySummary = Array.from(months.values()).map(x => ({ActivityMonth:x.ActivityMonth,'Total Actions':x['Total Actions'],Emails:x.Emails,Notes:x.Notes,Masonville:x.Masonville,'Unique Accounts':x.Accounts.size,'Unique Reps':x.Reps.size,'Intro Accounts':x.IntroAccounts.size}));
+    dq.introAccounts = introAccounts.size;
+    dq.introUniqueRows = introRows.size;
+    r.dq = dq;
+    r.countAudit = {
+      displayedRows: r.filtered.length,
+      loadedRows: r.rows.length,
+      uniqueAccounts: new Set(r.filtered.map(x=>x.AccountNumber).filter(Boolean)).size,
+      uniqueReps: new Set(r.filtered.map(x=>x['Action Rep']).filter(Boolean)).size,
+      emailRows: dq.emailRows,
+      introAccounts: dq.introAccounts,
+      latestActivity: r.filtered.map(x=>dt(x.ActivityDate)).filter(Boolean).sort((a,b)=>b-a)[0] || null
+    };
+    return true;
+  }
+
+  function renderAccurateKpis(){
+    const r = R(); if(!r) return;
+    const a = r.countAudit || {};
+    const actions = new Set(r.filtered.map(x=>x.Action).filter(Boolean)).size;
+    const types = new Set(r.filtered.map(x=>x.ActivityType).filter(Boolean)).size;
+    const latest = a.latestActivity ? a.latestActivity.toLocaleDateString() : '--';
+    const kpis = [
+      ['Total activity rows', a.displayedRows || 0, 'Deduped activity rows currently visible.'],
+      ['Action reps', a.uniqueReps || 0, 'Unique action reps in the current filters.'],
+      ['Accounts', a.uniqueAccounts || 0, 'Unique account numbers in the current filters.'],
+      ['Action categories', actions, 'Unique action values in the current filters.'],
+      ['Activity types', types, 'Unique activity type values in the current filters.'],
+      ['Email activities', a.emailRows || 0, `${pct(a.emailRows || 0, a.displayedRows || 0)} of activity rows.`],
+      ['Intro accounts', a.introAccounts || 0, `${pct(a.introAccounts || 0, a.uniqueAccounts || 0)} of accounts flagged.`],
+      ['Latest activity date', latest, 'Most recent activity date in the current filters.']
+    ];
+    const el = document.getElementById('act-rpt2-kpis');
+    if(el) el.innerHTML = kpis.map(k => `<div class="act-rpt2-kpi"><div class="v">${typeof k[1] === 'number' ? nfmt(k[1]) : esc(k[1])}</div><div class="l">${esc(k[0])}</div><div class="s">${esc(k[2])}</div></div>`).join('');
+    const st = document.getElementById('act-rpt2-status-text');
+    if(st) st.textContent = `${nfmt(a.displayedRows || 0)} displayed / ${nfmt(a.loadedRows || 0)} loaded • count-checked`;
+  }
+
+  function renderCountAudit(){
+    const r = R(); if(!r) return;
+    const wrap = document.querySelector('#tab-reports .act-rpt2-wrap'); if(!wrap) return;
+    let audit = document.getElementById('act-rpt2-count-audit');
+    if(!audit){ audit = document.createElement('div'); audit.id = 'act-rpt2-count-audit'; const k = document.getElementById('act-rpt2-kpis'); if(k && k.parentNode) k.parentNode.insertBefore(audit, k.nextSibling); else wrap.appendChild(audit); }
+    const a = r.countAudit || {};
+    audit.innerHTML = `<span><i class="fas fa-calculator" style="color:var(--primary)"></i> Count audit</span><span><b>${nfmt(a.displayedRows||0)}</b> deduped rows</span><span><b>${nfmt(a.uniqueAccounts||0)}</b> accounts</span><span><b>${nfmt(a.emailRows||0)}</b> email rows</span><span><b>${nfmt(a.introAccounts||0)}</b> intro accounts</span>`;
+  }
+
+  function renderAccurateDQ(){
+    const r = R(); if(!r) return;
+    const dq = r.dq || {}, total = r.filtered.length;
+    const issueTotal = (dq.unknownRep||0)+(dq.unknownType||0)+(dq.noAction||0)+(dq.noAccount||0)+(dq.missingDate||0);
+    const rows = [
+      ['Unknown reps',dq.unknownRep||0,'Rows where Action Rep could not be parsed'],
+      ['Unknown activity type',dq.unknownType||0,'Rows using fallback activity type'],
+      ['No action',dq.noAction||0,'Rows with blank or cleaned-empty Action'],
+      ['Missing account #',dq.noAccount||0,'Rows without AccountNumber'],
+      ['Missing activity date',dq.missingDate||0,'Rows without usable ActivityDate'],
+      ['Intro accounts',dq.introAccounts||0,'Unique accounts flagged as intros'],
+      ['Email activity rows',dq.emailRows||0,'Rows classified as email activity']
+    ];
+    const el = document.getElementById('act-rpt2-dq');
+    if(el) el.innerHTML = rows.map(x => `<div class="act-rpt2-dq-row"><div><b>${esc(x[0])}</b><br><span>${esc(x[2])}</span></div><strong>${nfmt(x[1])}</strong></div>`).join('') + `<div class="act-rpt2-dq-row"><div><b>Data quality score</b><br><span>Deduped row accuracy check</span></div><strong>${pct(Math.max(0,total-issueTotal),Math.max(total,1))}</strong></div>`;
+  }
+
+  function updateCharts(){
+    const r = R(); if(!r || !r.charts) return;
+    const reps = sortDesc(r.repSummary,'Total Actions').slice(0,12);
+    if(r.charts.reps){ r.charts.reps.data.labels = reps.map(x=>x['Action Rep']); r.charts.reps.data.datasets[0].data = reps.map(x=>x['Total Actions']); r.charts.reps.update(); }
+    const acts = sortDesc(r.actionSummary,'Total Actions').slice(0,10);
+    if(r.charts.actions){ r.charts.actions.data.labels = acts.map(x=>x.Action); r.charts.actions.data.datasets[0].data = acts.map(x=>x['Total Actions']); r.charts.actions.update(); }
+    const months = [...r.monthlySummary].sort((a,b)=>String(a.ActivityMonth).localeCompare(String(b.ActivityMonth))).slice(-12);
+    if(r.charts.months){ r.charts.months.data.labels = months.map(x=>x.ActivityMonth); if(r.charts.months.data.datasets[0]) r.charts.months.data.datasets[0].data = months.map(x=>x['Total Actions']); if(r.charts.months.data.datasets[1]) r.charts.months.data.datasets[1].data = months.map(x=>x.Emails); r.charts.months.update(); }
+  }
+
+  function runAccuracyPass(renderTable){
+    const r = R(); if(!r || !Array.isArray(r.rows)) return false;
+    computeAccurateAggregates();
+    renderAccurateKpis();
+    renderCountAudit();
+    renderAccurateDQ();
+    updateCharts();
+    if(renderTable && typeof r.setView === 'function'){
+      const current = r.activeView || 'pivot';
+      r.setView(current);
+    }
+    return true;
+  }
+  window.ACTRunCountAccuracyPass = function(){ return runAccuracyPass(true); };
+
+  function patchWhenReady(){
+    const r = R();
+    if(!r || r.__countAccuracyPassPatched) return false;
+    r.__countAccuracyPassPatched = true;
+    const oldApply = r.applyReportFilters;
+    if(typeof oldApply === 'function'){
+      r.applyReportFilters = function(){ const out = oldApply.apply(this, arguments); setTimeout(()=>runAccuracyPass(true),0); setTimeout(()=>runAccuracyPass(false),350); return out; };
+    }
+    ['loadFacts','refreshFacts','syncLoadedScope','setPresetRange'].forEach(fn => {
+      const old = r[fn];
+      if(typeof old === 'function') r[fn] = function(){ const out = old.apply(this, arguments); Promise.resolve(out).finally(()=>setTimeout(()=>runAccuracyPass(true),75)); return out; };
+    });
+    setTimeout(()=>runAccuracyPass(true),250);
+    setTimeout(()=>runAccuracyPass(false),1200);
+    return true;
+  }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', patchWhenReady); else patchWhenReady();
+  [500,1500,3000].forEach(ms => setTimeout(patchWhenReady, ms));
+})();
+</script>
+<!-- === COPILOT PATCH: COUNT ACCURACY PASS 2026-07-08 END === -->
+
+
+
+<!-- === COPILOT PATCH: HEAVY PROFESSIONAL UI CORRECTIONS PASS 2026-07-08 START === -->
+<style id="act-heavy-professional-ui-pass-20260708">
+  :root{
+    --act-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --act-surface: color-mix(in srgb,var(--bg-card) 94%,var(--primary));
+    --act-surface-2: color-mix(in srgb,var(--bg-app) 88%,var(--bg-card));
+    --act-border-soft: color-mix(in srgb,var(--border-color) 78%,transparent);
+    --act-shadow-soft: 0 14px 34px -26px rgba(15,23,42,.62), 0 1px 0 rgba(255,255,255,.44) inset;
+    --act-shadow-card: 0 18px 42px -32px rgba(15,23,42,.72), 0 1px 0 rgba(255,255,255,.52) inset;
+    --act-focus: 0 0 0 3px color-mix(in srgb,var(--primary) 22%,transparent);
+    --act-radius-md: 14px;
+    --act-radius-lg: 18px;
+    --act-radius-xl: 24px;
+  }
+  [data-theme="dark"]{
+    --act-surface: color-mix(in srgb,var(--bg-card) 90%,var(--primary));
+    --act-surface-2: color-mix(in srgb,var(--bg-app) 82%,var(--bg-card));
+    --act-border-soft: color-mix(in srgb,var(--border-color) 72%,transparent);
+    --act-shadow-soft: 0 18px 42px -28px rgba(0,0,0,.92), 0 1px 0 rgba(255,255,255,.04) inset;
+    --act-shadow-card: 0 22px 52px -34px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.055) inset;
+  }
+  html{background:var(--bg-app);}
+  body{font-family:var(--act-font)!important;-webkit-font-smoothing:antialiased;text-rendering:geometricPrecision;letter-spacing:-.005em;}
+  body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:-1;background:radial-gradient(circle at 8% 0%, color-mix(in srgb,var(--primary) 10%,transparent), transparent 28%),radial-gradient(circle at 100% 18%, rgba(59,130,246,.08), transparent 24%);}
+  [data-theme="dark"] body::before{background:radial-gradient(circle at 6% 0%, color-mix(in srgb,var(--primary) 18%,transparent), transparent 30%),radial-gradient(circle at 100% 18%, rgba(96,165,250,.10), transparent 24%);}
+
+  /* Universal polish */
+  button, input, select, textarea, .quick-filter-chip, .list-item, .act-rpt2-chip, .act-rpt2-tab{outline:none!important;}
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, .quick-filter-chip:focus-visible, .act-rpt2-chip:focus-visible, .act-rpt2-tab:focus-visible{box-shadow:var(--act-focus)!important;border-color:var(--primary)!important;}
+  button{user-select:none;}
+  .btn-primary,.btn-secondary,.act-rpt2-btn{border-radius:12px!important;transition:transform .14s ease, box-shadow .14s ease, background-color .14s ease, border-color .14s ease!important;}
+  .btn-primary:hover:not(:disabled),.btn-secondary:hover:not(:disabled),.act-rpt2-btn:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 12px 24px -20px rgba(15,23,42,.75)!important;}
+  .btn-primary:active,.btn-secondary:active,.act-rpt2-btn:active{transform:translateY(0);}
+  input, select, textarea{border-radius:12px!important;box-shadow:0 1px 0 rgba(255,255,255,.03) inset!important;}
+  input::placeholder, textarea::placeholder{color:color-mix(in srgb,var(--text-muted) 74%,transparent)!important;}
+  .custom-scrollbar::-webkit-scrollbar{width:10px!important;height:10px!important;}
+  .custom-scrollbar::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--primary) 76%,var(--border-color))!important;border:2px solid var(--bg-card)!important;border-radius:999px!important;}
+  .custom-scrollbar::-webkit-scrollbar-track{background:color-mix(in srgb,var(--bg-app) 82%,transparent)!important;border-radius:999px!important;}
+
+  /* App chrome */
+  header{min-height:60px!important;padding-inline:18px!important;background:color-mix(in srgb,var(--bg-card) 88%,transparent)!important;backdrop-filter:blur(16px) saturate(1.25);border-bottom:1px solid var(--act-border-soft)!important;box-shadow:0 12px 28px -30px rgba(15,23,42,.78)!important;}
+  header h1{letter-spacing:-.08em!important;}
+  header .nav-tab{height:60px!important;display:flex!important;align-items:center!important;padding:0 18px!important;border-bottom-width:3px!important;font-size:11px!important;font-weight:1000!important;letter-spacing:.1em!important;position:relative;}
+  header .nav-tab::after{content:"";position:absolute;left:14px;right:14px;bottom:8px;height:3px;border-radius:999px;background:transparent;transition:.18s ease;}
+  header .nav-tab.active{background:linear-gradient(180deg,color-mix(in srgb,var(--primary) 8%,transparent),transparent)!important;border-bottom-color:transparent!important;}
+  header .nav-tab.active::after{background:var(--primary);box-shadow:0 0 14px color-mix(in srgb,var(--primary) 34%,transparent);}
+  header .nav-tab:hover{color:var(--primary)!important;background:color-mix(in srgb,var(--primary) 7%,transparent)!important;}
+  #live-poll-indicator{height:30px!important;border-radius:999px!important;padding:0 10px!important;border-color:color-mix(in srgb,var(--accent-success) 32%,var(--border-color))!important;background:color-mix(in srgb,var(--accent-success) 10%,var(--bg-card))!important;}
+  header button[title]{width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;border-radius:12px!important;border:1px solid transparent!important;}
+  header button[title]:hover{background:color-mix(in srgb,var(--primary) 9%,var(--bg-card))!important;border-color:color-mix(in srgb,var(--primary) 28%,var(--border-color))!important;color:var(--primary)!important;}
+  #current-user-name{max-width:190px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+  /* Filters bar */
+  .horizontal-filters{padding:10px 16px!important;background:linear-gradient(180deg,color-mix(in srgb,var(--bg-card) 92%,var(--bg-app)),var(--bg-card))!important;border-bottom:1px solid var(--act-border-soft)!important;box-shadow:0 12px 32px -32px rgba(15,23,42,.55)!important;}
+  .filters-top-row{gap:10px!important;}
+  .multiselect-container{min-width:180px!important;}
+  .multiselect-header{height:36px!important;border-radius:999px!important;padding:0 12px!important;font-size:10px!important;font-weight:1000!important;letter-spacing:.06em;text-transform:uppercase;border-color:var(--act-border-soft)!important;background:var(--bg-input)!important;box-shadow:0 1px 0 rgba(255,255,255,.04) inset!important;}
+  .multiselect-header:hover{border-color:color-mix(in srgb,var(--primary) 42%,var(--border-color))!important;color:var(--primary)!important;}
+  .multiselect-dropdown{border-radius:16px!important;border-color:var(--act-border-soft)!important;box-shadow:0 24px 48px -24px rgba(15,23,42,.55)!important;overflow:hidden!important;}
+  .multiselect-search{padding:10px!important;}
+  .multiselect-search input{height:32px!important;font-size:11px!important;}
+  .multiselect-option{padding:9px 11px!important;font-size:12px!important;}
+  #active-filter-subtitle{margin-top:8px!important;padding-top:8px!important;font-size:10px!important;letter-spacing:.04em;}
+  .quick-filter-chip{border-radius:999px!important;padding:6px 11px!important;font-size:10px!important;font-weight:1000!important;letter-spacing:.08em;box-shadow:0 1px 0 rgba(255,255,255,.04) inset;}
+
+  /* Dashboard left rail */
+  #app-grid{background:linear-gradient(135deg,color-mix(in srgb,var(--bg-app) 96%,var(--primary)),var(--bg-app));}
+  #account-list-container{padding:12px!important;background:linear-gradient(180deg,var(--bg-app),color-mix(in srgb,var(--bg-app) 88%,var(--bg-card)))!important;}
+  #account-list-container + div, #account-list-container ~ div{border-color:var(--act-border-soft)!important;}
+  #list-search,#list-sort{height:38px!important;border-radius:13px!important;font-size:11px!important;font-weight:900!important;border-color:var(--act-border-soft)!important;}
+  #list-search:focus,#list-sort:focus{box-shadow:var(--act-focus)!important;}
+  .list-item{border-radius:18px!important;border:1px solid var(--act-border-soft)!important;background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 92%,var(--bg-app)))!important;box-shadow:var(--act-shadow-soft)!important;padding:12px!important;margin-bottom:10px!important;transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease, background .15s ease!important;}
+  .list-item:hover{transform:translateY(-2px)!important;box-shadow:0 22px 42px -30px rgba(15,23,42,.72)!important;border-color:color-mix(in srgb,var(--primary) 44%,var(--border-color))!important;}
+  .list-item.active{border-left-width:1px!important;border-color:color-mix(in srgb,var(--primary) 62%,var(--border-color))!important;background:linear-gradient(135deg,color-mix(in srgb,var(--primary) 12%,var(--bg-card)),var(--bg-card))!important;box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 18%,transparent),0 22px 44px -32px color-mix(in srgb,var(--primary) 50%,rgba(0,0,0,.45))!important;}
+  .list-item.active::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:4px;border-radius:0 999px 999px 0;background:var(--primary);}
+  .badge-ds{border-radius:999px!important;padding:3px 8px!important;font-size:8px!important;font-weight:1000!important;letter-spacing:.08em!important;}
+  .pulse-help,.pulse-multi,.pulse-intro{animation:none!important;}
+  .pulse-help{box-shadow:0 0 0 1px color-mix(in srgb,var(--accent-danger) 28%,transparent),var(--act-shadow-card)!important;}
+  .pulse-multi{box-shadow:0 0 0 1px color-mix(in srgb,var(--accent-warning) 28%,transparent),var(--act-shadow-card)!important;}
+  .pulse-intro{box-shadow:0 0 0 1px color-mix(in srgb,var(--accent-success) 28%,transparent),var(--act-shadow-card)!important;}
+  #bulk-action-bar{border-radius:16px 16px 0 0!important;margin:0 10px!important;padding:10px 12px!important;box-shadow:0 -18px 40px -28px rgba(15,23,42,.72)!important;}
+
+  /* Account workspace */
+  #empty-state{background:radial-gradient(circle at center,color-mix(in srgb,var(--primary) 8%,transparent),transparent 42%);}
+  #empty-state i{font-size:4.6rem!important;opacity:.14!important;color:var(--primary)!important;}
+  #active-form{padding:16px!important;background:linear-gradient(135deg,color-mix(in srgb,var(--bg-app) 94%,var(--primary)),var(--bg-app))!important;}
+  #active-form > .mb-6,
+  #active-form > .grid.grid-cols-2 > div,
+  #active-form > .p-3.border.rounded,
+  #active-form > .flex.flex-col.gap-6 > div{border-radius:20px!important;border:1px solid var(--act-border-soft)!important;box-shadow:var(--act-shadow-card)!important;}
+  #active-form > .mb-6{background:linear-gradient(135deg,color-mix(in srgb,var(--primary) 13%,var(--bg-card)),var(--bg-card))!important;}
+  #fv-company{font-weight:1000!important;letter-spacing:-.055em!important;}
+  #fv-message-container > div{border-radius:14px!important;padding:10px 12px!important;box-shadow:0 10px 24px -24px rgba(239,68,68,.8)!important;}
+  #active-form .font-black.text-muted.uppercase{font-size:9px!important;letter-spacing:.12em!important;color:color-mix(in srgb,var(--text-muted) 86%,var(--primary))!important;}
+  #active-form > .flex.flex-col.gap-6 > div:nth-child(2){border-top-width:0!important;position:relative;overflow:hidden!important;}
+  #active-form > .flex.flex-col.gap-6 > div:nth-child(2)::before{content:"";position:absolute;inset:0 0 auto;height:4px;background:linear-gradient(90deg,var(--primary),color-mix(in srgb,var(--accent-info) 70%,var(--primary)));}
+  #fv-manager-note{border:1px solid color-mix(in srgb,var(--primary) 34%,var(--border-color))!important;background:linear-gradient(180deg,var(--bg-input),color-mix(in srgb,var(--bg-input) 92%,var(--bg-app)))!important;font-size:14px!important;box-shadow:0 10px 24px -24px rgba(15,23,42,.7) inset!important;}
+  #history-column{border-left:1px solid var(--act-border-soft)!important;background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 92%,var(--bg-app)))!important;}
+  #history-column > .p-4.border-b{min-height:56px!important;background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 92%,var(--bg-app)))!important;border-color:var(--act-border-soft)!important;}
+  #fv-history{padding:14px!important;background:linear-gradient(180deg,var(--bg-app),color-mix(in srgb,var(--bg-app) 92%,var(--bg-card)))!important;}
+  .note-card{border-radius:18px!important;border-color:var(--act-border-soft)!important;box-shadow:var(--act-shadow-soft)!important;}
+  .note-card-header{background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 94%,var(--bg-app)))!important;padding:10px 12px!important;}
+  .note-card-body{padding:12px!important;font-size:13px!important;line-height:1.58!important;}
+
+  /* Reporting: executive-grade presentation */
+  #tab-reports.act-rpt-v2-shell{background:linear-gradient(135deg,color-mix(in srgb,var(--bg-app) 94%,var(--primary)),var(--bg-app))!important;}
+  .act-rpt2-wrap{gap:12px!important;padding:14px!important;grid-template-rows:auto auto auto auto minmax(0,1fr)!important;}
+  .act-rpt2-top{border-radius:24px!important;padding:18px 20px!important;border-color:var(--act-border-soft)!important;background:linear-gradient(135deg,color-mix(in srgb,var(--primary) 14%,var(--bg-card)),var(--bg-card) 58%,color-mix(in srgb,var(--accent-info) 6%,var(--bg-card)))!important;box-shadow:var(--act-shadow-card)!important;position:relative;overflow:hidden;}
+  .act-rpt2-top::before{content:"";position:absolute;inset:-70% auto auto -8%;width:260px;height:260px;border-radius:999px;background:color-mix(in srgb,var(--primary) 14%,transparent);filter:blur(10px);}
+  .act-rpt2-title{position:relative;font-size:clamp(1.38rem,2vw,2rem)!important;letter-spacing:-.07em!important;}
+  .act-rpt2-title i{width:42px;height:42px;display:inline-flex;align-items:center;justify-content:center;border-radius:16px;background:var(--primary);color:var(--primary-fg)!important;box-shadow:0 16px 34px -24px color-mix(in srgb,var(--primary) 70%,black);font-size:17px;}
+  .act-rpt2-sub{position:relative;font-size:10px!important;letter-spacing:.11em!important;}
+  .act-rpt2-pill{border-radius:999px!important;padding:6px 10px!important;background:color-mix(in srgb,var(--bg-input) 92%,var(--bg-card))!important;border-color:var(--act-border-soft)!important;}
+  .act-rpt2-pill.good{background:color-mix(in srgb,var(--accent-success) 12%,var(--bg-card))!important;}
+  .act-rpt2-pill.warn{background:color-mix(in srgb,var(--accent-warning) 12%,var(--bg-card))!important;}
+  .act-rpt2-toolbar{grid-template-columns:repeat(6,minmax(130px,1fr)) auto auto auto!important;border-radius:22px!important;padding:12px!important;border-color:var(--act-border-soft)!important;background:color-mix(in srgb,var(--bg-card) 94%,var(--bg-app))!important;box-shadow:var(--act-shadow-soft)!important;}
+  .act-rpt2-field label{font-size:9px!important;letter-spacing:.13em!important;}
+  .act-rpt2-field input,.act-rpt2-field select{height:38px!important;border-radius:13px!important;border-color:var(--act-border-soft)!important;background:var(--bg-input)!important;}
+  .act-rpt2-btn{height:38px!important;border-radius:13px!important;}
+  .act-rpt2-quick{padding:2px 0 0!important;gap:8px!important;}
+  .act-rpt2-chip{padding:7px 12px!important;border-radius:999px!important;border-color:var(--act-border-soft)!important;background:var(--bg-card)!important;}
+  .act-rpt2-chip:hover{transform:translateY(-1px);box-shadow:0 12px 24px -22px rgba(15,23,42,.72);}
+  .act-rpt2-chip.active{background:linear-gradient(135deg,var(--primary),color-mix(in srgb,var(--primary) 80%,var(--accent-info)))!important;box-shadow:0 15px 26px -22px color-mix(in srgb,var(--primary) 80%,black)!important;}
+  .act-rpt2-kpis{grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:10px!important;min-height:100px!important;}
+  .act-rpt2-kpi{border-radius:22px!important;padding:16px 16px 13px!important;border-color:var(--act-border-soft)!important;background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 92%,var(--bg-app)))!important;box-shadow:var(--act-shadow-card)!important;}
+  .act-rpt2-kpi::before{width:5px!important;border-radius:999px;top:14px!important;bottom:14px!important;left:0!important;inset:14px auto 14px 0!important;}
+  .act-rpt2-kpi .v{font-size:clamp(1.45rem,2vw,2rem)!important;letter-spacing:-.05em!important;}
+  .act-rpt2-kpi .l{font-size:9px!important;letter-spacing:.12em!important;}
+  .act-rpt2-kpi .s{font-size:10px!important;line-height:1.35!important;}
+  #act-rpt2-count-audit{border-radius:18px!important;padding:10px 12px!important;box-shadow:var(--act-shadow-soft)!important;background:linear-gradient(135deg,color-mix(in srgb,var(--primary) 9%,var(--bg-card)),var(--bg-card))!important;}
+  .act-rpt2-scope-banner{border-radius:18px!important;padding:11px 13px!important;box-shadow:var(--act-shadow-soft)!important;}
+  .act-rpt2-main{grid-template-columns:minmax(420px,.42fr) minmax(0,.58fr)!important;gap:12px!important;}
+  .act-rpt2-col{gap:12px!important;}
+  .act-rpt2-panel{border-radius:22px!important;border-color:var(--act-border-soft)!important;box-shadow:var(--act-shadow-card)!important;background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 94%,var(--bg-app)))!important;}
+  .act-rpt2-head{min-height:48px!important;padding:12px 14px!important;background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 92%,var(--bg-app)))!important;border-color:var(--act-border-soft)!important;}
+  .act-rpt2-head h3{font-size:10px!important;letter-spacing:.12em!important;}
+  .act-rpt2-chart{padding:14px!important;}
+  .act-rpt2-tab{padding:7px 11px!important;border-radius:999px!important;font-weight:1000!important;letter-spacing:.08em!important;background:var(--bg-input)!important;}
+  .act-rpt2-tab.active{background:var(--primary)!important;color:var(--primary-fg)!important;border-color:var(--primary)!important;box-shadow:0 14px 24px -22px color-mix(in srgb,var(--primary) 80%,black)!important;}
+  .act-rpt2-table-wrap{border-radius:0 0 22px 22px!important;background:var(--bg-card)!important;}
+  .act-rpt2-table{font-size:12px!important;border-collapse:separate!important;border-spacing:0!important;}
+  .act-rpt2-table th{height:42px!important;background:color-mix(in srgb,var(--bg-header) 88%,var(--bg-app))!important;color:color-mix(in srgb,var(--text-main) 78%,var(--primary))!important;font-size:10px!important;font-weight:1000!important;letter-spacing:.08em!important;text-transform:uppercase!important;border-bottom:1px solid var(--act-border-soft)!important;}
+  .act-rpt2-table td{height:38px!important;border-bottom:1px solid color-mix(in srgb,var(--border-color) 46%,transparent)!important;}
+  .act-rpt2-table tbody tr:nth-child(even) td{background:color-mix(in srgb,var(--bg-app) 34%,transparent)!important;}
+  .act-rpt2-table tbody tr:hover td{background:color-mix(in srgb,var(--primary) 8%,var(--bg-card))!important;}
+  .act-rpt2-pager{min-height:44px!important;padding:10px 12px!important;border-color:var(--act-border-soft)!important;background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 88%,var(--bg-app)))!important;}
+  .act-rpt2-dq-row{border-radius:14px!important;margin:8px!important;padding:11px 12px!important;border:1px solid var(--act-border-soft)!important;background:color-mix(in srgb,var(--bg-card) 94%,var(--bg-app))!important;}
+
+  /* Modals and transient UI */
+  .modal-overlay{background:rgba(2,6,23,.58)!important;backdrop-filter:blur(10px) saturate(1.15)!important;}
+  .modal-content{border-radius:24px!important;border:1px solid var(--act-border-soft)!important;box-shadow:0 34px 80px -35px rgba(0,0,0,.75)!important;background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-card) 92%,var(--bg-app)))!important;}
+  #sniper-load-modal .modal-content{max-width:min(1040px,calc(100vw - 36px))!important;border-top:0!important;padding:22px!important;}
+  #sniper-load-modal h3{letter-spacing:-.06em!important;}
+  .act-v251-scope{border-radius:22px!important;border-color:var(--act-border-soft)!important;background:linear-gradient(180deg,var(--bg-app),color-mix(in srgb,var(--bg-app) 90%,var(--bg-card)))!important;}
+  .act-v251-cat,.act-v251-main,.act-v251-sidebar{border-radius:16px!important;border-color:var(--act-border-soft)!important;}
+  .act-v251-cat.active{box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 22%,transparent) inset!important;}
+  .toast{border-radius:16px!important;border:1px solid var(--act-border-soft)!important;box-shadow:0 22px 42px -28px rgba(15,23,42,.78)!important;}
+
+  @media(max-width:1380px){.act-rpt2-toolbar{grid-template-columns:repeat(3,minmax(160px,1fr)) auto auto auto!important;}.act-rpt2-main{grid-template-columns:1fr!important;overflow:auto!important;}.act-rpt2-wrap{overflow:auto!important;}.act-rpt2-kpis{grid-template-columns:repeat(4,minmax(0,1fr))!important;}}
+  @media(max-width:980px){header{flex-wrap:wrap;height:auto!important;padding-block:8px!important;}header .nav-tab{height:44px!important;}.horizontal-filters{position:relative!important;}.act-rpt2-toolbar{grid-template-columns:1fr 1fr!important;}.act-rpt2-toolbar .search{grid-column:1/-1!important;}.act-rpt2-kpis{grid-template-columns:repeat(2,minmax(0,1fr))!important;}#app-grid{overflow:auto!important;}#active-form > .mb-6 > .flex.justify-between.items-start{grid-template-columns:1fr!important;}#history-column{max-width:none!important;width:100%!important;}}
+  @media(max-width:640px){.act-rpt2-kpis{grid-template-columns:1fr!important;}.act-rpt2-toolbar{grid-template-columns:1fr!important;}.act-rpt2-top{grid-template-columns:1fr!important;}.act-rpt2-status{justify-content:flex-start!important;}.multiselect-container{width:100%!important;}.filters-top-row{align-items:stretch!important;}#filter-container{width:100%!important;}}
+  @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important;}}
+</style>
+<script id="act-heavy-professional-ui-pass-20260708-script">
+(function(){
+  if(window.__ACT_HEAVY_PROFESSIONAL_UI_PASS_20260708__) return;
+  window.__ACT_HEAVY_PROFESSIONAL_UI_PASS_20260708__ = true;
+
+  const $ = id => document.getElementById(id);
+  const clean = v => String(v == null ? '' : v).replace(/\s+/g,' ').trim();
+
+  function addClass(el, cls){ if(el && !el.classList.contains(cls)) el.classList.add(cls); }
+  function setText(id, text){ const el=$(id); if(el) el.textContent=text; }
+
+  function hardenFragileActions(){
+    if(typeof window.clearAllFilters === 'function' && !window.clearAllFilters.__professionalHardened){
+      const original = window.clearAllFilters;
+      const wrapped = function(){
+        try{
+          document.querySelectorAll('.multiselect-dropdown input, #pbi-rep-filter-list input').forEach(chk => chk.checked = false);
+          if(window.FILTER_CONFIG && window.activeFilters){
+            window.FILTER_CONFIG.forEach(col => {
+              if(window.activeFilters[col.id]) window.activeFilters[col.id].clear();
+              const h = document.querySelector(`#ms-wrap-${col.id} .multiselect-header span`);
+              if(h) h.innerText = col.label;
+            });
+          }
+          if(window.massFilteredIds) window.massFilteredIds.clear();
+          const massInput = $('mass-id-input'); if(massInput) massInput.value = '';
+          const massCount = $('mass-id-count'); if(massCount) massCount.innerText = '0';
+          if(typeof window.clearDrilldownLock === 'function') window.clearDrilldownLock();
+          if(typeof window.applyFilters === 'function') window.applyFilters(false);
+        }catch(e){
+          console.warn('Professional clearAllFilters fallback used:', e);
+          try { return original.apply(this, arguments); } catch(_) {}
+        }
+      };
+      wrapped.__professionalHardened = true;
+      window.clearAllFilters = wrapped;
+    }
+    if(typeof window.jumpToAccount === 'function' && !window.jumpToAccount.__professionalHardened){
+      const wrapped = function(accountId){
+        if(!accountId || accountId === '(blank)') return;
+        const modal = $('drilldown-modal');
+        if(modal){ modal.classList.add('hidden-force'); modal.style.display = 'none'; }
+        if(typeof window._executeSwitchTab === 'function') window._executeSwitchTab('dashboard');
+        else if(typeof window.switchTab === 'function') window.switchTab('dashboard');
+        const search = $('list-search'); if(search) search.value = accountId;
+        if(typeof window.renderAccountList === 'function') window.renderAccountList(true,false);
+        setTimeout(()=>{
+          const card = document.getElementById(`card-${accountId}`);
+          if(card){ card.scrollIntoView({behavior:'smooth',block:'center'}); if(typeof window.selectAccount === 'function') window.selectAccount(accountId); }
+        }, 60);
+      };
+      wrapped.__professionalHardened = true;
+      window.jumpToAccount = wrapped;
+    }
+  }
+
+  function polishStaticLabels(){
+    document.title = 'A.C.T. Manager Console | Professional Reporting';
+    setText('loader-text','Preparing A.C.T. Manager Workspace...');
+    const navReports = $('nav-reports-tab');
+    if(navReports && !navReports.__proLabel){ navReports.innerHTML = '<i class="fas fa-chart-pie mr-2"></i>Reporting'; navReports.__proLabel = true; }
+    const histTitle = document.querySelector('#history-column h3');
+    if(histTitle) histTitle.innerHTML = '<i class="fas fa-timeline mr-2" style="color: var(--primary);"></i>Fact Activity Timeline';
+    const bulkBtn = $('btn-execute-bulk'); if(bulkBtn && clean(bulkBtn.textContent) === 'Execute Batch Patch') bulkBtn.innerHTML = '<i class="fas fa-bolt mr-2"></i>Execute Batch Update';
+  }
+
+  function addProfessionalBadges(){
+    const userBlock = $('current-user-name');
+    if(userBlock && !document.getElementById('act-pro-mode-badge')){
+      const badge = document.createElement('span');
+      badge.id='act-pro-mode-badge';
+      badge.className='act-rpt2-pill good';
+      badge.style.marginLeft='8px';
+      badge.innerHTML='<i class="fas fa-gem"></i> Pro UI';
+      userBlock.insertAdjacentElement('afterend', badge);
+    }
+  }
+
+  function normalizeReportShell(){
+    const tab = $('tab-reports');
+    if(tab) addClass(tab,'act-rpt-v2-shell');
+    const wrap = tab ? tab.querySelector('.act-rpt2-wrap') : null;
+    if(wrap && !wrap.__professionalAnnotated){
+      wrap.__professionalAnnotated = true;
+      const top = wrap.querySelector('.act-rpt2-top');
+      if(top && !top.querySelector('.act-pro-subline')){
+        const sub = top.querySelector('.act-rpt2-sub');
+        if(sub) sub.innerHTML = 'Executive account-activity reporting • scoped dataset • count-audited';
+      }
+    }
+    document.querySelectorAll('.act-rpt2-panel').forEach(panel=>{
+      if(!panel.querySelector('.act-panel-accent')){
+        const accent=document.createElement('div');
+        accent.className='act-panel-accent';
+        accent.style.cssText='height:3px;background:linear-gradient(90deg,var(--primary),color-mix(in srgb,var(--accent-info) 80%,var(--primary)));flex:0 0 auto;';
+        panel.insertBefore(accent, panel.firstChild);
+      }
+    });
+  }
+
+  function improveEmptyStates(){
+    const empty = $('empty-state');
+    if(empty && !empty.__professionalEmpty){
+      empty.__professionalEmpty = true;
+      empty.innerHTML = '<div style="max-width:340px"><i class="fas fa-inbox"></i><p class="text-xs uppercase font-black tracking-widest">Select an account</p><p class="text-[11px] font-bold text-muted mt-2 leading-relaxed">Choose an account from the left queue to review contacts, team ownership, manager actions, and fact-table activity.</p></div>';
+    }
+  }
+
+  function runPolish(){
+    document.body.classList.add('act-professional-ui');
+    hardenFragileActions();
+    polishStaticLabels();
+    addProfessionalBadges();
+    normalizeReportShell();
+    improveEmptyStates();
+  }
+
+  const oldRenderReports = window.renderReports;
+  if(typeof oldRenderReports === 'function' && !oldRenderReports.__professionalWrapped){
+    const wrapped = function(){ const result = oldRenderReports.apply(this, arguments); setTimeout(runPolish,0); setTimeout(runPolish,250); return result; };
+    wrapped.__professionalWrapped = true;
+    window.renderReports = wrapped;
+  }
+  const oldSelectAccount = window.selectAccount;
+  if(typeof oldSelectAccount === 'function' && !oldSelectAccount.__professionalWrapped){
+    const wrappedSelect = function(){ const result = oldSelectAccount.apply(this, arguments); setTimeout(runPolish,0); return result; };
+    wrappedSelect.__professionalWrapped = true;
+    window.selectAccount = wrappedSelect;
+  }
+
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', runPolish); else runPolish();
+  [250,900,1800,3500].forEach(ms=>setTimeout(runPolish,ms));
+})();
+</script>
+<!-- === COPILOT PATCH: HEAVY PROFESSIONAL UI CORRECTIONS PASS 2026-07-08 END === -->
+
 </body>
 </html>
