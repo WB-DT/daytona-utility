@@ -16279,5 +16279,1009 @@ const prevRenderReports = window.renderReports;
 })();
 </script>
 <!-- === COPILOT PATCH: REPORTS FEATURE PASS + AUDIT ACTION TOTALS 2026-07-09 END === -->
+
+
+<!-- === COPILOT PATCH: AUDIT NOTE RECONCILIATION + LOGISTICS HISTORY 2026-07-09 START === -->
+<script id="act-audit-note-reconcile-logistics-history-20260709">
+(function(){
+  if(window.__ACT_AUDIT_NOTE_RECONCILE_LOGISTICS_HISTORY_20260709__) return;
+  window.__ACT_AUDIT_NOTE_RECONCILE_LOGISTICS_HISTORY_20260709__ = true;
+
+  const LOGISTICS_LOGICAL = 'cr714_logisticslog_2';
+  const LOGISTICS_ENTITY_FALLBACK = 'cr714_logisticslog_2s';
+  const LOGISTICS_ACCOUNT_FIELD = 'cr714_accountnumber';
+  const LOGISTICS_ID_FIELD = 'cr714_logisticslog_2id';
+  const LOGISTICS_NOTE_FIELD = 'cr714_logisticsnotes';
+  const LOGISTICS_SELECT = [
+    LOGISTICS_ID_FIELD,
+    LOGISTICS_ACCOUNT_FIELD,
+    LOGISTICS_NOTE_FIELD,
+    'cr714_companyordeliveryname',
+    'cr714_rep',
+    'createdon',
+    'modifiedon',
+    'createdbyname',
+    'modifiedbyname',
+    'owneridname'
+  ];
+  const LOGISTICS_CHUNK_SIZE = 115;
+  const LOGISTICS_CONCURRENCY = 4;
+  const AUDIT_NOTE_CHUNK_SIZE = 45;
+  const AUDIT_NOTE_CONCURRENCY = 3;
+  const MAX_URL_CHARS = 14000;
+  const AUDIT_START = '2026-01-01T00:00:00Z';
+  const AUDIT_END = '2027-01-01T00:00:00Z';
+
+  const NOTE_FIELD_META = {
+    cr714_managernotes: { source:'Manager Note', touch:'Manager Note', manager:true },
+    cr714_notesfr: { source:'Manager Note', touch:'Manager Note', manager:true },
+    cr714_accountmanagementnotes: { source:'Account Management', touch:'Note' },
+    cr714_qbnotes: { source:'Cadence', touch:'Note' },
+    cr714_prospectingnotes: { source:'Prospecting', touch:'Note' },
+    cr714_logisticsnotes: { source:'Logistics', touch:'Logistics' },
+    cr714_actionmessage: { source:'Action Message', touch:'Action Message' }
+  };
+
+  const ENTITY_SOURCE = {
+    cr714_accountmanagementdataset: 'Account Management',
+    cr714_cadencedataset: 'Cadence',
+    cr714_prospectingdataset: 'Prospecting',
+    cr714_louisebrowndataset: 'Louise Brown',
+    cr714_logisticslog_2: 'Logistics'
+  };
+
+  const clean = v => String(v ?? '').replace(/\r\n/g,'\n').replace(/\r/g,'\n').trim();
+  const one = v => clean(v).replace(/\s+/g,' ');
+  const lower = v => one(v).toLowerCase();
+  const acctKey = v => one(v).toUpperCase();
+  const guid = v => one(v).replace(/[{}]/g,'').toLowerCase();
+  const od = v => String(v ?? '').replace(/'/g,"''");
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const uniq = arr => Array.from(new Set((arr||[]).map(acctKey).filter(Boolean))).sort();
+  const norm = v => one(v).toLowerCase().replace(/^note:\s*/,'').replace(/\s+/g,' ').trim();
+  const dateKey = v => { const d=new Date(v||0); return isNaN(d.getTime()) ? one(v) : d.toISOString().slice(0,19); };
+  const fmt = n => Number(n||0).toLocaleString();
+
+  function getTokenSafe(){ return typeof window.getToken === 'function' ? window.getToken() : Promise.resolve(null); }
+  function getEventDate(ev){ return ev && (ev['Note Date'] || ev.EmailDate || ev.LastModified || ev.createdon || ev.modifiedon || ''); }
+  function getRowsAccount(r){ return acctKey(r && (r.cr714_accountnumber || r.cr714_accountnum)); }
+  function sourceBadge(src){
+    const s=one(src);
+    const cls = s === 'Logistics' ? 'badge-pro' : (s === 'Manager Note' ? 'badge-am' : 'badge-ds');
+    return `<span class="badge-ds ${cls}">${esc(s)}</span>`;
+  }
+
+  async function resolveLogisticsEntitySet(token){
+    if(window.__actLogisticsEntitySet) return window.__actLogisticsEntitySet;
+    try{
+      const url = `${window.DATAVERSE_URL}/EntityDefinitions?$select=LogicalName,EntitySetName&$filter=${encodeURIComponent(`LogicalName eq '${LOGISTICS_LOGICAL}'`)}`;
+      const res = await fetch(url,{headers:{Authorization:`Bearer ${token}`, Accept:'application/json'}});
+      if(res.ok){
+        const data=await res.json();
+        const found=(data.value||[]).find(x=>x.LogicalName===LOGISTICS_LOGICAL && x.EntitySetName);
+        if(found){ window.__actLogisticsEntitySet=found.EntitySetName; return found.EntitySetName; }
+      }
+    }catch(e){ console.warn('Logistics entity set resolution failed; using fallback.', e); }
+    window.__actLogisticsEntitySet = LOGISTICS_ENTITY_FALLBACK;
+    return LOGISTICS_ENTITY_FALLBACK;
+  }
+
+  function makeAccountChunks(ids, chunkSize, buildUrl){
+    const out=[]; let cur=[];
+    uniq(ids).forEach(id=>{
+      const test=cur.concat([id]);
+      if(cur.length && (test.length>chunkSize || buildUrl(test).length>MAX_URL_CHARS)){ out.push(cur); cur=[id]; }
+      else cur=test;
+    });
+    if(cur.length) out.push(cur);
+    return out;
+  }
+
+  function logisticsUrl(entitySet, ids){
+    const filter='(' + ids.map(id=>`${LOGISTICS_ACCOUNT_FIELD} eq '${od(id)}'`).join(' or ') + ')';
+    return `${window.DATAVERSE_URL}/${entitySet}?$select=${LOGISTICS_SELECT.join(',')}&$filter=${encodeURIComponent(filter)}`;
+  }
+
+  async function fetchLogisticsChunk(token, entitySet, ids, idx, total){
+    let url=logisticsUrl(entitySet, ids), rows=[];
+    while(url){
+      const res=await fetch(url,{headers:{Authorization:`Bearer ${token}`, Accept:'application/json', Prefer:'odata.maxpagesize=5000, odata.include-annotations="OData.Community.Display.V1.FormattedValue"'}});
+      if(!res.ok){
+        if((res.status===400 || res.status===414) && ids.length>1){
+          const mid=Math.ceil(ids.length/2);
+          const a=await fetchLogisticsChunk(token, entitySet, ids.slice(0,mid), idx, total);
+          const b=await fetchLogisticsChunk(token, entitySet, ids.slice(mid), idx, total);
+          return a.concat(b);
+        }
+        console.warn('Logistics chunk failed', idx+1, total, res.status, await res.text().catch(()=>''));
+        return rows;
+      }
+      const data=await res.json();
+      rows.push(...(Array.isArray(data.value)?data.value:[]));
+      url=data['@odata.nextLink']||null;
+      await new Promise(requestAnimationFrame);
+    }
+    return rows;
+  }
+
+  function extractMetaAuthor(text){
+    const m=clean(text).match(/(?:Modified By|Created By)\s*:\s*([^\n\r]+)/i);
+    return m && m[1] ? one(m[1]).split(/\s{2,}|\||Action:|Account Management|Cadence|Prospecting|Louise Brown|Logistics/i)[0].trim() : '';
+  }
+  function extractMetaDate(text, fallback){
+    const m=clean(text).match(/(?:Modified On|Created On)\s*:\s*([^\n\r]+)/i);
+    return m && m[1] ? one(m[1]) : fallback;
+  }
+  function stripMetaLines(text){
+    return clean(text)
+      .replace(/(?:Modified By|Created By)\s*:[^\n\r]*(\n|$)/ig,'')
+      .replace(/(?:Modified On|Created On)\s*:[^\n\r]*(\n|$)/ig,'')
+      .replace(/^\s*(Account Management|Cadence|Prospecting|Louise Brown|Logistics)\s+(Note|Update)\s*:?\s*$/gim,'')
+      .replace(/^\s*Action\s*:[^\n\r]*(\n|$)/ig,'')
+      .replace(/^-{5,}$/gm,'')
+      .replace(/\n{3,}/g,'\n\n')
+      .trim();
+  }
+  function splitNoteBlocks(text){
+    const t=clean(text);
+    if(!t) return [];
+    const blocks=t.split(/-{8,}/).map(x=>x.trim()).filter(Boolean);
+    return blocks.length ? blocks : [t];
+  }
+  function blockIdentity(block){ return norm(stripMetaLines(block) || block); }
+  function deltaBlocks(oldText, newText){
+    const oldKeys=new Set(splitNoteBlocks(oldText).map(blockIdentity).filter(Boolean));
+    return splitNoteBlocks(newText).filter(b=>{
+      const k=blockIdentity(b);
+      return k && !oldKeys.has(k);
+    });
+  }
+  function eventKey(ev){
+    return [
+      lower(ev._eventKind || ev._touchType || ev.SourceDataset || 'Activity'),
+      acctKey(ev.cr714_accountnum),
+      dateKey(getEventDate(ev)),
+      lower(ev.EventRep || ev.cr714_rep || ''),
+      lower(ev['Action at time of Note'] || ev.cr714_action || ''),
+      norm(ev.NoteSegment || ev.EmailSubject || ev.EmailSegment || '')
+    ].join('|');
+  }
+  function existingEventKeys(){
+    const s=new Set();
+    (window.unifiedEventRows||[]).forEach(ev=>s.add(eventKey(ev)));
+    return s;
+  }
+
+  function logisticsRowToEvents(r){
+    const acct=acctKey(r[LOGISTICS_ACCOUNT_FIELD]);
+    if(!acct) return [];
+    const raw=clean(r[LOGISTICS_NOTE_FIELD]);
+    if(!raw) return [];
+    return splitNoteBlocks(raw).map(block=>{
+      const body=stripMetaLines(block);
+      if(!body) return null;
+      const d=extractMetaDate(block, r.modifiedon || r.createdon || null);
+      const author=one(extractMetaAuthor(block) || r.modifiedbyname || r.createdbyname || r.owneridname || r.cr714_rep || 'Logistics');
+      return {
+        'Note Date': d,
+        cr714_accountnum: acct,
+        cr714_accountname: one(r.cr714_companyordeliveryname || ''),
+        cr714_rep: one(r.cr714_rep || author),
+        cr714_action: 'Logistics Update',
+        SourceDataset: 'Logistics',
+        EventRep: author,
+        'Action at time of Note': 'Logistics Update',
+        NoteSegment: body,
+        EmailSubject: null,
+        EmailSegment: null,
+        EmailDate: null,
+        LastModified: r.modifiedon || r.createdon || d,
+        Count: 1,
+        _recordRef: one(r[LOGISTICS_ID_FIELD] || ''),
+        _entitySet: window.__actLogisticsEntitySet || LOGISTICS_ENTITY_FALLBACK,
+        _rawSource: r,
+        _touchType: 'Logistics',
+        _eventKind: 'Logistics',
+        _isLogistics: true
+      };
+    }).filter(Boolean);
+  }
+
+  function indexLogisticsRows(rows){
+    window.__actLogisticsRows = rows || [];
+    window.__actLogisticsRowsByAccount = new Map();
+    (rows||[]).forEach(r=>{
+      const acct=acctKey(r[LOGISTICS_ACCOUNT_FIELD]);
+      if(!acct) return;
+      if(!window.__actLogisticsRowsByAccount.has(acct)) window.__actLogisticsRowsByAccount.set(acct,[]);
+      window.__actLogisticsRowsByAccount.get(acct).push(r);
+      const acctObj=(window.mergedAccounts||[]).find(a=>acctKey(a.cr714_id || a.cr714_accountnum)===acct);
+      if(acctObj){
+        acctObj.sources = acctObj.sources || [];
+        const id=guid(r[LOGISTICS_ID_FIELD]);
+        if(id && !acctObj.sources.some(s=>guid(s.id)===id)){
+          acctObj.sources.push({type:'Logistics', table:window.__actLogisticsEntitySet||LOGISTICS_ENTITY_FALLBACK, id, rawNotes:r[LOGISTICS_NOTE_FIELD]||'', managerNotesRaw:'', message:'', rep:r.cr714_rep||''});
+        }
+      }
+    });
+    const keys=existingEventKeys(); let added=0;
+    (rows||[]).forEach(r=>{
+      logisticsRowToEvents(r).forEach(ev=>{
+        const k=eventKey(ev); if(keys.has(k)) return;
+        keys.add(k); window.unifiedEventRows=window.unifiedEventRows||[]; window.unifiedEventRows.push(ev); added++;
+      });
+    });
+    (window.unifiedEventRows||[]).sort((a,b)=>new Date(getEventDate(b)||0)-new Date(getEventDate(a)||0));
+    window.__actLogisticsStats={rows:(rows||[]).length, eventsAdded:added, loadedAt:new Date().toISOString()};
+    return added;
+  }
+
+  window.fetchScopedLogisticsHistory = async function(token){
+    const ids=uniq((window.mergedAccounts||[]).map(a=>a.cr714_id || a.cr714_accountnum));
+    if(!ids.length){ indexLogisticsRows([]); return []; }
+    const entitySet=await resolveLogisticsEntitySet(token);
+    const chunks=makeAccountChunks(ids, LOGISTICS_CHUNK_SIZE, chunk=>logisticsUrl(entitySet, chunk));
+    window.__actLogisticsChunkCount=chunks.length;
+    if(window.updateLoader) window.updateLoader(82, `Loading Logistics notes in ${chunks.length.toLocaleString()} scoped chunks...`, (window.totalLoadedRecords||0)+((window.__actFactRows||[]).length));
+    let next=0, done=0; const all=[];
+    async function worker(){
+      while(next<chunks.length){
+        const i=next++;
+        const rows=await fetchLogisticsChunk(token, entitySet, chunks[i], i, chunks.length);
+        all.push(...rows); done++;
+        if(window.updateLoader) window.updateLoader(Math.min(88,82+Math.round((done/Math.max(chunks.length,1))*6)), `Loaded Logistics chunk ${done} of ${chunks.length}...`, (window.totalLoadedRecords||0)+((window.__actFactRows||[]).length)+all.length);
+      }
+    }
+    await Promise.all(Array.from({length:Math.min(LOGISTICS_CONCURRENCY,chunks.length)}, worker));
+    indexLogisticsRows(all);
+    return all;
+  };
+
+  function collectSourceIdMap(includeLogistics=true){
+    const map=new Map(), byEntity=new Map();
+    function add(entity, id, acct, source){
+      id=guid(id); if(!entity || !id || !acct) return;
+      map.set(`${entity}|${id}`, {accountId:acctKey(acct), source:source || ENTITY_SOURCE[entity] || entity});
+      if(!byEntity.has(entity)) byEntity.set(entity,new Set());
+      byEntity.get(entity).add(id);
+    }
+    (window.mergedAccounts||[]).forEach(a=>{
+      const acct=acctKey(a.cr714_id || a.cr714_accountnum);
+      (a.sources||[]).forEach(s=>{
+        const t=one(s.table);
+        let entity='';
+        if(/accountmanagement/i.test(t) || s.type==='AM') entity='cr714_accountmanagementdataset';
+        else if(/cadence/i.test(t) || s.type==='Cadence') entity='cr714_cadencedataset';
+        else if(/prospecting/i.test(t) || s.type==='Prospecting') entity='cr714_prospectingdataset';
+        else if(/louise/i.test(t) || s.type==='Louise Brown') entity='cr714_louisebrowndataset';
+        else if(includeLogistics && (/logistics/i.test(t) || s.type==='Logistics')) entity=LOGISTICS_LOGICAL;
+        add(entity, s.id, acct, s.type==='AM'?'Account Management':s.type);
+      });
+    });
+    if(includeLogistics){
+      (window.__actLogisticsRows||[]).forEach(r=>add(LOGISTICS_LOGICAL, r[LOGISTICS_ID_FIELD], r[LOGISTICS_ACCOUNT_FIELD], 'Logistics'));
+    }
+    return {map, byEntity};
+  }
+
+  function auditNotesUrl(entity, ids){
+    const idFilter='(' + ids.map(id=>`_objectid_value eq ${id}`).join(' or ') + ')';
+    const filter=`createdon ge ${AUDIT_START} and createdon lt ${AUDIT_END} and (action eq 1 or action eq 2) and objecttypecode eq '${od(entity)}' and ${idFilter}`;
+    const params=new URLSearchParams();
+    params.set('$select','createdon,action,objecttypecode,_objectid_value,_userid_value,changedata');
+    params.set('$filter',filter);
+    params.set('$orderby','createdon asc');
+    return `${window.DATAVERSE_URL}/audits?${params.toString()}`;
+  }
+  async function fetchAuditNoteChunk(token, entity, ids, idx, total){
+    let url=auditNotesUrl(entity, ids), rows=[];
+    while(url){
+      const res=await fetch(url,{headers:{Authorization:`Bearer ${token}`, Accept:'application/json', Prefer:'odata.maxpagesize=5000, odata.include-annotations="*"'}});
+      if(!res.ok){
+        if((res.status===400 || res.status===414) && ids.length>1){
+          const mid=Math.ceil(ids.length/2);
+          const a=await fetchAuditNoteChunk(token, entity, ids.slice(0,mid), idx, total);
+          const b=await fetchAuditNoteChunk(token, entity, ids.slice(mid), idx, total);
+          return a.concat(b);
+        }
+        console.warn('Audit note chunk failed', entity, idx+1, total, res.status, await res.text().catch(()=>''));
+        return rows;
+      }
+      const data=await res.json(); rows.push(...(Array.isArray(data.value)?data.value:[])); url=data['@odata.nextLink']||null;
+      await new Promise(requestAnimationFrame);
+    }
+    return rows;
+  }
+
+  function parseChangedata(r){
+    try{
+      const parsed=typeof r.changedata==='string'?JSON.parse(r.changedata):r.changedata;
+      return parsed && Array.isArray(parsed.changedAttributes) ? parsed.changedAttributes : [];
+    }catch(_){ return []; }
+  }
+  function auditUser(r){ return one(r['_userid_value@OData.Community.Display.V1.FormattedValue'] || r._userid_value || 'Audit User'); }
+
+  function auditRowToNoteEvents(r, sourceLookup){
+    const entity=lower(r.objecttypecode);
+    const id=guid(r._objectid_value || r['_objectid_value']);
+    const ctx=sourceLookup.get(`${entity}|${id}`);
+    if(!ctx) return [];
+    const attrs=parseChangedata(r), out=[];
+    attrs.forEach(a=>{
+      const field=lower(a.logicalName);
+      const meta=NOTE_FIELD_META[field];
+      if(!meta) return;
+      const oldText=clean(a.oldName || a.oldValue || '');
+      const newText=clean(a.newName || a.newValue || '');
+      if(!newText) return;
+      deltaBlocks(oldText,newText).forEach(block=>{
+        const body=stripMetaLines(block);
+        if(!body) return;
+        const author=one(extractMetaAuthor(block) || auditUser(r));
+        const d=extractMetaDate(block, r.createdon);
+        const source = meta.source === 'Action Message' ? (ENTITY_SOURCE[entity] || ctx.source || 'Action Message') : (meta.source || ctx.source || ENTITY_SOURCE[entity] || 'Audit Note');
+        out.push({
+          'Note Date': d,
+          cr714_accountnum: ctx.accountId,
+          cr714_accountname: '',
+          cr714_rep: author,
+          cr714_action: meta.manager ? 'Manager Note' : (meta.touch || 'Note'),
+          SourceDataset: source,
+          EventRep: author,
+          'Action at time of Note': meta.manager ? 'Manager Note' : '',
+          NoteSegment: body,
+          EmailSubject: null,
+          EmailSegment: null,
+          EmailDate: null,
+          LastModified: r.createdon,
+          Count: 1,
+          _recordRef: `${entity}|${id}|audit|${dateKey(d)}|${field}`,
+          _entitySet: 'audits',
+          _rawSource: r,
+          _touchType: meta.touch || source,
+          _eventKind: meta.manager ? 'Manager Note' : (meta.touch || source),
+          _isAuditRecovered: true,
+          _changedField: field
+        });
+      });
+    });
+    return out;
+  }
+
+  window.reconcileAuditNoteHistory = async function(token){
+    const {map, byEntity}=collectSourceIdMap(true);
+    const existingRaw = Array.isArray(window.auditActionRawRows) ? window.auditActionRawRows : [];
+    const existingKeys=new Set(existingRaw.map(r=>`${lower(r.objecttypecode)}|${guid(r._objectid_value || r['_objectid_value'])}|${r.createdon}|${r.changedata||''}`));
+    const jobs=[];
+    byEntity.forEach((set,entity)=>{
+      const ids=Array.from(set);
+      makeAccountChunks(ids, AUDIT_NOTE_CHUNK_SIZE, chunk=>auditNotesUrl(entity, chunk)).forEach(chunk=>jobs.push({entity, ids:chunk}));
+    });
+    window.__actAuditNoteChunkCount=jobs.length;
+    const fetched=[]; let next=0, done=0;
+    if(window.updateLoader) window.updateLoader(89, `Reconciling note history from audit changes in ${jobs.length.toLocaleString()} scoped chunks...`, (window.totalLoadedRecords||0)+((window.__actFactRows||[]).length)+((window.__actLogisticsRows||[]).length));
+    async function worker(){
+      while(next<jobs.length){
+        const i=next++, job=jobs[i];
+        const rows=await fetchAuditNoteChunk(token, job.entity, job.ids, i, jobs.length);
+        rows.forEach(r=>{
+          const k=`${lower(r.objecttypecode)}|${guid(r._objectid_value || r['_objectid_value'])}|${r.createdon}|${r.changedata||''}`;
+          if(!existingKeys.has(k)){ existingKeys.add(k); fetched.push(r); }
+        });
+        done++;
+        if(window.updateLoader) window.updateLoader(Math.min(98, 89+Math.round((done/Math.max(jobs.length,1))*9)), `Reconciled audit note chunk ${done} of ${jobs.length}...`, (window.totalLoadedRecords||0)+((window.__actFactRows||[]).length)+((window.__actLogisticsRows||[]).length)+fetched.length);
+      }
+    }
+    if(jobs.length) await Promise.all(Array.from({length:Math.min(AUDIT_NOTE_CONCURRENCY,jobs.length)}, worker));
+    const allAudit=existingRaw.concat(fetched);
+    window.auditNoteRawRows=allAudit;
+    const keys=existingEventKeys(); let added=0, candidate=0;
+    allAudit.forEach(r=>{
+      auditRowToNoteEvents(r,map).forEach(ev=>{
+        candidate++;
+        const k=eventKey(ev); if(keys.has(k)) return;
+        keys.add(k); window.unifiedEventRows=window.unifiedEventRows||[]; window.unifiedEventRows.push(ev); added++;
+      });
+    });
+    (window.unifiedEventRows||[]).sort((a,b)=>new Date(getEventDate(b)||0)-new Date(getEventDate(a)||0));
+    window.__actAuditNoteReconcileStats={auditRows:allAudit.length, candidateEvents:candidate, recoveredEvents:added, loadedAt:new Date().toISOString()};
+    return window.__actAuditNoteReconcileStats;
+  };
+
+  function eventToSyntheticRow(ev){
+    return {
+      cr714_dt_act_fctblid: ev._recordRef || eventKey(ev),
+      cr714_activitynaturalkey: ev._recordRef || eventKey(ev),
+      cr714_accountnumber: ev.cr714_accountnum,
+      cr714_companyname: ev.cr714_accountname || '',
+      cr714_accountrep: ev.cr714_rep || ev.EventRep || '',
+      cr714_repfromnote: ev.EventRep || ev.cr714_rep || '',
+      cr714_activitydate: ev['Note Date'] || ev.LastModified || null,
+      cr714_notedate: ev['Note Date'] || ev.LastModified || null,
+      createdon: ev.LastModified || ev['Note Date'] || null,
+      modifiedon: ev.LastModified || ev['Note Date'] || null,
+      cr714_activitytype: ev._touchType || ev.SourceDataset || 'Activity',
+      cr714_sourcetype: ev.SourceDataset || ev._touchType || 'Activity',
+      cr714_effectiveaction: ev['Action at time of Note'] || ev.cr714_action || '',
+      cr714_action: ev.cr714_action || ev['Action at time of Note'] || '',
+      cr714_notetext: ev.NoteSegment || ev.EmailSegment || ev.EmailSubject || '',
+      cr714_notetextraw: ev.NoteSegment || ev.EmailSegment || ev.EmailSubject || '',
+      cr714_managernotes: ev._isManagerNote ? (ev.NoteSegment || '') : '',
+      cr714_emailtemplate: ev.EmailSubject || '',
+      __actPreferredRep: ev.EventRep || ev.cr714_rep || '',
+      __actSyntheticFromEvent: true,
+      __actEvent: ev
+    };
+  }
+
+  const previousLoadFactHistoryRange = window.loadFactHistoryRange;
+  window.loadFactHistoryRange = async function(accountId, monthsArg, opts){
+    accountId=acctKey(accountId || window.activeAccountId);
+    if(!accountId) return [];
+    const months=Number(monthsArg || localStorage.getItem('act_mgr_fact_history_months') || 3) || 3;
+    const end=new Date(); const start=new Date(end.getFullYear(), end.getMonth()-months, end.getDate());
+    const inRange=ev=>{ const d=new Date(getEventDate(ev)||0); return !isNaN(d.getTime()) && d>=start && d<=end; };
+    const events=(window.unifiedEventRows||[]).filter(ev=>acctKey(ev.cr714_accountnum)===accountId && inRange(ev));
+    if(events.length){
+      const rows=events.map(eventToSyntheticRow);
+      window.__actFactHistoryState=window.__actFactHistoryState||{};
+      window.__actFactHistoryState[accountId]={rows,events,loading:false,months,sort:localStorage.getItem('act_mgr_fact_history_sort')||'desc',loadedKey:accountId+'|'+months,loadedAt:Date.now(),fromUnifiedFactLogisticsAudit:true};
+      window.currentModalHistory=events.map(ev=>({date:getEventDate(ev),author:ev.EventRep||ev.cr714_rep||'Unknown',src:ev.SourceDataset||ev._touchType||'Activity',touchType:ev._touchType||'Activity',text:ev.NoteSegment||ev.EmailSegment||ev.EmailSubject||'',historicalAction:ev['Action at time of Note']||ev.cr714_action||'',emailSubject:ev.EmailSubject||'',tags:[ev._isAuditRecovered?'Recovered from Audit':'',ev._isLogistics?'Logistics':''].filter(Boolean)}));
+      if(typeof window.renderFactHistory==='function') window.renderFactHistory(accountId);
+      return rows;
+    }
+    return typeof previousLoadFactHistoryRange === 'function' ? previousLoadFactHistoryRange.apply(this, arguments) : [];
+  };
+  window.loadFactHistoryRange.__auditLogisticsUnified20260709=true;
+
+  const prevBuildFacts=window.buildReportingFactsAsync;
+  window.buildReportingFactsAsync=async function(){
+    if(typeof prevBuildFacts==='function') await prevBuildFacts.apply(this, arguments);
+    const facts=Array.isArray(window.reportingFacts)?window.reportingFacts:[];
+    const already=new Set(facts.filter(f=>f.factType==='event').map(f=>[f.accountId,f.noteDate,f.rep,f.action,f.touchType,f.sourceDataset].join('|')));
+    (window.unifiedEventRows||[]).forEach(ev=>{
+      const touch=ev._touchType || (ev.EmailSubject||ev.EmailSegment?'Email':'Note');
+      if(touch!=='Logistics' && !ev._isAuditRecovered) return;
+      const k=[ev.cr714_accountnum,ev['Note Date'],ev.cr714_rep||ev.EventRep,ev['Action at time of Note']||ev.cr714_action,touch,ev.SourceDataset].join('|');
+      if(already.has(k)) return;
+      already.add(k);
+      const d=new Date(ev['Note Date']||0);
+      facts.push({factType:'event',accountId:ev.cr714_accountnum,rep:ev.cr714_rep||ev.EventRep||'Unknown',action:ev['Action at time of Note']||ev.cr714_action||'None',sourceDataset:ev.SourceDataset||touch,noteDate:ev['Note Date']||null,monthKey:!isNaN(d.getTime())?`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`:null,touchType:touch,isAuditRecovered:!!ev._isAuditRecovered,isLogistics:touch==='Logistics',count:1});
+    });
+    window.reportingFacts=facts;
+  };
+
+  const prevRenderReports=window.renderReports;
+  window.renderReports=function(){
+    const r=typeof prevRenderReports==='function'?prevRenderReports.apply(this,arguments):undefined;
+    try{
+      const sc=document.querySelector('#tab-reports .act-report-scroll') || document.getElementById('tab-reports');
+      if(sc && !document.getElementById('act-logistics-audit-report-section')){
+        const ls=window.__actLogisticsStats||{}, as=window.__actAuditNoteReconcileStats||{};
+        const div=document.createElement('div');
+        div.id='act-logistics-audit-report-section';
+        div.className='act-report-section';
+        div.innerHTML=`<h3><span><i class="fas fa-truck mr-2"></i>Logistics + Audit-Recovered Notes</span><span class="act-pill">Logistics is queried directly, not from the fact table</span></h3><div class="body"><div class="act-report-note">Logistics updates come from the Logistics table because they are not published into cr714_dt_act_fctbls. Audit-recovered notes are only used to fill or reconcile missing note history from scoped changedata.</div><div class="act-report-table-wrap"><table class="act-report-table"><thead><tr><th>Source</th><th>Rows / Events</th><th>Chunks</th><th>Purpose</th></tr></thead><tbody><tr><td>${sourceBadge('Logistics')}</td><td>${fmt(ls.rows||0)} rows • ${fmt(ls.eventsAdded||0)} events added</td><td>${fmt(window.__actLogisticsChunkCount||0)}</td><td>Direct Logistics note history by scoped account number</td></tr><tr><td>${sourceBadge('Recovered from Audit')}</td><td>${fmt(as.recoveredEvents||0)} events recovered from ${fmt(as.auditRows||0)} audit rows</td><td>${fmt(window.__actAuditNoteChunkCount||0)}</td><td>Scoped changedata reconciliation for note fields</td></tr></tbody></table></div></div>`;
+        sc.insertBefore(div, sc.firstChild && sc.firstChild.nextSibling ? sc.firstChild.nextSibling : sc.firstChild);
+      }
+    }catch(e){ console.warn('Logistics/audit report section skipped', e); }
+    return r;
+  };
+
+  const previousFetchAllData=window.fetchAllData;
+  window.fetchAllData=async function(options={}){
+    const result=typeof previousFetchAllData==='function' ? await previousFetchAllData.apply(this, arguments) : undefined;
+    const Q=window.__ACT_QUERY_SNIPER||{};
+    if(!(Q.active || options.force || options.scoped)) return result;
+    const loader=document.getElementById('global-loader');
+    try{
+      if(loader && !options.silent) loader.style.display='flex';
+      const token=await getTokenSafe();
+      await window.fetchScopedLogisticsHistory(token);
+      await window.reconcileAuditNoteHistory(token);
+      if(typeof window.buildReportingFactsAsync==='function') await window.buildReportingFactsAsync();
+      else if(typeof window.buildReportingFacts==='function') window.buildReportingFacts();
+      window.reportsDirty=true;
+      if(window.updateLoader) window.updateLoader(100, 'Scoped data, fact history, Logistics updates, and audit note reconciliation synced.', (window.totalLoadedRecords||0)+((window.__actFactRows||[]).length)+((window.__actLogisticsRows||[]).length)+((window.auditNoteRawRows||[]).length));
+    }catch(e){
+      console.error('Logistics/audit note reconciliation failed:', e);
+      if(window.showToast) window.showToast('Logistics or audit note reconciliation was skipped: '+(e&&e.message?e.message:e),'warning');
+    }finally{
+      if(loader && !options.silent) setTimeout(()=>{loader.style.display='none';},350);
+    }
+    return result;
+  };
+  window.fetchAllData.__logisticsAuditNoteReconcile20260709=true;
+
+  console.info('ACT audit note reconciliation + direct Logistics history installed.');
+})();
+</script>
+<!-- === COPILOT PATCH: AUDIT NOTE RECONCILIATION + LOGISTICS HISTORY 2026-07-09 END === -->
+
+
+<!-- === COPILOT PATCH: DEDUPED SCOPE COUNTS SELECTED VS TOTAL 2026-07-09 START === -->
+<script id="act-deduped-scope-counts-selected-vs-total-20260709">
+(function(){
+  if(window.__ACT_DEDUPED_SCOPE_COUNTS_SELECTED_VS_TOTAL_20260709__) return;
+  window.__ACT_DEDUPED_SCOPE_COUNTS_SELECTED_VS_TOTAL_20260709__ = true;
+
+  const EF = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode'];
+  const CATS = [
+    {id:'cr714_managerassigned', label:'Manager', icon:'fa-user-shield'},
+    {id:'cr714_srmanager', label:'Sr Manager', icon:'fa-user-tie'},
+    {id:'cr714_supervisors', label:'Supervisor', icon:'fa-sitemap'},
+    {id:'cr714_departmentname', label:'Department', icon:'fa-building'},
+    {id:'cr714_employeename', label:'Rep Name', icon:'fa-users'},
+    {id:'statecode', label:'Rep Status', icon:'fa-toggle-on'}
+  ];
+
+  const $ = id => document.getElementById(id);
+  const arr = v => Array.isArray(v) ? v : [];
+  const clean = v => String(v ?? '').replace(/\s+/g,' ').trim();
+  const lower = v => clean(v).toLowerCase();
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const js = v => String(v ?? '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"');
+  const fmt = n => Number(n||0).toLocaleString();
+
+  function fs(id){ window.activeFilters = window.activeFilters || {}; if(!window.activeFilters[id]) window.activeFilters[id] = new Set(); return window.activeFilters[id]; }
+  function repName(row){ return clean(row.cr714_employeename || row.cr714_repname || row.fullname || row.name || row.cr714_name); }
+  function repKey(row){ return lower(repName(row)); }
+  function statusVal(row){ return clean(row._mappedStatecode || ((row.statecode === 0 || row.cr714_status === 1) ? 'Active' : ((row.statecode === 1 || row.cr714_status === 0) ? 'Inactive' : 'Unknown'))); }
+  function fieldVal(row,id){ return id === 'cr714_employeename' ? repName(row) : (id === 'statecode' ? statusVal(row) : clean(row[id])); }
+  function matchSet(actual,set){ if(!set || !set.size) return true; const a=lower(actual); return Array.from(set).some(x => lower(x) === a); }
+
+  // Important: For counts on a category, ignore only that category's own selection.
+  // All other active selections still apply, so Active-only status selection excludes Inactive reps everywhere else.
+  function rowMatchesExcept(row, exceptId){
+    if(!repName(row)) return false;
+    for(const c of CATS){
+      if(c.id === exceptId) continue;
+      const set = fs(c.id);
+      if(set.size && !matchSet(fieldVal(row,c.id), set)) return false;
+    }
+    return true;
+  }
+  function rowMatchesAll(row){ return rowMatchesExcept(row, null); }
+
+  function uniqueRepCount(rows){
+    const reps = new Set();
+    arr(rows).forEach(r => { const k=repKey(r); if(k) reps.add(k); });
+    return reps.size;
+  }
+  function scopedRows(){ return arr(window.employeesData).filter(rowMatchesAll); }
+  function scopedRepCount(){ return uniqueRepCount(scopedRows()); }
+
+  function optionRows(id){
+    const valueToRepKeys = new Map();
+    arr(window.employeesData).forEach(row => {
+      if(!rowMatchesExcept(row, id)) return;
+      const v = fieldVal(row,id);
+      const rk = repKey(row);
+      if(!v || !rk) return;
+      if(!valueToRepKeys.has(v)) valueToRepKeys.set(v,new Set());
+      valueToRepKeys.get(v).add(rk);
+    });
+    return Array.from(valueToRepKeys.entries())
+      .map(([v,set]) => [v,set.size])
+      .sort((a,b) => String(a[0]).localeCompare(String(b[0])));
+  }
+
+  function selectedOptionRows(id){
+    const set = fs(id);
+    if(!set.size) return [];
+    const rows = optionRows(id);
+    return rows.filter(([v]) => matchSet(v,set));
+  }
+
+  function selectedOptionCount(id){ return fs(id).size; }
+  function availableOptionCount(id){ return optionRows(id).length; }
+  function selectedValueLabel(id){
+    const n=selectedOptionCount(id), total=availableOptionCount(id);
+    if(n) return `${fmt(n)} selected / ${fmt(total)} shown`;
+    return `${fmt(total)} shown`;
+  }
+  function selectedRepImpactForCategory(id){
+    const set = fs(id);
+    const reps = new Set();
+    arr(window.employeesData).forEach(row => {
+      if(!rowMatchesExcept(row,id)) return;
+      if(set.size && !matchSet(fieldVal(row,id), set)) return;
+      const rk=repKey(row); if(rk) reps.add(rk);
+    });
+    return reps.size;
+  }
+
+  function ensureStyle(){
+    if($('act-scope-dedup-count-style')) return;
+    const st=document.createElement('style'); st.id='act-scope-dedup-count-style'; st.textContent=`
+      #sniper-load-modal .act-v251-cat .scope-count-line{display:block;color:var(--text-muted);font-size:9px;font-weight:850;margin-top:2px;line-height:1.25;}
+      #sniper-load-modal .act-v251-cat .scope-selected-line{display:block;color:var(--primary);font-size:9px;font-weight:950;margin-top:2px;line-height:1.25;}
+      #sniper-load-modal .act-v251-pill{min-width:48px;text-align:right;}
+      #sniper-load-modal .act-scope-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:10px 12px;border-bottom:1px solid var(--border-color);background:var(--bg-app);}
+      #sniper-load-modal .act-scope-stat{border:1px solid var(--border-color);border-radius:10px;background:var(--bg-card);padding:8px 10px;}
+      #sniper-load-modal .act-scope-stat .n{font-size:18px;font-weight:1000;color:var(--primary);line-height:1;}
+      #sniper-load-modal .act-scope-stat .l{font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-top:4px;}
+      #sniper-load-modal .act-v251-count{display:flex;flex-direction:column;align-items:flex-end;gap:1px;}
+      #sniper-load-modal .act-v251-count b{font-size:11px;color:var(--primary);line-height:1;}
+      #sniper-load-modal .act-v251-count small{font-size:8px;color:var(--text-muted);font-weight:900;text-transform:uppercase;}
+      @media(max-width:860px){#sniper-load-modal .act-scope-stats{grid-template-columns:1fr;}}
+    `; document.head.appendChild(st);
+  }
+
+  function updateSummary(){
+    const selectedParts=[];
+    CATS.forEach(c=>{
+      const sel=selectedOptionCount(c.id);
+      if(sel) selectedParts.push(`${c.label}: ${fmt(sel)} selected (${fmt(selectedRepImpactForCategory(c.id))} reps)`);
+    });
+    if(window.massFilteredIds && window.massFilteredIds.size) selectedParts.push(`Account Numbers: ${fmt(window.massFilteredIds.size)}`);
+
+    const selectedRepTotal = scopedRepCount();
+    const totalRepUniverse = uniqueRepCount(window.employeesData || []);
+    const sum=$('scoped-popup-selected-summary');
+    if(sum){
+      sum.innerHTML = selectedParts.length
+        ? `<b>Selected:</b> ${esc(selectedParts.join(' • '))}`
+        : 'No filters selected yet — choose at least one filter.';
+    }
+    const est=$('sniper-estimate');
+    if(est){
+      if(window.massFilteredIds && window.massFilteredIds.size){
+        est.innerText = `${fmt(window.massFilteredIds.size)} account IDs • ${fmt(selectedRepTotal)} deduped reps after filters`;
+      } else if(selectedParts.length){
+        est.innerText = `${fmt(selectedRepTotal)} / ${fmt(totalRepUniverse)} deduped reps in selected scope`;
+      } else {
+        est.innerText = 'No filters selected';
+      }
+    }
+    return {selectedRepTotal,totalRepUniverse};
+  }
+
+  function render(activeId){
+    ensureStyle();
+    const S = window.ACTScopeSectionV251 = window.ACTScopeSectionV251 || {};
+    S.activeCategory = activeId || S.activeCategory || CATS[0].id;
+    const panel=$('scoped-popup-filter-panel'); if(!panel) return;
+    const active=CATS.find(c=>c.id===S.activeCategory) || CATS[0];
+    const rows=optionRows(active.id);
+    const selected=fs(active.id);
+    const stats=updateSummary();
+    const selectedRows = selectedOptionRows(active.id);
+    const selectedRepForActive = selected.size ? selectedRepImpactForCategory(active.id) : stats.selectedRepTotal;
+    panel.innerHTML = `<div class="act-v251-scope">
+      <aside class="act-v251-sidebar custom-scrollbar">${CATS.map(c=>{
+        const sel=selectedOptionCount(c.id), avail=availableOptionCount(c.id), impacted=selectedRepImpactForCategory(c.id);
+        const activeCls=c.id===active.id?'active':'';
+        const hint=sel ? `${fmt(sel)} selected / ${fmt(avail)} shown` : `${fmt(avail)} shown`;
+        const selectedLine=sel ? `<span class="scope-selected-line">${fmt(impacted)} deduped reps selected</span>` : '';
+        return `<button type="button" class="act-v251-cat ${activeCls}" onclick="window.ACTScopeSectionV251.setCategory('${js(c.id)}')"><i class="fas ${c.icon}"></i><span>${esc(c.label)}<span class="scope-count-line">${esc(hint)}</span>${selectedLine}</span><span class="act-v251-pill">${sel?`${fmt(sel)}/${fmt(avail)}`:fmt(avail)}</span></button>`;
+      }).join('')}</aside>
+      <section class="act-v251-main">
+        <div class="act-v251-head"><h4>${esc(active.label)}</h4><p>Counts are deduped by rep and respect the current selections in the other categories. If Rep Status is Active-only, Inactive reps are excluded from these counts.</p></div>
+        <div class="act-scope-stats">
+          <div class="act-scope-stat"><div class="n">${fmt(stats.selectedRepTotal)}</div><div class="l">Deduped reps in selected scope</div></div>
+          <div class="act-scope-stat"><div class="n">${selected.size?fmt(selectedRepForActive):fmt(stats.selectedRepTotal)}</div><div class="l">Deduped reps for this category</div></div>
+          <div class="act-scope-stat"><div class="n">${selected.size?`${fmt(selected.size)} / ${fmt(rows.length)}`:fmt(rows.length)}</div><div class="l">${selected.size?'Selected / shown options':'Shown options'}</div></div>
+        </div>
+        <div class="act-v251-tools"><input placeholder="Search ${esc(active.label)}..." oninput="window.ACTScopeSectionV251.search(this.value)"><button class="btn-secondary text-xs px-3 py-2" onclick="window.ACTScopeSectionV251.selectVisible(this.innerText === 'Select Visible')">${selected.size ? 'Deselect Visible' : 'Select Visible'}</button></div>
+        <div id="act-v251-options" class="act-v251-list custom-scrollbar">${rows.length ? rows.map(([v,count]) => {
+          const isChecked=selected.has(v);
+          return `<label class="act-v251-row act-v251-opt" data-val="${esc(v)}"><input type="checkbox" value="${esc(v)}" ${isChecked?'checked':''} onchange="window.ACTScopeSectionV251.update('${js(active.id)}',this.value,this.checked)"><span title="${esc(v)}">${esc(v)}</span><span class="act-v251-count"><b>${fmt(count)}</b><small>deduped reps</small></span></label>`;
+        }).join('') : `<div class="act-v251-empty"><i class="fas fa-filter-circle-xmark text-3xl opacity-40"></i><div>No options match the current selections.</div></div>`}</div>
+      </section>
+    </div>`;
+    updateSummary();
+  }
+
+  const S = window.ACTScopeSectionV251 = window.ACTScopeSectionV251 || {};
+  S.optionCache = new Map();
+  S.optionRows = optionRows;
+  S.render = render;
+  S.setCategory = id => render(id);
+  S.update = function(id,value,checked){ checked ? fs(id).add(value) : fs(id).delete(value); if(S.optionCache) S.optionCache.clear(); render(id); };
+  S.search = function(term){ const q=lower(term); document.querySelectorAll('#act-v251-options .act-v251-opt').forEach(o=>{ o.style.display=(o.getAttribute('data-val')||'').toLowerCase().includes(q)?'grid':'none'; }); };
+  S.selectVisible = function(checked){
+    document.querySelectorAll('#act-v251-options .act-v251-opt').forEach(o=>{
+      if(o.style.display==='none') return;
+      const input=o.querySelector('input'); if(!input) return;
+      input.checked=checked;
+      checked ? fs(S.activeCategory).add(input.value) : fs(S.activeCategory).delete(input.value);
+    });
+    if(S.optionCache) S.optionCache.clear();
+    render(S.activeCategory);
+  };
+  S.updateSummary = updateSummary;
+
+  window.getScopedRepsFromPreFilters = function(){
+    const out=new Set();
+    arr(window.employeesData).forEach(row=>{ if(rowMatchesAll(row)){ const r=repName(row); if(r) out.add(r); } });
+    return out;
+  };
+  window.buildScopedPopupFilters = function(){ render(S.activeCategory); };
+  window.scopedPopupUpdateFilterState = function(id,v,ch){ S.update(id,v,ch); };
+  window.scopedPopupFilterSearch = function(id,t){ S.search(t); };
+  window.updateScopedPopupSummary = updateSummary;
+  window.updateSniperEstimate = updateSummary;
+  window.clearScopedPopupFilters = function(){ EF.forEach(id=>fs(id).clear()); if(window.massFilteredIds) window.massFilteredIds.clear(); if(S.optionCache) S.optionCache.clear(); render(S.activeCategory); if(window.showToast) window.showToast('Scope filters cleared.','info'); };
+
+  console.info('ACT deduped selected-vs-total scope counts installed.');
+})();
+</script>
+<!-- === COPILOT PATCH: DEDUPED SCOPE COUNTS SELECTED VS TOTAL 2026-07-09 END === -->
+
+
+<!-- === COPILOT PATCH: REPORT TABLE SCROLL-TO-EXPAND 2026-07-09 START === -->
+<script id="act-report-table-scroll-expand-20260709">
+(function(){
+  if(window.__ACT_REPORT_TABLE_SCROLL_EXPAND_20260709__) return;
+  window.__ACT_REPORT_TABLE_SCROLL_EXPAND_20260709__ = true;
+
+  const REPORT_TABLE_IDS = ['scorecard-table','actions-table','engagement-table','monthly-table'];
+  const REPORT_TABLE_SET = new Set(REPORT_TABLE_IDS);
+  const INITIAL_ROWS = 140;
+  const ROW_STEP = 120;
+  const NEAR_BOTTOM_PX = 140;
+
+  const $ = id => document.getElementById(id);
+  const fmt = n => Number(n || 0).toLocaleString();
+  const isReportTable = tableOrId => {
+    const id = typeof tableOrId === 'string' ? tableOrId : (tableOrId && tableOrId.id);
+    return REPORT_TABLE_SET.has(id);
+  };
+  function visibleReportRows(table){
+    const tb = table && table.tBodies && table.tBodies[0];
+    if(!tb) return [];
+    return Array.from(tb.querySelectorAll('tr')).filter(r =>
+      !r.classList.contains('act-scroll-expand-row') &&
+      !r.classList.contains('act-virtual-more-row') &&
+      !r.classList.contains('hidden-force')
+    );
+  }
+  function ensureStyle(){
+    if($('act-report-table-scroll-expand-style')) return;
+    const st=document.createElement('style');
+    st.id='act-report-table-scroll-expand-style';
+    st.textContent=`
+      #tab-reports{min-height:0!important;overflow:hidden!important;}
+      #tab-reports #report-scroll-container,
+      #tab-reports .act-report-scroll{
+        flex:1 1 auto!important;
+        min-height:0!important;
+        overflow-y:auto!important;
+        overflow-x:hidden!important;
+        overscroll-behavior:contain!important;
+        scrollbar-gutter:stable!important;
+      }
+      #tab-reports .report-view,
+      #tab-reports .report-view.active{
+        min-height:0!important;
+        overflow:hidden!important;
+      }
+      #tab-reports .table-container,
+      #tab-reports .act-report-table-wrap{
+        max-height:clamp(360px,58vh,760px)!important;
+        min-height:180px!important;
+        overflow:auto!important;
+        overscroll-behavior:contain!important;
+        scrollbar-gutter:stable both-edges!important;
+        border-radius:14px!important;
+        position:relative!important;
+      }
+      #tab-reports .table-container table,
+      #tab-reports .act-report-table-wrap table{
+        margin:0!important;
+      }
+      #tab-reports table thead th{
+        position:sticky!important;
+        top:0!important;
+        z-index:35!important;
+      }
+      #tab-reports table tfoot td{
+        position:sticky!important;
+        bottom:0!important;
+        z-index:34!important;
+      }
+      #tab-reports .act-scroll-hidden{display:none!important;}
+      #tab-reports .act-scroll-expand-row td{
+        text-align:center!important;
+        padding:10px 14px!important;
+        font-size:10px!important;
+        font-weight:950!important;
+        text-transform:uppercase!important;
+        letter-spacing:.06em!important;
+        color:var(--primary)!important;
+        background:linear-gradient(90deg, transparent, color-mix(in srgb, var(--primary) 10%, var(--bg-card)), transparent)!important;
+        border-top:1px dashed color-mix(in srgb, var(--primary) 45%, var(--border-color))!important;
+        cursor:default!important;
+      }
+      #tab-reports .act-scroll-expand-row button{
+        background:transparent!important;
+        border:0!important;
+        color:var(--primary)!important;
+        font:inherit!important;
+        cursor:pointer!important;
+        text-decoration:underline!important;
+        margin-left:8px!important;
+      }
+      #tab-reports .act-table-scroll-hint{
+        display:inline-flex;
+        gap:6px;
+        align-items:center;
+        font-size:10px;
+        font-weight:900;
+        color:var(--text-muted);
+        margin-left:8px;
+      }
+    `;
+    document.head.appendChild(st);
+  }
+
+  function removeLegacyVirtualRows(table){
+    const tb=table && table.tBodies && table.tBodies[0];
+    if(!tb) return;
+    tb.querySelectorAll('.act-virtual-more-row,.act-scroll-expand-row').forEach(r=>r.remove());
+  }
+
+  function reportColspan(table){
+    return Math.max(1, table.tHead && table.tHead.rows[0] ? table.tHead.rows[0].cells.length : 1);
+  }
+
+  function getLimit(table, reset){
+    const rows=visibleReportRows(table);
+    if(reset || !table.dataset.actScrollLimit){
+      table.dataset.actScrollLimit = String(Math.min(INITIAL_ROWS, Math.max(rows.length, INITIAL_ROWS)));
+    }
+    let limit=parseInt(table.dataset.actScrollLimit || INITIAL_ROWS, 10);
+    if(isNaN(limit) || limit < INITIAL_ROWS) limit = INITIAL_ROWS;
+    return limit;
+  }
+
+  function applyReportScrollExpand(tableOrId, reset=false){
+    ensureStyle();
+    const table = typeof tableOrId === 'string' ? $(tableOrId) : tableOrId;
+    if(!table || !isReportTable(table) || !table.tBodies || !table.tBodies[0]) return;
+    removeLegacyVirtualRows(table);
+    const rows = visibleReportRows(table);
+    let limit = getLimit(table, reset);
+    if(limit > rows.length) limit = rows.length;
+    table.dataset.actScrollLimit = String(limit || INITIAL_ROWS);
+
+    rows.forEach((r,i)=>{
+      if(i < limit) r.classList.remove('act-scroll-hidden');
+      else r.classList.add('act-scroll-hidden');
+    });
+
+    if(limit < rows.length){
+      const more=document.createElement('tr');
+      more.className='act-scroll-expand-row';
+      more.innerHTML=`<td colspan="${reportColspan(table)}"><i class="fas fa-arrow-down mr-1"></i> Showing ${fmt(limit)} of ${fmt(rows.length)} rows — keep scrolling to reveal more <button type="button" onclick="window.expandACTReportTable('${table.id}', true)">Show all</button></td>`;
+      table.tBodies[0].appendChild(more);
+    }
+    updateReportTableTotals(table.id);
+  }
+
+  window.expandACTReportTable = function(tableId, all=false){
+    const table=$(tableId); if(!table) return;
+    const rows=visibleReportRows(table);
+    const cur=parseInt(table.dataset.actScrollLimit || INITIAL_ROWS, 10) || INITIAL_ROWS;
+    table.dataset.actScrollLimit = String(all ? rows.length : Math.min(rows.length, cur + ROW_STEP));
+    applyReportScrollExpand(table, false);
+  };
+
+  function handleContainerScroll(container){
+    if(!container) return;
+    if(container.scrollTop + container.clientHeight < container.scrollHeight - NEAR_BOTTOM_PX) return;
+    const tables = container.matches && container.matches('.table-container,.act-report-table-wrap')
+      ? Array.from(container.querySelectorAll('table')).filter(t=>isReportTable(t))
+      : REPORT_TABLE_IDS.map(id=>$(id)).filter(Boolean);
+    tables.forEach(table => window.expandACTReportTable(table.id, false));
+  }
+
+  function bindScrollContainers(){
+    ensureStyle();
+    document.querySelectorAll('#tab-reports .table-container,#tab-reports .act-report-table-wrap,#tab-reports #report-scroll-container,#tab-reports .act-report-scroll').forEach(el=>{
+      if(el.__actReportScrollExpandBound) return;
+      el.__actReportScrollExpandBound = true;
+      el.addEventListener('scroll', function(){ handleContainerScroll(this); }, {passive:true});
+    });
+  }
+
+  function updateReportTableTotals(tableId){
+    if(!isReportTable(tableId)) return false;
+    const table=$(tableId); if(!table || !table.tBodies || !table.tBodies[0]) return true;
+    const headerCells=table.querySelectorAll('thead th');
+    let tfoot=table.querySelector('tfoot');
+    if(!tfoot){ tfoot=document.createElement('tfoot'); table.appendChild(tfoot); }
+    tfoot.innerHTML='';
+    const footerRow=document.createElement('tr');
+    const rows=Array.from(table.tBodies[0].querySelectorAll('tr')).filter(r=>
+      !r.classList.contains('act-scroll-expand-row') &&
+      !r.classList.contains('act-virtual-more-row') &&
+      !r.classList.contains('hidden-force')
+    );
+    headerCells.forEach((th,colIndex)=>{
+      const td=document.createElement('td');
+      td.className='p-2 font-black';
+      td.style.backgroundColor='var(--bg-stripe)';
+      td.style.color='var(--primary)';
+      td.style.borderTop='2px solid var(--primary)';
+      if(colIndex===0){
+        td.innerHTML=`TOTALS <span class="act-table-scroll-hint"><i class="fas fa-arrows-up-down"></i>${fmt(rows.length)} rows</span>`;
+      } else {
+        let sum=0, numeric=false;
+        rows.forEach(row=>{
+          const cell=row.cells[colIndex];
+          if(!cell) return;
+          const val=parseFloat(String(cell.innerText||'').replace(/[^0-9.-]+/g,''));
+          if(!isNaN(val)){ sum+=val; numeric=true; }
+        });
+        if(numeric){
+          const label=th.innerText||'';
+          if(label.includes('%') || label.includes('/ Record')){
+            td.innerText = rows.length ? (sum / rows.length).toFixed(2) + (label.includes('%') ? '%' : '') : (label.includes('%') ? '0%' : '0.00');
+          } else td.innerText = fmt(sum);
+        }
+      }
+      footerRow.appendChild(td);
+    });
+    tfoot.appendChild(footerRow);
+    return true;
+  }
+
+  const oldCalc=window.calculateTableTotals;
+  window.calculateTableTotals=function(tableId){
+    if(updateReportTableTotals(tableId)) return;
+    return typeof oldCalc==='function' ? oldCalc.apply(this, arguments) : undefined;
+  };
+
+  const oldApplyVirtual=window.applyACTTableVirtualization;
+  window.applyACTTableVirtualization=function(reset=false){
+    // Reporting tables use scroll-to-expand, not page-style table slices.
+    REPORT_TABLE_IDS.forEach(id=>applyReportScrollExpand(id, reset));
+    // Preserve the older behavior for non-reporting utility tables only.
+    if(typeof oldApplyVirtual==='function'){
+      ['dd-table','reassign-preview-table'].forEach(id=>{
+        const table=$(id); if(!table) return;
+        try{
+          // Temporarily call old virtualizer, then immediately re-expand report tables in case the old list included them.
+          oldApplyVirtual(false);
+        }catch(_){ }
+      });
+      REPORT_TABLE_IDS.forEach(id=>applyReportScrollExpand(id, false));
+    }
+    bindScrollContainers();
+  };
+
+  const oldRenderFilters=window.renderTableFilters;
+  window.renderTableFilters=function(tableId){
+    const r = typeof oldRenderFilters==='function' ? oldRenderFilters.apply(this, arguments) : undefined;
+    if(isReportTable(tableId)){
+      const table=$(tableId); if(table){ table.dataset.actScrollLimit=String(INITIAL_ROWS); applyReportScrollExpand(table, true); }
+    }
+    return r;
+  };
+
+  function refreshReportScrollTables(reset=false){
+    bindScrollContainers();
+    REPORT_TABLE_IDS.forEach(id=>applyReportScrollExpand(id, reset));
+  }
+  window.refreshReportScrollTables = refreshReportScrollTables;
+
+  const oldRenderReports=window.renderReports;
+  if(typeof oldRenderReports==='function'){
+    window.renderReports=function(){
+      const r=oldRenderReports.apply(this, arguments);
+      setTimeout(()=>refreshReportScrollTables(true), 80);
+      setTimeout(()=>refreshReportScrollTables(false), 350);
+      return r;
+    };
+  }
+
+  document.addEventListener('DOMContentLoaded',()=>setTimeout(()=>refreshReportScrollTables(true),800));
+  setTimeout(()=>refreshReportScrollTables(true),1000);
+  console.info('ACT report table scroll-to-expand installed.');
+})();
+</script>
+<!-- === COPILOT PATCH: REPORT TABLE SCROLL-TO-EXPAND 2026-07-09 END === -->
 </body>
 </html>
