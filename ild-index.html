@@ -16300,9 +16300,9 @@ const prevRenderReports = window.renderReports;
     'cr714_rep',
     'createdon',
     'modifiedon',
-    'createdbyname',
-    'modifiedbyname',
-    'owneridname'
+    'createdby',
+    'modifiedby',
+    'ownerid'
   ];
   const LOGISTICS_CHUNK_SIZE = 115;
   const LOGISTICS_CONCURRENCY = 4;
@@ -16461,7 +16461,7 @@ const prevRenderReports = window.renderReports;
       const body=stripMetaLines(block);
       if(!body) return null;
       const d=extractMetaDate(block, r.modifiedon || r.createdon || null);
-      const author=one(extractMetaAuthor(block) || r.modifiedbyname || r.createdbyname || r.owneridname || r.cr714_rep || 'Logistics');
+      const author=one(extractMetaAuthor(block) || r.modifiedby || r.createdby || r.ownerid || r.cr714_rep || 'Logistics');
       return {
         'Note Date': d,
         cr714_accountnum: acct,
@@ -17283,5 +17283,563 @@ const prevRenderReports = window.renderReports;
 })();
 </script>
 <!-- === COPILOT PATCH: REPORT TABLE SCROLL-TO-EXPAND 2026-07-09 END === -->
+
+
+<!-- === COPILOT PATCH: TABLE RESORT + STANDARD DATE DISPLAY 2026-07-09 START === -->
+<script id="act-table-resort-date-display-20260709">
+(function(){
+  if(window.__ACT_TABLE_RESORT_DATE_DISPLAY_20260709__) return;
+  window.__ACT_TABLE_RESORT_DATE_DISPLAY_20260709__ = true;
+
+  const REPORT_TABLE_IDS = ['scorecard-table','actions-table','engagement-table','monthly-table'];
+  const SKIP_ROW_CLASSES = ['act-scroll-expand-row','act-virtual-more-row'];
+  const DATE_HEADER_RE = /\b(date|created|modified|email sent|last email|last activity|activity date|note date|sent on|timestamp)\b/i;
+  const MM_DD_YYYY_RE = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2}|\d{4})(?:\s+.*)?$/;
+  const ISO_RE = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s].*)?$/;
+  const MONTH_NAME_RE = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b/i;
+
+  const $ = id => document.getElementById(id);
+  const pad2 = n => String(n).padStart(2,'0');
+  const clean = v => String(v ?? '').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();
+
+  function ensureStyle(){
+    if($('act-table-resort-date-display-style')) return;
+    const st=document.createElement('style');
+    st.id='act-table-resort-date-display-style';
+    st.textContent=`
+      table th.act-sortable-col{
+        cursor:pointer!important;
+        padding-right:1.75rem!important;
+        position:sticky!important;
+      }
+      table th.act-sortable-col:hover{
+        color:var(--primary)!important;
+        background:color-mix(in srgb, var(--primary) 8%, var(--bg-header))!important;
+      }
+      .act-sort-indicator{
+        display:inline-flex!important;
+        align-items:center!important;
+        justify-content:center!important;
+        width:14px!important;
+        margin-left:6px!important;
+        font-size:10px!important;
+        color:var(--text-muted)!important;
+        opacity:.75!important;
+      }
+      th.act-sort-active .act-sort-indicator{
+        color:var(--primary)!important;
+        opacity:1!important;
+      }
+      th.act-sort-active{
+        box-shadow:inset 0 -2px 0 var(--primary)!important;
+      }
+      td[data-act-date-normalized="1"]{
+        font-variant-numeric:tabular-nums!important;
+      }
+    `;
+    document.head.appendChild(st);
+  }
+
+  function makeDate(y,m,d){
+    y=Number(y); m=Number(m); d=Number(d);
+    if(y < 100) y += 2000;
+    if(!y || !m || !d || m < 1 || m > 12 || d < 1 || d > 31) return null;
+    const dt = new Date(y, m-1, d);
+    if(dt.getFullYear() !== y || dt.getMonth() !== m-1 || dt.getDate() !== d) return null;
+    return dt;
+  }
+
+  function parseACTDate(value){
+    if(value instanceof Date && !isNaN(value.getTime())) return value;
+    let s = clean(value);
+    if(!s || /^--$|^none$|^n\/a$/i.test(s)) return null;
+    s = s.replace(/^[A-Za-z]+,\s*/,'').replace(/\s+at\s+/i,' ');
+
+    let m = s.match(ISO_RE);
+    if(m) return makeDate(m[1], m[2], m[3]);
+
+    m = s.match(MM_DD_YYYY_RE);
+    if(m) return makeDate(m[3], m[1], m[2]);
+
+    // Dataverse / browser formatted strings often include a month name or a time zone.
+    if(MONTH_NAME_RE.test(s) || /GMT|UTC|T\d{2}:\d{2}/i.test(s)){
+      const d = new Date(s);
+      if(!isNaN(d.getTime())) return d;
+    }
+    return null;
+  }
+
+  window.formatACTDate = function(value, separator='/'){
+    const d = parseACTDate(value);
+    if(!d) return value == null ? '' : String(value);
+    const sep = separator === '-' ? '-' : '/';
+    return `${pad2(d.getMonth()+1)}${sep}${pad2(d.getDate())}${sep}${d.getFullYear()}`;
+  };
+
+  window.formatACTDateDash = function(value){ return window.formatACTDate(value, '-'); };
+
+  function headerCells(table){ return table && table.tHead ? Array.from(table.tHead.querySelectorAll('th')) : []; }
+  function bodyRows(table){
+    const tb = table && table.tBodies && table.tBodies[0];
+    if(!tb) return [];
+    return Array.from(tb.querySelectorAll('tr')).filter(r => !SKIP_ROW_CLASSES.some(c => r.classList.contains(c)));
+  }
+  function isDateColumn(table, colIndex){
+    const th = headerCells(table)[colIndex];
+    if(!th) return false;
+    const label = clean(th.textContent || th.innerText || '');
+    if(DATE_HEADER_RE.test(label)) return true;
+    const sample = bodyRows(table).slice(0, 12).map(r => r.cells[colIndex]).filter(Boolean);
+    let hits = 0;
+    sample.forEach(c => { if(parseACTDate(c.dataset.actRawDate || c.textContent)) hits++; });
+    return sample.length > 0 && hits >= Math.min(3, sample.length);
+  }
+
+  function normalizeDateCell(cell){
+    if(!cell) return;
+    const original = cell.dataset.actRawDate || cell.textContent;
+    const d = parseACTDate(original);
+    if(!d) return;
+    if(!cell.dataset.actRawDate) cell.dataset.actRawDate = clean(cell.textContent);
+    cell.dataset.actSortValue = String(d.getTime());
+    cell.dataset.actDateNormalized = '1';
+    cell.textContent = window.formatACTDate(d);
+  }
+
+  function normalizeTableDates(table){
+    if(!table || !table.tBodies || !table.tBodies[0]) return;
+    headerCells(table).forEach((_, colIndex) => {
+      if(!isDateColumn(table, colIndex)) return;
+      bodyRows(table).forEach(row => normalizeDateCell(row.cells[colIndex]));
+    });
+  }
+
+  function normalizeKnownDateDisplays(root=document){
+    const ids = ['fv-email','sync-time-display'];
+    ids.forEach(id => {
+      const el=$(id);
+      if(!el || /^none$|^--$/i.test(clean(el.textContent))) return;
+      const d=parseACTDate(el.dataset.actRawDate || el.textContent);
+      if(d){ if(!el.dataset.actRawDate) el.dataset.actRawDate = clean(el.textContent); el.textContent = window.formatACTDate(d); }
+    });
+
+    root.querySelectorAll && root.querySelectorAll('table').forEach(normalizeTableDates);
+
+    // Normalize common date-looking spans/divs that are explicitly labeled by class/id, without touching free-form note text.
+    root.querySelectorAll && root.querySelectorAll('[id*="date" i], [class*="date" i], [data-date], [data-act-date]').forEach(el => {
+      if(el.matches && el.matches('input,textarea,select,script,style')) return;
+      if(el.children && el.children.length > 0) return;
+      const txt=clean(el.textContent);
+      if(!txt || txt.length > 40 || /ago$/i.test(txt)) return;
+      const d=parseACTDate(el.dataset.actRawDate || el.dataset.date || el.dataset.actDate || txt);
+      if(d){ if(!el.dataset.actRawDate) el.dataset.actRawDate = txt; el.textContent = window.formatACTDate(d); }
+    });
+  }
+
+  function getSortType(table, colIndex){
+    if(isDateColumn(table, colIndex)) return 'date';
+    const rows = bodyRows(table).filter(r => !r.classList.contains('hidden-force'));
+    let numeric=0, checked=0;
+    rows.slice(0, 30).forEach(r => {
+      const c=r.cells[colIndex]; if(!c) return;
+      const txt=clean(c.textContent).replace(/,/g,'');
+      if(!txt || /[A-Za-z]/.test(txt.replace(/Record|Records|%/gi,''))) return;
+      checked++;
+      const n=parseFloat(txt.replace(/[^0-9.\-]/g,''));
+      if(!isNaN(n)) numeric++;
+    });
+    return checked && numeric >= Math.ceil(checked * .75) ? 'number' : 'text';
+  }
+
+  function sortValue(cell, type){
+    if(!cell) return type === 'text' ? '' : -Infinity;
+    if(type === 'date'){
+      const d=parseACTDate(cell.dataset.actRawDate || cell.dataset.actSortValue || cell.textContent);
+      return d ? d.getTime() : -Infinity;
+    }
+    if(type === 'number'){
+      const n=parseFloat(clean(cell.textContent).replace(/,/g,'').replace(/[^0-9.\-]/g,''));
+      return isNaN(n) ? -Infinity : n;
+    }
+    return clean(cell.textContent).toLowerCase();
+  }
+
+  function setSortIndicators(table, colIndex, dir){
+    headerCells(table).forEach((th,i)=>{
+      th.classList.toggle('act-sort-active', i === colIndex);
+      let ind=th.querySelector(':scope > .act-sort-indicator');
+      if(!ind){ ind=document.createElement('span'); ind.className='act-sort-indicator'; th.appendChild(ind); }
+      ind.innerHTML = i === colIndex ? (dir === 'asc' ? '<i class="fas fa-sort-up"></i>' : '<i class="fas fa-sort-down"></i>') : '<i class="fas fa-sort"></i>';
+      th.setAttribute('aria-sort', i === colIndex ? (dir === 'asc' ? 'ascending' : 'descending') : 'none');
+    });
+  }
+
+  function resortTable(tableId, colIndex, forcedDir){
+    ensureStyle();
+    const table=$(tableId); if(!table || !table.tBodies || !table.tBodies[0]) return;
+    normalizeTableDates(table);
+    const tbody=table.tBodies[0];
+    tbody.querySelectorAll('.act-scroll-expand-row,.act-virtual-more-row').forEach(r=>r.remove());
+    const rows=bodyRows(table);
+    if(!rows.length) return;
+    const prevCol=Number(table.dataset.actSortCol);
+    const prevDir=table.dataset.actSortDir || 'asc';
+    const dir = forcedDir || ((prevCol === Number(colIndex) && prevDir === 'asc') ? 'desc' : 'asc');
+    const type=getSortType(table, colIndex);
+    rows.forEach((r,i)=>{ if(!r.dataset.actOriginalIndex) r.dataset.actOriginalIndex=String(i); });
+    rows.sort((a,b)=>{
+      const av=sortValue(a.cells[colIndex], type), bv=sortValue(b.cells[colIndex], type);
+      let cmp;
+      if(type === 'text') cmp = String(av).localeCompare(String(bv), undefined, {numeric:true, sensitivity:'base'});
+      else cmp = av === bv ? 0 : (av < bv ? -1 : 1);
+      if(cmp === 0) cmp = Number(a.dataset.actOriginalIndex || 0) - Number(b.dataset.actOriginalIndex || 0);
+      return dir === 'asc' ? cmp : -cmp;
+    });
+    const frag=document.createDocumentFragment();
+    rows.forEach(r=>frag.appendChild(r));
+    tbody.appendChild(frag);
+    table.dataset.actSortCol=String(colIndex);
+    table.dataset.actSortDir=dir;
+    setSortIndicators(table, colIndex, dir);
+    if(typeof window.refreshReportScrollTables === 'function' && REPORT_TABLE_IDS.includes(tableId)) window.refreshReportScrollTables(true);
+    else if(typeof window.applyACTTableVirtualization === 'function') window.applyACTTableVirtualization(false);
+    if(typeof window.calculateTableTotals === 'function') window.calculateTableTotals(tableId);
+  }
+
+  window.sortTable = function(tableId, n, forcedDir){ resortTable(tableId, Number(n), forcedDir); };
+
+  function bindSortableHeaders(root=document){
+    ensureStyle();
+    root.querySelectorAll && root.querySelectorAll('table').forEach(table=>{
+      if(!table.id) return;
+      headerCells(table).forEach((th,idx)=>{
+        if(th.querySelector('input[type="checkbox"]')) return;
+        th.classList.add('act-sortable-col');
+        th.title = (th.title ? th.title + ' • ' : '') + 'Click to sort / resort';
+        if(!th.querySelector(':scope > .act-sort-indicator')){
+          const ind=document.createElement('span'); ind.className='act-sort-indicator'; ind.innerHTML='<i class="fas fa-sort"></i>'; th.appendChild(ind);
+        }
+        if(th.__actResortBound) return;
+        th.__actResortBound = true;
+        th.addEventListener('click', function(e){
+          if(e.target && e.target.closest && e.target.closest('input,select,button,a,.col-toggle-menu,.excel-checklist')) return;
+          e.preventDefault();
+          e.stopPropagation();
+          resortTable(table.id, idx);
+        }, true);
+      });
+    });
+  }
+
+  function refreshAll(root=document){
+    normalizeKnownDateDisplays(root);
+    bindSortableHeaders(root);
+  }
+
+  const oldRenderReports=window.renderReports;
+  if(typeof oldRenderReports === 'function'){
+    window.renderReports=function(){
+      const r=oldRenderReports.apply(this, arguments);
+      setTimeout(()=>refreshAll(document.getElementById('tab-reports') || document), 120);
+      setTimeout(()=>refreshAll(document.getElementById('tab-reports') || document), 500);
+      return r;
+    };
+  }
+
+  const oldSelectAccount=window.selectAccount;
+  if(typeof oldSelectAccount === 'function'){
+    window.selectAccount=async function(){
+      const r=await oldSelectAccount.apply(this, arguments);
+      setTimeout(()=>refreshAll(document.getElementById('active-form') || document), 150);
+      setTimeout(()=>refreshAll(document.getElementById('history-column') || document), 500);
+      return r;
+    };
+  }
+
+  const oldRenderFactHistory=window.renderFactHistory;
+  if(typeof oldRenderFactHistory === 'function'){
+    window.renderFactHistory=function(){
+      const r=oldRenderFactHistory.apply(this, arguments);
+      setTimeout(()=>refreshAll(document.getElementById('history-column') || document), 80);
+      return r;
+    };
+  }
+
+  const oldOpenFilter=window.openTableFilter;
+  if(typeof oldOpenFilter === 'function'){
+    window.openTableFilter=function(e, tableId, colIndex){
+      const r=oldOpenFilter.apply(this, arguments);
+      const table=$(tableId);
+      if(table) normalizeTableDates(table);
+      return r;
+    };
+  }
+
+  let moTimer=null;
+  const mo=new MutationObserver(muts=>{
+    if(!muts.some(m=>m.addedNodes && m.addedNodes.length)) return;
+    clearTimeout(moTimer);
+    moTimer=setTimeout(()=>refreshAll(document), 250);
+  });
+  try{ mo.observe(document.documentElement, {childList:true, subtree:true}); }catch(_){ }
+
+  document.addEventListener('DOMContentLoaded',()=>setTimeout(()=>refreshAll(document),700));
+  setTimeout(()=>refreshAll(document),1000);
+  console.info('ACT table resort and MM/dd/yyyy date display patch installed.');
+})();
+</script>
+<!-- === COPILOT PATCH: TABLE RESORT + STANDARD DATE DISPLAY 2026-07-09 END === -->
+
+
+<!-- === COPILOT PATCH: SCOPED WORKSPACE REPAIR + LOGISTICS CORE FIELDS 2026-07-09 START === -->
+<style id="act-scope-workspace-repair-20260709-style">
+  #sniper-load-modal .modal-content{
+    width:min(1180px, calc(100vw - 32px))!important;
+    max-width:1180px!important;
+    max-height:94vh!important;
+    padding:22px!important;
+    overflow:hidden!important;
+  }
+  #sniper-load-modal #scoped-popup-filter-panel{
+    display:block!important;
+    flex:1 1 auto!important;
+    min-height:0!important;
+    max-height:58vh!important;
+    overflow:auto!important;
+    padding:10px!important;
+    background:linear-gradient(180deg,color-mix(in srgb,var(--bg-app) 92%,var(--bg-card)),var(--bg-app))!important;
+    border:1px solid var(--border-color)!important;
+    border-radius:16px!important;
+  }
+  #sniper-load-modal .act-scope-v2-grid{
+    display:grid!important;
+    grid-template-columns:repeat(3,minmax(0,1fr))!important;
+    gap:12px!important;
+    align-items:start!important;
+  }
+  #sniper-load-modal .act-scope-v2-card{
+    min-width:0!important;
+    display:flex!important;
+    flex-direction:column!important;
+    border:1px solid color-mix(in srgb,var(--border-color) 86%,var(--primary))!important;
+    background:var(--bg-card)!important;
+    border-radius:15px!important;
+    overflow:hidden!important;
+    box-shadow:0 10px 22px -20px rgba(15,23,42,.45)!important;
+  }
+  #sniper-load-modal .act-scope-v2-head{
+    display:grid!important;
+    grid-template-columns:minmax(0,1fr) auto!important;
+    gap:8px!important;
+    align-items:center!important;
+    padding:10px 12px!important;
+    background:linear-gradient(135deg,color-mix(in srgb,var(--primary) 10%,var(--bg-header)),var(--bg-header))!important;
+    border-bottom:1px solid var(--border-color)!important;
+  }
+  #sniper-load-modal .act-scope-v2-title{
+    min-width:0!important;
+    color:var(--primary)!important;
+    font-size:12px!important;
+    line-height:1.12!important;
+    font-weight:1000!important;
+    text-transform:uppercase!important;
+    letter-spacing:.04em!important;
+    white-space:nowrap!important;
+    overflow:hidden!important;
+    text-overflow:ellipsis!important;
+  }
+  #sniper-load-modal .act-scope-v2-meta{
+    color:var(--text-muted)!important;
+    font-size:9px!important;
+    line-height:1.15!important;
+    font-weight:900!important;
+    text-align:right!important;
+    text-transform:uppercase!important;
+    letter-spacing:.04em!important;
+  }
+  #sniper-load-modal .act-scope-v2-tools{
+    display:flex!important;
+    gap:8px!important;
+    padding:9px 10px!important;
+    border-bottom:1px solid var(--border-color)!important;
+  }
+  #sniper-load-modal .act-scope-v2-search{
+    flex:1 1 auto!important;
+    min-width:0!important;
+    height:32px!important;
+    padding:6px 9px!important;
+    font-size:11px!important;
+    font-weight:800!important;
+  }
+  #sniper-load-modal .act-scope-v2-btn{
+    flex:0 0 auto!important;
+    height:32px!important;
+    padding:0 9px!important;
+    border-radius:9px!important;
+    font-size:10px!important;
+    font-weight:950!important;
+  }
+  #sniper-load-modal .act-scope-v2-list{
+    max-height:220px!important;
+    overflow:auto!important;
+    padding:7px!important;
+    scrollbar-gutter:stable!important;
+  }
+  #sniper-load-modal .act-scope-v2-row{
+    display:grid!important;
+    grid-template-columns:18px minmax(0,1fr) auto!important;
+    align-items:center!important;
+    gap:8px!important;
+    min-height:31px!important;
+    padding:6px 7px!important;
+    border-radius:9px!important;
+    color:var(--text-main)!important;
+    font-size:12px!important;
+    line-height:1.2!important;
+    font-weight:800!important;
+    cursor:pointer!important;
+  }
+  #sniper-load-modal .act-scope-v2-row:hover{background:var(--bg-hover)!important;}
+  #sniper-load-modal .act-scope-v2-row input{
+    width:16px!important;height:16px!important;margin:0!important;accent-color:var(--primary)!important;
+  }
+  #sniper-load-modal .act-scope-v2-name{
+    min-width:0!important;overflow:hidden!important;text-overflow:ellipsis!important;white-space:nowrap!important;
+  }
+  #sniper-load-modal .act-scope-v2-count{
+    color:var(--primary)!important;
+    font-size:10px!important;
+    font-weight:1000!important;
+    text-align:right!important;
+  }
+  #sniper-load-modal .act-scope-v2-count small{
+    display:block!important;
+    color:var(--text-muted)!important;
+    font-size:8px!important;
+    font-weight:900!important;
+    line-height:1!important;
+  }
+  #sniper-load-modal .act-scope-v2-empty{
+    padding:18px!important;
+    text-align:center!important;
+    color:var(--text-muted)!important;
+    font-size:11px!important;
+    font-weight:850!important;
+  }
+  @media(max-width:980px){#sniper-load-modal .act-scope-v2-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important;}}
+  @media(max-width:680px){#sniper-load-modal .act-scope-v2-grid{grid-template-columns:1fr!important;}#sniper-load-modal #scoped-popup-filter-panel{max-height:60vh!important;}}
+</style>
+<script id="act-scope-workspace-repair-20260709">
+(function(){
+  if(window.__ACT_SCOPE_WORKSPACE_REPAIR_20260709__) return;
+  window.__ACT_SCOPE_WORKSPACE_REPAIR_20260709__ = true;
+
+  const IDS = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode'];
+  const LABELS = {
+    cr714_managerassigned:'Manager', cr714_srmanager:'Sr Manager', cr714_supervisors:'Supervisor',
+    cr714_departmentname:'Department', cr714_employeename:'Rep Name', statecode:'Rep Status'
+  };
+  const ICONS = {
+    cr714_managerassigned:'fa-user-shield', cr714_srmanager:'fa-user-tie', cr714_supervisors:'fa-sitemap',
+    cr714_departmentname:'fa-building', cr714_employeename:'fa-users', statecode:'fa-toggle-on'
+  };
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const clean = v => String(v ?? '').replace(/\s+/g,' ').trim();
+  const norm = v => clean(v).toLowerCase();
+  const arr = v => Array.isArray(v) ? v : [];
+  function fs(id){ window.activeFilters = window.activeFilters || {}; if(!window.activeFilters[id]) window.activeFilters[id] = new Set(); return window.activeFilters[id]; }
+  function repName(e){ return clean(e?.cr714_employeename || e?.cr714_repname || e?.fullname || e?.name || e?.cr714_name); }
+  function statusVal(e){ return clean(e?._mappedStatecode || ((e?.statecode === 0 || e?.cr714_status === 1) ? 'Active' : ((e?.statecode === 1 || e?.cr714_status === 0) ? 'Inactive' : 'Unknown'))); }
+  function fieldVal(e,id){ return id === 'cr714_employeename' ? repName(e) : (id === 'statecode' ? statusVal(e) : clean(e?.[id])); }
+  function matchSet(actual,set){ if(!set || !set.size) return true; const a=norm(actual); return Array.from(set).some(x=>norm(x)===a); }
+  function employeeMatchesExcept(e,exceptId){
+    for(const id of IDS){
+      if(id === exceptId) continue;
+      const set = fs(id);
+      if(set.size && !matchSet(fieldVal(e,id), set)) return false;
+    }
+    return true;
+  }
+  function optionRows(id){
+    const counts = new Map();
+    arr(window.employeesData).forEach(e=>{
+      const rep = repName(e); if(!rep || !employeeMatchesExcept(e,id)) return;
+      const v = fieldVal(e,id); if(!v) return;
+      if(!counts.has(v)) counts.set(v, new Set());
+      counts.get(v).add(rep);
+    });
+    return Array.from(counts.entries()).map(([v,set])=>[v,set.size]).sort((a,b)=>String(a[0]).localeCompare(String(b[0])));
+  }
+  function scopedRepSet(){
+    const reps = new Set();
+    arr(window.employeesData).forEach(e=>{ const r=repName(e); if(r && employeeMatchesExcept(e,null)) reps.add(r); });
+    return reps;
+  }
+  function syncTopCheckboxes(id){
+    document.querySelectorAll(`.ms-opt-${id} input[type="checkbox"]`).forEach(cb=>{ cb.checked = fs(id).has(cb.value); });
+    const wrap = document.querySelector(`#ms-wrap-${id} .multiselect-header span`);
+    if(wrap){ const n=fs(id).size; wrap.textContent = LABELS[id] + (n ? (n===1 ? ' (1)' : ' (Multiple)') : ''); }
+  }
+  function updateSummary(){
+    const parts = IDS.map(id => fs(id).size ? `${LABELS[id]}: ${fs(id).size} selected` : '').filter(Boolean);
+    const reps = scopedRepSet();
+    const est = document.getElementById('sniper-estimate');
+    if(est) est.textContent = parts.length ? `${reps.size.toLocaleString()} deduped reps in selected scope` : 'No filters selected';
+    const sum = document.getElementById('scoped-popup-selected-summary');
+    if(sum) sum.innerHTML = parts.length ? `<b>Selected:</b> ${esc(parts.join(' • '))} (${reps.size.toLocaleString()} reps)` : 'Choose at least one filter.';
+  }
+  function cardHtml(id){
+    const rows = optionRows(id), selected = fs(id), label = LABELS[id];
+    const shown = rows.length, selectedReps = scopedRepSet().size;
+    return `<section class="act-scope-v2-card" data-scope-id="${id}">
+      <div class="act-scope-v2-head"><div class="act-scope-v2-title"><i class="fas ${ICONS[id]} mr-1"></i>${esc(label)}</div><div class="act-scope-v2-meta"><div>${shown} shown</div><div>${selected.size ? `${selected.size} selected` : `${selectedReps} reps`}</div></div></div>
+      <div class="act-scope-v2-tools"><input class="act-scope-v2-search" placeholder="Search ${esc(label)}..." oninput="window.scopedPopupFilterSearch('${id}',this.value)"><button type="button" class="btn-secondary act-scope-v2-btn" onclick="window.scopedPopupToggleAll('${id}', this)">${selected.size ? 'Clear' : 'All'}</button></div>
+      <div class="act-scope-v2-list custom-scrollbar" id="sf-drop-${id}">
+        ${rows.length ? rows.map(([v,count])=>`<label class="act-scope-v2-row sf-opt-${id}" data-val="${esc(v)}"><input type="checkbox" value="${esc(v)}" ${selected.has(v)?'checked':''} onchange="window.scopedPopupUpdateFilterState('${id}',this.value,this.checked)"><span class="act-scope-v2-name" title="${esc(v)}">${esc(v)}</span><span class="act-scope-v2-count">${count}<small>reps</small></span></label>`).join('') : `<div class="act-scope-v2-empty">No matching ${esc(label)} options.</div>`}
+      </div>
+    </section>`;
+  }
+  function render(){
+    const panel=document.getElementById('scoped-popup-filter-panel');
+    if(!panel) return;
+    panel.innerHTML = `<div class="act-scope-v2-grid">${IDS.map(cardHtml).join('')}</div>`;
+    updateSummary();
+  }
+
+  window.buildScopedPopupFilters = render;
+  window.scopedPopupUpdateFilterState = function(id,v,ch){
+    ch ? fs(id).add(v) : fs(id).delete(v);
+    syncTopCheckboxes(id);
+    render();
+    if(typeof window.updateFilterSubtitle === 'function') window.updateFilterSubtitle();
+  };
+  window.scopedPopupToggleAll = function(id,btn){
+    const selected = fs(id);
+    if(selected.size){ selected.clear(); }
+    else document.querySelectorAll(`#sf-drop-${id} .sf-opt-${id}`).forEach(row=>{ if(row.style.display !== 'none'){ const cb=row.querySelector('input'); if(cb) selected.add(cb.value); } });
+    syncTopCheckboxes(id);
+    render();
+    if(typeof window.updateFilterSubtitle === 'function') window.updateFilterSubtitle();
+  };
+  window.scopedPopupFilterSearch = function(id,term){
+    const q=norm(term);
+    document.querySelectorAll(`#sf-drop-${id} .sf-opt-${id}`).forEach(row=>{ row.style.display = norm(row.getAttribute('data-val')).includes(q) ? 'grid' : 'none'; });
+  };
+  window.clearScopedPopupFilters = function(){
+    IDS.forEach(id=>{ fs(id).clear(); syncTopCheckboxes(id); });
+    if(window.massFilteredIds && typeof window.massFilteredIds.clear === 'function') window.massFilteredIds.clear();
+    render();
+    if(typeof window.showToast === 'function') window.showToast('Scope filters cleared.','info');
+  };
+  window.updateScopedPopupSummary = updateSummary;
+  window.updateSniperEstimate = updateSummary;
+  window.getScopedRepsFromPreFilters = function(){ return scopedRepSet(); };
+
+  setTimeout(render, 0);
+  setTimeout(render, 300);
+  console.info('ACT scoped workspace repair installed. Logistics preload uses core fields: createdby / modifiedby / ownerid.');
+})();
+</script>
+<!-- === COPILOT PATCH: SCOPED WORKSPACE REPAIR + LOGISTICS CORE FIELDS 2026-07-09 END === -->
 </body>
 </html>
