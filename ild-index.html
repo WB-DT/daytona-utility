@@ -15827,5 +15827,457 @@ const prevRenderReports = window.renderReports;
 })();
 </script>
 <!-- === COPILOT PATCH: LARGER PARALLEL FACT CHUNKS + DEDUPED MANAGER HISTORY 2026-07-09 END === -->
+
+
+<!-- === COPILOT PATCH: REPORTS FEATURE PASS + AUDIT ACTION TOTALS 2026-07-09 START === -->
+<script id="act-report-feature-pass-audit-action-totals-20260709">
+(function(){
+  if(window.__ACT_REPORT_FEATURE_PASS_AUDIT_ACTION_TOTALS_20260709__) return;
+  window.__ACT_REPORT_FEATURE_PASS_AUDIT_ACTION_TOTALS_20260709__ = true;
+
+  const AUDIT_START = '2026-01-01T00:00:00Z';
+  const AUDIT_END   = '2027-01-01T00:00:00Z';
+  const AUDIT_CHUNK_SIZE = 45;
+  const AUDIT_CONCURRENCY = 3;
+  const MAX_AUDIT_URL_CHARS = 14000;
+
+  const ENTITY_META = {
+    cr714_accountmanagementdataset: {
+      label:'Account Management', short:'AM', plural:'cr714_accountmanagementdatasets', idField:'cr714_accountmanagementdatasetid', repField:'cr714_rep', badge:'badge-am'
+    },
+    cr714_cadencedataset: {
+      label:'Cadence', short:'Cadence', plural:'cr714_cadencedatasets', idField:'cr714_cadencedatasetid', repField:'cr714_retentionrep', badge:'badge-cad'
+    },
+    cr714_prospectingdataset: {
+      label:'Prospecting', short:'Prospecting', plural:'cr714_prospectingdatasets', idField:'cr714_prospectingdatasetid', repField:'cr714_repassigned', badge:'badge-pro'
+    },
+    cr714_louisebrowndataset: {
+      label:'Louise Brown', short:'Louise Brown', plural:'cr714_louisebrowndatasets', idField:'cr714_louisebrowndatasetid', repField:'cr714_assignedrep', badge:'badge-lb'
+    }
+  };
+  const ASSIGNMENT_FIELDS = ['cr714_rep','cr714_retentionrep','cr714_repassigned','cr714_assignedrep'];
+
+  const clean = v => String(v ?? '').replace(/\s+/g,' ').trim();
+  const lower = v => clean(v).toLowerCase();
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const od = v => String(v ?? '').replace(/'/g, "''");
+  const guid = v => clean(v).replace(/[{}]/g,'').toLowerCase();
+  const fmtNum = v => Number(v||0).toLocaleString();
+  const dateOnly = v => { const d = new Date(v||0); return isNaN(d.getTime()) ? '' : d.toISOString().slice(0,10); };
+  const monthKey = v => { const d = new Date(v||0); return isNaN(d.getTime()) ? '' : d.toISOString().slice(0,7); };
+  const minNonNull = arr => { const xs=(arr||[]).filter(Boolean).sort(); return xs[0] || null; };
+  const maxNonNull = arr => { const xs=(arr||[]).filter(Boolean).sort(); return xs[xs.length-1] || null; };
+
+  function normalizeRepName(v){
+    let t = clean(v)
+      .replace(/&lt;b&gt;\s*/gi,'').replace(/&lt;\/b&gt;/gi,'')
+      .replace(/&amp;lt;b&amp;gt;\s*/gi,'').replace(/&amp;lt;\/b&amp;gt;/gi,'')
+      .replace(/\s*\[Manager Override\]/gi,'').trim();
+    const fixes = {
+      'anslee erickson':'Anslee Laroche',
+      'Anslee Erickson':'Anslee Laroche',
+      'John Choynoswki':'John Choynowski',
+      'Jason CoitroneJr':'Jason Coitrone Jr',
+      'Reggie CostaScott':'Reggie Costa-Scott'
+    };
+    Object.entries(fixes).forEach(([a,b]) => { t = t.replace(a,b); });
+    return t || 'Unknown Rep';
+  }
+  function normalizeUploaderName(v){
+    const t=clean(v), l=t.toLowerCase();
+    if(l.includes('matt') && l.includes('bleakley')) return 'Matt Bleakley';
+    if(l.includes('anslee') && (l.includes('erickson') || l.includes('laroche'))) return 'Anslee Laroche';
+    return t || 'Unknown User';
+  }
+  function isAllowedUploader(v){
+    const t=lower(v);
+    return (t.includes('matt') && t.includes('bleakley')) || (t.includes('anslee') && (t.includes('erickson') || t.includes('laroche')));
+  }
+  function auditEventName(v){
+    const n=Number(v);
+    if(n===1) return 'Create';
+    if(n===2) return 'Update';
+    return clean(v) || 'Unknown';
+  }
+  function sourceLabel(entity){ return (ENTITY_META[entity] && ENTITY_META[entity].label) || entity || 'Unknown Table'; }
+  function sourceShort(entityOrLabel){
+    const meta = ENTITY_META[entityOrLabel] || Object.values(ENTITY_META).find(x => x.label === entityOrLabel || x.short === entityOrLabel);
+    return meta ? meta.short : clean(entityOrLabel || 'Other');
+  }
+  function badgeForSource(src){
+    const meta = Object.values(ENTITY_META).find(x => x.label === src || x.short === src || x.plural === src);
+    return meta ? meta.badge : 'badge-ds';
+  }
+
+  function collectScopedSourceIds(){
+    const byEntity = new Map();
+    (window.mergedAccounts || []).forEach(a => {
+      (a.sources || []).forEach(s => {
+        const meta = Object.entries(ENTITY_META).find(([_,m]) => m.plural === s.table || m.label === s.type || m.short === s.type);
+        if(!meta || !s.id) return;
+        const entity = meta[0];
+        if(!byEntity.has(entity)) byEntity.set(entity, new Set());
+        byEntity.get(entity).add(guid(s.id));
+      });
+    });
+    return byEntity;
+  }
+
+  function makeAuditUrl(entity, ids){
+    const idFilter = '(' + ids.map(id => `_objectid_value eq ${id}`).join(' or ') + ')';
+    const filter = `createdon ge ${AUDIT_START} and createdon lt ${AUDIT_END} and (action eq 1 or action eq 2) and objecttypecode eq '${od(entity)}' and ${idFilter}`;
+    const params = new URLSearchParams();
+    params.set('$select','createdon,action,objecttypecode,_objectid_value,_userid_value,changedata');
+    params.set('$filter',filter);
+    params.set('$orderby','createdon asc');
+    return `${window.DATAVERSE_URL}/audits?${params.toString()}`;
+  }
+  function dynamicAuditChunks(entity, ids){
+    const out=[]; let cur=[];
+    ids.forEach(id => {
+      const test = cur.concat([id]);
+      if(cur.length && (test.length > AUDIT_CHUNK_SIZE || makeAuditUrl(entity,test).length > MAX_AUDIT_URL_CHARS)){
+        out.push(cur); cur=[id];
+      } else cur=test;
+    });
+    if(cur.length) out.push(cur);
+    return out;
+  }
+
+  async function fetchAuditChunk(token, entity, ids, idx, total){
+    let url = makeAuditUrl(entity, ids);
+    const rows=[];
+    while(url){
+      const res = await fetch(url, { headers:{ Authorization:`Bearer ${token}`, Accept:'application/json', Prefer:'odata.maxpagesize=5000, odata.include-annotations="*"' }});
+      if(!res.ok){
+        if((res.status===400 || res.status===414) && ids.length > 1){
+          const mid=Math.ceil(ids.length/2);
+          const a=await fetchAuditChunk(token, entity, ids.slice(0,mid), idx, total);
+          const b=await fetchAuditChunk(token, entity, ids.slice(mid), idx, total);
+          return a.concat(b);
+        }
+        console.warn('Audit chunk failed', entity, idx+1, total, res.status, await res.text().catch(()=>''));
+        return rows;
+      }
+      const data=await res.json();
+      rows.push(...(Array.isArray(data.value) ? data.value : []));
+      url = data['@odata.nextLink'] || null;
+      await new Promise(requestAnimationFrame);
+    }
+    return rows;
+  }
+
+  function expandAuditRows(rawRows){
+    const expanded=[];
+    (rawRows||[]).forEach(r => {
+      const entity = lower(r.objecttypecode);
+      if(!ENTITY_META[entity]) return;
+      const obj = guid(r._objectid_value || r['_objectid_value']);
+      const uploadedRaw = clean(r['_userid_value@OData.Community.Display.V1.FormattedValue'] || r['_userid_value@OData.Community.Display.V1.FormattedValue'.replace(/_/g,'_')] || r._userid_value || '');
+      const base = {
+        createdon:r.createdon,
+        auditActionNumber:Number(r.action),
+        auditEventName:auditEventName(r.action),
+        entityLogicalName:entity,
+        objectId:obj,
+        uploadedByRaw:uploadedRaw,
+        uploadedBy:normalizeUploaderName(uploadedRaw),
+        auditCreatedOn:r.createdon
+      };
+      let attrs=[];
+      try{
+        const parsed = typeof r.changedata === 'string' ? JSON.parse(r.changedata) : r.changedata;
+        attrs = parsed && Array.isArray(parsed.changedAttributes) ? parsed.changedAttributes : [];
+      }catch(_){ attrs=[]; }
+      attrs.forEach(a => {
+        expanded.push({
+          ...base,
+          changedField: lower(a.logicalName),
+          oldValue: clean(a.oldValue), newValue: clean(a.newValue), oldName: clean(a.oldName), newName: clean(a.newName)
+        });
+      });
+    });
+    return expanded;
+  }
+
+  function buildAuditActionTotals(rawAuditRows){
+    const rows = expandAuditRows(rawAuditRows);
+    const actionByRecord = new Map();
+    rows.filter(r => r.changedField === 'cr714_action' && clean(r.newName || r.newValue)).sort((a,b)=>new Date(a.auditCreatedOn)-new Date(b.auditCreatedOn)).forEach(r => {
+      const k = `${r.entityLogicalName}|${r.objectId}`;
+      actionByRecord.set(k, {
+        entityLogicalName:r.entityLogicalName,
+        objectId:r.objectId,
+        action: clean(r.newName || r.newValue) || 'Unknown Action',
+        actionValueSourceEvent:r.auditEventName || 'No Action Audit Found',
+        actionValueTimestamp:r.auditCreatedOn,
+        actionValueUpdatedBy:normalizeUploaderName(r.uploadedBy)
+      });
+    });
+
+    const createRows = rows.filter(r => {
+      const meta=ENTITY_META[r.entityLogicalName];
+      return meta && r.auditActionNumber === 1 && (isAllowedUploader(r.uploadedByRaw) || isAllowedUploader(r.uploadedBy)) && ASSIGNMENT_FIELDS.includes(r.changedField) && r.changedField === meta.repField && clean(r.newName || r.newValue);
+    }).map(r => ({
+      entityLogicalName:r.entityLogicalName,
+      objectId:r.objectId,
+      createdOn:r.auditCreatedOn,
+      createdDate:dateOnly(r.auditCreatedOn),
+      createdMonth:monthKey(r.auditCreatedOn),
+      uploadedBy:normalizeUploaderName(r.uploadedBy || r.uploadedByRaw),
+      sourceTable:sourceLabel(r.entityLogicalName),
+      sourceShort:sourceShort(r.entityLogicalName),
+      assignmentField:r.changedField,
+      originalAssignedRep:normalizeRepName(r.newName || r.newValue),
+      originalAssignedRepRaw:clean(r.newName || r.newValue),
+      auditEvent:'Create'
+    })).sort((a,b) => (a.entityLogicalName+a.objectId+a.createdOn).localeCompare(b.entityLogicalName+b.objectId+b.createdOn));
+
+    const firstCreateByRecord = new Map();
+    createRows.forEach(r => {
+      const k=`${r.entityLogicalName}|${r.objectId}`;
+      if(!firstCreateByRecord.has(k)) firstCreateByRecord.set(k,r);
+    });
+
+    const details = Array.from(firstCreateByRecord.values()).map(r => {
+      const action = actionByRecord.get(`${r.entityLogicalName}|${r.objectId}`) || {};
+      return {
+        ...r,
+        action: clean(action.action) || 'Unknown Action',
+        actionValueSourceEvent: clean(action.actionValueSourceEvent) || 'No Action Audit Found',
+        actionValueTimestamp: action.actionValueTimestamp || null,
+        actionValueDate: dateOnly(action.actionValueTimestamp),
+        actionValueUpdatedBy: normalizeUploaderName(action.actionValueUpdatedBy || '') || 'Unknown User'
+      };
+    });
+
+    const groups = new Map();
+    details.forEach(r => {
+      const key = [r.createdMonth,r.createdDate,r.uploadedBy,r.sourceTable,r.originalAssignedRep,r.action,r.actionValueSourceEvent,r.actionValueDate,r.actionValueUpdatedBy,r.auditEvent].join('|');
+      if(!groups.has(key)) groups.set(key, {...r, originallyAssignedCount:0, createdTimes:[], actionTimes:[]});
+      const g=groups.get(key);
+      g.originallyAssignedCount++;
+      if(r.createdOn) g.createdTimes.push(r.createdOn);
+      if(r.actionValueTimestamp) g.actionTimes.push(r.actionValueTimestamp);
+    });
+    const grouped = Array.from(groups.values()).map(g => ({
+      createdMonth:g.createdMonth,
+      createdDate:g.createdDate,
+      uploadedBy:g.uploadedBy,
+      sourceTable:g.sourceTable,
+      sourceShort:g.sourceShort,
+      originalAssignedRep:g.originalAssignedRep,
+      action:g.action,
+      actionValueSourceEvent:g.actionValueSourceEvent,
+      actionValueDate:g.actionValueDate,
+      actionValueUpdatedBy:g.actionValueUpdatedBy,
+      auditEvent:g.auditEvent,
+      originallyAssignedCount:g.originallyAssignedCount,
+      firstCreatedTimestamp:minNonNull(g.createdTimes),
+      lastCreatedTimestamp:maxNonNull(g.createdTimes),
+      firstActionValueTimestamp:minNonNull(g.actionTimes),
+      lastActionValueTimestamp:maxNonNull(g.actionTimes)
+    })).sort((a,b) => (b.createdDate||'').localeCompare(a.createdDate||'') || (a.sourceTable||'').localeCompare(b.sourceTable||'') || (a.originalAssignedRep||'').localeCompare(b.originalAssignedRep||'') || (a.action||'').localeCompare(b.action||''));
+
+    window.auditActionDetails = details;
+    window.auditActionTotals = grouped;
+    window.auditActionRawRows = rawAuditRows || [];
+    window.auditActionExpandedRows = rows;
+    window.__actAuditActionStats = {
+      rawAuditRows:(rawAuditRows||[]).length,
+      expandedRows:rows.length,
+      detailRecords:details.length,
+      groupedRows:grouped.length,
+      loadedAt:new Date().toISOString(),
+      rangeStart:AUDIT_START,
+      rangeEnd:AUDIT_END
+    };
+    return grouped;
+  }
+
+  window.fetchScopedAuditActionTotals = async function(token){
+    const byEntity = collectScopedSourceIds();
+    const jobs=[];
+    byEntity.forEach((set, entity) => {
+      dynamicAuditChunks(entity, Array.from(set)).forEach(ids => jobs.push({entity, ids}));
+    });
+    window.__actAuditChunkCount = jobs.length;
+    if(!jobs.length){
+      buildAuditActionTotals([]);
+      return [];
+    }
+    if(window.updateLoader) window.updateLoader(87, `Loading audit action totals in ${jobs.length.toLocaleString()} scoped chunks...`, window.totalLoadedRecords || 0);
+    let next=0, done=0; const all=[];
+    async function worker(){
+      while(next < jobs.length){
+        const i=next++; const job=jobs[i];
+        const rows=await fetchAuditChunk(token, job.entity, job.ids, i, jobs.length);
+        all.push(...rows);
+        done++;
+        if(window.updateLoader) window.updateLoader(Math.min(98, 87 + Math.round((done/Math.max(jobs.length,1))*10)), `Loaded audit chunk ${done} of ${jobs.length}...`, (window.totalLoadedRecords||0) + (window.__actFactRows||[]).length + all.length);
+        await new Promise(requestAnimationFrame);
+      }
+    }
+    await Promise.all(Array.from({length:Math.min(AUDIT_CONCURRENCY,jobs.length)}, worker));
+    buildAuditActionTotals(all);
+    return window.auditActionTotals;
+  };
+
+  // Wrap the current scoped loader so audit totals become part of the normal loading procedure.
+  const previousFetchAllData = window.fetchAllData;
+  window.fetchAllData = async function(options={}){
+    const result = typeof previousFetchAllData === 'function' ? await previousFetchAllData.apply(this, arguments) : undefined;
+    const Q = window.__ACT_QUERY_SNIPER || {};
+    const shouldLoadAudit = !!(Q.active || options.force || options.scoped);
+    const loader = document.getElementById('global-loader');
+    try{
+      if(shouldLoadAudit){
+        if(loader && !options.silent) loader.style.display = 'flex';
+        if(window.updateLoader) window.updateLoader(86, 'Loading audit log for true action totals...', (window.totalLoadedRecords||0) + ((window.__actFactRows||[]).length));
+        const token = await window.getToken();
+        await window.fetchScopedAuditActionTotals(token);
+        if(typeof window.buildReportingFactsAsync === 'function') await window.buildReportingFactsAsync();
+        else if(typeof window.buildReportingFacts === 'function') window.buildReportingFacts();
+        window.reportsDirty = true;
+        if(window.updateLoader) window.updateLoader(100, 'Scoped data, fact history, and audit action totals synced.', (window.totalLoadedRecords||0) + ((window.__actFactRows||[]).length) + ((window.auditActionRawRows||[]).length));
+      }
+    }catch(e){
+      console.warn('Audit action totals load skipped/failed:', e);
+      window.__actAuditActionStats = { failed:true, message:e && e.message ? e.message : String(e), loadedAt:new Date().toISOString() };
+      if(window.showToast) window.showToast('Audit action totals were skipped: ' + (e && e.message ? e.message : e), 'warning');
+    } finally {
+      if(loader && !options.silent && shouldLoadAudit) setTimeout(() => { loader.style.display = 'none'; }, 350);
+    }
+    return result;
+  };
+  window.fetchAllData.__loadsScopedAuditActionTotals20260709 = true;
+
+  // Add audit facts into the normal reporting model after any existing report-fact build.
+  const prevBuildReportingFactsAsync = window.buildReportingFactsAsync;
+  window.buildReportingFactsAsync = async function(){
+    if(typeof prevBuildReportingFactsAsync === 'function') await prevBuildReportingFactsAsync.apply(this, arguments);
+    else window.reportingFacts = window.reportingFacts || [];
+    const existing = (window.reportingFacts || []).filter(f => f.factType !== 'auditCreateAssignment');
+    (window.auditActionTotals || []).forEach(r => existing.push({
+      factType:'auditCreateAssignment',
+      accountId:null,
+      rep:r.originalAssignedRep,
+      action:r.action || 'Unknown Action',
+      sourceDataset:r.sourceTable,
+      sourceTable:r.sourceTable,
+      noteDate:r.createdDate,
+      monthKey:r.createdMonth,
+      touchType:'Audit Create Assignment',
+      uploadedBy:r.uploadedBy,
+      actionValueUpdatedBy:r.actionValueUpdatedBy,
+      auditEvent:r.auditEvent,
+      count:Number(r.originallyAssignedCount || 0)
+    }));
+    window.reportingFacts = existing;
+    window.reportingDims = window.reportingDims || {};
+    window.reportingDims.reps = Array.from(new Set(existing.map(f=>f.rep).filter(Boolean))).sort();
+    window.reportingDims.actions = Array.from(new Set(existing.map(f=>f.action).filter(Boolean))).sort();
+    window.reportingDims.months = Array.from(new Set(existing.map(f=>f.monthKey).filter(Boolean))).sort().reverse();
+  };
+
+  function tableBadge(src){ return `<span class="badge-ds ${badgeForSource(src)}">${esc(sourceShort(src))}</span>`; }
+  function rowCells(vals){ return vals.map(v => `<td>${v}</td>`).join(''); }
+  function groupedSum(rows, keyFn, countFn){
+    const m=new Map();
+    (rows||[]).forEach(r => { const k=keyFn(r); m.set(k,(m.get(k)||0)+(countFn?Number(countFn(r)||0):1)); });
+    return Array.from(m.entries()).sort((a,b)=>b[1]-a[1]);
+  }
+  function downloadCsv(filename, rows){
+    if(!rows || !rows.length){ if(window.showToast) window.showToast('No rows to export.','warning'); return; }
+    const cols=Object.keys(rows[0]);
+    const csv=[cols.join(',')].concat(rows.map(r => cols.map(c => `"${String(r[c]??'').replace(/"/g,'""')}"`).join(','))).join('\n');
+    const blob=new Blob([csv],{type:'text/csv'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=filename; a.click();
+  }
+  window.exportAuditActionTotals = function(){ downloadCsv(`ACT_Audit_Action_Totals_${new Date().toISOString().slice(0,10)}.csv`, window.auditActionTotals || []); };
+  window.exportReportFacts = function(){ downloadCsv(`ACT_Reporting_Facts_${new Date().toISOString().slice(0,10)}.csv`, window.reportingFacts || []); };
+
+  function ensureReportStyle(){
+    if(document.getElementById('act-report-feature-pass-style')) return;
+    const st=document.createElement('style'); st.id='act-report-feature-pass-style'; st.textContent = `
+      #tab-reports{background:var(--bg-app);}
+      .act-report-shell{height:100%;display:flex;flex-direction:column;min-height:0;overflow:hidden;color:var(--text-main)}
+      .act-report-head{padding:14px 18px;background:var(--bg-card);border-bottom:1px solid var(--border-color);display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
+      .act-report-title{font-size:20px;font-weight:1000;color:var(--primary);letter-spacing:-.04em;text-transform:uppercase}.act-report-sub{font-size:11px;font-weight:800;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em}
+      .act-report-scroll{flex:1 1 auto;min-height:0;overflow:auto;padding:16px}.act-kpi-grid{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:12px;margin-bottom:14px}.act-kpi{background:var(--bg-card);border:1px solid var(--border-color);border-radius:16px;padding:14px;box-shadow:var(--shadow)}.act-kpi .n{font-size:28px;font-weight:1000;color:var(--primary);line-height:1}.act-kpi .l{font-size:10px;font-weight:950;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-top:6px}
+      .act-report-section{background:var(--bg-card);border:1px solid var(--border-color);border-radius:16px;box-shadow:var(--shadow);margin-bottom:14px;overflow:hidden}.act-report-section h3{margin:0;padding:12px 14px;border-bottom:1px solid var(--border-color);font-size:12px;font-weight:1000;text-transform:uppercase;letter-spacing:.08em;color:var(--primary);display:flex;justify-content:space-between;gap:8px;align-items:center}.act-report-section .body{padding:12px}.act-report-note{font-size:11px;font-weight:800;color:var(--text-muted);line-height:1.45;margin-bottom:10px}.act-report-table-wrap{overflow:auto;max-height:360px;border:1px solid var(--border-color);border-radius:12px}.act-report-table{width:100%;border-collapse:separate;border-spacing:0;font-size:11px}.act-report-table th{position:sticky;top:0;background:var(--bg-header);z-index:2;font-size:10px;text-transform:uppercase;letter-spacing:.05em}.act-report-table td,.act-report-table th{padding:8px 10px;border-bottom:1px solid var(--border-color);white-space:nowrap}.act-report-table tr:hover td{background:var(--bg-hover)}.act-report-grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.act-pill{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border-color);border-radius:999px;padding:4px 8px;font-size:10px;font-weight:900;color:var(--text-muted);background:var(--bg-input)}
+      @media(max-width:1100px){.act-kpi-grid{grid-template-columns:repeat(2,minmax(150px,1fr))}.act-report-grid2{grid-template-columns:1fr}}
+    `; document.head.appendChild(st);
+  }
+
+  window.renderReports = function(){
+    ensureReportStyle();
+    const tab=document.getElementById('tab-reports'); if(!tab) return;
+    const accounts=window.teamFilteredAccounts && window.teamFilteredAccounts.length ? window.teamFilteredAccounts : (window.mergedAccounts || []);
+    const facts=window.reportingFacts || [];
+    const eventFacts=facts.filter(f=>f.factType==='event');
+    const auditTotals=window.auditActionTotals || [];
+    const auditTotalCount=auditTotals.reduce((s,r)=>s+Number(r.originallyAssignedCount||0),0);
+    const sourceCounts=groupedSum(accounts.flatMap(a => (a.sources||[]).map(s => ({src:s.type||s.table, account:a.cr714_id}))), r=>sourceShort(r.src));
+    const touchByTable=groupedSum(eventFacts, f=>sourceShort(f.sourceDataset || f.sourceTable || 'Fact Table'), f=>f.count || 1);
+    const auditByTable=groupedSum(auditTotals, r=>r.sourceTable, r=>r.originallyAssignedCount);
+    const auditByAction=groupedSum(auditTotals, r=>r.action || 'Unknown Action', r=>r.originallyAssignedCount).slice(0,25);
+    const repAudit=groupedSum(auditTotals, r=>r.originalAssignedRep || 'Unknown Rep', r=>r.originallyAssignedCount).slice(0,25);
+    const touchByAction=groupedSum(eventFacts, f=>f.action || 'None', f=>f.count || 1).slice(0,25);
+    const touchTypeCounts=groupedSum(eventFacts, f=>f.touchType || 'Unknown Touch', f=>f.count || 1);
+    const auditStats=window.__actAuditActionStats || {};
+    const factStats=window.__actFactLoadStats || {};
+
+    tab.innerHTML = `<div class="act-report-shell">
+      <div class="act-report-head">
+        <div><div class="act-report-title"><i class="fas fa-chart-pie mr-2"></i>ACT Reports</div><div class="act-report-sub">Scoped tables, fact-history activity, and audit-backed true action totals</div></div>
+        <div class="flex gap-2 flex-wrap"><button class="btn-secondary text-xs px-3 py-2" onclick="window.exportReportFacts()"><i class="fas fa-download mr-1"></i>Export Facts</button><button class="btn-secondary text-xs px-3 py-2" onclick="window.exportAuditActionTotals()"><i class="fas fa-file-shield mr-1"></i>Export Audit Totals</button><button class="btn-primary text-xs px-3 py-2" onclick="window.renderReports()"><i class="fas fa-sync mr-1"></i>Refresh</button></div>
+      </div>
+      <div class="act-report-scroll custom-scrollbar">
+        <div class="act-kpi-grid">
+          <div class="act-kpi"><div class="n">${fmtNum(accounts.length)}</div><div class="l">Scoped Accounts</div></div>
+          <div class="act-kpi"><div class="n">${fmtNum((window.__actFactRows||[]).length)}</div><div class="l">Deduped Fact Rows</div></div>
+          <div class="act-kpi"><div class="n">${fmtNum(eventFacts.length)}</div><div class="l">Activity Events</div></div>
+          <div class="act-kpi"><div class="n">${fmtNum(auditTotalCount)}</div><div class="l">True Action Total (Audit)</div></div>
+          <div class="act-kpi"><div class="n">${fmtNum(auditStats.rawAuditRows || 0)}</div><div class="l">Audit Rows Loaded</div></div>
+        </div>
+
+        <div class="act-report-section"><h3><span><i class="fas fa-table-list mr-2"></i>Loaded Table Types</span><span class="act-pill">Fact chunks: ${fmtNum(factStats.chunks || window.__actFactChunkCount || 0)} • Audit chunks: ${fmtNum(window.__actAuditChunkCount || 0)}</span></h3><div class="body">
+          <div class="act-report-note">This section separates the live scoped dataset tables from the deduped fact-history events and the audit-backed create-assignment action totals.</div>
+          <div class="act-report-table-wrap"><table class="act-report-table"><thead><tr><th>Table Type</th><th>Context Records / Accounts</th><th>Fact Activity Events</th><th>Audit True Action Total</th><th>What It Means</th></tr></thead><tbody>
+            ${Object.values(ENTITY_META).map(meta => {
+              const sc = sourceCounts.find(x=>x[0]===meta.short)?.[1] || sourceCounts.find(x=>x[0]===meta.label)?.[1] || 0;
+              const tc = touchByTable.find(x=>x[0]===meta.short)?.[1] || touchByTable.find(x=>x[0]===meta.label)?.[1] || 0;
+              const ac = auditByTable.find(x=>x[0]===meta.label)?.[1] || 0;
+              return `<tr>${rowCells([tableBadge(meta.label),fmtNum(sc),fmtNum(tc),fmtNum(ac),esc(`Context from ${meta.plural}; true action totals from audits on ${Object.keys(ENTITY_META).find(k=>ENTITY_META[k]===meta) || meta.label}`)])}</tr>`;
+            }).join('')}
+          </tbody></table></div>
+        </div></div>
+
+        <div class="act-report-grid2">
+          <div class="act-report-section"><h3><span><i class="fas fa-clipboard-check mr-2"></i>Audit True Actions by Action</span><span class="act-pill">Create + later cr714_action corrections</span></h3><div class="body"><div class="act-report-table-wrap"><table class="act-report-table"><thead><tr><th>Action</th><th>Originally Assigned Count</th></tr></thead><tbody>${auditByAction.map(([k,v])=>`<tr>${rowCells([esc(k),fmtNum(v)])}</tr>`).join('') || `<tr><td colspan="2">No audit action totals loaded.</td></tr>`}</tbody></table></div></div></div>
+          <div class="act-report-section"><h3><span><i class="fas fa-person-chalkboard mr-2"></i>Audit True Actions by Original Rep</span><span class="act-pill">Uploader limited to Matt / Anslee logic</span></h3><div class="body"><div class="act-report-table-wrap"><table class="act-report-table"><thead><tr><th>Original Assigned Rep</th><th>Originally Assigned Count</th></tr></thead><tbody>${repAudit.map(([k,v])=>`<tr>${rowCells([esc(k),fmtNum(v)])}</tr>`).join('') || `<tr><td colspan="2">No audit rep totals loaded.</td></tr>`}</tbody></table></div></div></div>
+        </div>
+
+        <div class="act-report-grid2">
+          <div class="act-report-section"><h3><span><i class="fas fa-wave-square mr-2"></i>Fact Activity by Action</span><span class="act-pill">Deduped cr714_dt_act_fctbls history</span></h3><div class="body"><div class="act-report-table-wrap"><table class="act-report-table"><thead><tr><th>Action</th><th>Activity Events</th></tr></thead><tbody>${touchByAction.map(([k,v])=>`<tr>${rowCells([esc(k),fmtNum(v)])}</tr>`).join('') || `<tr><td colspan="2">No fact activity loaded.</td></tr>`}</tbody></table></div></div></div>
+          <div class="act-report-section"><h3><span><i class="fas fa-layer-group mr-2"></i>Fact Activity by Touch Type</span><span class="act-pill">Email / Note / Masonville / Manager Note</span></h3><div class="body"><div class="act-report-table-wrap"><table class="act-report-table"><thead><tr><th>Touch Type</th><th>Activity Events</th></tr></thead><tbody>${touchTypeCounts.map(([k,v])=>`<tr>${rowCells([esc(k),fmtNum(v)])}</tr>`).join('') || `<tr><td colspan="2">No touch activity loaded.</td></tr>`}</tbody></table></div></div></div>
+        </div>
+
+        <div class="act-report-section"><h3><span><i class="fas fa-file-shield mr-2"></i>Audit Action Total Detail</span><span class="act-pill">${fmtNum(auditTotals.length)} grouped rows • ${esc(auditStats.rangeStart || AUDIT_START)} to ${esc(auditStats.rangeEnd || AUDIT_END)}</span></h3><div class="body">
+          <div class="act-report-note">Matches the M-code logic: audits for Create/Update, latest nonblank <b>cr714_action</b> per record, first valid Create assignment per record, grouped by created date, uploader, table, original rep, and action.</div>
+          <div class="act-report-table-wrap"><table class="act-report-table"><thead><tr><th>Created Date</th><th>Table</th><th>Uploaded By</th><th>Original Assigned Rep</th><th>Action</th><th>Action Source</th><th>Action Updated By</th><th>Count</th></tr></thead><tbody>
+            ${auditTotals.slice(0,500).map(r => `<tr>${rowCells([esc(r.createdDate),tableBadge(r.sourceTable),esc(r.uploadedBy),esc(r.originalAssignedRep),esc(r.action),esc(r.actionValueSourceEvent),esc(r.actionValueUpdatedBy),fmtNum(r.originallyAssignedCount)])}</tr>`).join('') || `<tr><td colspan="8">No audit action totals loaded for this scope.</td></tr>`}
+          </tbody></table></div>
+        </div></div>
+      </div>
+    </div>`;
+    window.reportsDirty = false;
+  };
+
+  window.openLocalReportsOnly = function(event){ if(event && event.preventDefault) event.preventDefault(); window.switchTab ? window.switchTab('reports') : window.renderReports(); };
+  console.info('ACT report feature pass + audit action totals installed.');
+})();
+</script>
+<!-- === COPILOT PATCH: REPORTS FEATURE PASS + AUDIT ACTION TOTALS 2026-07-09 END === -->
 </body>
 </html>
