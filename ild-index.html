@@ -15137,5 +15137,323 @@ const prevRenderReports = window.renderReports;
 })();
 </script>
 <!-- === COPILOT PATCH: FACT TABLE BOOT LOAD + COOL LOADER 2026-07-09 END === -->
+
+
+<!-- === COPILOT PATCH: EXACT SCOPED CHUNKED FACT TABLE FETCH 2026-07-09 START === -->
+<script id="act-exact-scoped-chunked-fact-fetch-20260709">
+(function(){
+  if(window.__ACT_EXACT_SCOPED_CHUNKED_FACT_FETCH_20260709__) return;
+  window.__ACT_EXACT_SCOPED_CHUNKED_FACT_FETCH_20260709__ = true;
+
+  const FACT_SELECT = [
+    'cr714_dt_act_fctblid','cr714_activitynaturalkey','cr714_accountnumber','cr714_companyname','cr714_accountrep','cr714_repfromnote',
+    'cr714_activitydate','createdon','modifiedon','cr714_activitytype','cr714_effectiveaction','cr714_action','cr714_actionfromnotetag',
+    'cr714_actionmessage','cr714_emaildate','cr714_emailstatus','cr714_emailtemplate','cr714_notedate','cr714_notetext','cr714_notetextraw','cr714_managernotes','cr714_sourcetype'
+  ];
+
+  const FACT_TABLE = 'cr714_dt_act_fctbls';
+  const ACCOUNT_CHUNK_SIZE = 40;       // Keep OData URL safely under practical URL-length limits.
+  const FACT_CHUNK_CONCURRENCY = 3;    // Small parallel pool to avoid hammering Dataverse.
+
+  const clean = v => String(v ?? '').replace(/\s+/g, ' ').trim();
+  const od = v => String(v ?? '').replace(/'/g, "''");
+  const acctKey = v => clean(v).toUpperCase();
+  const uniq = arr => Array.from(new Set((arr || []).map(acctKey).filter(Boolean))).sort();
+  const dateOf = r => r?.cr714_activitydate || r?.cr714_notedate || r?.cr714_emaildate || r?.createdon || r?.modifiedon || '';
+  const textOf = r => clean(r?.cr714_notetext || r?.cr714_notetextraw || r?.cr714_actionmessage || r?.cr714_managernotes || '');
+  const typeOf = r => clean(r?.cr714_activitytype || r?.cr714_sourcetype || (r?.cr714_emaildate || r?.cr714_emailstatus || r?.cr714_emailtemplate ? 'Email' : 'Activity'));
+  const keyOf = r => clean(r?.cr714_dt_act_fctblid || r?.cr714_activitynaturalkey || [r?.cr714_accountnumber, dateOf(r), r?.cr714_effectiveaction || r?.cr714_action, textOf(r)].join('|'));
+
+  function updateChunkLoader(pct, text, count){
+    try { window.updateLoader && window.updateLoader(pct, text, count); } catch(_) {}
+  }
+
+  function resetLoadCounters(){
+    window.__actLoadCounters = { am:0, cadence:0, lb:0, fact:0, total:0 };
+  }
+
+  function bumpFactCounter(add){
+    const c = window.__actLoadCounters = window.__actLoadCounters || {am:0,cadence:0,lb:0,fact:0,total:0};
+    c.fact = (c.fact || 0) + (Number(add) || 0);
+    c.total = (window.totalLoadedRecords || 0) + c.fact;
+    updateChunkLoader(null, null, c.total);
+  }
+
+  function bumpDatasetCounter(type, add){
+    const c = window.__actLoadCounters = window.__actLoadCounters || {am:0,cadence:0,lb:0,fact:0,total:0};
+    if(type === 'AM') c.am += add;
+    else if(type === 'Cadence') c.cadence += add;
+    else if(type === 'Louise Brown') c.lb += add;
+  }
+
+  async function fetchPaginatedTracked(table, selectStr, token, globalAccountMap, typeLabel){
+    const before = Number(window.totalLoadedRecords || 0);
+    const result = await window.fetchPaginatedData(table, selectStr, token, globalAccountMap, typeLabel);
+    const after = Number(window.totalLoadedRecords || before);
+    bumpDatasetCounter(typeLabel, Math.max(0, after - before));
+    return result;
+  }
+
+  function factChunkUrl(accountIds){
+    const filter = '(' + accountIds.map(id => `cr714_accountnumber eq '${od(id)}'`).join(' or ') + ')';
+    return `${window.DATAVERSE_URL}/${FACT_TABLE}?$select=${FACT_SELECT.join(',')}&$filter=${encodeURIComponent(filter)}`;
+  }
+
+  async function fetchFactChunk(token, accountIds, chunkIndex, totalChunks){
+    let url = factChunkUrl(accountIds);
+    const rows = [];
+    while(url){
+      const res = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json',
+          'Prefer': 'odata.maxpagesize=5000, odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
+        }
+      });
+      if(!res.ok){
+        const msg = await res.text().catch(() => '');
+        throw new Error(`Fact chunk ${chunkIndex + 1}/${totalChunks} failed (${res.status}). ${msg}`);
+      }
+      const data = await res.json();
+      const batch = Array.isArray(data.value) ? data.value : [];
+      rows.push(...batch);
+      bumpFactCounter(batch.length);
+      updateChunkLoader(
+        Math.min(95, 55 + Math.round(((chunkIndex + 1) / Math.max(totalChunks, 1)) * 35)),
+        `Loading account history chunks ${chunkIndex + 1} of ${totalChunks}...`,
+        (window.__actLoadCounters && window.__actLoadCounters.total) || 0
+      );
+      await new Promise(requestAnimationFrame);
+      url = data['@odata.nextLink'] || null;
+    }
+    return rows;
+  }
+
+  async function fetchFactRowsForExactAccounts(token, accountIds){
+    const ids = uniq(accountIds);
+    window.__actFactRequestedAccountIds = ids;
+    window.__actFactChunkSize = ACCOUNT_CHUNK_SIZE;
+    if(!ids.length){
+      window.__actFactRows = [];
+      window.__actFactRowsByAccount = new Map();
+      window.unifiedEventRows = [];
+      return [];
+    }
+
+    const chunks = [];
+    for(let i = 0; i < ids.length; i += ACCOUNT_CHUNK_SIZE) chunks.push(ids.slice(i, i + ACCOUNT_CHUNK_SIZE));
+    window.__actFactChunkCount = chunks.length;
+    updateChunkLoader(52, `Loading history for ${ids.length.toLocaleString()} scoped accounts in ${chunks.length.toLocaleString()} chunks...`, window.totalLoadedRecords || 0);
+
+    const allRows = [];
+    let next = 0;
+    async function worker(){
+      while(next < chunks.length){
+        const myIndex = next++;
+        const rows = await fetchFactChunk(token, chunks[myIndex], myIndex, chunks.length);
+        allRows.push(...rows);
+      }
+    }
+    const workerCount = Math.min(FACT_CHUNK_CONCURRENCY, chunks.length);
+    await Promise.all(Array.from({length: workerCount}, worker));
+    return allRows;
+  }
+
+  function factToEvent(r){
+    const acct = acctKey(r.cr714_accountnumber);
+    const d = dateOf(r);
+    const t = typeOf(r);
+    const isEmail = /email/i.test(t) || !!(r.cr714_emaildate || r.cr714_emailstatus || r.cr714_emailtemplate);
+    return {
+      'Note Date': d || null,
+      cr714_accountnum: acct,
+      cr714_accountname: clean(r.cr714_companyname),
+      cr714_rep: clean(r.cr714_repfromnote || r.cr714_accountrep || 'Unassigned'),
+      cr714_action: clean(r.cr714_effectiveaction || r.cr714_action || r.cr714_actionfromnotetag || 'None'),
+      HelpStatus: '',
+      IsIntro: false,
+      LastModified: r.modifiedon || r.createdon || d || null,
+      SourceDataset: clean(r.cr714_sourcetype || 'Fact Table'),
+      EventRep: clean(r.cr714_repfromnote || r.cr714_accountrep || 'System'),
+      'Action at time of Note': clean(r.cr714_effectiveaction || r.cr714_actionfromnotetag || r.cr714_action || '') || null,
+      NoteSegment: textOf(r) || null,
+      EmailSubject: isEmail ? (clean(r.cr714_emailtemplate || r.cr714_emailstatus || '') || null) : null,
+      EmailSegment: isEmail ? (textOf(r) || clean(r.cr714_emailstatus || r.cr714_emailtemplate || '') || null) : null,
+      'Masonville Link': null,
+      EmailDate: r.cr714_emaildate || (isEmail ? d : null),
+      Count: 1,
+      _recordRef: clean(r.cr714_dt_act_fctblid || r.cr714_activitynaturalkey),
+      _entitySet: FACT_TABLE,
+      _rawSource: r,
+      _touchType: isEmail ? 'Email' : (/masonville/i.test(t) ? 'Masonville' : 'Note')
+    };
+  }
+
+  function indexFactRows(rows, allowedAccountIds){
+    const allowed = new Set(uniq(allowedAccountIds));
+    const byAcct = new Map();
+    const seen = new Set();
+    const events = [];
+
+    (rows || []).forEach(r => {
+      const acct = acctKey(r.cr714_accountnumber);
+      if(!acct || (allowed.size && !allowed.has(acct))) return;
+      const k = keyOf(r);
+      if(seen.has(k)) return;
+      seen.add(k);
+      if(!byAcct.has(acct)) byAcct.set(acct, []);
+      byAcct.get(acct).push(r);
+      const ev = factToEvent(r);
+      if(ev.cr714_accountnum && ev['Note Date']) events.push(ev);
+    });
+
+    byAcct.forEach(arr => arr.sort((a,b) => new Date(dateOf(b) || 0) - new Date(dateOf(a) || 0)));
+    events.sort((a,b) => new Date(b['Note Date'] || 0) - new Date(a['Note Date'] || 0));
+
+    window.__actFactRows = rows || [];
+    window.__actFactRowsByAccount = byAcct;
+    window.unifiedEventRows = events;
+    window.__actFactReportingRows = rows || [];
+    window.__actFactReportingLoaded = true;
+    window.__actFactReportingLoadedFromPreload = true;
+    return events;
+  }
+
+  async function exactScopedChunkedFetchAllData(options={}){
+    const Q = window.__ACT_QUERY_SNIPER || {};
+    const silent = !!options.silent;
+
+    // Safety: never pull the huge fact table until a scope has been chosen.
+    if(!Q.active && !options.force && !options.scoped){
+      window.mergedAccounts = window.mergedAccounts || [];
+      window.teamFilteredAccounts = window.teamFilteredAccounts || [];
+      window.unifiedEventRows = [];
+      window.__actFactRows = [];
+      return;
+    }
+
+    const loader = document.getElementById('global-loader');
+    if(loader && !silent) loader.style.display = 'flex';
+    resetLoadCounters();
+    window.totalLoadedRecords = 0;
+    window.mergedAccounts = [];
+    window.teamFilteredAccounts = [];
+    window.unifiedEventRows = [];
+    window.__actFactRows = [];
+    window.__actFactRowsByAccount = new Map();
+    window.__actFactReportingRows = [];
+    window.__actFactReportingLoaded = false;
+
+    try{
+      updateChunkLoader(12, 'Loading scoped account list first...', 0);
+      const token = await window.getToken();
+      const globalAccountMap = new Map();
+
+      const amSelect = 'cr714_accountnum,cr714_accountname,cr714_rep,cr714_action,modifiedon,createdon,cr714_help,cr714_actionemailsent,cr714_accountmanagementdatasetid,cr714_address,cr714_namemost,cr714_phone,cr714_emailmost,cr714_actionmessage,cr714_managernotes';
+      const cadSelect = 'cr714_accountnum,cr714_company,cr714_retentionrep,cr714_action,modifiedon,createdon,cr714_recordstatus,cr714_cadencedatasetid,cr714_intro,cr714_billingaddress,cr714_namemost,cr714_primaryphone,cr714_emailmost,cr714_actionmessage,cr714_managernotes';
+      const lbSelect = 'cr714_accountnum,cr714_accountname,cr714_assignedrep,cr714_action,modifiedon,createdon,cr714_help,cr714_actionemailsent,cr714_louisebrowndatasetid,cr714_intro,cr714_address,cr714_namemost,cr714_phone,cr714_emaillatest,cr714_actionmessage,cr714_notesfr';
+
+      await Promise.all([
+        fetchPaginatedTracked('cr714_accountmanagementdatasets', amSelect, token, globalAccountMap, 'AM'),
+        fetchPaginatedTracked('cr714_cadencedatasets', cadSelect, token, globalAccountMap, 'Cadence'),
+        fetchPaginatedTracked('cr714_louisebrowndatasets', lbSelect, token, globalAccountMap, 'Louise Brown')
+      ]);
+
+      window.mergedAccounts = Array.from(globalAccountMap.values());
+      window.teamFilteredAccounts = window.mergedAccounts.slice();
+
+      const exactAccountIds = uniq(window.mergedAccounts.map(a => a.cr714_id || a.cr714_accountnum));
+      window.__ACT_REPORT_SCOPE_ACCOUNT_IDS = exactAccountIds;
+      updateChunkLoader(48, `Scoped accounts loaded: ${exactAccountIds.length.toLocaleString()}. Now loading matching history only...`, window.totalLoadedRecords || 0);
+
+      const factRows = await fetchFactRowsForExactAccounts(token, exactAccountIds);
+      indexFactRows(factRows, exactAccountIds);
+
+      if(typeof window.populateDynamicActionSet === 'function') window.populateDynamicActionSet();
+      if(typeof window.initDateSlider === 'function') window.initDateSlider();
+      if(typeof window.buildReportingFactsAsync === 'function') await window.buildReportingFactsAsync();
+      else if(typeof window.buildReportingFacts === 'function') window.buildReportingFacts();
+
+      window.reportsDirty = true;
+      if(window.ACTProduction && typeof window.ACTProduction.saveCache === 'function') window.ACTProduction.saveCache();
+
+      updateChunkLoader(
+        100,
+        `Synced ${window.mergedAccounts.length.toLocaleString()} scoped accounts and ${factRows.length.toLocaleString()} matching history rows.`,
+        (window.totalLoadedRecords || 0) + factRows.length
+      );
+      if(loader && !silent) setTimeout(() => { loader.style.display = 'none'; }, 450);
+      return { accounts: window.mergedAccounts, factRows };
+    } catch(e){
+      console.error('Exact scoped chunked load failed:', e);
+      if(window.showToast) window.showToast('Scoped sync failed: ' + (e && e.message ? e.message : e), 'error');
+      if(loader && !silent) loader.style.display = 'none';
+      throw e;
+    }
+  }
+
+  exactScopedChunkedFetchAllData.__exactScopedChunkedFact20260709 = true;
+  window.fetchAllData = exactScopedChunkedFetchAllData;
+
+  // Reporting should reuse the preloaded exact-scope fact rows instead of launching an extra broad fact query.
+  const previousLoadReportingFromFactTable = window.loadReportingFromFactTable;
+  window.loadReportingFromFactTable = async function(force){
+    if(Array.isArray(window.__actFactRows) && window.__actFactRows.length){
+      window.__actFactReportingRows = window.__actFactRows;
+      window.__actFactReportingLoaded = true;
+      if((!Array.isArray(window.reportingFacts) || !window.reportingFacts.length) && typeof window.buildReportingFactsAsync === 'function'){
+        await window.buildReportingFactsAsync();
+      }
+      return window.__actFactRows;
+    }
+    return typeof previousLoadReportingFromFactTable === 'function' ? previousLoadReportingFromFactTable.apply(this, arguments) : [];
+  };
+  window.loadReportingFromFactTable.__usesPreloadedExactScope20260709 = true;
+
+  // Account history clicks should hit the preloaded per-account cache first.
+  const previousLoadFactHistoryRange = window.loadFactHistoryRange;
+  window.loadFactHistoryRange = async function(accountId, monthsArg, opts){
+    accountId = acctKey(accountId || window.activeAccountId);
+    const byAcct = window.__actFactRowsByAccount;
+    const force = !!(opts && opts.force);
+    if(!force && accountId && byAcct && byAcct.has(accountId)){
+      const months = Number(monthsArg || localStorage.getItem('act_mgr_fact_history_months') || 3) || 3;
+      const end = new Date();
+      const start = new Date(end.getFullYear(), end.getMonth() - months, end.getDate());
+      const rows = (byAcct.get(accountId) || []).filter(r => {
+        const d = new Date(dateOf(r) || 0);
+        return !isNaN(d.getTime()) && d >= start && d <= end;
+      });
+      window.__actFactHistoryState = window.__actFactHistoryState || {};
+      window.__actFactHistoryState[accountId] = {
+        rows,
+        loading:false,
+        months,
+        sort:localStorage.getItem('act_mgr_fact_history_sort') || 'desc',
+        loadedKey:accountId + '|' + months,
+        loadedAt:Date.now(),
+        fromExactScopedPreload:true
+      };
+      window.currentModalHistory = rows.map(r => ({
+        date: dateOf(r),
+        author: clean(r.cr714_repfromnote || r.cr714_accountrep || 'System'),
+        src: 'Fact Table',
+        touchType: typeOf(r),
+        text: textOf(r),
+        historicalAction: clean(r.cr714_effectiveaction || r.cr714_action || ''),
+        emailSubject: clean(r.cr714_emailtemplate || ''),
+        tags: []
+      }));
+      if(typeof window.renderFactHistory === 'function') window.renderFactHistory(accountId);
+      return rows;
+    }
+    return typeof previousLoadFactHistoryRange === 'function' ? previousLoadFactHistoryRange.apply(this, arguments) : [];
+  };
+  window.loadFactHistoryRange.__usesExactScopedPreload20260709 = true;
+
+  console.info('ACT exact scoped chunked fact fetch installed. Fact table fetch now waits for scoped account IDs, then queries cr714_dt_act_fctbls in account-number chunks only.');
+})();
+</script>
+<!-- === COPILOT PATCH: EXACT SCOPED CHUNKED FACT TABLE FETCH 2026-07-09 END === -->
 </body>
 </html>
