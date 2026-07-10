@@ -12313,13 +12313,49 @@ function mirrorPopupFromTop(){IDS.forEach(id=>{const valid=new Map();document.qu
     return esc(val??'');
   }
   function renderTable(){
-    const body=$('act-rpt2-table-body'); if(!body)return; document.querySelectorAll('.act-rpt2-tab').forEach(b=>b.classList.toggle('active',b.dataset.view===R.activeView));
-    const [table,rowsRaw,cols]=activeRowsAndCols(); const rows=sortRows(rowsRaw,table); const pages=Math.max(1,Math.ceil(rows.length/R.pageSize)); R.page=Math.max(1,Math.min(R.page,pages)); const start=(R.page-1)*R.pageSize; const pageRows=rows.slice(start,start+R.pageSize);
-    if(!rows.length){ body.innerHTML=`<div class="act-rpt2-empty"><i class="fas fa-table"></i><div>No rows match the current reporting filters.</div><div class="act-rpt2-muted">Try clearing filters or refreshing facts.</div></div>`; renderPager(rows.length,pages); return; }
-    body.innerHTML=`<table class="act-rpt2-table"><thead><tr>${cols.map(c=>`<th onclick="ACTFactReporting.sortTable('${table}',decodeURIComponent('${encodeURIComponent(c)}'))">${esc(c)} <i class="fas fa-sort ml-1 opacity-40"></i></th>`).join('')}</tr></thead><tbody>${pageRows.map(r=>`<tr>${cols.map(c=>`<td>${cellHtml(table,c,r[c],r)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
-    renderPager(rows.length,pages);
+    const body=$('act-rpt2-table-body'); if(!body)return;
+    document.querySelectorAll('.act-rpt2-tab').forEach(b=>b.classList.toggle('active',b.dataset.view===R.activeView));
+    const [table,rowsRaw,cols]=activeRowsAndCols();
+    const rows=sortRows(rowsRaw,table);
+    R._scrollTable = { table, rows, cols };
+    R._scrollLimit = Math.min(rows.length, R._scrollLimit || window.ACT_REPORT_SCROLL_INITIAL || 175);
+    if(!rows.length){
+      body.innerHTML=`<div class="act-rpt2-empty"><i class="fas fa-table"></i><div>No rows match the current reporting filters.</div><div class="act-rpt2-muted">Try clearing filters or refreshing facts.</div></div>`;
+      renderPager(rows.length,1);
+      return;
+    }
+    R._scrollLimit = Math.max(1, Math.min(R._scrollLimit, rows.length));
+    const visibleRows=rows.slice(0,R._scrollLimit);
+    body.innerHTML=`<div class="act-rpt2-scroll-table-wrap custom-scrollbar"><table class="act-rpt2-table act-rpt2-scroll-table"><thead><tr>${cols.map(c=>`<th onclick="ACTFactReporting.sortTable('${table}',decodeURIComponent('${encodeURIComponent(c)}'))">${esc(c)} <i class="fas fa-sort ml-1 opacity-40"></i></th>`).join('')}</tr></thead><tbody>${visibleRows.map(r=>`<tr>${cols.map(c=>`<td>${cellHtml(table,c,r[c],r)}</td>`).join('')}</tr>`).join('')}</tbody></table><div id="act-rpt2-scroll-sentinel" class="act-rpt2-scroll-sentinel">${R._scrollLimit<rows.length?'Scroll for more rows':'All rows loaded'}</div></div>`;
+    renderPager(rows.length,1);
+    bindReportScrollTable();
   }
-  function renderPager(total,pages){ const el=$('act-rpt2-table-footer'); if(!el)return; const start=total?((R.page-1)*R.pageSize+1):0; const end=Math.min(total,R.page*R.pageSize); el.innerHTML=`<div>Showing <b>${nfmt(start)}-${nfmt(end)}</b> of <b>${nfmt(total)}</b></div><div class="act-rpt2-pager"><label>Rows <select onchange="ACTFactReporting.setPageSize(this.value)" style="height:26px;width:auto;padding:2px 6px;font-size:10px"><option ${R.pageSize===75?'selected':''}>75</option><option ${R.pageSize===150?'selected':''}>150</option><option ${R.pageSize===300?'selected':''}>300</option><option ${R.pageSize===600?'selected':''}>600</option></select></label><button class="btn-secondary" onclick="ACTFactReporting.setPage(1)">First</button><button class="btn-secondary" onclick="ACTFactReporting.setPage(${R.page-1})">Prev</button><span>Page <b>${R.page}</b> / ${pages}</span><button class="btn-secondary" onclick="ACTFactReporting.setPage(${R.page+1})">Next</button></div>`; }
+  function bindReportScrollTable(){
+    const wrap=document.querySelector('#act-rpt2-table-body .act-rpt2-scroll-table-wrap');
+    if(!wrap || wrap.__actRpt2ScrollBound) return;
+    wrap.__actRpt2ScrollBound=true;
+    wrap.addEventListener('scroll',()=>{
+      const st=R._scrollTable; if(!st || !st.rows || R._scrollLimit>=st.rows.length) return;
+      if(wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 160){
+        const oldLimit=R._scrollLimit;
+        R._scrollLimit=Math.min(st.rows.length, oldLimit + (window.ACT_REPORT_SCROLL_STEP || 175));
+        const tbody=wrap.querySelector('tbody');
+        if(tbody){
+          tbody.insertAdjacentHTML('beforeend', st.rows.slice(oldLimit,R._scrollLimit).map(r=>`<tr>${st.cols.map(c=>`<td>${cellHtml(st.table,c,r[c],r)}</td>`).join('')}</tr>`).join(''));
+        }
+        const sentinel=$('act-rpt2-scroll-sentinel');
+        if(sentinel) sentinel.textContent = R._scrollLimit<st.rows.length ? `Loaded ${nfmt(R._scrollLimit)} of ${nfmt(st.rows.length)} - scroll for more` : `All ${nfmt(st.rows.length)} rows loaded`;
+        renderPager(st.rows.length,1);
+      }
+    }, {passive:true});
+  }
+  function renderPager(total,pages){
+    const el=$('act-rpt2-table-footer'); if(!el)return;
+    const shown=Math.min(total,R._scrollLimit||0);
+    el.innerHTML=`<div>Loaded <b>${nfmt(shown)}</b> of <b>${nfmt(total)}</b></div><div class="act-rpt2-pager act-rpt2-scroll-pager"><button class="btn-secondary" onclick="ACTFactReporting.loadMoreRows&&ACTFactReporting.loadMoreRows()">Load more</button><button class="btn-secondary" onclick="ACTFactReporting.loadAllRows&&ACTFactReporting.loadAllRows()">Load all</button><span class="act-rpt2-muted">Scroll table to append more rows</span></div>`;
+  }
+  R.loadMoreRows=function(){ const st=R._scrollTable; if(!st)return; R._scrollLimit=Math.min(st.rows.length,(R._scrollLimit||0)+(window.ACT_REPORT_SCROLL_STEP||175)); renderTable(); };
+  R.loadAllRows=function(){ const st=R._scrollTable; if(!st)return; R._scrollLimit=st.rows.length; renderTable(); };
 
   function renderKpis(){
     const total=R.filtered.length, reps=new Set(R.filtered.map(r=>r['Action Rep'])).size, accounts=new Set(R.filtered.map(r=>r.AccountNumber).filter(Boolean)).size, actions=new Set(R.filtered.map(r=>r.Action)).size, types=new Set(R.filtered.map(r=>r.ActivityType)).size, emails=R.dq.emailRows||0, intros=R.dq.introRows||0, latest=R.filtered.map(r=>dt(r.ActivityDate)).filter(Boolean).sort((a,b)=>b-a)[0];
@@ -19310,6 +19346,83 @@ const prevRenderReports = window.renderReports;
 })();
 /* === END COPILOT PATCH: TOP FILTER DROPDOWN COUNTS SAFE V5 - REPORTS PRESERVED === */
 </script>
+
+
+<!-- === COPILOT PATCH: RESTORE MANAGER CARDS HISTORY + RPT SCROLL V10 2026-07-10 START === -->
+<style id="act-restore-cards-history-rpt-scroll-v10-style">
+  /* Re-assert the older manager-card/history visual language after later reporting/filter patches. */
+  #tab-dashboard #app-grid{background:linear-gradient(180deg,color-mix(in srgb,var(--bg-app) 92%,var(--primary) 8%),var(--bg-app))!important;}
+  #account-list-container{padding:12px!important;background:color-mix(in srgb,var(--bg-app) 94%,var(--primary) 6%)!important;}
+  #account-list-container .list-item{
+    display:flex!important;flex-direction:column!important;gap:6px!important;margin-bottom:10px!important;padding:12px!important;
+    border:1px solid color-mix(in srgb,var(--border-color) 84%,var(--primary) 16%)!important;border-left:4px solid transparent!important;
+    border-radius:16px!important;background:linear-gradient(135deg,color-mix(in srgb,var(--bg-card) 96%,var(--primary) 4%),var(--bg-card))!important;
+    box-shadow:0 10px 24px -18px rgba(15,23,42,.70), inset 0 1px 0 rgba(255,255,255,.05)!important;color:var(--text-main)!important;
+    min-height:96px!important;overflow:hidden!important;transform:none!important;
+  }
+  #account-list-container .list-item:hover{border-color:var(--primary)!important;box-shadow:0 14px 30px -18px rgba(15,23,42,.85)!important;transform:translateY(-1px)!important;}
+  #account-list-container .list-item.active{border-left-color:var(--primary)!important;background:linear-gradient(135deg,color-mix(in srgb,var(--primary) 10%,var(--bg-card)),var(--bg-card))!important;}
+  #account-list-container .list-item.bulk-selected{border-color:var(--primary)!important;background:color-mix(in srgb,var(--primary) 12%,var(--bg-card))!important;}
+  #account-list-container .list-item .badge-ds,#account-list-container .badge-ds{border-radius:999px!important;font-size:9px!important;font-weight:950!important;padding:2px 7px!important;letter-spacing:.05em!important;}
+  #history-column{background:linear-gradient(180deg,var(--bg-card),color-mix(in srgb,var(--bg-app) 92%,var(--primary) 8%))!important;box-shadow:inset 1px 0 0 var(--border-color)!important;}
+  #history-column>.p-4.border-b{background:linear-gradient(135deg,color-mix(in srgb,var(--bg-card) 88%,var(--primary) 12%),var(--bg-card))!important;}
+  #fv-history{gap:12px!important;padding:14px!important;background:color-mix(in srgb,var(--bg-app) 94%,var(--primary) 6%)!important;}
+  #fv-history .note-card,#fv-history .act-history-card,#fv-history .fact-history-item,#fv-history .history-card{
+    border-radius:15px!important;border:1px solid color-mix(in srgb,var(--border-color) 84%,var(--primary) 16%)!important;box-shadow:0 10px 24px -18px rgba(15,23,42,.75)!important;
+    background:var(--bg-card)!important;overflow:hidden!important;margin-bottom:10px!important;flex-shrink:0!important;
+  }
+  #fv-history .note-card-header,#fv-history .act-history-card-header,#fv-history .history-card-header{
+    background:linear-gradient(135deg,color-mix(in srgb,var(--bg-header) 88%,var(--primary) 12%),var(--bg-header))!important;border-bottom:1px solid var(--border-color)!important;
+    padding:8px 10px!important;font-size:10px!important;font-weight:950!important;letter-spacing:.05em!important;text-transform:uppercase!important;color:var(--text-muted)!important;
+  }
+  #fv-history .note-card-body,#fv-history .act-history-card-body,#fv-history .history-card-body{
+    padding:11px 12px!important;font-size:.84rem!important;line-height:1.55!important;white-space:pre-wrap!important;word-break:break-word!important;overflow-wrap:anywhere!important;color:var(--text-main)!important;
+  }
+  #active-form{background:radial-gradient(circle at top left,color-mix(in srgb,var(--primary) 9%,transparent),transparent 33%),linear-gradient(180deg,color-mix(in srgb,var(--bg-app) 88%,var(--bg-card)),var(--bg-app))!important;}
+  #active-form>.mb-6,#active-form>.grid.grid-cols-2,#active-form>.p-3.border.rounded,#active-form>.flex.flex-col.gap-6>div{border-radius:16px!important;box-shadow:0 8px 18px -16px rgba(15,23,42,.55),inset 0 1px 0 rgba(255,255,255,.04)!important;}
+  /* New ACTFactReporting table behavior: viewport scroll appends more rows instead of page-based navigation. */
+  #tab-reports .act-rpt2-body{min-height:0!important;}
+  #tab-reports #act-rpt2-table-body{min-height:0!important;display:flex!important;flex-direction:column!important;}
+  #tab-reports .act-rpt2-scroll-table-wrap{max-height:clamp(390px,60vh,780px)!important;overflow:auto!important;border:1px solid var(--border-color)!important;border-radius:16px!important;background:var(--bg-card)!important;scrollbar-gutter:stable!important;}
+  #tab-reports .act-rpt2-scroll-table{margin:0!important;width:100%!important;}
+  #tab-reports .act-rpt2-scroll-table thead th{position:sticky!important;top:0!important;z-index:20!important;background:var(--bg-header)!important;box-shadow:0 1px 0 var(--border-color)!important;}
+  #tab-reports .act-rpt2-scroll-sentinel{text-align:center;padding:10px;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);background:color-mix(in srgb,var(--bg-app) 92%,var(--primary) 8%);}
+  #tab-reports .act-rpt2-scroll-pager{gap:8px!important;align-items:center!important;}
+  #tab-reports .act-rpt2-scroll-pager select,#tab-reports .act-rpt2-scroll-pager label{display:none!important;}
+</style>
+<script id="act-restore-cards-history-rpt-scroll-v10-script">
+(function(){
+  if(window.__ACT_RESTORE_CARDS_HISTORY_RPT_SCROLL_V10__) return;
+  window.__ACT_RESTORE_CARDS_HISTORY_RPT_SCROLL_V10__=true;
+  function polishHistory(){
+    const h=document.getElementById('fv-history'); if(!h) return;
+    h.querySelectorAll('.note-card:not(.act-restored),.act-history-card:not(.act-restored),.fact-history-item:not(.act-restored),.history-card:not(.act-restored)').forEach(c=>{
+      c.classList.add('act-restored');
+      if(!c.querySelector('.note-card-header,.act-history-card-header,.history-card-header')){
+        const first=c.firstElementChild; if(first) first.classList.add('history-card-body');
+      }
+    });
+  }
+  function resetReportScrollLimit(){
+    const R=window.ACTFactReporting; if(R){ R._scrollLimit=window.ACT_REPORT_SCROLL_INITIAL||175; }
+  }
+  const oldSetView=window.ACTFactReporting&&window.ACTFactReporting.setView;
+  if(window.ACTFactReporting && typeof oldSetView==='function' && !oldSetView.__scrollV10){
+    window.ACTFactReporting.setView=function(){ resetReportScrollLimit(); return oldSetView.apply(this,arguments); };
+    window.ACTFactReporting.setView.__scrollV10=true;
+  }
+  const oldApplyFilters=window.ACTFactReporting&&window.ACTFactReporting.applyFilters;
+  if(window.ACTFactReporting && typeof oldApplyFilters==='function' && !oldApplyFilters.__scrollV10){
+    window.ACTFactReporting.applyFilters=function(){ resetReportScrollLimit(); return oldApplyFilters.apply(this,arguments); };
+    window.ACTFactReporting.applyFilters.__scrollV10=true;
+  }
+  const mo=new MutationObserver(()=>polishHistory());
+  function start(){ const h=document.getElementById('fv-history'); if(h) mo.observe(h,{childList:true,subtree:true}); polishHistory(); }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start); else start();
+  setInterval(polishHistory,1500);
+})();
+</script>
+<!-- === COPILOT PATCH: RESTORE MANAGER CARDS HISTORY + RPT SCROLL V10 2026-07-10 END === -->
 
 </body>
 </html>
