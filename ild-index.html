@@ -18841,73 +18841,133 @@ const prevRenderReports = window.renderReports;
 </script>
 
 
+
 <script>
-/* === COPILOT PATCH: SINGLE DATASET LABEL SOURCE + SAFE GALLERY V1 (2026-07-09) ===
-   Purpose:
-   - One canonical dataset-label source for badges. No mutation observers, no post-render relabel scripts.
-   - Render gallery immediately after scoped load without requiring a quick-filter toggle.
-   - Make quick-filter/gallery rendering non-blocking and avoid full-array hard freezes on large account pools.
+/* === COPILOT PATCH: GALLERY LOAD/FREEZE ROOT FIX V2 (2026-07-09) ===
+   Root cause addressed:
+   1) beginScopedLoad waited for buildReportingFactsAsync + cache writes before the loader disappeared, so the gallery looked empty.
+   2) applyFilters/renderAccountList still performed blocking full-array filtering/sorting/DOM work after load and on quick-filter clicks.
+   3) Multiple old badge relabel paths were removed earlier; this block keeps one final badge/render source and owns the gallery path.
 */
 (function(){
-  if(window.__ACT_SINGLE_DATASET_LABEL_SAFE_GALLERY_V1__) return;
-  window.__ACT_SINGLE_DATASET_LABEL_SAFE_GALLERY_V1__ = true;
+  if(window.__ACT_GALLERY_LOAD_FREEZE_ROOT_FIX_V2__) return;
+  window.__ACT_GALLERY_LOAD_FREEZE_ROOT_FIX_V2__ = true;
 
   const PAGE_SIZE = 50;
-  const LARGE_SORT_LIMIT = 25000;
-  const BIG_LIST_CANDIDATE_MULTIPLIER = 4;
-  let renderToken = 0;
+  const SORT_LIMIT = 12000;
+  const DOM_BATCH_SIZE = 40;
+  let renderSeq = 0;
+  let appendInProgress = false;
 
   const DATASETS = Object.freeze({
-    AM:  { key:'AM',  abbr:'AM',  label:'Account Management', cls:'badge-am', rank:10 },
+    AM:  { key:'AM',  abbr:'AM',  label:'Account Management', cls:'badge-am',  rank:10 },
     CAD: { key:'CAD', abbr:'CAD', label:'Cadence',            cls:'badge-cad', rank:20 },
     PRO: { key:'PRO', abbr:'PRO', label:'Prospecting',        cls:'badge-pro', rank:30 },
-    LB:  { key:'LB',  abbr:'LB',  label:'Louise Brown',       cls:'badge-lb', rank:40 },
+    LB:  { key:'LB',  abbr:'LB',  label:'Louise Brown',       cls:'badge-lb',  rank:40 },
     LOG: { key:'LOG', abbr:'LOG', label:'Logistics',          cls:'badge-pro', rank:50 },
-    UNK: { key:'UNK', abbr:'DS',  label:'Dataset',            cls:'badge-ds', rank:99 }
+    UNK: { key:'UNK', abbr:'DS',  label:'Dataset',            cls:'badge-ds',  rank:99 }
   });
 
   function clean(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim(); }
   function norm(v){ return clean(v).toLowerCase(); }
   function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
   function js(v){ return String(v == null ? '' : v).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"'); }
-  function raf(){ return new Promise(resolve => requestAnimationFrame(resolve)); }
-  function idle(){ return new Promise(resolve => (window.requestIdleCallback ? requestIdleCallback(resolve,{timeout:100}) : setTimeout(resolve,0))); }
+  function afterPaint(){ return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); }
+  function idle(cb, timeout){ return (window.requestIdleCallback || function(fn){ return setTimeout(fn, 0); })(cb, {timeout: timeout || 700}); }
+  function setText(id, val){ const el = document.getElementById(id); if(el) el.innerText = String(val); }
 
   function datasetKey(input){
     const raw = typeof input === 'string' ? input : clean(input && (input.type || input.SourceDataset || input.sourceDataset || input.table || input.logicalName || input.name));
     const s = norm(raw).replace(/[_\-]+/g,' ');
     if(!s) return 'UNK';
-    if(s === 'am' || s.includes('accountmanagement') || s.includes('account management') || s.includes('cr714 accountmanagement')) return 'AM';
-    if(s === 'cad' || s.includes('cadence') || s.includes('cr714 cadencedataset')) return 'CAD';
-    if(s === 'pro' || s.includes('prospect') || s.includes('cr714 prospecting')) return 'PRO';
-    if(s === 'lb' || s.includes('louise') || s.includes('brown') || s.includes('cr714 louisebrown')) return 'LB';
+    if(s === 'am' || s.includes('accountmanagement') || s.includes('account management')) return 'AM';
+    if(s === 'cad' || s.includes('cadence')) return 'CAD';
+    if(s === 'pro' || s.includes('prospect')) return 'PRO';
+    if(s === 'lb' || s.includes('louise') || s.includes('brown')) return 'LB';
     if(s === 'log' || s.includes('logistic')) return 'LOG';
     return 'UNK';
   }
   function datasetMeta(input){ return DATASETS[datasetKey(input)] || DATASETS.UNK; }
-  function sourceBadgeHtml(account){
+  function datasetBadges(account){
     const seen = new Map();
     (account && Array.isArray(account.sources) ? account.sources : []).forEach(src => {
-      const meta = datasetMeta(src);
-      if(!seen.has(meta.key)) seen.set(meta.key, meta);
+      const m = datasetMeta(src);
+      if(!seen.has(m.key)) seen.set(m.key, m);
     });
     if(!seen.size) seen.set('UNK', DATASETS.UNK);
-    return Array.from(seen.values()).sort((a,b)=>a.rank-b.rank).map(m => `<span class="badge-ds ${m.cls}" title="${esc(m.label)}" data-dataset-key="${m.key}">${esc(m.abbr)}</span>`).join('');
+    return Array.from(seen.values()).sort((a,b)=>a.rank-b.rank)
+      .map(m => `<span class="badge-ds ${m.cls}" title="${esc(m.label)}" data-dataset-key="${m.key}">${esc(m.abbr)}</span>`).join('');
   }
   window.ACTDatasetLabels = DATASETS;
   window.ACTDatasetKey = datasetKey;
   window.ACTDatasetMeta = datasetMeta;
-  window.ACTDatasetBadgeHtml = sourceBadgeHtml;
-  // Keep this name for any old callers, but make it use the canonical source only.
-  window.ACTDatasetAbbrev = function(input){ return datasetMeta(input).abbr; };
+  window.ACTDatasetBadgeHtml = datasetBadges;
+  window.ACTDatasetAbbrev = x => datasetMeta(x).abbr;
 
-  function normalizeLoadedAccounts(){
-    const rows = Array.isArray(window.mergedAccounts) ? window.mergedAccounts : [];
-    rows.forEach(a => {
-      if(!Array.isArray(a.sources)) a.sources = [];
-      a._actDatasetKeys = Array.from(new Set(a.sources.map(datasetKey))).filter(Boolean);
-      a._actDatasetLabels = a._actDatasetKeys.map(k => DATASETS[k] || DATASETS.UNK);
+  function employeeName(e){ return clean(e && (e.cr714_employeename || e.cr714_repname || e.fullname || e.name || e.cr714_name)); }
+  function employeeState(e){
+    if(!e) return '';
+    if(e._mappedStatecode) return clean(e._mappedStatecode);
+    if(e.statecode === 0 || e.cr714_status === 1) return 'Active';
+    if(e.statecode === 1 || e.cr714_status === 0) return 'Inactive';
+    return clean(e.statecode || '');
+  }
+  function fieldVal(e, id){ return id === 'cr714_employeename' ? employeeName(e) : (id === 'statecode' ? employeeState(e) : clean(e && e[id])); }
+  function setHasValue(set, actual){ if(!set || !set.size) return true; const a = norm(actual); return Array.from(set).some(x => norm(x) === a); }
+  function activeSet(id){ window.activeFilters = window.activeFilters || {}; if(!window.activeFilters[id]) window.activeFilters[id] = new Set(); return window.activeFilters[id]; }
+  function accountRepValues(a){
+    const vals = new Set();
+    if(a && a.rep) vals.add(clean(a.rep));
+    (a && Array.isArray(a.sources) ? a.sources : []).forEach(s => { if(s && s.rep) vals.add(clean(s.rep)); });
+    return Array.from(vals).filter(Boolean);
+  }
+  function getValidRepSetFromActiveFilters(){
+    const cfg = (window.FILTER_CONFIG || []).map(x => x.id).filter(Boolean);
+    const employeeFilters = cfg.filter(id => id !== 'action');
+    const anyEmployeeFilter = employeeFilters.some(id => activeSet(id).size);
+    if(!anyEmployeeFilter) return null;
+    const reps = new Set();
+    (window.employeesData || []).forEach(e => {
+      const rep = employeeName(e);
+      if(!rep) return;
+      for(const id of employeeFilters){
+        const set = activeSet(id);
+        if(set.size && !setHasValue(set, fieldVal(e, id))) return;
+      }
+      reps.add(rep);
     });
+    return reps;
+  }
+  function accountMatchesRepSet(a, reps){
+    if(!reps || !reps.size) return true;
+    return accountRepValues(a).some(r => setHasValue(reps, r));
+  }
+  function accountMatchesAction(a){
+    const set = activeSet('action');
+    if(!set.size) return true;
+    const vals = new Set();
+    if(a && a.action) vals.add(clean(a.action));
+    (a && Array.isArray(a.sources) ? a.sources : []).forEach(s => { if(s && s.action) vals.add(clean(s.action)); });
+    return Array.from(vals).some(v => setHasValue(set, v));
+  }
+  function accountMatchesMassId(a){
+    if(!window.massFilteredIds || !window.massFilteredIds.size) return true;
+    return window.massFilteredIds.has(clean(a && a.cr714_id).toUpperCase());
+  }
+  function computeFilteredAccountsFast(){
+    const all = Array.isArray(window.mergedAccounts) ? window.mergedAccounts : [];
+    if(!all.length) return [];
+    const reps = getValidRepSetFromActiveFilters();
+    const hasEmployeeFilter = reps !== null;
+    const hasAction = activeSet('action').size > 0;
+    const hasMass = !!(window.massFilteredIds && window.massFilteredIds.size);
+    let rows = all.filter(a => accountMatchesAction(a) && accountMatchesMassId(a) && (!hasEmployeeFilter || accountMatchesRepSet(a, reps)));
+    // If a scoped query returned rows but the local employee map could not line them up, do not blank the gallery after load.
+    if(!rows.length && all.length && window.__ACT_QUERY_SNIPER && window.__ACT_QUERY_SNIPER.active && !hasAction && !hasMass){
+      rows = all.slice();
+      console.warn('ACT gallery fallback: local employee filter map produced 0 rows, showing scoped Dataverse rows instead.');
+    }
+    return rows;
   }
 
   function isRequest(a){
@@ -18915,51 +18975,69 @@ const prevRenderReports = window.renderReports;
     return !!((a && (a.isHelp || a.isClose)) || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') &&
       !String((a && a.managerNotes) || '').toUpperCase().includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR';
   }
-  function accountComparator(sortType){
-    return function(a,b){
-      const ah = isRequest(a) ? 1 : 0;
-      const bh = isRequest(b) ? 1 : 0;
-      if(ah !== bh) return bh - ah;
-      if(sortType === 'company-asc') return clean(a.company).localeCompare(clean(b.company));
-      if(sortType === 'rep-asc') return clean(a.rep).localeCompare(clean(b.rep));
-      return new Date(b.modifiedon || 0) - new Date(a.modifiedon || 0);
-    };
-  }
-  function largePoolTopK(items, k, cmp){
-    const keep = Math.max(k * BIG_LIST_CANDIDATE_MULTIPLIER, 200);
-    const trim = Math.max(k * 2, 100);
-    const best = [];
-    for(let i=0;i<items.length;i++){
-      best.push(items[i]);
-      if(best.length > keep){ best.sort(cmp); best.length = trim; }
-    }
-    best.sort(cmp);
-    return best.slice(0, Math.max(k, PAGE_SIZE));
-  }
-  function currentUniverse(){
-    const tf = Array.isArray(window.teamFilteredAccounts) ? window.teamFilteredAccounts : [];
-    const all = Array.isArray(window.mergedAccounts) ? window.mergedAccounts : [];
-    return tf.length ? tf : all;
-  }
   function applyQuickAndSearch(rows){
+    let out = Array.isArray(rows) ? rows : [];
+    const qf = window.activeQuickFilter || 'all';
+    if(window.drilldownActive && window.drilldownFilteredIds) out = out.filter(a => window.drilldownFilteredIds.has(a.cr714_id));
+    if(qf === 'help') out = out.filter(isRequest);
+    else if(qf === 'stale') out = out.filter(a => !a.modifiedon || (Date.now() - new Date(a.modifiedon).getTime()) / 86400000 > 30);
+    else if(qf === 'intro') out = out.filter(a => !!a.intro);
     const termEl = document.getElementById('list-search');
     const term = norm(termEl ? termEl.value : '');
-    let out = rows;
-    if(window.drilldownActive && window.drilldownFilteredIds) out = out.filter(a => window.drilldownFilteredIds.has(a.cr714_id));
-    const qf = window.activeQuickFilter || 'all';
-    if(qf === 'help') out = out.filter(isRequest);
-    else if(qf === 'stale') out = out.filter(a => !a.modifiedon || (new Date() - new Date(a.modifiedon)) / 86400000 > 30);
-    else if(qf === 'intro') out = out.filter(a => !!a.intro);
     if(term) out = out.filter(a => norm(a.cr714_id).includes(term) || norm(a.company).includes(term) || norm(a.rep).includes(term));
     return out;
   }
-  function quickChipVisual(filter){
-    document.querySelectorAll('.quick-filter-chip').forEach(btn => {
-      btn.className = 'quick-filter-chip text-[9px] py-1 uppercase';
-      btn.style.backgroundColor = '';
-      btn.style.color = '';
-      btn.style.borderColor = '';
-      if(btn.id === 'qf-help') btn.innerHTML = 'Requests';
+  function cmpFactory(sortType){
+    return function(a,b){
+      const ah = isRequest(a) ? 1 : 0, bh = isRequest(b) ? 1 : 0;
+      if(ah !== bh) return bh - ah;
+      if(sortType === 'company-asc') return clean(a.company).localeCompare(clean(b.company));
+      if(sortType === 'rep-asc') return clean(a.rep).localeCompare(clean(b.rep));
+      return (new Date(b.modifiedon || 0).getTime() || 0) - (new Date(a.modifiedon || 0).getTime() || 0);
+    };
+  }
+  function selectTopWindow(rows, need, cmp){
+    if(rows.length <= SORT_LIMIT) return rows.slice().sort(cmp);
+    const keep = Math.max(need * 5, 300);
+    const trim = Math.max(need * 3, 150);
+    const best = [];
+    for(let i=0;i<rows.length;i++){
+      best.push(rows[i]);
+      if(best.length > keep){ best.sort(cmp); best.length = trim; }
+    }
+    best.sort(cmp);
+    best.__actPartialSort = true;
+    best.__actRealTotal = rows.length;
+    return best;
+  }
+  function accountCard(a){
+    const help = isRequest(a);
+    const activeClass = a.cr714_id === window.activeAccountId ? 'active' : '';
+    const pulse = help ? 'pulse-help' : (a.intro ? 'pulse-intro' : ((a.sources || []).length > 1 ? 'pulse-multi' : ''));
+    const checked = window.bulkSelectedIds && window.bulkSelectedIds.has(a.cr714_id);
+    return `<div class="list-item ${pulse} ${activeClass} ${checked ? 'bulk-selected' : ''}" id="card-${esc(a.cr714_id)}" onclick="window.selectAccount('${js(a.cr714_id)}')">
+      <div class="absolute top-2 left-2 z-10" onclick="event.stopPropagation()"><input type="checkbox" class="page-bulk-cb w-4 h-4 cursor-pointer" style="accent-color: var(--primary);" data-id="${esc(a.cr714_id)}" ${checked ? 'checked' : ''} onchange="window.toggleBulkSelection('${js(a.cr714_id)}', event)"></div>
+      <div class="flex justify-between items-start mb-1 pl-6">
+        <div class="font-black text-[12px] truncate mr-2 leading-tight">${help ? '<i class="fas fa-exclamation-circle mr-1" style="color: var(--accent-danger);"></i>' : ''}${a.intro ? '<i class="fas fa-star mr-1" style="color: var(--accent-success);" title="New Intro"></i>' : ''}${esc(a.company)}</div>
+        <div class="text-[9px] text-muted whitespace-nowrap uppercase font-black">${window.timeAgo ? window.timeAgo(a.modifiedon) : ''}</div>
+      </div>
+      <div class="flex justify-between items-center mb-1.5 pl-6 gap-1 flex-wrap">
+        <span class="font-mono text-[10px] text-muted"><i class="fas fa-hashtag mr-1 opacity-50"></i>${esc(a.cr714_id)}</span>
+        <div class="act-dataset-badges flex gap-1">${datasetBadges(a)}</div>
+      </div>
+      <div class="flex justify-between items-center pl-6">
+        <span class="truncate max-w-[120px] font-bold text-[10px] uppercase" style="color: var(--primary);"><i class="fas fa-user-circle mr-1 opacity-50"></i>${esc(a.rep)}</span>
+        <div class="text-[9px] font-black uppercase px-2 py-0.5 border rounded text-muted inline-block" style="border-color: var(--border-color);">${esc(a.action || 'Idle')}</div>
+      </div>
+    </div>`;
+  }
+  function updateQuickVisual(filter){
+    document.querySelectorAll('.quick-filter-chip').forEach(b => {
+      b.className = 'quick-filter-chip text-[9px] py-1 uppercase';
+      b.style.backgroundColor = '';
+      b.style.color = '';
+      b.style.borderColor = '';
+      if(b.id === 'qf-help') b.innerHTML = 'Requests';
     });
     const activeBtn = document.getElementById(`qf-${filter}`);
     if(activeBtn){
@@ -18975,412 +19053,263 @@ const prevRenderReports = window.renderReports;
       }
     }
   }
-  window.setQuickFilter = function(filter){
-    window.activeQuickFilter = filter || 'all';
-    quickChipVisual(window.activeQuickFilter);
-    window.renderAccountList(true, false);
-    setTimeout(() => { try{ window.updateGlobalBells && window.updateGlobalBells(); }catch(e){} }, 0);
-  };
 
-  function accountCardHtml(a){
-    const help = isRequest(a);
-    const activeClass = a.cr714_id === window.activeAccountId ? 'active' : '';
-    let pulseClass = '';
-    if(help) pulseClass = 'pulse-help';
-    else if(a.intro) pulseClass = 'pulse-intro';
-    else if((a.sources || []).length > 1) pulseClass = 'pulse-multi';
-    return `<div class="list-item ${pulseClass} ${activeClass} ${window.bulkSelectedIds && window.bulkSelectedIds.has(a.cr714_id) ? 'bulk-selected' : ''}" id="card-${esc(a.cr714_id)}" onclick="window.selectAccount('${js(a.cr714_id)}')">
-      <div class="absolute top-2 left-2 z-10" onclick="event.stopPropagation()"><input type="checkbox" class="page-bulk-cb w-4 h-4 cursor-pointer" style="accent-color: var(--primary);" data-id="${esc(a.cr714_id)}" ${window.bulkSelectedIds && window.bulkSelectedIds.has(a.cr714_id) ? 'checked' : ''} onchange="window.toggleBulkSelection('${js(a.cr714_id)}', event)"></div>
-      <div class="flex justify-between items-start mb-1 pl-6">
-        <div class="font-black text-[12px] truncate mr-2 leading-tight">${help ? '<i class="fas fa-exclamation-circle mr-1" style="color: var(--accent-danger);"></i>' : ''}${a.intro ? '<i class="fas fa-star mr-1" style="color: var(--accent-success);" title="New Intro"></i>' : ''}${esc(a.company)}</div>
-        <div class="text-[9px] text-muted whitespace-nowrap uppercase font-black">${window.timeAgo ? window.timeAgo(a.modifiedon) : ''}</div>
-      </div>
-      <div class="flex justify-between items-center mb-1.5 pl-6 gap-1 flex-wrap">
-        <span class="font-mono text-[10px] text-muted"><i class="fas fa-hashtag mr-1 opacity-50"></i>${esc(a.cr714_id)}</span>
-        <div class="act-dataset-badges flex gap-1">${sourceBadgeHtml(a)}</div>
-      </div>
-      <div class="flex justify-between items-center pl-6">
-        <span class="truncate max-w-[120px] font-bold text-[10px] uppercase" style="color: var(--primary);"><i class="fas fa-user-circle mr-1 opacity-50"></i>${esc(a.rep)}</span>
-        <div class="text-[9px] font-black uppercase px-2 py-0.5 border rounded text-muted inline-block" style="border-color: var(--border-color);">${esc(a.action || 'Idle')}</div>
-      </div>
-    </div>`;
+  async function renderItems(items, replace){
+    const container = document.getElementById('account-list-container');
+    if(!container) return;
+    if(replace) container.innerHTML = '';
+    for(let i=0;i<items.length;i+=DOM_BATCH_SIZE){
+      container.insertAdjacentHTML('beforeend', items.slice(i, i + DOM_BATCH_SIZE).map(accountCard).join(''));
+      if(i + DOM_BATCH_SIZE < items.length) await afterPaint();
+    }
+  }
+  function updateCountText(total, showing, partial){
+    setText('list-count-text', `${total} Pool`);
+    const info = document.getElementById('grid-page-text');
+    if(info){
+      if(showing < total) info.innerHTML = `Showing ${showing} of ${total} <span class="opacity-50 lowercase ml-1">(${partial ? 'ranked preview' : 'scroll for more'})</span>`;
+      else info.innerHTML = `Showing all ${total}`;
+    }
   }
 
   window.renderAccountList = function(fullRefresh = true, appendMode = false){
-    const myToken = ++renderToken;
+    const seq = ++renderSeq;
     const container = document.getElementById('account-list-container');
     if(!container) return;
-    const run = async () => {
-      await raf();
-      if(myToken !== renderToken) return;
-      normalizeLoadedAccounts();
-      const sortEl = document.getElementById('list-sort');
-      const sortType = sortEl ? sortEl.value : 'date-desc';
+    (async function(){
+      await afterPaint();
+      if(seq !== renderSeq) return;
+      const base = (Array.isArray(window.teamFilteredAccounts) && window.teamFilteredAccounts.length) ? window.teamFilteredAccounts : (Array.isArray(window.mergedAccounts) ? window.mergedAccounts : []);
       if(fullRefresh || !Array.isArray(window.listDisplayAccounts)){
-        let rows = applyQuickAndSearch(currentUniverse());
-        const totalBeforeCap = rows.length;
-        const cmp = accountComparator(sortType);
-        const loaded = Math.max(Number(window.loadedCount || window.gridPageSize || PAGE_SIZE), PAGE_SIZE);
-        if(rows.length > LARGE_SORT_LIMIT) rows = largePoolTopK(rows, loaded, cmp);
-        else rows = rows.slice().sort(cmp);
-        window.listDisplayAccounts = rows;
-        window.__actGalleryTotalBeforeCap = totalBeforeCap;
-        if(!appendMode){
-          window.loadedCount = Math.max(Number(window.gridPageSize || PAGE_SIZE), PAGE_SIZE);
-          container.scrollTop = 0;
-        }
+        const filtered = applyQuickAndSearch(base);
+        const sortEl = document.getElementById('list-sort');
+        const cmp = cmpFactory(sortEl ? sortEl.value : 'date-desc');
+        const need = Math.max(Number(window.gridPageSize || PAGE_SIZE), PAGE_SIZE);
+        const display = selectTopWindow(filtered, need, cmp);
+        window.__actGalleryRealTotal = display.__actRealTotal || filtered.length;
+        window.__actGalleryPartialSort = !!display.__actPartialSort;
+        window.listDisplayAccounts = display;
+        window.loadedCount = need;
+        container.scrollTop = 0;
+      } else if(appendMode) {
+        window.loadedCount = Math.min((window.loadedCount || PAGE_SIZE) + PAGE_SIZE, (window.listDisplayAccounts || []).length);
       }
-      await idle();
-      if(myToken !== renderToken) return;
-      const list = Array.isArray(window.listDisplayAccounts) ? window.listDisplayAccounts : [];
-      const total = Number(window.__actGalleryTotalBeforeCap || list.length);
-      const loadedCount = Math.max(Number(window.loadedCount || window.gridPageSize || PAGE_SIZE), PAGE_SIZE);
-      const showing = Math.min(loadedCount, list.length, total);
-      const listCount = document.getElementById('list-count-text');
-      if(listCount) listCount.innerText = `${total} Pool`;
-      const scrollInfo = document.getElementById('grid-page-text');
-      if(scrollInfo){
-        if(showing < total) scrollInfo.innerHTML = `Showing ${showing} of ${total} <span class="opacity-50 lowercase ml-1">(scroll/filter for more)</span>`;
-        else scrollInfo.innerHTML = `Showing all ${total}`;
-      }
-      if(total === 0){
+      const list = window.listDisplayAccounts || [];
+      const realTotal = Number(window.__actGalleryRealTotal || list.length);
+      const end = Math.min(Number(window.loadedCount || PAGE_SIZE), list.length);
+      const start = appendMode ? Math.max(0, end - PAGE_SIZE) : 0;
+      updateCountText(realTotal, Math.min(end, realTotal), !!window.__actGalleryPartialSort);
+      if(!realTotal){
         container.innerHTML = `<div class="h-full flex flex-col items-center justify-center text-muted opacity-50"><i class="fas fa-search text-3xl mb-3"></i><p class="text-xs uppercase font-black tracking-widest text-center">No accounts match<br/>your filters</p></div>`;
         return;
       }
-      const cards = list.slice(0, loadedCount).map(accountCardHtml).join('');
-      container.innerHTML = cards;
-      const visibleIds = list.slice(0, loadedCount).map(a => a.cr714_id);
+      await renderItems(list.slice(start, end), !appendMode);
+      const visibleIds = list.slice(0, end).map(a => a.cr714_id);
       const selectAll = document.getElementById('selectAllPage');
       if(selectAll) selectAll.checked = visibleIds.length > 0 && visibleIds.every(id => window.bulkSelectedIds && window.bulkSelectedIds.has(id));
-    };
-    run().catch(e => { console.error('Safe gallery render failed:', e); });
+    })().catch(e => console.error('Gallery render failed:', e));
   };
 
-  window.debouncedRenderAccountList = function(){
-    clearTimeout(window.searchTimeout);
-    window.searchTimeout = setTimeout(() => window.renderAccountList(true, false), 175);
-  };
-
-  function renderDefaultGalleryAfterLoad(){
-    normalizeLoadedAccounts();
-    if((!Array.isArray(window.teamFilteredAccounts) || !window.teamFilteredAccounts.length) && Array.isArray(window.mergedAccounts) && window.mergedAccounts.length){
-      // The scoped query already limited the universe. If front-end employee matching drops everything, keep the loaded scope visible by default.
-      window.teamFilteredAccounts = window.mergedAccounts.slice();
-    }
-    window.activeQuickFilter = 'all';
-    quickChipVisual('all');
-    const fs = document.getElementById('fs-accts');
-    if(fs) fs.innerText = (window.teamFilteredAccounts || []).length;
-    const reass = document.getElementById('reassign-count-display');
-    if(reass) reass.innerText = (window.teamFilteredAccounts || []).length;
-    window.renderAccountList(true, false);
-  }
-
-  const oldBeginScopedLoad = window.beginScopedLoad;
-  if(typeof oldBeginScopedLoad === 'function'){
-    window.beginScopedLoad = async function(){
-      const result = await oldBeginScopedLoad.apply(this, arguments);
-      renderDefaultGalleryAfterLoad();
-      setTimeout(renderDefaultGalleryAfterLoad, 150);
-      return result;
-    };
-  }
-  const oldFetchAllData = window.fetchAllData;
-  if(typeof oldFetchAllData === 'function'){
-    window.fetchAllData = async function(){
-      const result = await oldFetchAllData.apply(this, arguments);
-      renderDefaultGalleryAfterLoad();
-      return result;
-    };
-  }
-  const oldClearBulk = window.clearBulkSelection;
-  window.clearBulkSelection = function(){
-    if(window.bulkSelectedIds) window.bulkSelectedIds.clear();
-    try{ window.updateBulkUI && window.updateBulkUI(); }catch(e){}
-    // Do not force a duplicate synchronous render here. applyFilters/renderAccountList will handle it.
-  };
-
-  const st = document.createElement('style');
-  st.id = 'act-single-dataset-label-safe-gallery-style';
-  st.textContent = `
-    #account-list-container .act-dataset-badges{min-height:16px;}
-    #account-list-container .badge-ds{border-radius:999px!important;padding:3px 7px!important;font-size:8px!important;font-weight:1000!important;letter-spacing:.08em!important;line-height:1!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;min-width:26px!important;max-width:34px!important;overflow:hidden!important;white-space:nowrap!important;}
-  `;
-  if(!document.getElementById(st.id)) document.head.appendChild(st);
-
-  setTimeout(renderDefaultGalleryAfterLoad, 0);
-  console.info('ACT single dataset label source + safe gallery renderer installed.');
-})();
-/* === END COPILOT PATCH: SINGLE DATASET LABEL SOURCE + SAFE GALLERY V1 === */
-</script>
-
-<!-- === COPILOT PATCH: DEFAULT GALLERY + QUICK FILTER FREEZE HARDENING V2 2026-07-10 START === -->
-<script id="act-default-gallery-quickfilter-hardening-v2-20260710">
-(function(){
-  if(window.__ACT_DEFAULT_GALLERY_QUICKFILTER_HARDENING_V2_20260710__) return;
-  window.__ACT_DEFAULT_GALLERY_QUICKFILTER_HARDENING_V2_20260710__ = true;
-
-  const PAGE = 50;
-  const EF = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode'];
-  const Q = window.__ACT_QUERY_SNIPER = window.__ACT_QUERY_SNIPER || {active:false,allowWideOpen:false,selectedRepSet:new Set(),selectedMassIds:new Set()};
-  const originalFetchAllData = window.fetchAllData;
-  const originalBuildFilters = window.buildFilters;
-  const originalBuildReportingFactsAsync = window.buildReportingFactsAsync;
-
-  function clean(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim(); }
-  function upper(v){ return clean(v).toUpperCase(); }
-  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
-  function dateMs(v){ const t = v ? Date.parse(v) : 0; return Number.isFinite(t) ? t : 0; }
-  function fmtAgo(dateStr){ try { return window.timeAgo ? window.timeAgo(dateStr) : ''; } catch(e){ return ''; } }
-  function hasSet(id){ return !!(window.activeFilters && window.activeFilters[id] && window.activeFilters[id].size); }
-  function hasAnyScope(){ return EF.some(hasSet) || !!(window.massFilteredIds && window.massFilteredIds.size); }
-  function accountId(a){ return clean(a && (a.cr714_id || a.cr714_accountnum || a.accountId)); }
-  function accountRep(a){ return clean(a && (a.rep || a.cr714_rep || a.cr714_retentionrep || a.cr714_repassigned || a.cr714_assignedrep || 'Unassigned')); }
-  function accountAction(a){ return clean(a && (a.action || a.cr714_action || 'Idle')) || 'Idle'; }
-  function isRequest(a){
-    const hs = upper(a && a.helpStatus);
-    return !!((a && (a.isHelp || a.isClose)) || hs === 'HELP REQUESTED' || hs === 'CLOSE REQUESTED') &&
-      !upper(a && a.managerNotes).includes('[RESOLVED]') && hs !== 'RESOLVED' && hs !== 'CLEAR';
-  }
-  function isStale(a){ const m = dateMs(a && a.modifiedon); return !m || ((Date.now() - m) / 86400000 > 30); }
-
-  const DATASET_INFO = {
-    AM:{rank:10, abbr:'AM', label:'Account Management', cls:'badge-am'},
-    CAD:{rank:20, abbr:'CAD', label:'Cadence', cls:'badge-cad'},
-    PRO:{rank:30, abbr:'PRO', label:'Prospecting', cls:'badge-pro'},
-    LB:{rank:40, abbr:'LB', label:'Louise Brown', cls:'badge-lb'},
-    LOG:{rank:50, abbr:'LOG', label:'Logistics', cls:'badge-pro'},
-    UNK:{rank:99, abbr:'DS', label:'Dataset', cls:'badge-ds'}
-  };
-  function datasetKey(src){
-    const raw = typeof src === 'string' ? src : clean(src && (src.type || src.SourceDataset || src.sourceDataset || src.table || src.logicalName || src.name));
-    const s = raw.toLowerCase().replace(/[_-]+/g,' ');
-    if(!s) return 'UNK';
-    if(s === 'am' || s.includes('accountmanagement') || s.includes('account management')) return 'AM';
-    if(s === 'cad' || s.includes('cadence')) return 'CAD';
-    if(s === 'pro' || s.includes('prospect')) return 'PRO';
-    if(s === 'lb' || s.includes('louise') || s.includes('brown')) return 'LB';
-    if(s === 'log' || s.includes('logistic')) return 'LOG';
-    return 'UNK';
-  }
-  function badgeHtml(a){
-    const seen = new Map();
-    (Array.isArray(a && a.sources) ? a.sources : []).forEach(s => {
-      const k = datasetKey(s);
-      if(!seen.has(k)) seen.set(k, DATASET_INFO[k] || DATASET_INFO.UNK);
-    });
-    if(!seen.size && a && a.sourceDataset) seen.set(datasetKey(a.sourceDataset), DATASET_INFO[datasetKey(a.sourceDataset)] || DATASET_INFO.UNK);
-    return Array.from(seen.values()).sort((x,y)=>x.rank-y.rank).map(m => `<span class="badge-ds ${m.cls}" title="${esc(m.label)}">${esc(m.abbr)}</span>`).join('');
-  }
-
-  function employeeAllowedReps(){
-    const filters = window.activeFilters || {};
-    const activeTeam = EF.filter(id => id !== 'cr714_employeename' && id !== 'statecode' && filters[id] && filters[id].size);
-    const activeState = filters.statecode && filters.statecode.size;
-    if(!activeTeam.length && !activeState) return null;
-    const reps = new Set();
-    (window.employeesData || []).forEach(e => {
-      let ok = true;
-      for(const id of activeTeam){ if(!filters[id].has(e[id])){ ok=false; break; } }
-      const state = e._mappedStatecode || ((e.statecode === 0 || e.cr714_status === 1) ? 'Active' : 'Inactive');
-      if(ok && activeState && !filters.statecode.has(state)) ok = false;
-      const r = clean(e.cr714_employeename || e.cr714_repname || e.fullname || e.name);
-      if(ok && r) reps.add(r);
-    });
-    return reps;
-  }
-
-  window.applyFilters = function(preservePage){
-    let rows = Array.isArray(window.mergedAccounts) ? window.mergedAccounts : [];
-    const filters = window.activeFilters || {};
-    const allowed = employeeAllowedReps();
-    const repSet = filters.cr714_employeename && filters.cr714_employeename.size ? filters.cr714_employeename : null;
-    const actionSet = filters.action && filters.action.size ? filters.action : null;
-    const mass = window.massFilteredIds && window.massFilteredIds.size ? window.massFilteredIds : null;
-    if(allowed || repSet || actionSet || mass){
-      rows = rows.filter(a => {
-        const rep = accountRep(a);
-        if(allowed && !allowed.has(rep)) return false;
-        if(repSet && !repSet.has(rep)) return false;
-        if(actionSet && !actionSet.has(accountAction(a))) return false;
-        if(mass && !mass.has(accountId(a).toUpperCase())) return false;
-        return true;
-      });
-    }
-    window.teamFilteredAccounts = rows;
-    const fs = document.getElementById('fs-accts'); if(fs) fs.innerText = rows.length.toLocaleString();
-    const rc = document.getElementById('reassign-count-display'); if(rc) rc.innerText = rows.length.toLocaleString();
-    try { window.updateFilterSubtitle && window.updateFilterSubtitle(); } catch(e){}
-    try { window.updateGlobalBells && window.updateGlobalBells(); } catch(e){}
-    window.renderAccountList(true, !!preservePage);
-  };
-
-  function computeDisplayRows(){
-    let rows = (Array.isArray(window.teamFilteredAccounts) && window.teamFilteredAccounts.length) ? window.teamFilteredAccounts : (window.mergedAccounts || []);
-    const termEl = document.getElementById('list-search');
-    const term = clean(termEl && termEl.value).toLowerCase();
-    const filter = window.activeQuickFilter || 'all';
-    if(filter === 'help') rows = rows.filter(isRequest);
-    else if(filter === 'stale') rows = rows.filter(isStale);
-    else if(filter === 'intro') rows = rows.filter(a => !!(a && a.intro));
-    if(term) rows = rows.filter(a => accountId(a).toLowerCase().includes(term) || clean(a.company || a.name).toLowerCase().includes(term) || accountRep(a).toLowerCase().includes(term));
-
-    const sortType = (document.getElementById('list-sort') || {}).value || 'date-desc';
-    const n = rows.length;
-    const shouldFullySort = n <= 4500 || filter !== 'all' || term || sortType !== 'date-desc';
-    rows = rows.slice();
-    if(shouldFullySort){
-      rows.sort((a,b) => {
-        const ah = isRequest(a) ? 1 : 0, bh = isRequest(b) ? 1 : 0;
-        if(ah !== bh) return bh - ah;
-        if(sortType === 'company-asc') return clean(a.company).localeCompare(clean(b.company));
-        if(sortType === 'rep-asc') return accountRep(a).localeCompare(accountRep(b));
-        return dateMs(b.modifiedon) - dateMs(a.modifiedon);
-      });
-    }
-    return rows;
-  }
-
-  function renderCard(a){
-    const id = accountId(a);
-    const help = isRequest(a);
-    const activeClass = id === window.activeAccountId ? 'active' : '';
-    const pulse = help ? 'pulse-help' : (a && a.intro ? 'pulse-intro' : ((a.sources || []).length > 1 ? 'pulse-multi' : ''));
-    const selected = window.bulkSelectedIds && window.bulkSelectedIds.has(id);
-    return `<div class="list-item ${pulse} ${activeClass} ${selected?'bulk-selected':''}" id="card-${esc(id)}" onclick="window.selectAccount('${String(id).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}')">
-      <div class="absolute top-2 left-2 z-10" onclick="event.stopPropagation()"><input type="checkbox" class="page-bulk-cb w-4 h-4 cursor-pointer" style="accent-color: var(--primary);" data-id="${esc(id)}" ${selected?'checked':''} onchange="window.toggleBulkSelection('${String(id).replace(/\\/g,'\\\\').replace(/'/g,"\\'")}', event)"></div>
-      <div class="flex justify-between items-start mb-1 pl-6">
-        <div class="font-black text-[12px] truncate mr-2 leading-tight">${help?'<i class="fas fa-exclamation-circle mr-1" style="color: var(--accent-danger);"></i>':''}${a && a.intro?'<i class="fas fa-star mr-1" style="color: var(--accent-success);" title="New Intro"></i>':''}${esc(a && a.company || 'Unknown Company')}</div>
-        <div class="text-[9px] text-muted whitespace-nowrap uppercase font-black">${esc(fmtAgo(a && a.modifiedon))}</div>
-      </div>
-      <div class="flex justify-between items-center mb-1.5 pl-6 gap-1 flex-wrap">
-        <span class="font-mono text-[10px] text-muted"><i class="fas fa-hashtag mr-1 opacity-50"></i>${esc(id)}</span>
-        <div class="flex gap-1 act-dataset-badges">${badgeHtml(a)}</div>
-      </div>
-      <div class="flex justify-between items-center pl-6">
-        <span class="truncate max-w-[120px] font-bold text-[10px] uppercase" style="color: var(--primary);"><i class="fas fa-user-circle mr-1 opacity-50"></i>${esc(accountRep(a))}</span>
-        <div class="text-[9px] font-black uppercase px-2 py-0.5 border rounded text-muted inline-block" style="border-color: var(--border-color);">${esc(accountAction(a))}</div>
-      </div>
-    </div>`;
-  }
-
-  window.renderAccountList = function(fullRefresh, preservePage){
-    const container = document.getElementById('account-list-container');
-    if(!container) return;
-    window.gridPageSize = PAGE;
-    if(fullRefresh !== false){
-      window.listDisplayAccounts = computeDisplayRows();
-      if(!preservePage) window.loadedCount = PAGE;
-      if(!preservePage) container.scrollTop = 0;
-    }
-    const rows = window.listDisplayAccounts || [];
-    const total = rows.length;
-    const count = Math.min(Number(window.loadedCount || PAGE), total);
-    const listCount = document.getElementById('list-count-text'); if(listCount) listCount.innerText = `${total.toLocaleString()} Pool`;
-    const pageText = document.getElementById('grid-page-text'); if(pageText) pageText.innerHTML = count < total ? `Showing ${count.toLocaleString()} of ${total.toLocaleString()} <span class="opacity-50 lowercase ml-1">(scroll for more)</span>` : `Showing all ${total.toLocaleString()}`;
-    if(!total){
-      container.innerHTML = `<div class="h-full flex flex-col items-center justify-center text-muted opacity-50"><i class="fas fa-search text-3xl mb-3"></i><p class="text-xs uppercase font-black tracking-widest text-center">No accounts match<br/>your filters</p></div>`;
-      return;
-    }
-    container.innerHTML = rows.slice(0, count).map(renderCard).join('');
-    const cb = document.getElementById('selectAllPage');
-    if(cb){ const ids = rows.slice(0,count).map(accountId); cb.checked = !!ids.length && ids.every(id => window.bulkSelectedIds && window.bulkSelectedIds.has(id)); }
-  };
-
-  window.setQuickFilter = function(filter){
-    window.activeQuickFilter = filter || 'all';
-    document.querySelectorAll('.quick-filter-chip').forEach(b => {
-      b.className = 'quick-filter-chip text-[9px] py-1 uppercase';
-      b.style.backgroundColor = ''; b.style.color = ''; b.style.borderColor = '';
-      if(b.id === 'qf-help') b.innerHTML = 'Requests';
-    });
-    const btn = document.getElementById(`qf-${window.activeQuickFilter}`);
-    if(btn){
-      btn.className = 'quick-filter-chip active text-[9px] py-1 uppercase';
-      if(window.activeQuickFilter === 'help'){
-        btn.style.backgroundColor = 'var(--accent-danger)'; btn.style.color = 'white'; btn.style.borderColor = 'var(--accent-danger)';
-      } else {
-        btn.style.backgroundColor = 'var(--primary)'; btn.style.color = 'var(--primary-fg)'; btn.style.borderColor = 'var(--primary)';
-      }
-    }
-    window.loadedCount = PAGE;
-    try { window.updateGlobalBells && window.updateGlobalBells(); } catch(e){}
-    window.renderAccountList(true, false);
-  };
-
-  function renderDefaultGalleryAfterLoad(){
-    window.activeQuickFilter = window.activeQuickFilter || 'all';
-    if(!Array.isArray(window.teamFilteredAccounts) || !window.teamFilteredAccounts.length) window.teamFilteredAccounts = Array.isArray(window.mergedAccounts) ? window.mergedAccounts : [];
-    const fs = document.getElementById('fs-accts'); if(fs) fs.innerText = window.teamFilteredAccounts.length.toLocaleString();
-    const rc = document.getElementById('reassign-count-display'); if(rc) rc.innerText = window.teamFilteredAccounts.length.toLocaleString();
-    window.loadedCount = PAGE;
-    window.renderAccountList(true, false);
-  }
-  window.renderDefaultGalleryAfterLoad = renderDefaultGalleryAfterLoad;
-
-  window.beginScopedLoad = async function(wide){
-    const has = !!wide || hasAnyScope();
-    if(!has){
-      if(window.showToast) window.showToast('Pick at least one scope filter first.','warning');
-      if(window.openScopedLoadPrompt) window.openScopedLoadPrompt();
-      return;
-    }
-    Q.active = true;
-    Q.allowWideOpen = !!wide;
-    Q.selectedRepSet = wide ? new Set() : (window.getScopedRepsFromPreFilters ? window.getScopedRepsFromPreFilters() : new Set());
-    Q.selectedMassIds = new Set(window.massFilteredIds || []);
-    const modal = document.getElementById('sniper-load-modal'); if(modal) modal.style.display = 'none';
-    const loader = document.getElementById('global-loader'); if(loader) loader.style.display = 'flex';
-    if(window.updateLoader) window.updateLoader(18, wide ? 'Loading data...' : 'Loading selected scope...', 0);
-    try{
-      if(typeof originalFetchAllData === 'function') await originalFetchAllData.call(window, {force:true, scoped:true});
-      if(window.populateDynamicActionSet) window.populateDynamicActionSet();
-      if(typeof originalBuildFilters === 'function') originalBuildFilters.call(window);
-      window.teamFilteredAccounts = Array.isArray(window.mergedAccounts) ? window.mergedAccounts : [];
-      if(loader) loader.style.display = 'none';
-      renderDefaultGalleryAfterLoad();
-      if(window.showToast) window.showToast(`Loaded ${window.teamFilteredAccounts.length.toLocaleString()} accounts.`, 'success');
-      if(typeof originalBuildReportingFactsAsync === 'function'){
-        setTimeout(() => { const p = originalBuildReportingFactsAsync.call(window); if(p && typeof p.catch === 'function') p.catch(()=>{}); }, 600);
-      }
-    } catch(e){
-      if(loader) loader.style.display = 'none';
-      console.error('Scoped load failed', e);
-      if(window.showToast) window.showToast('Scoped load failed: ' + (e && e.message ? e.message : e), 'error');
-    }
-  };
-
-  // Single, owned infinite-scroll handler. Do not call older render append paths.
-  function bindScroll(){
+  function installScrollLoader(){
     const c = document.getElementById('account-list-container');
-    if(!c || c.__actV2ScrollBound) return;
-    c.__actV2ScrollBound = true;
-    c.addEventListener('scroll', function(){
-      const total = (window.listDisplayAccounts || []).length;
-      if(total && c.scrollTop + c.clientHeight >= c.scrollHeight - 180 && (window.loadedCount || PAGE) < total){
-        window.loadedCount = Math.min(total, (window.loadedCount || PAGE) + PAGE);
+    if(!c || c.__actGalleryV2Scroll) return;
+    c.__actGalleryV2Scroll = true;
+    c.addEventListener('scroll', () => {
+      if(appendInProgress) return;
+      if(!Array.isArray(window.listDisplayAccounts)) return;
+      if((window.loadedCount || PAGE_SIZE) >= window.listDisplayAccounts.length) return;
+      if(c.scrollTop + c.clientHeight > c.scrollHeight - 320){
+        appendInProgress = true;
         window.renderAccountList(false, true);
+        setTimeout(() => { appendInProgress = false; }, 250);
       }
     }, {passive:true});
   }
+  setTimeout(installScrollLoader, 0);
+
+  window.setQuickFilter = function(filter){
+    window.activeQuickFilter = filter || 'all';
+    updateQuickVisual(window.activeQuickFilter);
+    window.renderAccountList(true, false);
+    setTimeout(() => { try{ window.updateGlobalBells && window.updateGlobalBells(); }catch(e){} }, 0);
+  };
+  window.debouncedRenderAccountList = function(){
+    clearTimeout(window.searchTimeout);
+    window.searchTimeout = setTimeout(() => window.renderAccountList(true, false), 120);
+  };
+  window.clearBulkSelection = function(){
+    if(window.bulkSelectedIds) window.bulkSelectedIds.clear();
+    try{ window.updateBulkUI && window.updateBulkUI(); }catch(e){}
+  };
+
+  window.applyFilters = function(preservePage = false){
+    const rows = computeFilteredAccountsFast();
+    window.teamFilteredAccounts = rows;
+    setText('fs-accts', rows.length);
+    setText('reassign-count-display', rows.length);
+    if(window.activeAccountId && !rows.some(a => a.cr714_id === window.activeAccountId) && typeof window.clearSelection === 'function') window.clearSelection();
+    if(window.bulkSelectedIds) window.bulkSelectedIds.clear();
+    try{ window.updateBulkUI && window.updateBulkUI(); }catch(e){}
+    window.reportsDirty = true;
+    window.renderAccountList(true, !!preservePage);
+    setTimeout(() => { try{ window.updateFilterSubtitle && window.updateFilterSubtitle(); }catch(e){} }, 0);
+    setTimeout(() => { try{ window.updateGlobalBells && window.updateGlobalBells(); }catch(e){} }, 0);
+  };
+
+  window.clearAllFilters = function(){
+    document.querySelectorAll('.multiselect-dropdown input, #pbi-rep-filter-list input').forEach(chk => { chk.checked = false; });
+    (window.FILTER_CONFIG || []).forEach(col => {
+      activeSet(col.id).clear();
+      const h = document.querySelector(`#ms-wrap-${col.id} .multiselect-header span`);
+      if(h) h.innerText = col.label || col.id;
+    });
+    if(window.massFilteredIds) window.massFilteredIds.clear();
+    const mi = document.getElementById('mass-id-input'); if(mi) mi.value = '';
+    const mc = document.getElementById('mass-id-count'); if(mc) mc.innerText = '0';
+    if(typeof window.clearDrilldownLock === 'function') window.clearDrilldownLock();
+    window.applyFilters(false);
+  };
+
+  function showLoadedScopeImmediately(){
+    const rows = Array.isArray(window.mergedAccounts) ? window.mergedAccounts : [];
+    window.teamFilteredAccounts = rows.slice();
+    window.activeQuickFilter = 'all';
+    updateQuickVisual('all');
+    setText('fs-accts', rows.length);
+    setText('reassign-count-display', rows.length);
+    window.loadedCount = Math.max(Number(window.gridPageSize || PAGE_SIZE), PAGE_SIZE);
+    window.listDisplayAccounts = null;
+    window.renderAccountList(true, false);
+  }
+
+  window.beginScopedLoad = async function(wide){
+    const EF = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode'];
+    const hasScope = !!wide || EF.some(id => activeSet(id).size) || !!(window.massFilteredIds && window.massFilteredIds.size);
+    if(!hasScope){
+      if(window.showToast) window.showToast('Pick at least one scope filter first.', 'warning');
+      if(window.ACTFriendlyScopeHome && window.ACTFriendlyScopeHome.render) window.ACTFriendlyScopeHome.render();
+      return;
+    }
+    const Q = window.__ACT_QUERY_SNIPER = window.__ACT_QUERY_SNIPER || {active:false,allowWideOpen:false,selectedRepSet:new Set(),selectedMassIds:new Set()};
+    Q.active = true;
+    Q.allowWideOpen = !!wide;
+    Q.selectedRepSet = wide ? new Set() : (typeof window.getScopedRepsFromPreFilters === 'function' ? window.getScopedRepsFromPreFilters() : new Set());
+    Q.selectedMassIds = new Set(window.massFilteredIds || []);
+    if(window.ACTProduction) window.ACTProduction.abortController = new AbortController();
+    const modal = document.getElementById('sniper-load-modal');
+    if(modal) modal.style.display = 'none';
+    const loader = document.getElementById('global-loader');
+    if(loader) loader.style.display = 'flex';
+    if(window.updateLoader) window.updateLoader(15, wide ? 'Loading scope...' : 'Loading selected scope...', 0);
+    try{
+      await window.fetchAllData({force:true, scoped:true});
+      if(window.ACTProduction) window.ACTProduction.abortController = null;
+      if(window.updateLoader) window.updateLoader(92, 'Rendering gallery now...', (window.mergedAccounts || []).length);
+      showLoadedScopeImmediately();
+      if(loader) loader.style.display = 'none';
+      await afterPaint();
+      // Now do slower filter/dropdown prep after the user can already see and use the gallery.
+      setTimeout(() => {
+        try{ window.populateDynamicActionSet && window.populateDynamicActionSet(); }catch(e){ console.warn(e); }
+        try{ window.buildFilters && window.buildFilters(); }catch(e){ console.warn(e); }
+        try{ window.applyFilters && window.applyFilters(false); }catch(e){ console.warn(e); }
+      }, 75);
+      window.__actFactsDirty = true;
+      window.reportsDirty = true;
+      if(window.showToast) window.showToast(`Loaded ${(window.mergedAccounts || []).length.toLocaleString()} accounts.`, 'success');
+      // No buildReportingFactsAsync and no large IndexedDB cache write here. Reports can build facts lazily.
+    }catch(err){
+      if(window.ACTProduction) window.ACTProduction.abortController = null;
+      if(loader) loader.style.display = 'none';
+      console.error('Scoped load failed:', err);
+      if(window.showToast) window.showToast('Scoped load failed: ' + (err && err.message ? err.message : err), 'error');
+    }
+  };
+
+  const oldSwitchTab = window.switchTab;
+  window.switchTab = function(id){
+    if(id === 'reports' && window.__actFactsDirty && typeof window.buildReportingFactsAsync === 'function'){
+      const loader = document.getElementById('global-loader');
+      if(loader) loader.style.display = 'flex';
+      window.updateLoader && window.updateLoader(35, 'Building reports on demand...', (window.teamFilteredAccounts || []).length);
+      setTimeout(async () => {
+        try{
+          await window.buildReportingFactsAsync();
+          window.__actFactsDirty = false;
+        }catch(e){ console.error('On-demand facts failed:', e); }
+        if(loader) loader.style.display = 'none';
+        if(typeof oldSwitchTab === 'function') oldSwitchTab.call(window, id);
+      }, 30);
+      return;
+    }
+    return typeof oldSwitchTab === 'function' ? oldSwitchTab.apply(this, arguments) : undefined;
+  };
 
   const st = document.createElement('style');
-  st.id = 'act-default-gallery-quickfilter-hardening-v2-style';
+  st.id = 'act-gallery-load-freeze-root-fix-v2-style';
   st.textContent = `
-    #account-list-container .act-card-source-rail{display:none!important;}
+    #account-list-container{contain:content;}
     #account-list-container .act-dataset-badges{min-height:16px;}
     #account-list-container .badge-ds{border-radius:999px!important;padding:3px 7px!important;font-size:8px!important;font-weight:1000!important;letter-spacing:.08em!important;line-height:1!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;min-width:26px!important;max-width:34px!important;overflow:hidden!important;white-space:nowrap!important;}
   `;
   if(!document.getElementById(st.id)) document.head.appendChild(st);
 
-  bindScroll();
-  document.addEventListener('DOMContentLoaded', bindScroll);
-  setTimeout(bindScroll, 250);
-  setTimeout(renderDefaultGalleryAfterLoad, 0);
-  console.info('ACT default gallery + quick filter hardening V2 installed.');
+  setTimeout(() => {
+    installScrollLoader();
+    if((window.mergedAccounts || []).length && !(window.teamFilteredAccounts || []).length) showLoadedScopeImmediately();
+  }, 0);
+  console.info('ACT gallery load/freeze root fix V2 installed: facts deferred, gallery owned, quick filters non-blocking.');
 })();
+/* === END COPILOT PATCH: GALLERY LOAD/FREEZE ROOT FIX V2 === */
 </script>
-<!-- === COPILOT PATCH: DEFAULT GALLERY + QUICK FILTER FREEZE HARDENING V2 2026-07-10 END === -->
+
+
+<script>
+/* === COPILOT PATCH: TOP FILTER DROPDOWN COUNTS SAFE V5 - REPORTS PRESERVED (2026-07-09) ===
+   Appended only; no reporting-tab/nav/renderReports/openLocalReportsOnly changes.
+*/
+(function(){
+  if(window.__ACT_TOP_FILTER_COUNTS_SAFE_V5__) return;
+  window.__ACT_TOP_FILTER_COUNTS_SAFE_V5__ = true;
+  const EMP=['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode'];
+  let t1=null,t2=null;
+  const clean=v=>String(v==null?'':v).replace(/\s+/g,' ').trim();
+  const norm=v=>clean(v).toLowerCase();
+  const esc=v=>String(v==null?'':v).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+  const js=v=>String(v==null?'':v).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"');
+  function cfg(){return (window.FILTER_CONFIG||[]).filter(x=>x&&x.id)}
+  function fs(id){window.activeFilters=window.activeFilters||{}; if(!(window.activeFilters[id] instanceof Set))window.activeFilters[id]=new Set(window.activeFilters[id]||[]); return window.activeFilters[id]}
+  function rn(e){return clean(e&&(e.cr714_employeename||e.cr714_repname||e.fullname||e.name||e.cr714_name))}
+  function st(e){if(!e)return''; if(e._mappedStatecode)return clean(e._mappedStatecode); if(e.statecode===0||e.cr714_status===1)return'Active'; if(e.statecode===1||e.cr714_status===0)return'Inactive'; return clean(e.statecode||'Unknown')}
+  function ev(e,id){return id==='cr714_employeename'?rn(e):(id==='statecode'?st(e):clean(e&&e[id]))}
+  function reps(a){const out=new Set(); if(clean(a&&a.rep))out.add(clean(a.rep)); ((a&&a.sources)||[]).forEach(s=>{if(clean(s&&s.rep))out.add(clean(s.rep))}); return [...out]}
+  function accts(){return Array.isArray(window.mergedAccounts)?window.mergedAccounts:[]}
+  function loadedReps(){const out=new Set(); accts().forEach(a=>reps(a).forEach(r=>out.add(r))); return out}
+  function m(v,set){if(!set||!set.size)return true; const n=norm(v); return [...set].some(x=>norm(x)===n)}
+  function empOk(e,except){for(const id of EMP){if(id===except)continue; const set=fs(id); if(set.size&&!m(ev(e,id),set))return false} return true}
+  function repOk(rep,except){if(except==='cr714_employeename')return true; const rows=(window.employeesData||[]).filter(e=>norm(rn(e))===norm(rep)); if(!rows.length)return !EMP.some(id=>id!==except&&id!=='cr714_employeename'&&fs(id).size); return rows.some(e=>empOk(e,except))}
+  function acctOk(a,except){const ar=reps(a); if(except!=='cr714_employeename'&&fs('cr714_employeename').size&&!ar.some(r=>m(r,fs('cr714_employeename'))))return false; if(except!=='action'&&fs('action').size&&!m(clean(a&&a.action),fs('action')))return false; if(window.massFilteredIds&&window.massFilteredIds.size&&!window.massFilteredIds.has(clean(a&&a.cr714_id).toUpperCase()))return false; const hasOrg=EMP.some(id=>id!==except&&id!=='cr714_employeename'&&fs(id).size); return !hasOrg||ar.some(r=>repOk(r,except))}
+  function optionRows(id){const sel=fs(id), base=accts().filter(a=>acctOk(a,id)), map=new Map();
+    if(id==='cr714_employeename'){[...loadedReps()].filter(r=>repOk(r,id)).forEach(r=>{const ids=new Set(); base.forEach(a=>{if(reps(a).some(x=>norm(x)===norm(r)))ids.add(clean(a.cr714_id))}); map.set(r,{v:r,c:ids.size,u:'accts',ok:true})}); sel.forEach(r=>{if(!map.has(r))map.set(r,{v:r,c:0,u:'selected',ok:false})});}
+    else if(EMP.includes(id)){const lr=loadedReps(); (window.employeesData||[]).forEach(e=>{const r=rn(e); if(!r)return; if(lr.size&&![...lr].some(x=>norm(x)===norm(r)))return; if(!empOk(e,id))return; const v=ev(e,id); if(v){const o=map.get(v)||{v,c:0,u:'reps',ok:true}; o.c++; map.set(v,o)}}); sel.forEach(v=>{if(!map.has(v))map.set(v,{v,c:0,u:'selected',ok:false})});}
+    else if(id==='action'){base.forEach(a=>{const v=clean(a&&a.action); if(v){const o=map.get(v)||{v,c:0,u:'accts',ok:true}; o.c++; map.set(v,o)}}); sel.forEach(v=>{if(!map.has(v))map.set(v,{v,c:0,u:'selected',ok:false})});}
+    return [...map.values()].filter(r=>r.c>0||sel.has(r.v)).sort((a,b)=>a.v.localeCompare(b.v));}
+  function subtitle(){const el=document.getElementById('active-filter-subtitle'); if(!el)return; const p=[]; cfg().forEach(c=>{const v=[...fs(c.id)]; if(v.length)p.push(`<span class="font-bold">${esc(c.label)}:</span> ${esc(v.length>2?`${v.length} selected`:v.join(', '))}`)}); el.innerHTML=p.length?p.join(' <span class="mx-2" style="color: var(--border-color);">|</span> '):'No active filters.'}
+  function render(){const c=document.getElementById('filter-container'); if(!c)return; const open=[...document.querySelectorAll('.multiselect-dropdown.show')].map(d=>d.id.replace(/^ms-drop-/,''))[0]; c.innerHTML=cfg().map(col=>`<div class="multiselect-container" id="ms-wrap-${esc(col.id)}"><div class="multiselect-header"><span>${esc(fs(col.id).size?`${col.label} (${fs(col.id).size})`:col.label)}</span> <i class="fas fa-chevron-down opacity-50"></i></div><div class="multiselect-dropdown custom-scrollbar" id="ms-drop-${esc(col.id)}"><div class="multiselect-search"><input type="text" placeholder="Search..." oninput="window.debouncedFilterDropdown('${js(col.id)}',this.value)" class="w-full"></div><label class="multiselect-option select-all-opt" style="color: var(--primary);"><input type="checkbox" onchange="window.toggleAllFilter('${js(col.id)}',this)"> <span>Select visible</span></label>${optionRows(col.id).map(r=>`<label class="multiselect-option ms-opt-${col.id}${r.ok?'':' act-stale'}" data-val="${esc(r.v)}"><input type="checkbox" value="${esc(r.v)}" ${fs(col.id).has(r.v)?'checked':''} onchange="window.updateFilterState('${js(col.id)}',this)"><span class="truncate">${esc(r.v)}</span><span class="act-count-badge">${r.c?r.c.toLocaleString()+' '+r.u:'selected'}</span></label>`).join('')||'<div class="act-empty-opt">No options available.</div>'}</div></div>`).join(''); cfg().forEach(col=>{const w=document.getElementById(`ms-wrap-${col.id}`),d=document.getElementById(`ms-drop-${col.id}`),h=w&&w.querySelector('.multiselect-header'); if(h&&d)h.onclick=e=>{e.stopPropagation(); const was=d.classList.contains('show'); document.querySelectorAll('.multiselect-dropdown').forEach(x=>x.classList.remove('show')); if(!was)d.classList.add('show')}; if(open===col.id&&d)d.classList.add('show')}); subtitle()}
+  function sr(){clearTimeout(t1); t1=setTimeout(render,0)} function sa(){clearTimeout(t2); t2=setTimeout(()=>typeof window.applyFilters==='function'&&window.applyFilters(false),120)}
+  window.buildFilters=function(){render(); const sel=document.getElementById('reassign-target-rep'); if(sel){const r=[...loadedReps()].sort(); sel.innerHTML='<option value="">-- Select Representative --</option>'+r.map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('')}};
+  window.updateFilterState=function(id,cb){cb.checked?fs(id).add(cb.value):fs(id).delete(cb.value); sr(); sa()};
+  window.toggleAllFilter=function(id,cb){document.querySelectorAll(`#ms-drop-${id} .ms-opt-${id}`).forEach(o=>{if(o.style.display==='none')return; const x=o.querySelector('input'); if(!x)return; x.checked=cb.checked; cb.checked?fs(id).add(x.value):fs(id).delete(x.value)}); sr(); sa()};
+  window.filterDropdown=function(id,term){const q=norm(term); document.querySelectorAll(`#ms-drop-${id} .ms-opt-${id}`).forEach(o=>{const v=o.getAttribute('data-val')||''; o.style.display=(!q||norm(v).includes(q))?'flex':'none'})};
+  window.debouncedFilterDropdown=function(id,term){clearTimeout(window.searchTimeout); window.searchTimeout=setTimeout(()=>window.filterDropdown(id,term),80)};
+  window.updateFilterVisibility=function(){sr()}; window.updateFilterSubtitle=subtitle;
+  const oldApply=window.applyFilters; if(typeof oldApply==='function'&&!oldApply.__safeV5){window.applyFilters=function(){const r=oldApply.apply(this,arguments); sr(); return r}; window.applyFilters.__safeV5=true}
+  const oldBegin=window.beginScopedLoad; if(typeof oldBegin==='function'&&!oldBegin.__safeV5){window.beginScopedLoad=async function(){const r=await oldBegin.apply(this,arguments); setTimeout(()=>window.buildFilters&&window.buildFilters(),150); return r}; window.beginScopedLoad.__safeV5=true}
+  const styleEl=document.createElement('style'); styleEl.id='act-counts-safe-v5-style'; styleEl.textContent='#filter-container .act-count-badge{font-size:9px;font-weight:950;color:var(--text-muted);padding:2px 6px;border:1px solid var(--border-color);border-radius:999px;background:var(--bg-app);white-space:nowrap}.act-stale{background:rgba(234,179,8,.08)!important}.act-empty-opt{padding:12px;text-align:center;color:var(--text-muted);font-size:11px;font-weight:800}'; if(!document.getElementById(styleEl.id))document.head.appendChild(styleEl);
+  setTimeout(()=>window.buildFilters&&window.buildFilters(),0);
+})();
+/* === END COPILOT PATCH: TOP FILTER DROPDOWN COUNTS SAFE V5 - REPORTS PRESERVED === */
+</script>
 
 </body>
 </html>
