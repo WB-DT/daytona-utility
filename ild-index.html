@@ -18637,5 +18637,364 @@ const prevRenderReports = window.renderReports;
 /* === END COPILOT PATCH: LEFT BADGE CLASS CORRECTION V1 === */
 </script>
 
+
+<script>
+/* === COPILOT PATCH: ACTIVE-REP SCOPE + RESPONSIVE ACCOUNT LOAD V3 (2026-07-09) ===
+   Fixes:
+   1) Scope defaults to Active reps.
+   2) Rep Name option list and selected-rep scope are computed from the same employee filter function.
+   3) Selecting a scope no longer freezes the browser: account rows are fetched through small rep chunks,
+      small Dataverse pages, and frequent UI yields. Fact table stays lazy per selected account.
+*/
+(function(){
+  if(window.__ACT_ACTIVE_REP_SCOPE_RESPONSIVE_LOAD_V3__) return;
+  window.__ACT_ACTIVE_REP_SCOPE_RESPONSIVE_LOAD_V3__ = true;
+
+  const EF = ['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode'];
+  const REP_FIELD = {
+    cr714_accountmanagementdatasets:'cr714_rep',
+    cr714_cadencedatasets:'cr714_retentionrep',
+    cr714_prospectingdatasets:'cr714_repassigned',
+    cr714_louisebrowndatasets:'cr714_assignedrep'
+  };
+  const ID_FIELD = {
+    cr714_accountmanagementdatasets:'cr714_accountnum',
+    cr714_cadencedatasets:'cr714_accountnum',
+    cr714_prospectingdatasets:'cr714_accountnum',
+    cr714_louisebrowndatasets:'cr714_accountnum'
+  };
+  const TYPE_ABBR = {
+    cr714_accountmanagementdatasets:'AM',
+    cr714_cadencedatasets:'CAD',
+    cr714_prospectingdatasets:'PRO',
+    cr714_louisebrowndatasets:'LB'
+  };
+  const PAGE_SIZE = 1000;
+  const REP_CHUNK = 35;
+  const TABLE_CONCURRENCY = 1;
+
+  function clean(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim(); }
+  function norm(v){ return clean(v).toLowerCase(); }
+  function acct(v){ return clean(v).toUpperCase(); }
+  function od(v){ return String(v == null ? '' : v).replace(/'/g,"''"); }
+  function esc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
+  function idle(){ return new Promise(resolve => (window.requestIdleCallback ? requestIdleCallback(resolve,{timeout:80}) : setTimeout(resolve,0))); }
+  function fs(id){ window.activeFilters = window.activeFilters || {}; if(!window.activeFilters[id]) window.activeFilters[id] = new Set(); return window.activeFilters[id]; }
+  function repName(e){ return clean(e && (e.cr714_employeename || e.cr714_repname || e.fullname || e.name || e.cr714_name)); }
+  function statusVal(e){ return clean(e && (e._mappedStatecode || ((e.statecode===0 || e.cr714_status===1) ? 'Active' : ((e.statecode===1 || e.cr714_status===0) ? 'Inactive' : 'Unknown')))); }
+  function fieldVal(e,id){ return id === 'cr714_employeename' ? repName(e) : (id === 'statecode' ? statusVal(e) : clean(e && e[id])); }
+  function matchSet(actual,set){ if(!set || !set.size) return true; const a=norm(actual); return Array.from(set).some(x => norm(x) === a); }
+  function employeeMatches(row, exceptId){
+    for(const id of EF){
+      if(id === exceptId) continue;
+      const set = fs(id);
+      if(set.size && !matchSet(fieldVal(row,id), set)) return false;
+    }
+    return true;
+  }
+  function selectedRepSet(){
+    const out = new Set();
+    (window.employeesData || []).forEach(e => {
+      const r = repName(e);
+      if(r && employeeMatches(e, null)) out.add(r);
+    });
+    return out;
+  }
+  function hasAnyScope(){ return EF.some(id => fs(id).size) || !!(window.massFilteredIds && window.massFilteredIds.size); }
+  function ensureActiveDefault(force){
+    if(!window.activeFilters) window.activeFilters = {};
+    EF.forEach(id => fs(id));
+    if((force || !hasAnyScope()) && !fs('statecode').size){
+      fs('statecode').add('Active');
+    }
+  }
+  function toast(msg,type){ try{ window.showToast && window.showToast(msg,type||'info'); }catch(e){} }
+  function setLoader(pct,text,count){ try{ window.updateLoader && window.updateLoader(pct,text,count); }catch(e){} }
+  function loader(show){ const l=document.getElementById('global-loader'); if(l) l.style.display = show ? 'flex' : 'none'; }
+  function chunks(arr,n){ const out=[]; for(let i=0;i<arr.length;i+=n) out.push(arr.slice(i,i+n)); return out; }
+  function buildFilter(table, reps, ids){
+    const parts=[];
+    const rf=REP_FIELD[table], af=ID_FIELD[table] || 'cr714_accountnum';
+    if(ids && ids.length) parts.push('(' + ids.map(x => `${af} eq '${od(x)}'`).join(' or ') + ')');
+    if(rf && reps && reps.length) parts.push('(' + reps.map(x => `${rf} eq '${od(x)}'`).join(' or ') + ')');
+    return parts.join(' and ');
+  }
+  function rowToAccount(table,typeLabel,r,map){
+    const id = clean(r.cr714_accountnum); if(!id) return;
+    const company = clean(r.cr714_accountname || r.cr714_company || r.cr714_acctname || 'Unknown Company');
+    const localRep = clean(r.cr714_rep || r.cr714_retentionrep || r.cr714_repassigned || r.cr714_assignedrep || 'Unassigned');
+    const createDate = new Date(r.createdon || r.modifiedon || 0);
+    const emailDate = r.cr714_actionemailsent || r.cr714_emailsenttimestamp;
+    const recordId = r.cr714_accountmanagementdatasetid || r.cr714_cadencedatasetid || r.cr714_prospectingdatasetid || r.cr714_louisebrowndatasetid;
+    const contact = r.cr714_namemost || r.cr714_namelatest || '--';
+    const phone = typeof window.formatPhone === 'function' ? window.formatPhone(r.cr714_primaryphone || r.cr714_phone) : (r.cr714_primaryphone || r.cr714_phone || '--');
+    const email = r.cr714_emailmost || r.cr714_email_latest || r.cr714_emaillatest || '--';
+    const address = r.cr714_billingaddress || r.cr714_address || '--';
+    const msg = window.stripJson ? window.stripJson(r.cr714_actionmessage) : clean(r.cr714_actionmessage);
+    const managerNote = window.stripJson ? window.stripJson(r.cr714_managernotes || r.cr714_notesfr || '') : clean(r.cr714_managernotes || r.cr714_notesfr || '');
+    const stCode = r.statecode === 1 ? 'Inactive' : 'Active';
+    if(!map.has(id)){
+      map.set(id, { cr714_id:id, company, rep:localRep, _latestRepDate:createDate, action:r.cr714_action, message:msg, managerNotes:managerNote, modifiedon:r.modifiedon, emailDate, contact, phone, email, address, sources:[], isHelp:false, isClose:false, intro:!!r.cr714_intro, helpStatus:'', statecode:stCode, importantInfo:'', _historyLoaded:false, _d365Loaded:false, _introAcknowledged:false });
+    }
+    const existing = map.get(id);
+    if(createDate > existing._latestRepDate){ existing._latestRepDate=createDate; existing.rep=localRep; existing.statecode=stCode; }
+    existing.sources.push({ type:typeLabel, table, id:recordId, rawNotes:r.cr714_notesfr || r.cr714_accountmanagementnotes || r.cr714_qbnotes || r.cr714_prospectingnotes || '', managerNotesRaw:r.cr714_managernotes || r.cr714_notesfr || '', message:msg, rep:localRep });
+    if(r.modifiedon && (!existing.modifiedon || r.modifiedon > existing.modifiedon)) existing.modifiedon = r.modifiedon;
+    if(emailDate && (!existing.emailDate || emailDate > existing.emailDate)) existing.emailDate = emailDate;
+    if(contact !== '--' && existing.contact === '--') existing.contact = contact;
+    if(phone !== '--' && existing.phone === '--') existing.phone = phone;
+    if(email !== '--' && existing.email === '--') existing.email = email;
+    if(address !== '--' && existing.address === '--') existing.address = address;
+    const rHelp = r['cr714_help@OData.Community.Display.V1.FormattedValue'] || r.cr714_help || r['cr714_recordstatus@OData.Community.Display.V1.FormattedValue'] || r.cr714_recordstatus || '';
+    if(rHelp && rHelp !== 'Clear' && rHelp !== 'Resolved') existing.helpStatus = rHelp;
+    const msgUpper = String(msg || '').toUpperCase();
+    const helpUpper = String(rHelp || '').toUpperCase();
+    if(msgUpper.includes('[HELP REQUEST]') || helpUpper === 'HELP REQUESTED') existing.isHelp = true;
+    if(msgUpper.includes('[CLOSED]') || helpUpper === 'CLOSE REQUESTED') existing.isClose = true;
+    if(r.cr714_action && r.cr714_action !== existing.action) existing.action = r.cr714_action;
+    if(r.cr714_intro) existing.intro = true;
+  }
+
+  async function fetchTableSlice(table, selectStr, token, map, reps, ids){
+    const typeLabel = TYPE_ABBR[table] || table;
+    const filter = buildFilter(table, reps, ids);
+    let url = `${window.DATAVERSE_URL}/${table}?$select=${selectStr},statecode`;
+    if(filter) url += `&$filter=${encodeURIComponent(filter)}`;
+    let page = 0;
+    while(url){
+      const res = await fetch(url, { headers:{ 'Authorization':`Bearer ${token}`, 'Accept':'application/json', 'Prefer':`odata.maxpagesize=${PAGE_SIZE}, odata.include-annotations="OData.Community.Display.V1.FormattedValue"` }});
+      if(!res.ok){
+        const txt = await res.text().catch(()=>String(res.status));
+        throw new Error(`${table} failed (${res.status}): ${txt}`);
+      }
+      const data = await res.json();
+      const rows = Array.isArray(data.value) ? data.value : [];
+      for(let i=0;i<rows.length;i++){
+        rowToAccount(table,typeLabel,rows[i],map);
+        if(i && i % 200 === 0) await idle();
+      }
+      window.totalLoadedRecords = Number(window.totalLoadedRecords || 0) + rows.length;
+      setLoader(null,null,window.totalLoadedRecords || 0);
+      page++;
+      await idle();
+      url = data['@odata.nextLink'] || null;
+    }
+  }
+
+  async function responsiveFetchAllData(options={}){
+    ensureActiveDefault(false);
+    loader(!options.silent);
+    setLoader(12,'Loading scoped accounts with responsive chunks...',0);
+    window.totalLoadedRecords = 0;
+    window.mergedAccounts = [];
+    window.teamFilteredAccounts = [];
+    window.unifiedEventRows = [];
+    window.__actFactRows = [];
+    window.__actFactRowsByAccount = new Map();
+    window.__actFactReportingLoaded = false;
+    window.__actFactReportingRows = [];
+    window.reportingFacts = [];
+    window.reportingDims = { reps:[], actions:[], months:[] };
+    try{
+      const token = await window.getToken();
+      const repSet = selectedRepSet();
+      const reps = Array.from(repSet).sort();
+      const ids = Array.from(window.massFilteredIds || []).map(acct).filter(Boolean);
+      const Q = window.__ACT_QUERY_SNIPER = window.__ACT_QUERY_SNIPER || {};
+      Q.active = true;
+      Q.allowWideOpen = false;
+      Q.selectedRepSet = repSet;
+      Q.selectedMassIds = new Set(ids);
+      window.__ACT_SELECTED_REP_SCOPE = reps;
+      window.__ACT_SCOPE_SELECTED_REPS = repSet;
+
+      const plan = [
+        ['cr714_accountmanagementdatasets','cr714_accountnum,cr714_accountname,cr714_rep,cr714_action,modifiedon,createdon,cr714_help,cr714_actionemailsent,cr714_accountmanagementdatasetid,cr714_address,cr714_namemost,cr714_phone,cr714_emailmost,cr714_actionmessage,cr714_managernotes'],
+        ['cr714_cadencedatasets','cr714_accountnum,cr714_company,cr714_retentionrep,cr714_action,modifiedon,createdon,cr714_recordstatus,cr714_cadencedatasetid,cr714_intro,cr714_billingaddress,cr714_namemost,cr714_primaryphone,cr714_emailmost,cr714_actionmessage,cr714_managernotes'],
+        ['cr714_louisebrowndatasets','cr714_accountnum,cr714_accountname,cr714_assignedrep,cr714_action,modifiedon,createdon,cr714_help,cr714_actionemailsent,cr714_louisebrowndatasetid,cr714_intro,cr714_address,cr714_namemost,cr714_phone,cr714_emaillatest,cr714_actionmessage,cr714_notesfr']
+      ];
+      const repChunks = reps.length ? chunks(reps, REP_CHUNK) : [[]];
+      const idChunks = ids.length ? chunks(ids, 80) : [[]];
+      const totalUnits = plan.length * Math.max(repChunks.length, idChunks.length, 1);
+      let done = 0;
+      const map = new Map();
+
+      for(const [table,selectStr] of plan){
+        if(ids.length){
+          for(const idChunk of idChunks){
+            setLoader(Math.min(88, 15 + Math.round((done/Math.max(totalUnits,1))*70)), `Loading ${TYPE_ABBR[table]} account ID chunk ${done+1}...`, window.totalLoadedRecords || 0);
+            await fetchTableSlice(table, selectStr, token, map, [], idChunk);
+            done++;
+            await idle();
+          }
+        }else{
+          for(const repChunk of repChunks){
+            setLoader(Math.min(88, 15 + Math.round((done/Math.max(totalUnits,1))*70)), `Loading ${TYPE_ABBR[table]} reps ${done+1} of ${totalUnits}...`, window.totalLoadedRecords || 0);
+            await fetchTableSlice(table, selectStr, token, map, repChunk, []);
+            done++;
+            await idle();
+          }
+        }
+      }
+
+      window.mergedAccounts = Array.from(map.values());
+      window.teamFilteredAccounts = window.mergedAccounts.slice();
+      window.__ACT_REPORT_SCOPE_ACCOUNT_IDS = window.mergedAccounts.map(a => a.cr714_id);
+      window.__actFactLoadStats = { mode:'lazy-per-account', accounts:window.mergedAccounts.length, selectedReps:reps.length, factRows:0, loadedAt:new Date().toISOString() };
+      if(typeof window.populateDynamicActionSet === 'function') window.populateDynamicActionSet();
+      if(typeof window.initDateSlider === 'function') { try{ window.initDateSlider(); }catch(_){} }
+      window.reportsDirty = true;
+      // Do not build heavy report facts here. Reports can build when opened, and fact rows are lazy per account.
+      setLoader(94, 'Rendering account list...', window.totalLoadedRecords || 0);
+      await idle();
+      setLoader(100, `Loaded ${window.mergedAccounts.length.toLocaleString()} accounts for ${reps.length.toLocaleString()} selected reps.`, window.totalLoadedRecords || 0);
+      if(!options.silent) setTimeout(()=>loader(false),80);
+      return { accounts:window.mergedAccounts, factRows:[], lazyFacts:true, selectedReps:reps };
+    }catch(e){
+      loader(false);
+      console.error('Responsive scoped account load failed:', e);
+      toast('Scoped load failed: ' + (e && e.message ? e.message : e), 'error');
+      throw e;
+    }
+  }
+
+  async function beginScopedLoadResponsive(wide){
+    ensureActiveDefault(false);
+    if(!wide && !hasAnyScope()){
+      toast('Defaulted scope to Active reps. Click Load Selected Scope again.', 'info');
+      if(typeof window.ACTFriendlyScopeHome?.render === 'function') window.ACTFriendlyScopeHome.render();
+      return;
+    }
+    const modal = document.getElementById('sniper-load-modal');
+    if(modal) modal.style.display = 'none';
+    const t0 = performance.now ? performance.now() : Date.now();
+    const result = await responsiveFetchAllData({force:true,scoped:true});
+    if(typeof window.buildFilters === 'function') window.buildFilters();
+    if(typeof window.applyFilters === 'function'){
+      // applyFilters can be expensive when it rebuilds reports; suppress report render during initial scope load.
+      const reportsTab = document.getElementById('tab-reports');
+      const wasActive = reportsTab && reportsTab.classList.contains('active');
+      if(reportsTab && wasActive) reportsTab.classList.remove('active');
+      window.applyFilters(false);
+      if(reportsTab && wasActive) reportsTab.classList.add('active');
+    }
+    const ms = Math.round(((performance.now ? performance.now() : Date.now()) - t0));
+    window.ACTLoadingPerf = window.ACTLoadingPerf || {};
+    window.ACTLoadingPerf.lastLoad = { mode:'responsive-active-rep-scope', ms, accounts:(window.mergedAccounts||[]).length, selectedReps:(result.selectedReps||[]).length, at:new Date().toISOString() };
+    toast(`Loaded ${(window.mergedAccounts||[]).length.toLocaleString()} accounts for ${(result.selectedReps||[]).length.toLocaleString()} selected reps.`, 'success');
+    return result;
+  }
+
+  function optionRowsForScope(id){
+    const counts = new Map();
+    (window.employeesData || []).forEach(e => {
+      const r = repName(e);
+      if(!r || !employeeMatches(e,id)) return;
+      const v = fieldVal(e,id);
+      if(v) counts.set(v,(counts.get(v)||0)+1);
+    });
+    return Array.from(counts.entries()).sort((a,b)=>String(a[0]).localeCompare(String(b[0])));
+  }
+
+  function patchScopeUI(){
+    const F = window.ACTFriendlyScopeHome;
+    ensureActiveDefault(false);
+    if(F && !F.__activeRepScopePatchedV3){
+      F.__activeRepScopePatchedV3 = true;
+      const oldOpen = F.open;
+      F.open = function(){ ensureActiveDefault(false); F.active = F.active || 'cr714_employeename'; return oldOpen ? oldOpen.apply(this, arguments) : F.render(); };
+      F.setCategory = function(id){ F.active=id; F.term=''; F.render(); };
+      F.renderStats = function(){
+        const reps = selectedRepSet();
+        const touched = hasAnyScope();
+        const el = document.getElementById('act-scope-stats');
+        if(!el) return;
+        el.innerHTML = `<div class="act-stat"><div class="v">${touched?reps.size.toLocaleString():'--'}</div><div class="l">Selected Reps</div></div><div class="act-stat"><div class="v">${fs('statecode').has('Active')?'Active':'Mixed'}</div><div class="l">Default Status</div></div><div class="act-stat"><div class="v">${EF.filter(x=>fs(x).size).length}</div><div class="l">Fields Selected</div></div><div class="act-stat"><div class="v">${(window.mergedAccounts||[]).length ? (window.mergedAccounts||[]).length.toLocaleString() : '--'}</div><div class="l">Loaded Accounts</div></div>`;
+      };
+      F.renderOptions = function(){
+        ensureActiveDefault(false);
+        const CATS=[
+          {id:'cr714_managerassigned', label:'Manager', icon:'fa-user-shield', hint:'Best starting point for most leaders.'},
+          {id:'cr714_srmanager', label:'Sr Manager', icon:'fa-user-tie', hint:'Use for a senior-manager rollup.'},
+          {id:'cr714_supervisors', label:'Supervisor', icon:'fa-sitemap', hint:'Narrow to a supervisor group.'},
+          {id:'cr714_departmentname', label:'Department', icon:'fa-building', hint:'Filter to one department or division.'},
+          {id:'cr714_employeename', label:'Rep Name', icon:'fa-users', hint:'Choose reps directly.'},
+          {id:'statecode', label:'Rep Status', icon:'fa-toggle-on', hint:'Defaults to Active.'}
+        ];
+        const active = CATS.find(x=>x.id===F.active) || CATS[4];
+        const rows = optionRowsForScope(active.id).filter(([v]) => !F.term || norm(v).includes(norm(F.term)));
+        const selected = fs(active.id);
+        const h = document.getElementById('act-option-head');
+        if(h) h.innerHTML = `<b><i class="fas ${active.icon} mr-1"></i>${esc(active.label)}</b><p>${esc(active.hint)} ${selected.size?selected.size+' selected.':'Nothing selected in this category yet.'}</p>`;
+        const search = document.getElementById('act-scope-search');
+        if(search && search.value !== (F.term || '')) search.value = F.term || '';
+        const el = document.getElementById('act-options');
+        if(!el) return;
+        el.innerHTML = rows.length ? rows.map(([v,count]) => `<label class="act-row act-opt" data-val="${esc(v)}"><input type="checkbox" value="${esc(v)}" ${selected.has(v)?'checked':''} onchange="window.ACTFriendlyScopeHome.update('${active.id}',this.value,this.checked)"><span title="${esc(v)}">${esc(v)}</span><span class="c">${count.toLocaleString()} reps</span></label>`).join('') : `<div class="act-empty"><i class="fas fa-filter-circle-xmark text-3xl opacity-40"></i><div>No options match the current selections.</div></div>`;
+      };
+      F.renderAudit = function(){
+        const reps = selectedRepSet();
+        const el = document.getElementById('act-audit');
+        if(!el) return;
+        const parts = EF.filter(id=>fs(id).size).map(id => `${(window.FILTER_CONFIG||[]).find(c=>c.id===id)?.label || id}: ${fs(id).size}`);
+        el.innerHTML = `<div class="act-audit-card"><b>Selected Reps</b><div>${reps.size.toLocaleString()} reps match the current scope.</div></div><div class="act-audit-card"><b>RepName Dropdown Match</b><div>The Rep Name dropdown and selected-rep load scope now use the same employee filter function.</div></div><div class="act-audit-card"><b>Scope</b><div>${esc(parts.join(' • ') || 'Active reps')}</div></div>`;
+        const foot = document.getElementById('act-foot-note');
+        if(foot) foot.innerHTML = `<i class="fas fa-check-circle mr-1" style="color:var(--accent-success)"></i>Selected Reps: ${reps.size.toLocaleString()} (${esc(parts.join(' • ') || 'Rep Status: Active')})`;
+        const btn = document.getElementById('act-load-btn');
+        if(btn) btn.classList.remove('act-load-disabled');
+        const est = document.getElementById('sniper-estimate'); if(est) est.innerText = `${reps.size.toLocaleString()} selected reps`;
+        const sum = document.getElementById('scoped-popup-selected-summary'); if(sum) sum.innerText = `Selected Reps: ${reps.size.toLocaleString()}`;
+      };
+      F.update = function(id,value,checked){ checked ? fs(id).add(value) : fs(id).delete(value); F.term=''; F.render(); };
+      F.clearAll = function(){ EF.forEach(id=>fs(id).clear()); if(window.massFilteredIds) window.massFilteredIds.clear(); ensureActiveDefault(true); F.active='cr714_employeename'; F.term=''; F.render(); toast('Scope reset to Active reps.','info'); };
+      F.load = function(){ ensureActiveDefault(false); return beginScopedLoadResponsive(false); };
+    }
+  }
+
+  function patchBuildFilters(){
+    if(typeof window.buildFilters !== 'function' || window.buildFilters.__activeRepScopePatchedV3) return;
+    const oldBuild = window.buildFilters;
+    window.buildFilters = function(){
+      const result = oldBuild.apply(this, arguments);
+      const qReps = window.__ACT_SCOPE_SELECTED_REPS || (window.__ACT_QUERY_SNIPER && window.__ACT_QUERY_SNIPER.selectedRepSet) || selectedRepSet();
+      const repFilter = window.activeFilters && window.activeFilters['cr714_employeename'];
+      const wrap = document.getElementById('ms-wrap-cr714_employeename');
+      if(wrap){
+        const opts = Array.from(new Set((window.mergedAccounts||[]).map(a=>clean(a.rep)).filter(r=>r && (!qReps || !qReps.size || qReps.has(r))))).sort();
+        const drop = document.getElementById('ms-drop-cr714_employeename');
+        if(drop){
+          const search = drop.querySelector('.multiselect-search')?.outerHTML || `<div class="multiselect-search"><input type="text" placeholder="Search..." oninput="window.debouncedFilterDropdown('cr714_employeename', this.value)" class="w-full"></div>`;
+          drop.innerHTML = search + `<label class="multiselect-option select-all-opt" style="color: var(--primary);"><input type="checkbox" onchange="window.toggleAllFilter('cr714_employeename', this)"> <span>Select All</span></label>` + opts.map(val => `<label class="multiselect-option ms-opt-cr714_employeename" data-val="${esc(val)}"><input type="checkbox" value="${esc(val)}" ${repFilter&&repFilter.has(val)?'checked':''} onchange="window.updateFilterState('cr714_employeename', this)"><span class="truncate">${esc(val)}</span></label>`).join('');
+        }
+        const span = wrap.querySelector('.multiselect-header span');
+        if(span) span.innerText = qReps && qReps.size ? `Rep Name (${qReps.size} scoped)` : 'Rep Name';
+      }
+      return result;
+    };
+    window.buildFilters.__activeRepScopePatchedV3 = true;
+  }
+
+  window.getScopedRepsFromPreFilters = selectedRepSet;
+  window.getScopedODataFilter = function(table){
+    const Q = window.__ACT_QUERY_SNIPER || {};
+    if(!Q.active || Q.allowWideOpen) return '';
+    const ids = Array.from(Q.selectedMassIds || window.massFilteredIds || []).map(acct).filter(Boolean).slice(0,80);
+    const reps = Array.from(Q.selectedRepSet || selectedRepSet()).sort().slice(0,REP_CHUNK);
+    return buildFilter(table,reps,ids);
+  };
+  window.fetchAllData = responsiveFetchAllData;
+  window.fetchAllData.__activeRepResponsiveLoadV3 = true;
+  window.beginScopedLoad = beginScopedLoadResponsive;
+  window.beginScopedLoad.__activeRepResponsiveLoadV3 = true;
+
+  function boot(){ ensureActiveDefault(false); patchScopeUI(); patchBuildFilters(); }
+  boot();
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  setTimeout(boot,0); setTimeout(boot,250); setTimeout(boot,1200);
+  console.info('ACT Active Rep default + responsive scoped account load V3 installed.');
+})();
+/* === END COPILOT PATCH: ACTIVE-REP SCOPE + RESPONSIVE ACCOUNT LOAD V3 === */
+</script>
+
 </body>
 </html>
