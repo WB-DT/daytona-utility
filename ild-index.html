@@ -15982,13 +15982,13 @@ const prevRenderReports = window.renderReports;
       label:'Account Management', short:'AM', plural:'cr714_accountmanagementdatasets', idField:'cr714_accountmanagementdatasetid', repField:'cr714_rep', badge:'badge-am'
     },
     cr714_cadencedataset: {
-      label:'Cadence', short:'Cadence', plural:'cr714_cadencedatasets', idField:'cr714_cadencedatasetid', repField:'cr714_retentionrep', badge:'badge-cad'
+      label:'Cadence', short:'CAD', plural:'cr714_cadencedatasets', idField:'cr714_cadencedatasetid', repField:'cr714_retentionrep', badge:'badge-cad'
     },
     cr714_prospectingdataset: {
-      label:'Prospecting', short:'Prospecting', plural:'cr714_prospectingdatasets', idField:'cr714_prospectingdatasetid', repField:'cr714_repassigned', badge:'badge-pro'
+      label:'Prospecting', short:'PRO', plural:'cr714_prospectingdatasets', idField:'cr714_prospectingdatasetid', repField:'cr714_repassigned', badge:'badge-pro'
     },
     cr714_louisebrowndataset: {
-      label:'Louise Brown', short:'Louise Brown', plural:'cr714_louisebrowndatasets', idField:'cr714_louisebrowndatasetid', repField:'cr714_assignedrep', badge:'badge-lb'
+      label:'Louise Brown', short:'LB', plural:'cr714_louisebrowndatasets', idField:'cr714_louisebrowndatasetid', repField:'cr714_assignedrep', badge:'badge-lb'
     }
   };
   const ASSIGNMENT_FIELDS = ['cr714_rep','cr714_retentionrep','cr714_repassigned','cr714_assignedrep'];
@@ -17977,5 +17977,387 @@ const prevRenderReports = window.renderReports;
 })();
 </script>
 <!-- === COPILOT PATCH: SCOPED WORKSPACE REPAIR + LOGISTICS CORE FIELDS 2026-07-09 END === -->
+
+<script>
+/* === COPILOT PATCH: LOADING PERFORMANCE PASS V1 (2026-07-09) ===
+   Goals:
+   1) Make scoped load reach usable dashboard faster.
+   2) Defer non-critical logistics augmentation and report fact rebuild to background.
+   3) Reduce duplicate token/fetch work and high-frequency loader DOM churn.
+   4) Keep full data integrity: deferred work still completes after first paint.
+*/
+(function(){
+  if(window.__ACT_LOADING_PERF_PASS_V1__) return;
+  window.__ACT_LOADING_PERF_PASS_V1__ = true;
+
+  const PERF = window.ACTLoadingPerf = window.ACTLoadingPerf || {};
+  PERF.lastLoad = PERF.lastLoad || null;
+  PERF.backgroundPromise = null;
+  PERF.backgroundState = 'idle';
+
+  function now(){ return (performance && performance.now) ? performance.now() : Date.now(); }
+  function wall(){ return Date.now ? Date.now() : new Date().getTime(); }
+  function clean(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim(); }
+  function idle(fn, timeout){
+    if(typeof requestIdleCallback === 'function') return requestIdleCallback(fn, { timeout: timeout || 1200 });
+    return setTimeout(fn, 80);
+  }
+  function ensureSet(v){ return v instanceof Set ? v : new Set(v || []); }
+  function loader(show){ const el=document.getElementById('global-loader'); if(el) el.style.display = show ? 'flex' : 'none'; }
+  function toast(msg,type){ try{ window.showToast && window.showToast(msg,type||'info'); }catch(e){} }
+
+  function buildIndexes(){
+    const accounts = window.mergedAccounts || [];
+    window.__actAccountById = new Map();
+    window.__actAccountSearchIndex = new Map();
+    accounts.forEach(a=>{
+      const id = clean(a.cr714_id || a.cr714_accountnum || a.accountId).toUpperCase();
+      if(id) window.__actAccountById.set(id, a);
+      a.__actModMs = a.modifiedon ? new Date(a.modifiedon).getTime() || 0 : 0;
+      a.__actHelpOpen = !!((a.isHelp || a.isClose || ['HELP REQUESTED','CLOSE REQUESTED'].includes(clean(a.helpStatus).toUpperCase())) && !clean(a.managerNotes).toUpperCase().includes('[RESOLVED]') && !['RESOLVED','CLEAR'].includes(clean(a.helpStatus).toUpperCase()));
+      a.__actSearch = [a.cr714_id, a.company, a.rep, a.action].map(clean).join(' ').toLowerCase();
+      if(id) window.__actAccountSearchIndex.set(id, a.__actSearch);
+    });
+  }
+  PERF.buildIndexes = buildIndexes;
+
+  // Cache / coalesce token requests during load bursts.
+  if(typeof window.getToken === 'function' && !window.getToken.__actPerfTokenCache){
+    const previousGetToken = window.getToken;
+    const tokenCache = new Map();
+    const inflight = new Map();
+    window.getToken = async function(scopeUrl){
+      const key = scopeUrl || 'default';
+      const cached = tokenCache.get(key);
+      if(cached && cached.expiresAt > wall() + 60000) return cached.token;
+      if(inflight.has(key)) return inflight.get(key);
+      const p = previousGetToken.apply(this, arguments).then(token=>{
+        tokenCache.set(key, { token, expiresAt: wall() + 28 * 60 * 1000 });
+        inflight.delete(key);
+        return token;
+      }).catch(err=>{ inflight.delete(key); throw err; });
+      inflight.set(key, p);
+      return p;
+    };
+    window.getToken.__actPerfTokenCache = true;
+  }
+
+  // Throttle loader updates to avoid hundreds of synchronous DOM writes during paginated fetches.
+  if(typeof window.updateLoader === 'function' && !window.updateLoader.__actPerfThrottle){
+    const previousUpdateLoader = window.updateLoader;
+    let lastFlush = 0;
+    let pending = null;
+    let timer = null;
+    function flush(){
+      if(!pending) return;
+      const args = pending; pending = null; timer = null; lastFlush = now();
+      previousUpdateLoader.apply(window, args);
+    }
+    window.updateLoader = function(pct, text, count){
+      pending = arguments;
+      const urgent = pct === 100 || pct === 0 || /failed|error|synced|complete/i.test(String(text||''));
+      if(urgent || now() - lastFlush > 180) flush();
+      else if(!timer) timer = setTimeout(flush, 180);
+    };
+    window.updateLoader.__actPerfThrottle = true;
+  }
+
+  // Coalesce identical concurrent GET requests. This mostly helps repeated metadata / D365 lookups.
+  if(window.fetch && !window.fetch.__actPerfDedupe){
+    const previousFetch = window.fetch.bind(window);
+    const inflightFetches = new Map();
+    window.fetch = function(resource, options){
+      const method = clean((options && options.method) || (resource && resource.method) || 'GET').toUpperCase();
+      const url = typeof resource === 'string' ? resource : (resource && resource.url) || '';
+      const canDedupe = method === 'GET' && /\/api\/data\/v9\.2\//i.test(url) && !/\$skiptoken=/i.test(url);
+      if(!canDedupe) return previousFetch(resource, options);
+      const key = url;
+      if(inflightFetches.has(key)) return inflightFetches.get(key).then(r=>r.clone());
+      const p = previousFetch(resource, options).finally(()=>inflightFetches.delete(key));
+      inflightFetches.set(key, p);
+      return p.then(r=>r.clone());
+    };
+    window.fetch.__actPerfDedupe = true;
+  }
+
+  // Lightweight first-paint scoped loader. It temporarily skips expensive non-critical steps inside fetchAllData,
+  // then restores and runs them in the background after the dashboard is usable.
+  function installFastScopedLoad(){
+    if(typeof window.beginScopedLoad !== 'function' || window.beginScopedLoad.__actPerfFastScope) return;
+    const originalBeginScopedLoad = window.beginScopedLoad;
+    const originalFetchAllData = window.fetchAllData;
+
+    async function fastBeginScopedLoad(wide){
+      const hasSelectedScope = Object.keys(window.activeFilters||{}).some(id => window.activeFilters[id] && window.activeFilters[id].size) || !!(window.massFilteredIds && window.massFilteredIds.size);
+      if(!wide && !hasSelectedScope){
+        if(typeof window.buildScopedPopupFilters === 'function') window.buildScopedPopupFilters();
+        toast('Pick at least one scope filter first.','warning');
+        return;
+      }
+      if(typeof originalFetchAllData !== 'function') return originalBeginScopedLoad.apply(this, arguments);
+
+      const t0 = now();
+      const Q = window.__ACT_QUERY_SNIPER = window.__ACT_QUERY_SNIPER || { active:false, allowWideOpen:false, selectedRepSet:new Set(), selectedMassIds:new Set() };
+      Q.active = true;
+      Q.allowWideOpen = !!wide;
+      Q.selectedRepSet = wide ? new Set() : (typeof window.getScopedRepsFromPreFilters === 'function' ? window.getScopedRepsFromPreFilters() : new Set());
+      Q.selectedMassIds = ensureSet(window.massFilteredIds);
+
+      const modal = document.getElementById('sniper-load-modal');
+      if(modal) modal.style.display = 'none';
+      loader(true);
+      if(window.updateLoader) window.updateLoader(12, wide ? 'Starting wide load...' : 'Loading account slice...', 0);
+      // Prevent stale report facts from a prior scope while non-critical facts rebuild in the background.
+      window.reportingFacts = [];
+      window.reportingDims = { reps: [], actions: [], months: [] };
+      window.reportsDirty = true;
+
+      const originalLogistics = window.fetchScopedLogisticsHistory;
+      const originalBuildFacts = window.buildReportingFactsAsync;
+      let didDeferLogistics = false;
+      let didDeferFacts = false;
+
+      if(typeof originalLogistics === 'function'){
+        window.fetchScopedLogisticsHistory = async function(){ didDeferLogistics = true; window.__actLogisticsDeferred = true; return []; };
+      }
+      if(typeof originalBuildFacts === 'function'){
+        window.buildReportingFactsAsync = async function(){ didDeferFacts = true; window.__actFactsDeferred = true; return window.reportingFacts || []; };
+      }
+
+      try{
+        await originalFetchAllData.call(window, { force:true, scoped:true, fastInitial:true });
+      }catch(err){
+        console.error('Fast scoped load failed, retrying original path:', err);
+        window.fetchScopedLogisticsHistory = originalLogistics;
+        window.buildReportingFactsAsync = originalBuildFacts;
+        return originalBeginScopedLoad.apply(this, arguments);
+      }finally{
+        window.fetchScopedLogisticsHistory = originalLogistics;
+        window.buildReportingFactsAsync = originalBuildFacts;
+      }
+
+      buildIndexes();
+      if(typeof window.populateDynamicActionSet === 'function') window.populateDynamicActionSet();
+      if(typeof window.buildFilters === 'function') window.buildFilters();
+      if(typeof window.applyFilters === 'function') window.applyFilters(false);
+      window.reportsDirty = true;
+      loader(false);
+      const loadMs = Math.round(now() - t0);
+      PERF.lastLoad = { mode:'fast-scoped', ms:loadMs, accounts:(window.mergedAccounts||[]).length, at:new Date().toISOString(), deferredLogistics:didDeferLogistics, deferredFacts:didDeferFacts };
+      toast(`Loaded ${(window.mergedAccounts||[]).length.toLocaleString()} accounts. Finishing history/report prep in the background...`, 'success');
+
+      // Background completion: logistics + reporting facts + cache. Runs after first paint.
+      PERF.backgroundState = 'queued';
+      PERF.backgroundPromise = new Promise(resolve=>{
+        idle(async ()=>{
+          PERF.backgroundState = 'running';
+          try{
+            const token = typeof window.getToken === 'function' ? await window.getToken() : null;
+            if(didDeferLogistics && typeof originalLogistics === 'function' && token){
+              if(window.updateLoader) window.updateLoader(82, 'Finishing Logistics history in background...', (window.totalLoadedRecords||0));
+              await originalLogistics.call(window, token);
+            }
+            if(typeof originalBuildFacts === 'function'){
+              await originalBuildFacts.call(window);
+            }else if(typeof window.buildReportingFacts === 'function'){
+              window.buildReportingFacts();
+            }
+            buildIndexes();
+            if(window.ACTProduction && typeof window.ACTProduction.saveCache === 'function') window.ACTProduction.saveCache();
+            window.reportsDirty = false;
+            if(document.getElementById('tab-reports') && document.getElementById('tab-reports').classList.contains('active') && typeof window.renderReports === 'function') window.renderReports();
+            PERF.backgroundState = 'complete';
+            toast('Background history/report prep complete.', 'success');
+          }catch(bgErr){
+            PERF.backgroundState = 'failed';
+            console.warn('Background load completion failed:', bgErr);
+            toast('Background history/report prep had an issue. Dashboard data is still loaded.', 'warning');
+          }finally{
+            resolve(PERF.backgroundState);
+          }
+        }, 1600);
+      });
+      return { accounts: window.mergedAccounts || [], fast:true, background: PERF.backgroundPromise };
+    }
+
+    fastBeginScopedLoad.__actPerfFastScope = true;
+    fastBeginScopedLoad.__actPerfOriginal = originalBeginScopedLoad;
+    window.beginScopedLoad = fastBeginScopedLoad;
+  }
+
+  // If user opens Reports while the background completion is still running, show a clear message and let it finish.
+  if(typeof window.switchTab === 'function' && !window.switchTab.__actPerfReportsWait){
+    const previousSwitchTab = window.switchTab;
+    window.switchTab = function(id){
+      const result = previousSwitchTab.apply(this, arguments);
+      if(id === 'reports' && PERF.backgroundPromise && PERF.backgroundState === 'running'){
+        loader(true);
+        if(window.updateLoader) window.updateLoader(78, 'Finishing report facts...', (window.reportingFacts||[]).length);
+        PERF.backgroundPromise.finally(()=>loader(false));
+      }
+      return result;
+    };
+    window.switchTab.__actPerfReportsWait = true;
+  }
+
+  // Build useful indexes after any non-scoped forced refresh too.
+  if(typeof window.fetchAllData === 'function' && !window.fetchAllData.__actPerfIndexAfterLoad){
+    const previousFetchAllData = window.fetchAllData;
+    window.fetchAllData = async function(){
+      const out = await previousFetchAllData.apply(this, arguments);
+      buildIndexes();
+      return out;
+    };
+    window.fetchAllData.__actPerfIndexAfterLoad = true;
+  }
+
+  // Keep the latest friendly scope overrides active, then install fast scope once late patches have settled.
+  function lateInstall(){
+    try{
+      if(window.ACTFriendlyScopeHome){
+        window.openScopedLoadPrompt = window.ACTFriendlyScopeHome.open;
+        window.buildScopedPopupFilters = window.ACTFriendlyScopeHome.render;
+        window.forceOpenScopedLoadPrompt = window.ACTFriendlyScopeHome.open;
+      }
+      installFastScopedLoad();
+    }catch(e){ console.warn('Performance patch late install skipped:', e); }
+  }
+  lateInstall();
+  setTimeout(lateInstall, 0);
+  setTimeout(lateInstall, 400);
+  setTimeout(lateInstall, 1200);
+
+  console.info('ACT loading performance pass installed: fast scoped first-paint, deferred logistics/reporting, token/fetch coalescing, loader throttling.');
+})();
+/* === END COPILOT PATCH: LOADING PERFORMANCE PASS V1 === */
+</script>
+
+
+<script>
+/* === COPILOT PATCH: LEFT CARD DATASET ABBREVIATIONS V1 (2026-07-09) ===
+   Forces the left-side account cards to show compact source badges only:
+   Account Management -> AM, Cadence -> CAD, Prospecting -> PRO, Louise Brown -> LB, Logistics -> LOG.
+*/
+(function(){
+  if(window.__ACT_LEFT_CARD_DATASET_ABBREVIATIONS_V1__) return;
+  window.__ACT_LEFT_CARD_DATASET_ABBREVIATIONS_V1__ = true;
+
+  const MAP = new Map([
+    ['account management','AM'], ['accountmanagement','AM'], ['am','AM'], ['cr714_accountmanagementdataset','AM'], ['cr714_accountmanagementdatasets','AM'],
+    ['cadence','CAD'], ['cad','CAD'], ['cr714_cadencedataset','CAD'], ['cr714_cadencedatasets','CAD'],
+    ['prospecting','PRO'], ['prospect','PRO'], ['pro','PRO'], ['cr714_prospectingdataset','PRO'], ['cr714_prospectingdatasets','PRO'],
+    ['louise brown','LB'], ['louisebrown','LB'], ['lb','LB'], ['cr714_louisebrowndataset','LB'], ['cr714_louisebrowndatasets','LB'],
+    ['logistics','LOG'], ['log','LOG'], ['cr714_logisticslog_2','LOG'], ['cr714_logisticslog_2s','LOG'], ['cr714_logistics','LOG'],
+    ['fact table','FACT'], ['fact','FACT'], ['cr714_dt_act_fctbl','FACT'], ['cr714_dt_act_fctbls','FACT'],
+    ['manager note','MGR'], ['manager notes','MGR']
+  ]);
+
+  function clean(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim(); }
+  function key(v){ return clean(v).toLowerCase(); }
+  function abbr(v){
+    const raw = clean(v);
+    if(!raw) return '';
+    const k = key(raw);
+    if(MAP.has(k)) return MAP.get(k);
+    if(/account\s*management|accountmanagement/i.test(raw)) return 'AM';
+    if(/cadence/i.test(raw)) return 'CAD';
+    if(/prospect/i.test(raw)) return 'PRO';
+    if(/louise\s*brown|louisebrown/i.test(raw)) return 'LB';
+    if(/logistics/i.test(raw)) return 'LOG';
+    return raw.length > 4 ? raw.split(/\s+/).map(x=>x[0]).join('').slice(0,4).toUpperCase() : raw.toUpperCase();
+  }
+
+  window.ACTDatasetAbbrev = abbr;
+
+  function normalizeSourceObjects(){
+    (window.mergedAccounts || []).forEach(a => {
+      (a.sources || []).forEach(s => {
+        const short = abbr(s.type || s.table || s.sourceDataset || s.SourceDataset);
+        if(short){
+          s._fullType = s._fullType || s.type || s.table || '';
+          s.type = short;
+          s.shortType = short;
+        }
+      });
+    });
+  }
+
+  function fixBadges(root){
+    const scope = root || document.getElementById('account-list-container') || document;
+    if(!scope) return;
+    scope.querySelectorAll('.badge-ds').forEach(b => {
+      const full = clean(b.textContent);
+      const short = abbr(full);
+      if(short && full !== short){
+        b.textContent = short;
+        b.title = full;
+        b.setAttribute('aria-label', full + ' source');
+      }
+      b.classList.add('act-source-badge-short');
+    });
+  }
+
+  function installStyle(){
+    if(document.getElementById('act-left-card-abbrev-style')) return;
+    const st = document.createElement('style');
+    st.id = 'act-left-card-abbrev-style';
+    st.textContent = `
+      #account-list-container .badge-ds.act-source-badge-short,
+      #account-list-container .badge-ds{
+        min-width: 26px!important;
+        text-align: center!important;
+        white-space: nowrap!important;
+        max-width: 44px!important;
+        overflow: hidden!important;
+        text-overflow: clip!important;
+        letter-spacing: .055em!important;
+        font-size: 8px!important;
+        padding: 2px 5px!important;
+      }
+      #account-list-container .badge-ds.badge-lb{max-width:32px!important;}
+    `;
+    document.head.appendChild(st);
+  }
+
+  function installRenderWrapper(){
+    if(typeof window.renderAccountList !== 'function' || window.renderAccountList.__actDatasetAbbrevWrapped) return;
+    const previous = window.renderAccountList;
+    const wrapped = function(){
+      normalizeSourceObjects();
+      const result = previous.apply(this, arguments);
+      fixBadges(document.getElementById('account-list-container'));
+      return result;
+    };
+    wrapped.__actDatasetAbbrevWrapped = true;
+    wrapped.__actPreviousRenderAccountList = previous;
+    window.renderAccountList = wrapped;
+  }
+
+  function installObserver(){
+    const c = document.getElementById('account-list-container');
+    if(!c || c.__actDatasetAbbrevObserver) return;
+    c.__actDatasetAbbrevObserver = new MutationObserver(() => fixBadges(c));
+    c.__actDatasetAbbrevObserver.observe(c, { childList:true, subtree:true, characterData:true });
+  }
+
+  function boot(){
+    installStyle();
+    normalizeSourceObjects();
+    installRenderWrapper();
+    installObserver();
+    fixBadges(document.getElementById('account-list-container'));
+  }
+
+  boot();
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  setTimeout(boot, 0);
+  setTimeout(boot, 400);
+  setTimeout(boot, 1200);
+  setInterval(boot, 3500);
+  console.info('ACT left-card dataset abbreviations installed.');
+})();
+/* === END COPILOT PATCH: LEFT CARD DATASET ABBREVIATIONS V1 === */
+</script>
+
 </body>
 </html>
