@@ -18359,5 +18359,283 @@ const prevRenderReports = window.renderReports;
 /* === END COPILOT PATCH: LEFT CARD DATASET ABBREVIATIONS V1 === */
 </script>
 
+
+<script>
+/* === COPILOT PATCH: SQL-SPEED LAZY FACT TABLE V1 (2026-07-09) ===
+   The previous path preloaded cr714_dt_act_fctbls for every scoped account via huge OR chunks.
+   That freezes the browser and makes Dataverse behave unlike SQL. This pass changes the UX model:
+   - Initial scoped load = account list only. No all-scope fact-table preload.
+   - Fact history = fetched on-demand for the selected account with a highly selective predicate.
+   - Reports do not trigger all-scope fact scans unless a deliberate future server/API endpoint is added.
+*/
+(function(){
+  if(window.__ACT_SQL_SPEED_LAZY_FACT_TABLE_V1__) return;
+  window.__ACT_SQL_SPEED_LAZY_FACT_TABLE_V1__ = true;
+
+  const FACT_TABLE = 'cr714_dt_act_fctbls';
+  const FACT_SELECT = [
+    'cr714_dt_act_fctblid','cr714_activitynaturalkey','cr714_accountnumber','cr714_companyname','cr714_accountrep','cr714_repfromnote',
+    'cr714_activitydate','createdon','modifiedon','cr714_activitytype','cr714_effectiveaction','cr714_action','cr714_actionfromnotetag',
+    'cr714_actionmessage','cr714_emaildate','cr714_emailstatus','cr714_emailtemplate','cr714_notedate','cr714_notetext','cr714_notetextraw','cr714_managernotes','cr714_sourcetype'
+  ].join(',');
+  const FACT_TOP = 350; // tight cap keeps per-account history fast and bounded
+
+  function clean(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim(); }
+  function od(v){ return String(v == null ? '' : v).replace(/'/g,"''"); }
+  function acctKey(v){ return clean(v).toUpperCase(); }
+  function dateOf(r){ return r && (r.cr714_activitydate || r.cr714_notedate || r.cr714_emaildate || r.modifiedon || r.createdon) || ''; }
+  function textOf(r){ return clean(r && (r.cr714_notetext || r.cr714_notetextraw || r.cr714_managernotes || r.cr714_actionmessage || r.cr714_emailstatus) || ''); }
+  function typeOf(r){
+    const t = clean(r && (r.cr714_activitytype || r.cr714_sourcetype) || 'Activity');
+    if(r && (r.cr714_emaildate || r.cr714_emailstatus || r.cr714_emailtemplate || /email/i.test(t))) return 'Email';
+    if(r && r.cr714_managernotes) return 'Manager Response';
+    if(/note/i.test(t) || (r && (r.cr714_notetext || r.cr714_notetextraw))) return 'Note';
+    return t || 'Activity';
+  }
+  function eventFromFactRow(r){
+    const acct = acctKey(r.cr714_accountnumber);
+    const tt = typeOf(r);
+    return {
+      'Note Date': dateOf(r) || null,
+      cr714_accountnum: acct,
+      cr714_accountname: clean(r.cr714_companyname),
+      cr714_rep: clean(r.cr714_repfromnote || r.cr714_accountrep || 'Unknown'),
+      cr714_action: clean(r.cr714_effectiveaction || r.cr714_action || r.cr714_actionfromnotetag || 'None'),
+      SourceDataset: clean(r.cr714_sourcetype || 'Fact Table'),
+      EventRep: clean(r.cr714_repfromnote || r.cr714_accountrep || 'Unknown'),
+      'Action at time of Note': clean(r.cr714_effectiveaction || r.cr714_action || r.cr714_actionfromnotetag || 'None'),
+      NoteSegment: /email/i.test(tt) ? null : textOf(r),
+      EmailSubject: /email/i.test(tt) ? clean(r.cr714_emailtemplate || r.cr714_emailstatus || '') : null,
+      EmailSegment: /email/i.test(tt) ? textOf(r) : null,
+      EmailDate: r.cr714_emaildate || (/email/i.test(tt) ? dateOf(r) : null),
+      LastModified: r.modifiedon || r.createdon || dateOf(r) || null,
+      Count: 1,
+      _recordRef: clean(r.cr714_dt_act_fctblid || r.cr714_activitynaturalkey),
+      _entitySet: FACT_TABLE,
+      _rawSource: r,
+      _touchType: tt,
+      _eventKind: tt
+    };
+  }
+  function setLoader(show, pct, text, count){
+    const l=document.getElementById('global-loader');
+    if(l) l.style.display = show ? 'flex' : 'none';
+    if(typeof window.updateLoader === 'function') window.updateLoader(pct == null ? null : pct, text || null, count);
+  }
+  function toast(msg,type){ try{ window.showToast && window.showToast(msg,type||'info'); }catch(e){} }
+  function uniqAccounts(){ return Array.from(new Set((window.mergedAccounts||[]).map(a=>acctKey(a.cr714_id || a.cr714_accountnum)).filter(Boolean))).sort(); }
+  function buildIndexes(){
+    window.__actFactRows = window.__actFactRows || [];
+    window.__actFactRowsByAccount = window.__actFactRowsByAccount || new Map();
+    window.__ACT_REPORT_SCOPE_ACCOUNT_IDS = uniqAccounts();
+    window.__actFactLoadStats = window.__actFactLoadStats || { mode:'lazy-per-account', loadedAt:new Date().toISOString(), accounts:window.__ACT_REPORT_SCOPE_ACCOUNT_IDS.length, chunks:0, fetched:0, accepted:0, deduped:0, eventRows:(window.unifiedEventRows||[]).length };
+  }
+
+  async function accountListOnlyFetchAllData(options={}){
+    const loader=document.getElementById('global-loader');
+    if(loader && !options.silent) loader.style.display='flex';
+    window.totalLoadedRecords=0;
+    window.mergedAccounts=[];
+    window.teamFilteredAccounts=[];
+    window.unifiedEventRows=[];
+    window.__actFactRows=[];
+    window.__actFactRowsByAccount=new Map();
+    window.__actFactReportingLoaded=false;
+    window.__actFactReportingRows=[];
+    window.reportingFacts=[];
+    window.reportingDims={reps:[],actions:[],months:[]};
+    try{
+      if(window.updateLoader) window.updateLoader(12,'Loading scoped accounts only...',0);
+      const token = typeof window.getToken === 'function' ? await window.getToken() : null;
+      if(!token) throw new Error('No Dataverse token available.');
+      const globalAccountMap=new Map();
+      const amSelect='cr714_accountnum,cr714_accountname,cr714_rep,cr714_action,modifiedon,createdon,cr714_help,cr714_actionemailsent,cr714_accountmanagementdatasetid,cr714_address,cr714_namemost,cr714_phone,cr714_emailmost,cr714_actionmessage,cr714_managernotes';
+      const cadSelect='cr714_accountnum,cr714_company,cr714_retentionrep,cr714_action,modifiedon,createdon,cr714_recordstatus,cr714_cadencedatasetid,cr714_intro,cr714_billingaddress,cr714_namemost,cr714_primaryphone,cr714_emailmost,cr714_actionmessage,cr714_managernotes';
+      const lbSelect='cr714_accountnum,cr714_accountname,cr714_assignedrep,cr714_action,modifiedon,createdon,cr714_help,cr714_actionemailsent,cr714_louisebrowndatasetid,cr714_intro,cr714_address,cr714_namemost,cr714_phone,cr714_emaillatest,cr714_actionmessage,cr714_notesfr';
+      await Promise.all([
+        window.fetchPaginatedData('cr714_accountmanagementdatasets', amSelect, token, globalAccountMap, 'AM'),
+        window.fetchPaginatedData('cr714_cadencedatasets', cadSelect, token, globalAccountMap, 'CAD'),
+        window.fetchPaginatedData('cr714_louisebrowndatasets', lbSelect, token, globalAccountMap, 'LB')
+      ]);
+      window.mergedAccounts=Array.from(globalAccountMap.values());
+      // Keep badges abbreviated even if older code still reads source.type.
+      (window.mergedAccounts||[]).forEach(a => (a.sources||[]).forEach(s => {
+        if(window.ACTDatasetAbbrev) s.type = window.ACTDatasetAbbrev(s.type || s.table);
+      }));
+      window.teamFilteredAccounts=window.mergedAccounts.slice();
+      buildIndexes();
+      if(typeof window.populateDynamicActionSet==='function') window.populateDynamicActionSet();
+      if(typeof window.initDateSlider==='function') { try{window.initDateSlider();}catch(_){} }
+      if(typeof window.buildReportingFactsAsync==='function'){
+        // Account-level facts only. unifiedEventRows is empty by design at first paint.
+        await window.buildReportingFactsAsync();
+      }else if(typeof window.buildReportingFacts==='function') window.buildReportingFacts();
+      window.reportsDirty=true;
+      if(window.updateLoader) window.updateLoader(100,`Loaded ${window.mergedAccounts.length.toLocaleString()} accounts. History is lazy-loaded per account.`,window.totalLoadedRecords||0);
+      if(loader && !options.silent) setTimeout(()=>{ loader.style.display='none'; },120);
+      return {accounts:window.mergedAccounts, factRows:[], lazyFacts:true};
+    }catch(e){
+      if(loader && !options.silent) loader.style.display='none';
+      console.error('SQL-speed account-only load failed:', e);
+      toast('Scoped account load failed: '+(e && e.message ? e.message : e),'error');
+      throw e;
+    }
+  }
+
+  async function loadFactHistorySQLSpeed(accountId, monthsArg, opts){
+    accountId=acctKey(accountId || window.activeAccountId);
+    if(!accountId) return [];
+    const months=Number(monthsArg || localStorage.getItem('act_mgr_fact_history_months') || 3) || 3;
+    const force=!!(opts && opts.force);
+    const key=accountId+'|'+months+'|sqlspeed';
+    window.__actFactHistoryState=window.__actFactHistoryState||{};
+    const existing=window.__actFactHistoryState[accountId];
+    if(!force && existing && existing.loadedKey===key && Array.isArray(existing.rows)){
+      if(typeof window.renderFactHistory==='function') window.renderFactHistory(accountId);
+      return existing.rows;
+    }
+    const st=window.__actFactHistoryState[accountId]={rows:[],events:[],loading:true,months,sort:localStorage.getItem('act_mgr_fact_history_sort')||'desc',loadedKey:key,fromSqlSpeedLazyFacts:true};
+    if(typeof window.renderFactHistory==='function') window.renderFactHistory(accountId);
+    try{
+      const token=typeof window.getToken==='function'?await window.getToken():null;
+      if(!token) throw new Error('No Dataverse token available.');
+      const cutoff=new Date();
+      cutoff.setMonth(cutoff.getMonth()-months);
+      const cutoffIso=cutoff.toISOString();
+      const filters=[
+        `cr714_accountnumber eq '${od(accountId)}'`,
+        `(cr714_activitydate ge ${cutoffIso} or cr714_notedate ge ${cutoffIso} or cr714_emaildate ge ${cutoffIso} or modifiedon ge ${cutoffIso})`
+      ];
+      const url=`${window.DATAVERSE_URL}/${FACT_TABLE}?$select=${FACT_SELECT}&$filter=${encodeURIComponent(filters.join(' and '))}&$orderby=cr714_activitydate desc,modifiedon desc&$top=${FACT_TOP}`;
+      const res=await fetch(url,{headers:{'Authorization':`Bearer ${token}`,'Accept':'application/json','Prefer':'odata.maxpagesize=500'}});
+      if(!res.ok){
+        const msg=await res.text().catch(()=>String(res.status));
+        throw new Error(`Fact lookup failed (${res.status}). ${msg}`);
+      }
+      const data=await res.json();
+      let rows=Array.isArray(data.value)?data.value:[];
+      // Client-side final sort is cheap because this is a single account and bounded.
+      rows=rows.sort((a,b)=>new Date(dateOf(b)||0)-new Date(dateOf(a)||0));
+      const events=rows.map(eventFromFactRow).filter(ev=>ev && (ev.NoteSegment || ev.EmailSegment || ev.EmailSubject || ev._touchType));
+      const byAcct=window.__actFactRowsByAccount=window.__actFactRowsByAccount||new Map();
+      byAcct.set(accountId, rows);
+      window.__actFactRows=Array.from(new Map([...(window.__actFactRows||[]), ...rows].map(r=>[clean(r.cr714_dt_act_fctblid||r.cr714_activitynaturalkey||JSON.stringify(r)), r])).values());
+      const existingEvents=(window.unifiedEventRows||[]).filter(ev=>acctKey(ev.cr714_accountnum)!==accountId);
+      window.unifiedEventRows=existingEvents.concat(events);
+      st.rows=rows;
+      st.events=events;
+      st.loading=false;
+      st.loadedAt=Date.now();
+      window.currentModalHistory=events.map(ev=>({
+        date:ev['Note Date'],
+        author:ev.EventRep || ev.cr714_rep || 'Unknown',
+        src:ev.SourceDataset || 'Fact Table',
+        touchType:ev._touchType || 'Note',
+        text:ev.NoteSegment || ev.EmailSegment || ev.EmailSubject || '',
+        historicalAction:ev['Action at time of Note'] || ev.cr714_action || '',
+        emailSubject:ev.EmailSubject || '',
+        tags:[]
+      }));
+      window.__actFactLoadStats={mode:'lazy-per-account',accounts:1,chunks:1,fetched:rows.length,accepted:rows.length,deduped:0,eventRows:events.length,loadedAt:new Date().toISOString(),accountId,months};
+      if(typeof window.renderFactHistory==='function') window.renderFactHistory(accountId);
+      return rows;
+    }catch(e){
+      st.loading=false;
+      st.error=(e && e.message) ? e.message : String(e);
+      console.error('SQL-speed fact history failed:', e);
+      const el=document.getElementById('fv-history');
+      if(el) el.innerHTML=`<div class="h-full flex flex-col items-center justify-center text-center p-4" style="color: var(--accent-danger);"><i class="fas fa-triangle-exclamation text-3xl mb-3"></i><div class="text-[10px] font-black uppercase tracking-widest">Fast Fact Lookup Failed</div><div class="text-[10px] font-bold mt-2">${clean(st.error)}</div></div>`;
+      return [];
+    }
+  }
+
+  async function beginScopedLoadSQLSpeed(wide){
+    const EF=['cr714_managerassigned','cr714_srmanager','cr714_supervisors','cr714_departmentname','cr714_employeename','statecode'];
+    const hasScope=!!wide || EF.some(id=>window.activeFilters && window.activeFilters[id] && window.activeFilters[id].size) || !!(window.massFilteredIds && window.massFilteredIds.size);
+    if(!hasScope){
+      if(typeof window.buildScopedPopupFilters==='function') window.buildScopedPopupFilters();
+      toast('Pick at least one scope filter first.','warning');
+      return;
+    }
+    const Q=window.__ACT_QUERY_SNIPER=window.__ACT_QUERY_SNIPER||{active:false,allowWideOpen:false,selectedRepSet:new Set(),selectedMassIds:new Set()};
+    Q.active=true;
+    Q.allowWideOpen=!!wide;
+    Q.selectedRepSet=wide?new Set():(typeof window.getScopedRepsFromPreFilters==='function'?window.getScopedRepsFromPreFilters():new Set());
+    Q.selectedMassIds=new Set(window.massFilteredIds||[]);
+    const modal=document.getElementById('sniper-load-modal'); if(modal) modal.style.display='none';
+    const t0=(performance&&performance.now)?performance.now():Date.now();
+    setLoader(true,10,wide?'Loading wide account list...':'Loading scoped account list...',0);
+    try{
+      await accountListOnlyFetchAllData({force:true,scoped:true,sqlSpeed:true});
+      if(typeof window.buildFilters==='function') window.buildFilters();
+      if(typeof window.applyFilters==='function') window.applyFilters(false);
+      setLoader(false);
+      window.ACTLoadingPerf=window.ACTLoadingPerf||{};
+      window.ACTLoadingPerf.lastLoad={mode:'sql-speed-lazy-facts',ms:Math.round(((performance&&performance.now)?performance.now():Date.now())-t0),accounts:(window.mergedAccounts||[]).length,facts:'lazy per account',at:new Date().toISOString()};
+      toast(`Loaded ${(window.mergedAccounts||[]).length.toLocaleString()} accounts. Fact history will load only when you select an account.`, 'success');
+      return {accounts:window.mergedAccounts, factRows:[], lazyFacts:true};
+    }catch(e){
+      setLoader(false);
+      toast('SQL-speed load failed: '+(e&&e.message?e.message:e),'error');
+      throw e;
+    }
+  }
+
+  window.fetchAllData=accountListOnlyFetchAllData;
+  window.fetchAllData.__sqlSpeedLazyFacts=true;
+  window.beginScopedLoad=beginScopedLoadSQLSpeed;
+  window.beginScopedLoad.__sqlSpeedLazyFacts=true;
+  window.loadFactHistoryRange=loadFactHistorySQLSpeed;
+  window.loadFactHistoryRange.__sqlSpeedLazyFacts=true;
+  window.loadReportingFromFactTable=async function(){
+    toast('Report-wide fact scan is disabled in SQL-speed mode. Select an account to load its fact history instantly.', 'info');
+    return window.__actFactRows || [];
+  };
+  window.loadReportingFromFactTable.__sqlSpeedLazyFacts=true;
+
+  console.info('ACT SQL-speed lazy fact table mode installed: no all-scope fact preload, per-account indexed lookups only.');
+})();
+/* === END COPILOT PATCH: SQL-SPEED LAZY FACT TABLE V1 === */
+</script>
+
+
+<script>
+/* === COPILOT PATCH: LEFT BADGE CLASS CORRECTION V1 (2026-07-09) === */
+(function(){
+  if(window.__ACT_LEFT_BADGE_CLASS_CORRECTION_V1__) return;
+  window.__ACT_LEFT_BADGE_CLASS_CORRECTION_V1__ = true;
+  function clean(v){ return String(v == null ? '' : v).replace(/\s+/g,' ').trim().toUpperCase(); }
+  function classify(v){
+    const t=clean(v);
+    if(t==='AM' || /ACCOUNT\s*MANAGEMENT/.test(t)) return 'badge-am';
+    if(t==='CAD' || /CADENCE/.test(t)) return 'badge-cad';
+    if(t==='PRO' || /PROSPECT/.test(t)) return 'badge-pro';
+    if(t==='LB' || /LOUISE\s*BROWN/.test(t)) return 'badge-lb';
+    if(t==='LOG' || /LOGISTICS/.test(t)) return 'badge-pro';
+    return '';
+  }
+  function apply(){
+    const root=document.getElementById('account-list-container') || document;
+    root.querySelectorAll('.badge-ds').forEach(b=>{
+      const cls=classify(b.textContent || b.title || b.getAttribute('aria-label'));
+      if(!cls) return;
+      b.classList.remove('badge-am','badge-cad','badge-pro','badge-lb');
+      b.classList.add(cls);
+    });
+  }
+  function boot(){
+    apply();
+    const c=document.getElementById('account-list-container');
+    if(c && !c.__actBadgeClassCorrectionObserver){
+      c.__actBadgeClassCorrectionObserver=new MutationObserver(apply);
+      c.__actBadgeClassCorrectionObserver.observe(c,{childList:true,subtree:true,characterData:true,attributes:true});
+    }
+  }
+  boot();
+  setTimeout(boot,0); setTimeout(boot,500); setInterval(boot,4000);
+})();
+/* === END COPILOT PATCH: LEFT BADGE CLASS CORRECTION V1 === */
+</script>
+
 </body>
 </html>
