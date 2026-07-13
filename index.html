@@ -1392,6 +1392,44 @@
         return res;
     }
 
+    window.resolveMasonvilleAccountDirect = async function(accountGuid, existingToken = "") {
+        const cleanGuid = String(accountGuid || "").replace(/[{}]/g, "").trim();
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanGuid)) {
+            throw new Error("A valid Dynamics 365 account GUID is required.");
+        }
+
+        const d365Token = existingToken || await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+        const filter = `accountid eq '${cleanGuid}'`;
+        const accountLookupUrl = `https://wbmasonco.crm.dynamics.com/api/data/v9.0/accounts?$filter=${encodeURIComponent(filter)}&$select=accountnumber,name`;
+        const response = await fetch(accountLookupUrl, {
+            method: "GET",
+            headers: {
+                Authorization: `Bearer ${d365Token}`,
+                Accept: "application/json",
+                "OData-MaxVersion": "4.0",
+                "OData-Version": "4.0"
+            }
+        });
+
+        if (!response.ok) {
+            const errText = await response.text().catch(() => "");
+            throw new Error(`Dynamics account lookup failed: ${response.status} ${errText}`);
+        }
+
+        const result = await response.json();
+        const account = Array.isArray(result?.value) ? result.value[0] : null;
+        if (!account?.accountnumber) {
+            throw new Error("Dynamics 365 did not return an account number for this account GUID.");
+        }
+
+        return {
+            accountGuid: cleanGuid,
+            accountNumber: String(account.accountnumber).trim(),
+            accountName: String(account.name || "").trim(),
+            lookupUrl: accountLookupUrl
+        };
+    };
+
     window.createMasonvilleSalesCallDirect = async function({ accountId, notesPayload, type = "ISReq", companyName = "", repOwnerName = "" }) {
         const MASONVILLE_API_BASE = "https://wbmasonco.crm.dynamics.com/api/data/v9.2";
         // Mirrors the existing Power Automate CreateRecord owner bind for MVGO Catalog ISREQ records.
@@ -4490,12 +4528,18 @@ window.populateForm = function(rec) {
                 accountGuid: String(currentAccountGuid || '').replace(/[{}]/g, '').trim()
             };
 
-            const masonvilleAccountNumber = String(currentRecordId || '').trim();
-            if (!masonvilleAccountNumber) throw new Error('No Masonville account number is available.');
+            // Resolve the account number from the authoritative Dynamics account GUID.
+            // This follows the supplied v9.0 accounts lookup instead of assuming currentRecordId is the account number.
+            const accountResolution = await window.resolveMasonvilleAccountDirect(currentAccountGuid);
+            const masonvilleAccountNumber = accountResolution.accountNumber;
 
-            // HAR-confirmed route shape:
-            // #/activityleadcall?id=<activityid>&accountNumber=<account number>
-            const masonvilleUrl = `https://go.masonville.com/#/activityleadcall?id=${encodeURIComponent(activityId)}&accountNumber=${encodeURIComponent(masonvilleAccountNumber)}`;
+            window._pendingMVGOCatalog.accountNumber = masonvilleAccountNumber;
+            window._pendingMVGOCatalog.accountName = accountResolution.accountName;
+            window._pendingMVGOCatalog.accountLookupUrl = accountResolution.lookupUrl;
+
+            // The lead-call route is the read/review page. The sales-call route opens the
+            // created mss_salescall activity in the editable Masonville experience.
+            const masonvilleUrl = `https://go.masonville.com/#/activitysalescall?id=${encodeURIComponent(activityId)}&accountNumber=${encodeURIComponent(masonvilleAccountNumber)}`;
             const frame = document.getElementById('mvgo-masonville-iframe');
             if (!frame) throw new Error('The Masonville modal frame is unavailable.');
             frame.dataset.url = masonvilleUrl;
@@ -4506,7 +4550,7 @@ window.populateForm = function(rec) {
             const modal = document.getElementById('mvgo-masonville-modal');
             modal.classList.remove('hidden');
             modal.style.display = 'flex';
-            window.showToast('Masonville draft opened. Review the data and submit the catalog request.', 'success');
+            window.showToast('Editable Masonville sales call opened. Review and submit the catalog request.', 'success');
         } catch (error) {
             console.error('Unable to open MVGO Catalog request:', error);
             window.showToast(error?.message || 'Unable to open Masonville.', 'error');
