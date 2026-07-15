@@ -5927,5 +5927,154 @@ document.getElementById('script-modal').style.display='flex';
 })();
 </script>
 
+
+<script>
+/* ACT Masonville daily-auth gate and connection watchdog - 2026-07-15 */
+(function () {
+  'use strict';
+  const MVGO_AUTH_KEY = 'act_mvgo_auth_date_v1';
+  const MVGO_LOGIN_URL = 'https://go.masonville.com/?actFresh=';
+  const HEALTH_INTERVAL_MS = 5 * 60 * 1000;
+  let authPromise = null;
+  let authResolve = null;
+  let healthTimer = null;
+
+  const localDay = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  };
+  const isMvgoVerifiedToday = () => localStorage.getItem(MVGO_AUTH_KEY) === localDay();
+  const customerUrl = (accountId) => `https://go.masonville.com/#/customer/${encodeURIComponent(accountId || '')}`;
+
+  function ensureUi() {
+    if (document.getElementById('mvgo-auth-gate')) return;
+    const gate = document.createElement('div');
+    gate.id = 'mvgo-auth-gate';
+    gate.className = 'modal-overlay';
+    gate.style.cssText = 'display:none;z-index:9905;align-items:center;justify-content:center;';
+    gate.innerHTML = `
+      <div class="modal-content" style="width:min(560px,94vw);text-align:left;">
+        <div style="display:flex;gap:.75rem;align-items:center;margin-bottom:.8rem;">
+          <i class="fas fa-shield-halved" style="font-size:1.6rem;color:var(--primary)"></i>
+          <div><h2 style="font-size:1.1rem;font-weight:900;">Connect Masonville GO</h2>
+          <p class="text-muted" style="font-size:.78rem;">A fresh Masonville session is required once per day before ACT can sync sales-call notes.</p></div>
+        </div>
+        <div style="padding:.75rem;border:1px solid var(--border-color);border-radius:.6rem;background:var(--bg-input);font-size:.78rem;line-height:1.45;">
+          1. Open Masonville GO.<br>2. Complete Microsoft sign-in if prompted.<br>3. Return here and select <b>Login complete</b>.
+        </div>
+        <div id="mvgo-auth-error" class="text-status-danger" style="display:none;margin-top:.65rem;font-size:.76rem;font-weight:700;"></div>
+        <div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem;flex-wrap:wrap;">
+          <button id="mvgo-open-login" class="btn-primary"><i class="fas fa-arrow-up-right-from-square" style="margin-right:.35rem"></i>Open Masonville GO</button>
+          <button id="mvgo-login-complete" class="btn-secondary"><i class="fas fa-check" style="margin-right:.35rem"></i>Login complete</button>
+        </div>
+      </div>`;
+    document.body.appendChild(gate);
+    document.getElementById('mvgo-open-login').addEventListener('click', () => {
+      window.open(MVGO_LOGIN_URL + Date.now(), 'ACT_Masonville_Login', 'popup=yes,width=1180,height=820,resizable=yes,scrollbars=yes');
+    });
+    document.getElementById('mvgo-login-complete').addEventListener('click', () => {
+      localStorage.setItem(MVGO_AUTH_KEY, localDay());
+      gate.style.display = 'none';
+      if (authResolve) authResolve(true);
+      authPromise = null; authResolve = null;
+      if (window.showToast) window.showToast('Masonville GO marked connected for today.', 'success');
+    });
+  }
+
+  window.ensureMasonvilleDailyAuth = function(forcePrompt) {
+    ensureUi();
+    if (!forcePrompt && isMvgoVerifiedToday()) return Promise.resolve(true);
+    if (authPromise) return authPromise;
+    document.getElementById('mvgo-auth-error').style.display = 'none';
+    document.getElementById('mvgo-auth-gate').style.display = 'flex';
+    authPromise = new Promise(resolve => { authResolve = resolve; });
+    return authPromise;
+  };
+
+  window.invalidateMasonvilleAuth = function(message) {
+    localStorage.removeItem(MVGO_AUTH_KEY);
+    ensureUi();
+    const e = document.getElementById('mvgo-auth-error');
+    e.textContent = message || 'The Masonville connection is no longer valid. Please sign in again.';
+    e.style.display = 'block';
+    document.getElementById('mvgo-auth-gate').style.display = 'flex';
+  };
+
+  async function connectionHealthCheck() {
+    if (document.visibilityState !== 'visible') return;
+    try {
+      if (typeof window.getToken === 'function') {
+        await window.getToken('https://wbmasonco.crm.dynamics.com//user_impersonation', true);
+      }
+    } catch (err) {
+      if (window.showToast) window.showToast('ACT CRM authentication needs attention. Please sign in again.', 'error');
+    }
+    if (!isMvgoVerifiedToday()) window.ensureMasonvilleDailyAuth(false);
+  }
+
+  function installWrappers() {
+    if (typeof window.recordActFactActivity === 'function' && !window.recordActFactActivity.__actMvgoLinkWrapped) {
+      const originalFact = window.recordActFactActivity;
+      const wrappedFact = async function(activityType, options) {
+        const next = Object.assign({}, options || {});
+        if (/MVGO|Masonville/i.test(String(activityType || ''))) {
+          const id = next.accountNumber || window.currentRecordId || (typeof currentRecordId !== 'undefined' ? currentRecordId : '');
+          const link = customerUrl(id);
+          if (!String(next.noteText || '').includes(link)) next.noteText = `${String(next.noteText || '').trim()}${String(next.noteText || '').trim() ? '\n\n' : ''}Masonville GO Link: ${link}`;
+          if (!String(next.details || '').includes(link)) next.details = `${String(next.details || '').trim()}${String(next.details || '').trim() ? '\n\n' : ''}Masonville GO Link: ${link}`;
+        }
+        return originalFact.call(this, activityType, next);
+      };
+      wrappedFact.__actMvgoLinkWrapped = true;
+      window.recordActFactActivity = wrappedFact;
+    }
+
+    if (typeof window.pushToMasonvilleSilent === 'function' && !window.pushToMasonvilleSilent.__actAuthWrapped) {
+      const originalPush = window.pushToMasonvilleSilent;
+      const wrapped = async function(accountId, notesPayload, type) {
+        await window.ensureMasonvilleDailyAuth(false);
+        const link = customerUrl(accountId);
+        const noteWithLink = `${String(notesPayload || '').trim()}\n\nMasonville GO Link: ${link}`.trim();
+        try {
+          const result = await originalPush.call(this, accountId, noteWithLink, type);
+          if (result === false) window.invalidateMasonvilleAuth('Masonville rejected the sync. Please refresh your Masonville login, then retry.');
+          return result;
+        } catch (err) {
+          window.invalidateMasonvilleAuth('Masonville sync failed. Please refresh your Masonville login, then retry.');
+          throw err;
+        }
+      };
+      wrapped.__actAuthWrapped = true;
+      window.pushToMasonvilleSilent = wrapped;
+    }
+
+    if (typeof window.generateMVGOUrl === 'function' && !window.generateMVGOUrl.__actLinkWrapped) {
+      const originalGenerate = window.generateMVGOUrl;
+      const wrappedGenerate = async function() {
+        await window.ensureMasonvilleDailyAuth(false);
+        const input = document.getElementById('mvgo-notes');
+        const link = customerUrl(window.currentRecordId || (typeof currentRecordId !== 'undefined' ? currentRecordId : ''));
+        if (input && !input.value.includes(link)) input.value = `${input.value.trim()}${input.value.trim() ? '\n\n' : ''}Masonville GO Link: ${link}`;
+        return originalGenerate.apply(this, arguments);
+      };
+      wrappedGenerate.__actLinkWrapped = true;
+      window.generateMVGOUrl = wrappedGenerate;
+    }
+  }
+
+  function start() {
+    ensureUi();
+    installWrappers();
+    setTimeout(installWrappers, 1500);
+    setTimeout(() => window.ensureMasonvilleDailyAuth(false), 1200);
+    healthTimer = setInterval(connectionHealthCheck, HEALTH_INTERVAL_MS);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') connectionHealthCheck();
+    });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, {once:true});
+  else start();
+})();
+</script>
 </body>
 </html>
