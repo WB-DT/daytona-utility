@@ -281,6 +281,55 @@
         .custom-dropdown-item { border-color: var(--border-color); transition: background 0.15s; }
         .custom-dropdown-item:hover { background-color: rgba(0,0,0,0.05); }
     
+ /* Protected department topbar label - shown only when special templates are active */
+ #special-email-templates-label {
+     display:none;
+     align-items:center;
+     gap:0.48rem;
+     min-height:32px;
+     padding:4px 11px;
+     border-radius:999px;
+     border:1px solid rgba(34,197,94,0.46);
+     background:linear-gradient(135deg, rgba(34,197,94,0.16), rgba(37,99,235,0.10));
+     color:var(--accent-success);
+     font-size:0.7rem;
+     font-weight:950;
+     letter-spacing:0.015em;
+     white-space:nowrap;
+     box-shadow:0 5px 14px rgba(34,197,94,0.12), inset 0 1px 0 rgba(255,255,255,0.14);
+ }
+ #special-email-templates-label.is-active { display:inline-flex; }
+ #special-email-templates-label .special-template-status-dot {
+     width:8px;
+     height:8px;
+     border-radius:999px;
+     background:var(--accent-success);
+     box-shadow:0 0 0 4px rgba(34,197,94,0.12), 0 0 10px rgba(34,197,94,0.50);
+     flex:0 0 auto;
+ }
+ #special-email-templates-label .special-template-department {
+     padding-left:0.42rem;
+     margin-left:0.08rem;
+     border-left:1px solid rgba(34,197,94,0.32);
+     color:var(--text-main);
+     font-size:0.64rem;
+     font-weight:800;
+ }
+ [data-theme="midnight"] #special-email-templates-label,
+ [data-theme="oled"] #special-email-templates-label,
+ [data-theme="matt"] #special-email-templates-label,
+ [data-theme="gatsby"] #special-email-templates-label,
+ [data-theme="ocean"] #special-email-templates-label,
+ [data-theme="forest"] #special-email-templates-label,
+ [data-theme="sunset"] #special-email-templates-label {
+     border-color:rgba(74,222,128,0.48);
+     background:linear-gradient(135deg, rgba(74,222,128,0.16), rgba(56,189,248,0.11));
+     box-shadow:0 6px 16px rgba(0,0,0,0.22), 0 0 14px rgba(74,222,128,0.08);
+ }
+ @media (max-width:640px) {
+     #special-email-templates-label { width:100%; justify-content:center; }
+ }
+
  /* Top bar utility controls - moved from filter row for cleaner first-pass layout */
  #topbar-utility-controls { display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; min-width:0; }
  #topbar-utility-controls #email-counter-segment { margin-right:0 !important; height:32px; white-space:nowrap; }
@@ -1245,20 +1294,53 @@
 
     let currentThemeIdx=0, isEditMode=true, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentAccountGuid=null, currentUserRepName=null, currentUserProfile=null;
 
-    // Retention template access is evaluated before every action-based email rule.
+    // Protected template access is evaluated before every record/action email rule.
+    // Dataverse Choice columns expose a numeric raw value and a readable formatted value.
+    // The formatted value must be checked first; otherwise "Retention" can be hidden by its number.
+    window.normalizeDepartmentName = function(value) {
+        return String(value ?? '')
+            .replace(/&/g, ' and ')
+            .replace(/[^a-z0-9]+/gi, ' ')
+            .trim()
+            .replace(/\s+/g, ' ')
+            .toLowerCase();
+    };
     window.getCurrentEmployeeDepartment = function() {
         const p = currentUserProfile || {};
-        const candidates = [
-            p.cr714_department,
-            p.cr7714_department,
-            p["cr714_department@OData.Community.Display.V1.FormattedValue"],
-            p["cr7714_department@OData.Community.Display.V1.FormattedValue"]
+        const preferredKeys = [
+            'cr714_department@OData.Community.Display.V1.FormattedValue',
+            'cr7714_department@OData.Community.Display.V1.FormattedValue',
+            'cr714_department',
+            'cr7714_department'
         ];
-        return String(candidates.find(v => v !== undefined && v !== null && String(v).trim()) || '').trim();
+        const candidates = preferredKeys.map(key => p[key]);
+        // Also tolerate a corrected publisher prefix or differently cased department key.
+        Object.keys(p).forEach(key => {
+            if (key.toLowerCase().includes('department')) candidates.push(p[key]);
+        });
+        const readable = candidates.find(value => {
+            const normalized = window.normalizeDepartmentName(value);
+            return normalized === 'retention' || normalized === 'food service';
+        });
+        if (readable !== undefined) return String(readable).trim();
+        return String(candidates.find(value => value !== undefined && value !== null && String(value).trim()) || '').trim();
     };
-    window.isRetentionDepartment = function() {
-        return window.getCurrentEmployeeDepartment().toLowerCase() === 'retention';
+    window.isProtectedEmailDepartment = function() {
+        const p = currentUserProfile || {};
+        const department = window.normalizeDepartmentName(window.getCurrentEmployeeDepartment());
+        const rawDepartmentValues = [p.cr714_department, p.cr7714_department]
+            .map(value => Number(String(value ?? '').replace(/,/g, '').trim()))
+            .filter(Number.isFinite);
+        const protectedChoiceValues = new Set([
+            473930041, // Food Service
+            473930042  // Retention
+        ]);
+        return department === 'retention'
+            || department === 'food service'
+            || rawDepartmentValues.some(value => protectedChoiceValues.has(value));
     };
+    // Backward-compatible alias for the first version of the template rules.
+    window.isRetentionDepartment = window.isProtectedEmailDepartment;
     let introFollowUpTemplateAllowedRepNames = new Set();
     let failedSaves = []; let duplicateRecordIds = new Set();
     window.hasUnsavedChanges = false; window.targetSelectId = null; window.currentRecordSnapshot = null; window.currentUserGraphPhone = null; window.isPopulating = false;
@@ -1281,7 +1363,27 @@
     };
     
 
+    window.updateSpecialEmailTemplatesLabel = function() {
+        const label = document.getElementById('special-email-templates-label');
+        const departmentEl = document.getElementById('special-email-templates-department');
+        if (!label) return;
+
+        const isActive = Boolean(window.isProtectedEmailDepartment?.());
+        const rawDepartment = window.getCurrentEmployeeDepartment?.() || '';
+        const normalizedDepartment = window.normalizeDepartmentName?.(rawDepartment) || '';
+        const departmentLabel = normalizedDepartment === 'food service'
+            ? 'Food Service'
+            : normalizedDepartment === 'retention'
+                ? 'Retention'
+                : '';
+
+        label.classList.toggle('is-active', isActive);
+        label.setAttribute('aria-hidden', String(!isActive));
+        if (departmentEl) departmentEl.textContent = isActive ? departmentLabel : '';
+    };
+
     window.updateEmailTemplateHelper = function() {
+        window.updateSpecialEmailTemplatesLabel?.();
         const dd = document.getElementById('email-template-dropdown');
         const helper = document.getElementById('email-template-helper');
         const card = document.getElementById('email-template-card');
@@ -2474,6 +2576,7 @@ window.preloadTemplateImages = async function() {
                 .filter(Boolean));
             
             if (profileData.value && profileData.value.length > 0) currentUserProfile = profileData.value[0];
+            window.updateSpecialEmailTemplatesLabel?.();
 
             let allRaw = [];
             if(amData.value) amData.value.forEach(r => allRaw.push({ ...r, _dsType: 'AM', _priority: 1 }));
@@ -2983,8 +3086,8 @@ window.launchEmailLogic = async function() {
         const customNotesPlaceholder = `<div style="${pStyle} color:dodgerblue; font-size: 14px; font-weight: bold;"></div>`;
 
         if (template === "Retention Savings Review" || template === "Retention We Miss You") {
-            if (!(window.isRetentionDepartment && window.isRetentionDepartment())) {
-                if (window.showToast) window.showToast("This email template is only available to the Retention department.", "error");
+            if (!(window.isProtectedEmailDepartment && window.isProtectedEmailDepartment())) {
+                if (window.showToast) window.showToast("This email template is only available to Retention and Food Service.", "error");
                 return;
             }
             const retentionRepName = window.escapeHTML(currentUserRepName || currentUserProfile?.cr714_employeename || repName || "W.B. Mason Retention Representative");
@@ -4231,13 +4334,14 @@ window.populateForm = function(rec) {
         
         if (dd) {
             dd.innerHTML = "";
-            // 1. Department override: Retention is checked first and trumps all action rules.
-            if (window.isRetentionDepartment && window.isRetentionDepartment()) {
+            // 1. Department override: Retention/Food Service is checked first and trumps
+            // Cadence/Mandown call-only and all assigned-action template rules.
+            if (window.isProtectedEmailDepartment && window.isProtectedEmailDepartment()) {
                 dd.disabled = false;
                 if (launchEmailButton) launchEmailButton.disabled = false;
                 [
-                    { val: "Retention Savings Review", txt: "⭐ Retention - Savings Review" },
-                    { val: "Retention We Miss You", txt: "⭐ Retention - We Miss Your Business" }
+                    { val: "Retention Savings Review", txt: "⭐ Retention / Food Service - Savings Review" },
+                    { val: "Retention We Miss You", txt: "⭐ Retention / Food Service - We Miss Your Business" }
                 ].forEach((templateDef, index) => {
                     const opt = document.createElement('option');
                     opt.value = templateDef.val;
@@ -4247,7 +4351,7 @@ window.populateForm = function(rec) {
                 });
                 dd.value = "Retention Savings Review";
                 if (window.updateEmailTemplateHelper) window.updateEmailTemplateHelper();
-            // 2. Unified Cadence Check for employees who are not in Retention.
+            // 2. Unified Cadence Check only for employees outside Retention/Food Service.
             } else if (rec.primaryType === 'Cadence' || rec.primaryType === 'Mandown') {
                 const opt = document.createElement('option');
                 opt.text = "-- No Email Allowed (Call Only) --";
@@ -5666,6 +5770,12 @@ document.getElementById('script-modal').style.display='flex';
                     <h1 class="text-2xl font-black tracking-tighter" style="color: var(--primary); font-family: 'Arial Black', sans-serif;">ACT</h1>
                 </div>
                 <div id="topbar-utility-controls" onclick="event.stopPropagation()">
+                    <div id="special-email-templates-label" role="status" aria-live="polite" aria-hidden="true" title="Your department has access to the special email template library">
+                        <span class="special-template-status-dot" aria-hidden="true"></span>
+                        <i class="fas fa-wand-magic-sparkles" aria-hidden="true"></i>
+                        <span>Special Email Templates Active</span>
+                        <span id="special-email-templates-department" class="special-template-department"></span>
+                    </div>
                     <div id="email-counter-segment" class="flex justify-between items-center text-xs text-main font-semibold p-1 border rounded px-3 h-8" style="border-color: var(--border-color); background-color: var(--bg-input);">
                         <span><i class="fas fa-paper-plane text-status-info mr-2"></i>Hourly Limit:</span>
                         <span id="email-hourly-count" class="font-bold ml-2">0/100</span>
