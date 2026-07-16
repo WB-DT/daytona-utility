@@ -1042,6 +1042,7 @@
 
     let currentThemeIdx=0, isEditMode=true, allRecords=[], currentSelectedRecord=null, currentRecordId=null, currentAccountGuid=null, currentUserRepName=null, currentUserProfile=null;
     let introFollowUpTemplateAllowedRepNames = new Set();
+    let retentionTemplateAccessAllowed = false;
     let failedSaves = []; let duplicateRecordIds = new Set();
     window.hasUnsavedChanges = false; window.targetSelectId = null; window.currentRecordSnapshot = null; window.currentUserGraphPhone = null; window.isPopulating = false;
 
@@ -1060,6 +1061,13 @@
             msalAccount?.name
         ];
         return candidateNames.some(n => introFollowUpTemplateAllowedRepNames.has(window.normalizeRepNameForAccess(n)));
+    };
+
+    // Retention templates are available to Retention employees and to either level of
+    // management listed on at least one Retention employee record.
+    window.isRetentionTemplateAllowed = function() {
+        const department = window.normalizeRepNameForAccess(currentUserProfile?.cr714_department);
+        return department === 'retention' || retentionTemplateAccessAllowed === true;
     };
     
 
@@ -2171,9 +2179,10 @@ window.preloadTemplateImages = async function() {
                 fetch(`${DATAVERSE_URL}/cr714_accountmanagementdatasets?$filter=cr714_rep eq '${targetRep}' and cr714_accountnum ne null and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
                 fetch(`${DATAVERSE_URL}/cr714_cadencedatasets?$filter=cr714_retentionrep eq '${targetRep}' and cr714_accountnum ne null and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
                 fetch(`${DATAVERSE_URL}/cr714_prospectingdatasets?$filter=cr714_repassigned eq '${targetRep}' and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
-                fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$filter=cr714_employeename eq '${targetRep}'`, reqOptions).catch(() => ({ ok: false })),
+                fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_name,cr714_extension,cr714_department,cr714_managerassigned,cr714_srmanager&$filter=cr714_employeename eq '${targetRep}'`, reqOptions).catch(() => ({ ok: false })),
                 fetch(`${DATAVERSE_URL}/cr714_louisebrowndatasets?$filter=cr714_assignedrep eq '${targetRep}' and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
-                fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_name,cr714_managerassigned&$filter=${encodeURIComponent("cr714_managerassigned eq 'Ashley Bathrick' or cr714_managerassigned eq 'Tabatha Hanks'")}`, reqOptions).catch(() => ({ ok: false }))
+                fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_name,cr714_managerassigned&$filter=${encodeURIComponent("cr714_managerassigned eq 'Ashley Bathrick' or cr714_managerassigned eq 'Tabatha Hanks'")}`, reqOptions).catch(() => ({ ok: false })),
+                fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_name,cr714_department,cr714_managerassigned,cr714_srmanager&$filter=${encodeURIComponent("cr714_department eq 'Retention'")}`, reqOptions).catch(() => ({ ok: false }))
             ]);
 
             const amData = requests[0].ok ? await requests[0].json() : { value: [] };
@@ -2182,12 +2191,26 @@ window.preloadTemplateImages = async function() {
             const profileData = requests[3].ok ? await requests[3].json() : { value: [] };
             const lbData = requests[4].ok ? await requests[4].json() : { value: [] };
             const introFollowUpAllowedData = requests[5].ok ? await requests[5].json() : { value: [] };
+            const retentionEmployeeData = requests[6].ok ? await requests[6].json() : { value: [] };
             introFollowUpTemplateAllowedRepNames = new Set((introFollowUpAllowedData.value || [])
                 .map(r => r.cr714_employeename || r.cr714_name || r.name || '')
                 .map(window.normalizeRepNameForAccess)
                 .filter(Boolean));
             
             if (profileData.value && profileData.value.length > 0) currentUserProfile = profileData.value[0];
+
+            const retentionAccessCandidateNames = [
+                currentUserRepName,
+                currentUserProfile?.cr714_employeename,
+                currentUserProfile?.cr714_name,
+                currentUserProfile?.name,
+                msalAccount?.name
+            ].map(window.normalizeRepNameForAccess).filter(Boolean);
+            retentionTemplateAccessAllowed = (retentionEmployeeData.value || []).some(rep => {
+                const manager = window.normalizeRepNameForAccess(rep.cr714_managerassigned);
+                const srManager = window.normalizeRepNameForAccess(rep.cr714_srmanager);
+                return retentionAccessCandidateNames.includes(manager) || retentionAccessCandidateNames.includes(srManager);
+            });
 
             let allRaw = [];
             if(amData.value) amData.value.forEach(r => allRaw.push({ ...r, _dsType: 'AM', _priority: 1 }));
@@ -2863,6 +2886,33 @@ ${signature}${wrapperEnd}`;
         else if (template === "BID-NYS HP") {
             subject = "WB Mason - HP Ink & Toner NY State Pricing";
             body = `${wrapperStart}<div style="${pStyle}">Hello again from WB Mason,</div><div style="${pStyle}">WB Mason is reaching out to customers who can utilize special pricing for HP ink and toner supplies through the state of NY. Please let me know if you utilize HP in the offices and if so who would purchase these items. We are creating a favorites list for easy visibility on pricing and ordering for all HP supplies.</div><div style="${pStyle}">Don’t hesitate to reach out with any questions or concerns.</div><div style="${pStyle}">We look forward to hearing from you!</div>${signature}${wrapperEnd}`;
+        }
+        else if (template === "Retention Template 1" || template === "Retention Template 2") {
+            if (!(window.isRetentionTemplateAllowed && window.isRetentionTemplateAllowed())) {
+                if (window.showToast) window.showToast("This Retention email template is not available for your profile.", "error");
+                return;
+            }
+            const accountId = currentSelectedRecord?.cr714_id || currentRecordId || "";
+            subject = `${accountId} - Placeholder for Subject TBD.`;
+            if (template === "Retention Template 1") {
+                body = `${wrapperStart}
+<div style="${pStyle}">My name is <strong>${repName}</strong>, I am assisting your account representative with some opportunities in the area!</div>
+<div style="${pStyle}">After doing a review on your account It looks like we can save you money by taking any invoices or receipts you may have outside of WB Mason, and having our team provide a side-by-side price comparison for you to review savings with us!</div>
+<div style="${pStyle}">We strive to be a one stop shop, so you have less vendors to worry about.</div>
+<div style="${pStyle}"><strong>At WB Mason we guarantee:</strong></div>
+<ul style="margin: 0 0 16px 20px; padding: 0;">
+    <li>FREE business to business delivery with a dedicated WB Mason delivery driver</li>
+    <li>Match, or beat, our competitor’s pricing if lower than ours</li>
+    <li>ME! I promise to provide amazing customer service and same day responses for any questions or requests you may have</li>
+</ul>
+<div style="${pStyle}">I’d love the chance to show you how we can be the best solution for your business, would you be willing to reply with order confirmations, invoices, screenshots, or receipts of items you’re having to purchase elsewhere?</div>
+${signature}${wrapperEnd}`;
+            } else {
+                body = `${wrapperStart}
+<div style="${pStyle}">My name is <strong>${repName}</strong>, I am assisting your representative with your account.</div>
+<div style="${pStyle}">I am reaching out to you as I was advised you handle where you currently purchase supplies for your company? It doesn’t look like you’ve ordered in a little while, and we miss your business!</div>
+${signature}${wrapperEnd}`;
+            }
         }
         else if (template === "FiscalBudget") {
             const accountId = currentSelectedRecord?.cr714_id || currentRecordId || "";
@@ -3965,11 +4015,18 @@ window.populateForm = function(rec) {
                    {val: "FiscalBudget", txt: "FiscalBudget"},
                    {val: "PackShip Decline", txt: "PackShip Decline"},
                    {val: "ScholarCraft Email", txt: "ScholarCraft Email", disabledUntil: "2026-04-27"},
-                   {val: "Introduction Follow Up", txt: "⭐ Introduction Follow Up", restricted: "introFollowUp"}
+                   {val: "Introduction Follow Up", txt: "⭐ Introduction Follow Up", restricted: "introFollowUp"},
+                   {val: "Retention Template 1", txt: "Retention - Price Comparison", restricted: "retention"},
+                   {val: "Retention Template 2", txt: "Retention - We Miss Your Business", restricted: "retention"}
                 ];
 
                 const todayStr = new Date().toISOString().slice(0, 10);
-                const allTemplates = allTemplatesRaw.filter(t => (!t.disabledUntil || todayStr >= t.disabledUntil) && (!t.restricted || (t.restricted === 'introFollowUp' && window.isIntroFollowUpTemplateAllowed && window.isIntroFollowUpTemplateAllowed())));
+                const allTemplates = allTemplatesRaw.filter(t =>
+                    (!t.disabledUntil || todayStr >= t.disabledUntil) &&
+                    (!t.restricted ||
+                        (t.restricted === 'introFollowUp' && window.isIntroFollowUpTemplateAllowed && window.isIntroFollowUpTemplateAllowed()) ||
+                        (t.restricted === 'retention' && window.isRetentionTemplateAllowed && window.isRetentionTemplateAllowed()))
+                );
                 
                 const addEmailTemplateOption = (optionDef, selected = false) => {
                     const opt = document.createElement('option');
@@ -4000,6 +4057,12 @@ window.populateForm = function(rec) {
                 if (introFollowUpOption && !Array.from(dd.options).some(opt => opt.value === introFollowUpOption.val)) {
                     addEmailTemplateOption(introFollowUpOption, dd.options.length === 0);
                 }
+                const retentionOptions = allTemplates.filter(t => t.restricted === 'retention');
+                retentionOptions.forEach(optionDef => {
+                    if (!Array.from(dd.options).some(opt => opt.value === optionDef.val)) {
+                        addEmailTemplateOption(optionDef, dd.options.length === 0);
+                    }
+                });
                 if (window.updateEmailTemplateHelper) window.updateEmailTemplateHelper();
             }
         }
@@ -5927,154 +5990,5 @@ document.getElementById('script-modal').style.display='flex';
 })();
 </script>
 
-
-<script>
-/* ACT Masonville daily-auth gate and connection watchdog - 2026-07-15 */
-(function () {
-  'use strict';
-  const MVGO_AUTH_KEY = 'act_mvgo_auth_date_v1';
-  const MVGO_LOGIN_URL = 'https://go.masonville.com/?actFresh=';
-  const HEALTH_INTERVAL_MS = 5 * 60 * 1000;
-  let authPromise = null;
-  let authResolve = null;
-  let healthTimer = null;
-
-  const localDay = () => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  };
-  const isMvgoVerifiedToday = () => localStorage.getItem(MVGO_AUTH_KEY) === localDay();
-  const customerUrl = (accountId) => `https://go.masonville.com/#/customer/${encodeURIComponent(accountId || '')}`;
-
-  function ensureUi() {
-    if (document.getElementById('mvgo-auth-gate')) return;
-    const gate = document.createElement('div');
-    gate.id = 'mvgo-auth-gate';
-    gate.className = 'modal-overlay';
-    gate.style.cssText = 'display:none;z-index:9905;align-items:center;justify-content:center;';
-    gate.innerHTML = `
-      <div class="modal-content" style="width:min(560px,94vw);text-align:left;">
-        <div style="display:flex;gap:.75rem;align-items:center;margin-bottom:.8rem;">
-          <i class="fas fa-shield-halved" style="font-size:1.6rem;color:var(--primary)"></i>
-          <div><h2 style="font-size:1.1rem;font-weight:900;">Connect Masonville GO</h2>
-          <p class="text-muted" style="font-size:.78rem;">A fresh Masonville session is required once per day before ACT can sync sales-call notes.</p></div>
-        </div>
-        <div style="padding:.75rem;border:1px solid var(--border-color);border-radius:.6rem;background:var(--bg-input);font-size:.78rem;line-height:1.45;">
-          1. Open Masonville GO.<br>2. Complete Microsoft sign-in if prompted.<br>3. Return here and select <b>Login complete</b>.
-        </div>
-        <div id="mvgo-auth-error" class="text-status-danger" style="display:none;margin-top:.65rem;font-size:.76rem;font-weight:700;"></div>
-        <div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem;flex-wrap:wrap;">
-          <button id="mvgo-open-login" class="btn-primary"><i class="fas fa-arrow-up-right-from-square" style="margin-right:.35rem"></i>Open Masonville GO</button>
-          <button id="mvgo-login-complete" class="btn-secondary"><i class="fas fa-check" style="margin-right:.35rem"></i>Login complete</button>
-        </div>
-      </div>`;
-    document.body.appendChild(gate);
-    document.getElementById('mvgo-open-login').addEventListener('click', () => {
-      window.open(MVGO_LOGIN_URL + Date.now(), 'ACT_Masonville_Login', 'popup=yes,width=1180,height=820,resizable=yes,scrollbars=yes');
-    });
-    document.getElementById('mvgo-login-complete').addEventListener('click', () => {
-      localStorage.setItem(MVGO_AUTH_KEY, localDay());
-      gate.style.display = 'none';
-      if (authResolve) authResolve(true);
-      authPromise = null; authResolve = null;
-      if (window.showToast) window.showToast('Masonville GO marked connected for today.', 'success');
-    });
-  }
-
-  window.ensureMasonvilleDailyAuth = function(forcePrompt) {
-    ensureUi();
-    if (!forcePrompt && isMvgoVerifiedToday()) return Promise.resolve(true);
-    if (authPromise) return authPromise;
-    document.getElementById('mvgo-auth-error').style.display = 'none';
-    document.getElementById('mvgo-auth-gate').style.display = 'flex';
-    authPromise = new Promise(resolve => { authResolve = resolve; });
-    return authPromise;
-  };
-
-  window.invalidateMasonvilleAuth = function(message) {
-    localStorage.removeItem(MVGO_AUTH_KEY);
-    ensureUi();
-    const e = document.getElementById('mvgo-auth-error');
-    e.textContent = message || 'The Masonville connection is no longer valid. Please sign in again.';
-    e.style.display = 'block';
-    document.getElementById('mvgo-auth-gate').style.display = 'flex';
-  };
-
-  async function connectionHealthCheck() {
-    if (document.visibilityState !== 'visible') return;
-    try {
-      if (typeof window.getToken === 'function') {
-        await window.getToken('https://wbmasonco.crm.dynamics.com//user_impersonation', true);
-      }
-    } catch (err) {
-      if (window.showToast) window.showToast('ACT CRM authentication needs attention. Please sign in again.', 'error');
-    }
-    if (!isMvgoVerifiedToday()) window.ensureMasonvilleDailyAuth(false);
-  }
-
-  function installWrappers() {
-    if (typeof window.recordActFactActivity === 'function' && !window.recordActFactActivity.__actMvgoLinkWrapped) {
-      const originalFact = window.recordActFactActivity;
-      const wrappedFact = async function(activityType, options) {
-        const next = Object.assign({}, options || {});
-        if (/MVGO|Masonville/i.test(String(activityType || ''))) {
-          const id = next.accountNumber || window.currentRecordId || (typeof currentRecordId !== 'undefined' ? currentRecordId : '');
-          const link = customerUrl(id);
-          if (!String(next.noteText || '').includes(link)) next.noteText = `${String(next.noteText || '').trim()}${String(next.noteText || '').trim() ? '\n\n' : ''}Masonville GO Link: ${link}`;
-          if (!String(next.details || '').includes(link)) next.details = `${String(next.details || '').trim()}${String(next.details || '').trim() ? '\n\n' : ''}Masonville GO Link: ${link}`;
-        }
-        return originalFact.call(this, activityType, next);
-      };
-      wrappedFact.__actMvgoLinkWrapped = true;
-      window.recordActFactActivity = wrappedFact;
-    }
-
-    if (typeof window.pushToMasonvilleSilent === 'function' && !window.pushToMasonvilleSilent.__actAuthWrapped) {
-      const originalPush = window.pushToMasonvilleSilent;
-      const wrapped = async function(accountId, notesPayload, type) {
-        await window.ensureMasonvilleDailyAuth(false);
-        const link = customerUrl(accountId);
-        const noteWithLink = `${String(notesPayload || '').trim()}\n\nMasonville GO Link: ${link}`.trim();
-        try {
-          const result = await originalPush.call(this, accountId, noteWithLink, type);
-          if (result === false) window.invalidateMasonvilleAuth('Masonville rejected the sync. Please refresh your Masonville login, then retry.');
-          return result;
-        } catch (err) {
-          window.invalidateMasonvilleAuth('Masonville sync failed. Please refresh your Masonville login, then retry.');
-          throw err;
-        }
-      };
-      wrapped.__actAuthWrapped = true;
-      window.pushToMasonvilleSilent = wrapped;
-    }
-
-    if (typeof window.generateMVGOUrl === 'function' && !window.generateMVGOUrl.__actLinkWrapped) {
-      const originalGenerate = window.generateMVGOUrl;
-      const wrappedGenerate = async function() {
-        await window.ensureMasonvilleDailyAuth(false);
-        const input = document.getElementById('mvgo-notes');
-        const link = customerUrl(window.currentRecordId || (typeof currentRecordId !== 'undefined' ? currentRecordId : ''));
-        if (input && !input.value.includes(link)) input.value = `${input.value.trim()}${input.value.trim() ? '\n\n' : ''}Masonville GO Link: ${link}`;
-        return originalGenerate.apply(this, arguments);
-      };
-      wrappedGenerate.__actLinkWrapped = true;
-      window.generateMVGOUrl = wrappedGenerate;
-    }
-  }
-
-  function start() {
-    ensureUi();
-    installWrappers();
-    setTimeout(installWrappers, 1500);
-    setTimeout(() => window.ensureMasonvilleDailyAuth(false), 1200);
-    healthTimer = setInterval(connectionHealthCheck, HEALTH_INTERVAL_MS);
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') connectionHealthCheck();
-    });
-  }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, {once:true});
-  else start();
-})();
-</script>
 </body>
 </html>
