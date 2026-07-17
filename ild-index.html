@@ -12332,10 +12332,10 @@ const prevRenderReports = window.renderReports;
       // Audit is a required preload stage. Keep #global-loader visible until the
       // native Create and Create/Update Audit queries finish.
       if(window.updateLoader) window.updateLoader(80, 'Loading Audit Table and Original Upload Counts...', (window.totalLoadedRecords||0)+factRows.length);
-      if(!window.ACTAuditUploadMetrics || typeof window.ACTAuditUploadMetrics.load!=='function'){
-        throw new Error('Audit loader is unavailable; the app will not open with incomplete upload totals.');
+      if(!window.ACTNativeAudit || typeof window.ACTNativeAudit.load!=='function'){
+        throw new Error('Native Audit Table loader is unavailable; Fact Table data will not be substituted.');
       }
-      const auditResult=await window.ACTAuditUploadMetrics.load(true);
+      const auditResult=await window.ACTNativeAudit.load(true);
       if(!auditResult || auditResult.error){
         throw new Error(auditResult?.error||'Audit Table failed to load.');
       }
@@ -16603,5 +16603,81 @@ window.ACTAuditUploadMetrics={...(window.ACTAuditUploadMetrics||{}),load,refresh
 const badge=()=>{const nav=document.getElementById('nav-reports-tab');if(nav&&!document.getElementById('act-report-ready-badge')){const b=document.createElement('span');b.id='act-report-ready-badge';nav.appendChild(b)}renderStatus()};if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',badge,{once:true});else badge();setIdle();
 })();
 </script>
-</body>
+<script id="act-native-audit-authority-20260717">
+(function(){
+'use strict';
+if(window.__ACT_NATIVE_AUDIT_AUTHORITY_20260717__)return;
+window.__ACT_NATIVE_AUDIT_AUTHORITY_20260717__=true;
+const API='https://org23279050.crm.dynamics.com/api/data/v9.2';
+const ENTITIES=['cr714_accountmanagementdataset','cr714_cadencedataset','cr714_prospectingdataset','cr714_louisebrowndataset'];
+const REP_FIELDS={cr714_accountmanagementdataset:'cr714_rep',cr714_cadencedataset:'cr714_retentionrep',cr714_prospectingdataset:'cr714_repassigned',cr714_louisebrowndataset:'cr714_assignedrep'};
+const SOURCE_NAMES={cr714_accountmanagementdataset:'Account Management',cr714_cadencedataset:'Cadence',cr714_prospectingdataset:'Prospecting',cr714_louisebrowndataset:'Louise Brown'};
+const START='2026-01-01T00:00:00Z',END='2027-01-01T00:00:00Z';
+const clean=v=>String(v??'').trim(),guid=v=>clean(v).replace(/[{}]/g,'').toLowerCase();
+let active=null,controller=null;
+function setCount(n){window.ACTSetOriginalUploadCount?.(n);const C=window.__actDatasetCounts;if(C){C.originalUploads=Number(n)||0;document.querySelectorAll('[data-act-count="originalUploads"]').forEach(x=>x.textContent=Number(n||0).toLocaleString())}}
+function entityFilter(){return '('+ENTITIES.map(x=>`objecttypecode eq '${x}'`).join(' or ')+')'}
+function makeUrl(actions,userIds){
+ const action='('+actions.map(x=>`action eq ${x}`).join(' or ')+')';
+ const users=userIds?.length?' and ('+userIds.map(x=>`_userid_value eq ${x}`).join(' or ')+')':'';
+ const filter=`createdon ge ${START} and createdon lt ${END} and ${action} and ${entityFilter()}${users}`;
+ const q=new URLSearchParams({'$select':'createdon,action,objecttypecode,_objectid_value,_userid_value,changedata','$filter':filter,'$orderby':'createdon asc'});
+ return `${API}/audits?${q.toString()}`;
+}
+async function requestJson(url,token,signal,label){
+ console.info('[ACT Native Audit]',label,url);
+ const response=await fetch(url,{method:'GET',signal,cache:'no-store',headers:{Authorization:`Bearer ${token}`,Accept:'application/json','Content-Type':'application/json','OData-MaxVersion':'4.0','OData-Version':'4.0',Prefer:'odata.include-annotations="*", odata.maxpagesize=5000'}});
+ const text=await response.text();
+ if(!response.ok)throw new Error(`${label} failed (${response.status}): ${text.slice(0,500)}`);
+ try{return JSON.parse(text)}catch{throw new Error(`${label} returned non-JSON data`)}
+}
+async function allPages(url,token,signal,label,onRows){const rows=[];let page=0;while(url){page++;const data=await requestJson(url,token,signal,`${label} page ${page}`);rows.push(...(data.value||[]));onRows?.(rows.length,page);url=data['@odata.nextLink']||null}return rows}
+async function allowedUsers(token,signal){
+ const f="fullname eq 'Matt Bleakley' or fullname eq 'Anslee Erickson' or fullname eq 'Anslee Laroche'";
+ const q=new URLSearchParams({'$select':'systemuserid,fullname','$filter':f});
+ const data=await requestJson(`${API}/systemusers?${q.toString()}`,token,signal,'Audit uploader lookup');
+ return (data.value||[]).map(x=>guid(x.systemuserid)).filter(Boolean)
+}
+function attrs(row){try{return (JSON.parse(row.changedata||'{}').changedAttributes||[]).map(x=>({field:clean(x.logicalName).toLowerCase(),value:clean(x.newName||x.newValue)}))}catch{return[]}}
+function uploader(row){return clean(row['_userid_value@OData.Community.Display.V1.FormattedValue']||row._userid_value||'Unknown User')}
+function normalizeRep(v){let x=clean(v).replace(/<\/?b>\s*/gi,'').replace(/&lt;\/?b&gt;\s*/gi,'').replace(/\s*\[Manager Override\]\s*/gi,' ').trim();const f={'anslee erickson':'Anslee Laroche','john choynoswki':'John Choynowski','jason coitronejr':'Jason Coitrone Jr','reggie costascott':'Reggie Costa-Scott'};return f[x.toLowerCase()]||x||'Unknown Rep'}
+function cleanAction(v){const x=clean(v).replace(/\s*--\]$/,'').replace(/-- Leave Action Unchanged --?/gi,'').replace(/[\]!]/g,'').trim();return x||'Unknown Action'}
+function build(createRows,changeRows){
+ const earliest=new Map();
+ [...createRows].sort((a,b)=>String(a.createdon).localeCompare(String(b.createdon))).forEach(row=>{const key=clean(row.objecttypecode).toLowerCase()+'|'+guid(row._objectid_value);if(!earliest.has(key))earliest.set(key,row)});
+ const changes=new Map();
+ changeRows.forEach(row=>{const key=clean(row.objecttypecode).toLowerCase()+'|'+guid(row._objectid_value);if(!earliest.has(key))return;if(!changes.has(key))changes.set(key,[]);changes.get(key).push(row)});
+ const records=[];
+ for(const [key,create] of earliest){
+  const entity=clean(create.objecttypecode).toLowerCase(),repField=REP_FIELDS[entity];
+  const events=(changes.get(key)||[create]).slice().sort((a,b)=>String(a.createdon).localeCompare(String(b.createdon)));
+  let rep='',action='',assignmentEvent='',actionEvent='';
+  for(const event of events){for(const a of attrs(event)){if(!rep&&a.field===repField&&a.value){rep=normalizeRep(a.value);assignmentEvent=Number(event.action)===1?'Create':'Update'}if(a.field==='cr714_action'&&a.value){action=cleanAction(a.value);actionEvent=Number(event.action)===1?'Create':'Update'}}}
+  records.push({createdOn:create.createdon,createdDate:String(create.createdon||'').slice(0,10),uploadedBy:uploader(create),sourceTable:SOURCE_NAMES[entity]||entity,entity,objectId:guid(create._objectid_value),rep:rep||'Unknown Rep',action:action||'Unknown Action',assignmentEvent:assignmentEvent||'No Assignment Audit Found',actionEvent:actionEvent||'No Action Audit Found'});
+ }
+ return records
+}
+function summarize(records){const map=new Map();for(const r of records){const k=[r.createdDate,r.uploadedBy,r.sourceTable,r.rep,r.action,r.actionEvent,r.assignmentEvent].join('|');if(!map.has(k))map.set(k,{...r,count:0,first:r.createdOn,last:r.createdOn});const g=map.get(k);g.count++;if(r.createdOn<g.first)g.first=r.createdOn;if(r.createdOn>g.last)g.last=r.createdOn}return Array.from(map.values()).sort((a,b)=>String(b.createdDate).localeCompare(String(a.createdDate))||a.sourceTable.localeCompare(b.sourceTable)||a.rep.localeCompare(b.rep)||a.action.localeCompare(b.action))}
+function render(){const host=document.getElementById('act-filtered-audit-batches');if(!host)return;const d=window.__actNativeAuditData;if(!d){host.innerHTML='<div class="act-audit-meta">Native Audit Table has not loaded.</div>';return}const rows=d.summary||[];host.innerHTML=`<div class="act-audit-meta"><strong>Native Dataverse Audit Table only.</strong> No Fact Table rows are used here. ${d.createRows.toLocaleString()} Create audit rows; ${d.changeRows.toLocaleString()} Create/Update audit rows; ${d.records.length.toLocaleString()} deduplicated original uploads.</div><div class="table-container" style="margin-top:10px"><table><thead><tr><th>Created Date</th><th>Uploaded By</th><th>Source Table</th><th>Original Assigned Rep</th><th>Action</th><th>Action Audit Event</th><th>Assignment Audit Event</th><th>Originally Assigned Count</th><th>First Created</th><th>Last Created</th></tr></thead><tbody>${rows.map(x=>`<tr><td>${x.createdDate}</td><td>${window.escapeHTML?.(x.uploadedBy)||x.uploadedBy}</td><td>${x.sourceTable}</td><td>${window.escapeHTML?.(x.rep)||x.rep}</td><td>${window.escapeHTML?.(x.action)||x.action}</td><td>${x.actionEvent}</td><td>${x.assignmentEvent}</td><td>${x.count}</td><td>${new Date(x.first).toLocaleString()}</td><td>${new Date(x.last).toLocaleString()}</td></tr>`).join('')}</tbody></table></div>`}
+async function load(force=true){
+ if(active)return active;controller=new AbortController();setCount(0);
+ active=(async()=>{const token=await window.getToken();const users=await allowedUsers(token,controller.signal);if(!users.length)throw new Error('No allowed uploader system-user IDs were returned.');
+  window.updateLoader?.(80,'Native Audit Table: loading Create rows...',0);
+  const creates=await allPages(makeUrl([1],users),token,controller.signal,'Native Create Audit',(n)=>{setCount(n);window.updateLoader?.(84,`Native Audit Table: ${n.toLocaleString()} Create rows...`,n)});
+  window.updateLoader?.(87,'Native Audit Table: loading Create/Update rows...',creates.length);
+  const changes=await allPages(makeUrl([1,2],[]),token,controller.signal,'Native Change Audit',(n)=>window.updateLoader?.(89,`Native Audit Table: ${n.toLocaleString()} Create/Update rows...`,creates.length+n));
+  const records=build(creates,changes),summary=summarize(records);setCount(records.length);
+  const data={source:'Dataverse audits entity',range:{start:START,end:END},createRows:creates.length,changeRows:changes.length,records,summary,counts:{createdRecords:records.length},rawAuditRows:creates.length+changes.length,error:null};
+  window.__actNativeAuditData=data;window.__actAuditUploadMetrics=data;window.__ACT_NATIVE_AUDIT_READY=true;render();console.info('[ACT Native Audit] complete',data);return data
+ })().catch(e=>{console.error('[ACT Native Audit] failed',e);return{error:e.message||String(e),records:[],counts:{createdRecords:0},rawAuditRows:0}}).finally(()=>{active=null;controller=null});return active
+}
+function cancel(){controller?.abort()}
+window.ACTNativeAudit={load,cancel,render};
+// Replace every legacy audit entry point with the native Audit-only loader.
+window.ACTAuditUploadMetrics={load,refresh:()=>load(true),cancel};
+window.ACTStartupAudit={start:load,bootstrap:load,guardReports:()=>!!window.__ACT_NATIVE_AUDIT_READY,cancel};
+const hook=()=>{document.getElementById('act-load-filtered-audit')?.addEventListener('click',e=>{e.stopImmediatePropagation();load(true)},{capture:true});render()};
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',hook,{once:true});else hook();
+})();
+</script></body>
 </html>
