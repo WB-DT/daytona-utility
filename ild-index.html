@@ -15840,5 +15840,79 @@ if(window.Chart&&Chart.defaults){
 }
 })();
 </script>
+
+<script id="act-msal-multiple-token-fix-20260721">
+(function(){
+'use strict';
+if(window.__ACT_MSAL_MULTIPLE_TOKEN_FIX_20260721__)return;
+window.__ACT_MSAL_MULTIPLE_TOKEN_FIX_20260721__=true;
+const cache=new Map(),inflight=new Map();
+function normalizeScope(scope){
+ const raw=String(scope||'https://org23279050.crm.dynamics.com/user_impersonation').trim();
+ return raw.replace(/(https:\/\/[^/]+)\/{2,}/i,'$1/');
+}
+function accountKey(a){return String(a?.homeAccountId||a?.localAccountId||a?.username||'');}
+function resolveAccount(){
+ const app=window.msalInstance;
+ const accounts=typeof app?.getAllAccounts==='function'?app.getAllAccounts():[];
+ let account=window.msalAccount||null;
+ if(account){const key=accountKey(account);account=accounts.find(a=>accountKey(a)===key)||account;}
+ if(!account&&typeof app?.getActiveAccount==='function')account=app.getActiveAccount();
+ if(!account&&window.currentUserName){const wanted=String(window.currentUserName).trim().toLowerCase();account=accounts.find(a=>String(a.name||a.username||'').trim().toLowerCase()===wanted)||null;}
+ if(!account&&accounts.length===1)account=accounts[0];
+ if(!account&&accounts.length>1){
+   const saved=localStorage.getItem('act_msal_home_account_id');
+   account=accounts.find(a=>accountKey(a)===saved)||accounts.slice().sort((a,b)=>accountKey(a).localeCompare(accountKey(b)))[0];
+ }
+ if(account){
+   window.msalAccount=account;
+   localStorage.setItem('act_msal_home_account_id',accountKey(account));
+   try{app.setActiveAccount?.(account);}catch(_){}
+ }
+ return account;
+}
+function isInteractionRequired(e){
+ const code=String(e?.errorCode||e?.code||'').toLowerCase();
+ const name=String(e?.name||'').toLowerCase();
+ return name.includes('interactionrequired')||['interaction_required','login_required','consent_required','no_tokens_found','token_refresh_required'].includes(code);
+}
+window.getToken=async function(scopeUrl){
+ const app=window.msalInstance;
+ if(!app)throw new Error('MSAL is not initialized.');
+ const scope=normalizeScope(scopeUrl);
+ const account=resolveAccount();
+ if(!account)throw new Error('No signed-in Microsoft account is available. Sign in again.');
+ const authority=String(window.msalConfig?.auth?.authority||'').trim();
+ const key=[accountKey(account),authority,scope].join('|');
+ const hit=cache.get(key);
+ if(hit&&hit.expiresAt>Date.now()+60000)return hit.token;
+ if(inflight.has(key))return inflight.get(key);
+ const request={scopes:[scope],account,authority};
+ const task=(async()=>{
+  try{
+   let result;
+   try{result=await app.acquireTokenSilent(request);}
+   catch(first){
+    if(String(first?.errorCode||first?.message||'').includes('multiple_matching_tokens')){
+      /* A fully-qualified account + authority + normalized scope removes cache ambiguity. */
+      result=await app.acquireTokenSilent({...request,forceRefresh:true});
+    }else if(isInteractionRequired(first)){
+      result=await app.acquireTokenPopup({...request,prompt:'select_account'});
+    }else throw first;
+   }
+   if(result?.account){window.msalAccount=result.account;try{app.setActiveAccount?.(result.account);}catch(_){} }
+   if(!result?.accessToken)throw new Error('Microsoft authentication returned no access token.');
+   const expires=result.expiresOn instanceof Date?result.expiresOn.getTime():Date.now()+25*60*1000;
+   cache.set(key,{token:result.accessToken,expiresAt:expires});
+   return result.accessToken;
+  }finally{inflight.delete(key);}
+ })();
+ inflight.set(key,task);
+ return task;
+};
+window.getToken.__actMultipleTokenFix=true;
+console.info('ACT MSAL deterministic account/authority token fix installed.');
+})();
+</script>
 </body>
 </html>
