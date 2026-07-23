@@ -1267,6 +1267,17 @@
             .mvgo-footer-actions { flex-direction: column; }
             .mvgo-footer-actions button { width: 100%; }
         }
+
+        /* Masonville durable queue status and details */
+        #masonville-queue-pill { height:32px; display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px; font-size:.68rem; font-weight:900; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-main); cursor:pointer; white-space:nowrap; }
+        #masonville-queue-pill.mvq-ok { color:var(--accent-success); border-color:rgba(34,197,94,.38); background:rgba(34,197,94,.09); }
+        #masonville-queue-pill.mvq-warn { color:var(--accent-warning); border-color:rgba(234,179,8,.48); background:rgba(234,179,8,.11); animation:pulseYellow 2s infinite; }
+        #masonville-queue-pill.mvq-danger { color:var(--accent-danger); border-color:rgba(239,68,68,.55); background:rgba(239,68,68,.12); animation:pulseRed 1.6s infinite; }
+        #masonville-queue-count { min-width:18px; height:18px; padding:0 5px; display:inline-flex; align-items:center; justify-content:center; border-radius:999px; color:#fff; background:currentColor; box-shadow:inset 0 0 0 9px rgba(15,23,42,.18); }
+        .mvq-modal { width:min(760px,94vw); max-width:94vw; }
+        .mvq-list { max-height:55vh; overflow:auto; display:flex; flex-direction:column; gap:.55rem; }
+        .mvq-row { padding:.7rem; border:1px solid var(--border-color); border-radius:.65rem; background:var(--bg-input); color:var(--text-main); }
+        .mvq-state { padding:2px 7px; border-radius:999px; background:rgba(234,179,8,.13); color:var(--accent-warning); font-size:.64rem; font-weight:900; }
 </style>
 
 <script>
@@ -1766,81 +1777,277 @@
         };
     };
 
-    window.pushToMasonvilleSilent = async function(accountId, notesPayload, type = "ISLead") {
-        try {
-            const companyName = currentSelectedRecord ? currentSelectedRecord.cr714_company : "";
-            const repOwnerName = currentUserRepName || (msalAccount && msalAccount.name) || "";
-            const normalizedType = String(type || "").trim();
+    // --- Masonville GO note delivery queue ---------------------------------
+    // Store first, deliver second. IndexedDB is the durable browser store and
+    // localStorage is a second emergency mirror. The original timestamps travel
+    // with every retry so backfilled notes retain the time the user created them.
+    const MASONVILLE_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/9600fc61adea438ba498b1542e38cf47/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Z8KzQY52W_xgt246b_SliGmBgZLFc4MbF9OkFe01Z7Q";
+    const MV_QUEUE_DB = "ACTMasonvilleDeliveryQueue";
+    const MV_QUEUE_STORE = "pending";
+    const MV_QUEUE_BACKUP_KEY = "ACT_MVGO_NOTE_QUEUE_BACKUP_V1";
+    const MV_QUEUE_ARCHIVE_KEY = "ACT_MVGO_NOTE_QUEUE_ARCHIVE_V1";
+    const MV_RETRY_BASE_MS = 30000;
+    const MV_RETRY_MAX_MS = 15 * 60 * 1000;
+    let mvQueueProcessing = false;
+    let mvQueueTimer = null;
 
-            // MVGO Catalog ISREQ requests should bypass the old assignment Flow and write directly to Masonville/D365.
-            if (normalizedType.toLowerCase() === "isreq") {
-                return await window.createMasonvilleSalesCallDirect({
-                    accountId,
-                    notesPayload,
-                    type: "ISReq",
-                    companyName,
-                    repOwnerName
-                });
-            }
+    function mvNewId() {
+        return (crypto && crypto.randomUUID) ? crypto.randomUUID() : `mvgo-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
 
-            // Existing Power Automate path remains for the other activity types (ISLead/ISCall/ISEmail/etc.).
-            // If we split these later, add new branches above this fallback.
-            const flowUrl = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/9600fc61adea438ba498b1542e38cf47/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=Z8KzQY52W_xgt246b_SliGmBgZLFc4MbF9OkFe01Z7Q";
-            
-            // 1. Fetch the logged-in user's internal Dynamics 365 System User GUID
-            let repOwnerGuid = "";
-            try {
-                if (msalAccount && msalAccount.username) {
-                    const d365Token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
-                    const userEmail = msalAccount.username.toLowerCase();
-                    // Query the systemusers table to find the matching ID for the current rep
-                    const userRes = await fetch(`https://wbmasonco.crm.dynamics.com/api/data/v9.2/systemusers?$filter=internalemailaddress eq '${userEmail}'&$select=systemuserid`, {
-                        headers: { 'Authorization': `Bearer ${d365Token}`, 'Content-Type': 'application/json' }
-                    });
-                    if (userRes.ok) {
-                        const userData = await userRes.json();
-                        if (userData.value && userData.value.length > 0) {
-                            repOwnerGuid = userData.value[0].systemuserid;
-                        }
-                    }
+    function mvOpenDb() {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(MV_QUEUE_DB, 1);
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                if (!db.objectStoreNames.contains(MV_QUEUE_STORE)) {
+                    const store = db.createObjectStore(MV_QUEUE_STORE, { keyPath: "id" });
+                    store.createIndex("nextAttemptUtc", "nextAttemptUtc", { unique: false });
                 }
-            } catch(e) { 
-                console.warn("Failed to fetch Rep Owner GUID, Flow will fallback to default owner.", e); 
-            }
-
-            // 2. Build the payload including the newly fetched Owner GUID and logged-in rep display name
-            const payload = {
-                accountId: accountId,
-                notesPayload: notesPayload,
-                subject: `${companyName}/${accountId}`,
-                activityType: normalizedType || "ISLead",
-                regardingGuid: currentAccountGuid || "",
-                repOwnerGuid: repOwnerGuid,
-                repOwnerName: repOwnerName
             };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error("Unable to open Masonville queue."));
+        });
+    }
 
-            // 3. Push to Power Automate
-            const response = await fetch(flowUrl, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify(payload)
+    async function mvDbRequest(mode, action) {
+        const db = await mvOpenDb();
+        try {
+            return await new Promise((resolve, reject) => {
+                const tx = db.transaction(MV_QUEUE_STORE, mode);
+                const store = tx.objectStore(MV_QUEUE_STORE);
+                const request = action(store);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error || tx.error);
             });
+        } finally {
+            db.close();
+        }
+    }
 
-            if (response.ok) {
-                console.log("Power Automate Sync Successful");
-                return true;
-            } else {
-                throw new Error(`Flow Error: ${response.status}`);
+    async function mvGetQueue() {
+        try { return (await mvDbRequest("readonly", store => store.getAll())) || []; }
+        catch (error) {
+            console.warn("IndexedDB queue read failed; using backup mirror.", error);
+            try { return JSON.parse(localStorage.getItem(MV_QUEUE_BACKUP_KEY) || "[]"); } catch (_) { return []; }
+        }
+    }
+
+    function mvWriteBackup(items) {
+        try { localStorage.setItem(MV_QUEUE_BACKUP_KEY, JSON.stringify(items)); }
+        catch (error) { console.warn("Masonville local backup write failed.", error); }
+    }
+
+    async function mvRefreshBackupAndStatus() {
+        const items = await mvGetQueue();
+        mvWriteBackup(items);
+        const pill = document.getElementById("masonville-queue-pill");
+        const count = document.getElementById("masonville-queue-count");
+        if (count) count.textContent = String(items.length);
+        if (pill) {
+            pill.classList.toggle("mvq-ok", items.length === 0);
+            pill.classList.toggle("mvq-warn", items.length > 0 && items.length < 25);
+            pill.classList.toggle("mvq-danger", items.length >= 25);
+            pill.title = items.length ? `${items.length} Masonville update(s) waiting for delivery. Click for details.` : "Masonville delivery queue is clear.";
+        }
+        return items;
+    }
+
+    async function mvPut(item) {
+        try { await mvDbRequest("readwrite", store => store.put(item)); }
+        catch (error) {
+            const backup = await mvGetQueue();
+            const index = backup.findIndex(x => x.id === item.id);
+            if (index >= 0) backup[index] = item; else backup.push(item);
+            mvWriteBackup(backup);
+            if (!backup.some(x => x.id === item.id)) throw error;
+        }
+        await mvRefreshBackupAndStatus();
+    }
+
+    async function mvDelete(id) {
+        try { await mvDbRequest("readwrite", store => store.delete(id)); }
+        catch (error) { console.warn("IndexedDB queue delete failed.", error); }
+        const items = (await mvGetQueue()).filter(x => x.id !== id);
+        mvWriteBackup(items);
+        await mvRefreshBackupAndStatus();
+    }
+
+    function mvArchive(item, result) {
+        try {
+            const archive = JSON.parse(localStorage.getItem(MV_QUEUE_ARCHIVE_KEY) || "[]");
+            archive.unshift({ ...item, payload: undefined, notesPreview: String(item.payload?.notesPayload || "").slice(0, 250), deliveredUtc: new Date().toISOString(), result });
+            localStorage.setItem(MV_QUEUE_ARCHIVE_KEY, JSON.stringify(archive.slice(0, 100)));
+        } catch (error) { console.warn("Masonville archive write failed.", error); }
+    }
+
+    function mvRetryDelay(attempts, retryAfterSeconds) {
+        if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) return Math.min(retryAfterSeconds * 1000, MV_RETRY_MAX_MS);
+        const exponential = Math.min(MV_RETRY_BASE_MS * Math.pow(2, Math.max(0, attempts - 1)), MV_RETRY_MAX_MS);
+        return exponential + Math.floor(Math.random() * 5000);
+    }
+
+    async function mvSend(item) {
+        const response = await fetch(MASONVILLE_FLOW_URL, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-ACT-Queue-Id": item.id,
+                "X-ACT-Original-Time": item.originalCreatedUtc
+            },
+            body: JSON.stringify(item.payload)
+        });
+        if (!response.ok) {
+            const error = new Error(`Flow Error: ${response.status}`);
+            error.status = response.status;
+            error.retryAfter = Number(response.headers.get("Retry-After"));
+            try { error.responseText = (await response.text()).slice(0, 500); } catch (_) {}
+            throw error;
+        }
+        return { status: response.status };
+    }
+
+    window.processMasonvilleQueue = async function(options = {}) {
+        if (mvQueueProcessing || !navigator.onLine) return;
+        mvQueueProcessing = true;
+        let delivered = 0;
+        try {
+            const now = Date.now();
+            const items = (await mvGetQueue())
+                .filter(item => options.force || !item.nextAttemptUtc || Date.parse(item.nextAttemptUtc) <= now)
+                .sort((a, b) => Date.parse(a.originalCreatedUtc) - Date.parse(b.originalCreatedUtc));
+
+            for (const item of items) {
+                item.status = "Sending";
+                item.lastAttemptUtc = new Date().toISOString();
+                await mvPut(item);
+                try {
+                    const result = await mvSend(item);
+                    mvArchive(item, result);
+                    await mvDelete(item.id);
+                    delivered++;
+                } catch (error) {
+                    item.attempts = (item.attempts || 0) + 1;
+                    item.status = "Retry";
+                    item.lastStatus = error.status || 0;
+                    item.lastError = error.responseText || error.message || "Network error";
+                    item.nextAttemptUtc = new Date(Date.now() + mvRetryDelay(item.attempts, error.retryAfter)).toISOString();
+                    await mvPut(item);
+                    console.warn("Masonville delivery retained for retry.", item.id, error);
+                    // Stop a batch after a service/network failure to avoid hammering the Flow environment.
+                    if (!error.status || [408, 425, 429, 500, 502, 503, 504].includes(error.status)) break;
+                }
             }
-
-        } catch (error) {
-            console.error("Sync Error:", error);
-            window.showToast(`Masonville Sync Failed: ${error.message}`, "error");
-            return false;
+        } finally {
+            mvQueueProcessing = false;
+            const remaining = await mvRefreshBackupAndStatus();
+            if (delivered > 0) window.showToast(`${delivered} queued Masonville update${delivered === 1 ? "" : "s"} delivered.`, "success");
+            if (options.notify && remaining.length > 0) window.showToast(`${remaining.length} Masonville update${remaining.length === 1 ? " is" : "s are"} still safely queued.`, "processing");
         }
     };
+
+    window.openMasonvilleQueue = async function() {
+        const items = (await mvRefreshBackupAndStatus()).sort((a,b) => Date.parse(a.originalCreatedUtc) - Date.parse(b.originalCreatedUtc));
+        let modal = document.getElementById("masonville-queue-modal");
+        if (!modal) {
+            modal = document.createElement("div");
+            modal.id = "masonville-queue-modal";
+            modal.className = "modal-overlay";
+            modal.innerHTML = `<div class="modal-content mvq-modal"><div class="flex items-center justify-between gap-3 mb-3"><div><h2 class="text-lg font-black text-main"><i class="fas fa-cloud-arrow-up mr-2"></i>Masonville Delivery Queue</h2><p class="text-xs text-muted">Updates are stored locally until the Flow service accepts them.</p></div><button class="btn-secondary" onclick="document.getElementById('masonville-queue-modal').style.display='none'"><i class="fas fa-xmark"></i></button></div><div id="masonville-queue-list" class="mvq-list custom-scrollbar"></div><div class="flex justify-end gap-2 mt-3"><button class="btn-secondary text-xs" onclick="window.exportMasonvilleQueueBackup()"><i class="fas fa-download mr-1"></i>Export Backup</button><button class="btn-primary text-xs" onclick="window.processMasonvilleQueue({force:true,notify:true}); window.openMasonvilleQueue();"><i class="fas fa-arrows-rotate mr-1"></i>Retry Now</button></div></div>`;
+            document.body.appendChild(modal);
+        }
+        const list = modal.querySelector("#masonville-queue-list");
+        list.innerHTML = items.length ? items.map(item => `<div class="mvq-row"><div class="flex justify-between gap-3"><strong>${window.escapeHtml ? window.escapeHtml(item.payload?.subject || item.accountId || "Masonville update") : (item.payload?.subject || item.accountId || "Masonville update")}</strong><span class="mvq-state">${item.status || "Pending"}</span></div><div class="text-xs text-muted mt-1">Original: ${new Date(item.originalCreatedUtc).toLocaleString()} | Attempts: ${item.attempts || 0}</div><div class="text-xs mt-1">${String(item.payload?.notesPayload || "").replace(/</g,"&lt;").slice(0,220)}</div>${item.lastError ? `<div class="text-xs text-status-danger mt-1">${String(item.lastError).replace(/</g,"&lt;")}</div>` : ""}</div>`).join("") : `<div class="history-feed-state"><i class="fas fa-circle-check"></i><strong>Queue clear</strong><span>There are no Masonville updates waiting.</span></div>`;
+        modal.style.display = "flex";
+    };
+
+    window.exportMasonvilleQueueBackup = async function() {
+        const items = await mvGetQueue();
+        const blob = new Blob([JSON.stringify({ exportedUtc: new Date().toISOString(), queue: items }, null, 2)], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `ACT-Masonville-Queue-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    };
+
+    window.pushToMasonvilleSilent = async function(accountId, notesPayload, type = "ISLead", originalTimes = {}) {
+        const companyName = currentSelectedRecord ? currentSelectedRecord.cr714_company : "";
+        const repOwnerName = currentUserRepName || (msalAccount && msalAccount.name) || "";
+        const normalizedType = String(type || "").trim();
+
+        // ISReq remains a direct Dataverse operation and does not use the failing Flow endpoint.
+        if (normalizedType.toLowerCase() === "isreq") {
+            return await window.createMasonvilleSalesCallDirect({ accountId, notesPayload, type: "ISReq", companyName, repOwnerName });
+        }
+
+        let repOwnerGuid = "";
+        try {
+            if (msalAccount && msalAccount.username) {
+                const d365Token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+                const userEmail = msalAccount.username.toLowerCase().replace(/'/g, "''");
+                const userRes = await fetch(`https://wbmasonco.crm.dynamics.com/api/data/v9.2/systemusers?$filter=internalemailaddress eq '${userEmail}'&$select=systemuserid`, { headers: { "Authorization": `Bearer ${d365Token}`, "Content-Type": "application/json" } });
+                if (userRes.ok) repOwnerGuid = (await userRes.json()).value?.[0]?.systemuserid || "";
+            }
+        } catch (error) { console.warn("Owner lookup failed; queued payload will use the default owner.", error); }
+
+        const originalCreatedUtc = originalTimes.originalCreatedUtc || new Date().toISOString();
+        const originalModifiedUtc = originalTimes.originalModifiedUtc || originalCreatedUtc;
+        const id = mvNewId();
+        const payload = {
+            accountId,
+            notesPayload,
+            subject: `${companyName}/${accountId}`,
+            activityType: normalizedType || "ISLead",
+            regardingGuid: currentAccountGuid || "",
+            repOwnerGuid,
+            repOwnerName,
+            queueId: id,
+            idempotencyKey: id,
+            originalCreatedDate: originalCreatedUtc,
+            originalModifiedDate: originalModifiedUtc,
+            queuedByACT: true
+        };
+        const item = { id, accountId, payload, originalCreatedUtc, originalModifiedUtc, queuedUtc: new Date().toISOString(), status: "Pending", attempts: 0, nextAttemptUtc: new Date().toISOString(), lastError: null, lastStatus: null };
+
+        // Store before attempting network delivery so a 503, timeout, tab close, or refresh cannot lose the update.
+        await mvPut(item);
+        try {
+            const result = await mvSend(item);
+            mvArchive(item, result);
+            await mvDelete(item.id);
+            console.log("Power Automate Sync Successful", item.id);
+            return true;
+        } catch (error) {
+            item.attempts = 1;
+            item.status = "Retry";
+            item.lastStatus = error.status || 0;
+            item.lastError = error.responseText || error.message || "Network error";
+            item.nextAttemptUtc = new Date(Date.now() + mvRetryDelay(item.attempts, error.retryAfter)).toISOString();
+            await mvPut(item);
+            window.showToast(`Masonville service unavailable. Update saved safely and queued for retry.`, "processing");
+            return true;
+        }
+    };
+
+    window.initializeMasonvilleQueue = async function() {
+        // Restore the mirror only when IndexedDB is empty (for example after an interrupted browser migration).
+        try {
+            const dbItems = await mvDbRequest("readonly", store => store.getAll());
+            const backupItems = JSON.parse(localStorage.getItem(MV_QUEUE_BACKUP_KEY) || "[]");
+            if ((!dbItems || dbItems.length === 0) && backupItems.length) {
+                for (const item of backupItems) await mvDbRequest("readwrite", store => store.put(item));
+            }
+        } catch (error) { console.warn("Masonville queue recovery check failed.", error); }
+        await mvRefreshBackupAndStatus();
+        clearInterval(mvQueueTimer);
+        mvQueueTimer = setInterval(() => window.processMasonvilleQueue(), 2 * 60 * 1000);
+        window.addEventListener("online", () => window.processMasonvilleQueue({ notify: true }));
+        document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") window.processMasonvilleQueue(); });
+        setTimeout(() => window.processMasonvilleQueue(), 2500);
+    };
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", window.initializeMasonvilleQueue, { once: true });
+    else window.initializeMasonvilleQueue();
 
     window.parseNotes = function(rawNotes) {
         if (!rawNotes) return []; 
@@ -2561,7 +2768,7 @@ window.preloadTemplateImages = async function() {
                 fetch(`${DATAVERSE_URL}/cr714_prospectingdatasets?$filter=cr714_repassigned eq '${targetRep}' and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
                 fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$filter=cr714_employeename eq '${targetRep}'`, reqOptions).catch(() => ({ ok: false })),
                 fetch(`${DATAVERSE_URL}/cr714_louisebrowndatasets?$filter=cr714_assignedrep eq '${targetRep}' and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
-                fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_name,cr714_managerassigned&$filter=${encodeURIComponent("cr714_managerassigned eq 'Ashley Bathrick' or cr714_managerassigned eq 'Tabatha Hanks'")}`, reqOptions).catch(() => ({ ok: false }))
+                fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_employeename,cr714_managerassigned&$filter=${encodeURIComponent("cr714_managerassigned eq 'Ashley Bathrick' or cr714_managerassigned eq 'Tabatha Hanks'")}`, reqOptions).catch(() => ({ ok: false }))
             ]);
 
             const amData = requests[0].ok ? await requests[0].json() : { value: [] };
@@ -5776,6 +5983,7 @@ document.getElementById('script-modal').style.display='flex';
                         <span>Special Email Templates Active</span>
                         <span id="special-email-templates-department" class="special-template-department"></span>
                     </div>
+                    <button id="masonville-queue-pill" class="mvq-ok" onclick="window.openMasonvilleQueue()" title="Masonville delivery queue"><i class="fas fa-cloud-arrow-up"></i><span>Masonville</span><span id="masonville-queue-count">0</span></button>
                     <div id="email-counter-segment" class="flex justify-between items-center text-xs text-main font-semibold p-1 border rounded px-3 h-8" style="border-color: var(--border-color); background-color: var(--bg-input);">
                         <span><i class="fas fa-paper-plane text-status-info mr-2"></i>Hourly Limit:</span>
                         <span id="email-hourly-count" class="font-bold ml-2">0/100</span>
