@@ -1278,6 +1278,25 @@
         .mvq-list { max-height:55vh; overflow:auto; display:flex; flex-direction:column; gap:.55rem; }
         .mvq-row { padding:.7rem; border:1px solid var(--border-color); border-radius:.65rem; background:var(--bg-input); color:var(--text-main); }
         .mvq-state { padding:2px 7px; border-radius:999px; background:rgba(234,179,8,.13); color:var(--accent-warning); font-size:.64rem; font-weight:900; }
+
+        /* Masonville live send countdown */
+        #masonville-send-countdown {
+            position: fixed; inset: 0; z-index: 9988; display: none;
+            align-items: center; justify-content: center; pointer-events: none;
+            background: rgba(15,23,42,.28); backdrop-filter: blur(2px);
+        }
+        #masonville-send-countdown.is-visible { display: flex; }
+        .mv-send-countdown-card {
+            width: min(360px, 88vw); padding: 1.15rem 1.25rem; text-align: center;
+            border: 1px solid var(--border-color); border-radius: .9rem;
+            color: var(--text-main); background: var(--modal-bg); box-shadow: 0 18px 45px rgba(15,23,42,.34);
+        }
+        .mv-send-countdown-icon { color: var(--primary); font-size: 1.35rem; margin-bottom: .35rem; }
+        .mv-send-countdown-title { font-size: .95rem; font-weight: 950; }
+        .mv-send-countdown-copy { margin-top: .2rem; color: var(--text-muted); font-size: .72rem; font-weight: 700; }
+        .mv-send-countdown-number { margin: .65rem auto .45rem; font-size: 2.4rem; line-height: 1; font-weight: 950; color: var(--primary); }
+        .mv-send-countdown-track { height: 7px; overflow: hidden; border-radius: 999px; background: var(--bg-input); border: 1px solid var(--border-color); }
+        .mv-send-countdown-bar { width: 100%; height: 100%; transform-origin: left; background: linear-gradient(90deg,var(--primary),var(--accent-warning)); }
 </style>
 
 <script>
@@ -1887,24 +1906,75 @@
         return exponential + Math.floor(Math.random() * 5000);
     }
 
-    async function mvSend(item) {
-        const response = await fetch(MASONVILLE_FLOW_URL, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "X-ACT-Queue-Id": item.id,
-                "X-ACT-Original-Time": item.originalCreatedUtc
-            },
-            body: JSON.stringify(item.payload)
-        });
-        if (!response.ok) {
-            const error = new Error(`Flow Error: ${response.status}`);
-            error.status = response.status;
-            error.retryAfter = Number(response.headers.get("Retry-After"));
-            try { error.responseText = (await response.text()).slice(0, 500); } catch (_) {}
-            throw error;
+    function mvShowSendCountdown(seconds = 3) {
+        let overlay = document.getElementById("masonville-send-countdown");
+        if (!overlay) {
+            overlay = document.createElement("div");
+            overlay.id = "masonville-send-countdown";
+            overlay.setAttribute("role", "status");
+            overlay.setAttribute("aria-live", "polite");
+            overlay.innerHTML = `<div class="mv-send-countdown-card"><div class="mv-send-countdown-icon"><i class="fas fa-cloud-arrow-up fa-beat-fade"></i></div><div class="mv-send-countdown-title">Sending note to Masonville</div><div class="mv-send-countdown-copy">Still trying. If time runs out, the note will be queued automatically.</div><div id="masonville-send-countdown-number" class="mv-send-countdown-number">${seconds}</div><div class="mv-send-countdown-track"><div id="masonville-send-countdown-bar" class="mv-send-countdown-bar"></div></div></div>`;
+            document.body.appendChild(overlay);
         }
-        return { status: response.status };
+        const number = overlay.querySelector("#masonville-send-countdown-number");
+        const bar = overlay.querySelector("#masonville-send-countdown-bar");
+        const started = performance.now();
+        const duration = seconds * 1000;
+        overlay.classList.add("is-visible");
+        const update = () => {
+            const elapsed = performance.now() - started;
+            const remainingMs = Math.max(0, duration - elapsed);
+            const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+            if (number) number.textContent = String(remainingSeconds);
+            if (bar) bar.style.transform = `scaleX(${Math.max(0, remainingMs / duration)})`;
+        };
+        update();
+        const intervalId = setInterval(update, 50);
+        return () => {
+            clearInterval(intervalId);
+            overlay.classList.remove("is-visible");
+            if (bar) bar.style.transform = "scaleX(1)";
+        };
+    }
+
+    async function mvSend(item, options = {}) {
+        // The item is already in the durable queue. Give the live request three
+        // seconds, show the user a countdown, then continue with the ACT workflow.
+        const showCountdown = options.showCountdown === true;
+        const hideCountdown = showCountdown ? mvShowSendCountdown(3) : () => {};
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort("Masonville Flow timed out after 3 seconds."), 3000);
+        try {
+            const response = await fetch(MASONVILLE_FLOW_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-ACT-Queue-Id": item.id,
+                    "X-ACT-Original-Time": item.originalCreatedUtc
+                },
+                body: JSON.stringify(item.payload),
+                signal: controller.signal
+            });
+            if (!response.ok) {
+                const error = new Error(`Flow Error: ${response.status}`);
+                error.status = response.status;
+                error.retryAfter = Number(response.headers.get("Retry-After"));
+                try { error.responseText = (await response.text()).slice(0, 500); } catch (_) {}
+                throw error;
+            }
+            return { status: response.status };
+        } catch (error) {
+            if (error && error.name === "AbortError") {
+                const timeoutError = new Error("Masonville Flow timed out after 3 seconds.");
+                timeoutError.status = 0;
+                timeoutError.isTimeout = true;
+                throw timeoutError;
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeoutId);
+            hideCountdown();
+        }
     }
 
     window.processMasonvilleQueue = async function(options = {}) {
@@ -2013,7 +2083,7 @@
         // Store before attempting network delivery so a 503, timeout, tab close, or refresh cannot lose the update.
         await mvPut(item);
         try {
-            const result = await mvSend(item);
+            const result = await mvSend(item, { showCountdown: true });
             mvArchive(item, result);
             await mvDelete(item.id);
             console.log("Power Automate Sync Successful", item.id);
@@ -3113,6 +3183,12 @@ allRaw.forEach(r => {
       if (oppType === "Email") masonvilleType = "ISEmail";
 
       const pushNotes = note ? note : "(Metadata Update)";
+
+      // The ACT/Dataverse save is complete at this point. Clear the dirty-state
+      // before waiting on Masonville so the user can move to the next record.
+      // Masonville is store-first and will remain in its own queue if delivery
+      // fails or exceeds the 10-second request limit.
+      window.hasUnsavedChanges = false;
       await window.pushToMasonvilleSilent(currentRecordId, pushNotes, masonvilleType);
     }
 
@@ -5849,6 +5925,239 @@ document.getElementById('script-modal').style.display='flex';
     };
     
 </script>
+
+<!-- ACT6_MERGED_HISTORY_SECTIONS_START -->
+<style id="act6-merged-history-sections-style">
+
+  #history-column.act-right-hub-column{overflow:hidden;}
+  #history-column .act-right-hub-card{
+    height:100%;
+    min-height:0;
+    display:flex;
+    flex-direction:column;
+    overflow:hidden;
+  }
+  .act-right-hub-header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:.5rem;
+    padding:.55rem .65rem;
+    border-bottom:1px solid var(--border-color);
+    background:var(--bg-header);
+    flex-shrink:0;
+  }
+  .act-right-hub-title{
+    display:flex;
+    align-items:center;
+    gap:.45rem;
+    min-width:0;
+    font-size:.72rem;
+    font-weight:950;
+    text-transform:uppercase;
+    letter-spacing:.055em;
+    color:var(--text-muted);
+  }
+  .act-right-hub-title i{color:var(--primary);}
+  .act-right-hub-tools{display:flex;align-items:center;gap:.35rem;flex-shrink:0;}
+  .act-right-hub-tool-btn{
+    width:28px;
+    height:28px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:7px;
+    border:1px solid var(--border-color);
+    background:var(--bg-input);
+    color:var(--text-muted);
+    cursor:pointer;
+    transition:all .15s ease;
+  }
+  .act-right-hub-tool-btn:hover{border-color:var(--primary);color:var(--primary);background:var(--bg-card);}
+  .act-right-hub-tabs{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:.35rem;
+    padding:.45rem;
+    border-bottom:1px solid var(--border-color);
+    background:color-mix(in srgb,var(--primary) 4%,var(--bg-card));
+    flex-shrink:0;
+  }
+  .act-right-hub-tab{
+    border:1px solid var(--border-color);
+    border-radius:.65rem;
+    background:var(--bg-input);
+    color:var(--text-muted);
+    min-height:38px;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:2px;
+    font-size:.58rem;
+    font-weight:950;
+    line-height:1.05;
+    cursor:pointer;
+    transition:all .15s ease;
+    text-transform:uppercase;
+    letter-spacing:.025em;
+  }
+  .act-right-hub-tab i{font-size:.82rem;color:var(--primary);opacity:.82;}
+  .act-right-hub-tab:hover{border-color:var(--primary);background:var(--bg-card);transform:translateY(-1px);}
+  .act-right-hub-tab.active{
+    border-color:var(--primary);
+    background:color-mix(in srgb,var(--primary) 13%,var(--bg-card));
+    color:var(--text-main);
+    box-shadow:inset 0 -2px 0 var(--primary);
+  }
+  .act-right-hub-body{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;background:var(--bg-card);}
+  .act-right-section{position:absolute;inset:0;display:none;min-height:0;overflow:hidden;}
+  .act-right-section.active{display:flex;flex-direction:column;}
+  .act-right-section-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:.55rem;}
+  .act-right-frame-wrap{position:relative;flex:1 1 auto;min-height:0;overflow:hidden;background:#fff;}
+  .act-right-frame-wrap iframe{width:100%;height:100%;border:0;background:#fff;display:block;}
+  .act-right-empty{
+    height:100%;
+    min-height:0;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    gap:.45rem;
+    padding:1rem;
+    color:var(--text-muted);
+    background:linear-gradient(180deg,color-mix(in srgb,var(--primary) 4%,transparent),transparent);
+  }
+  .act-right-empty i{font-size:1.45rem;color:var(--primary);opacity:.75;}
+  .act-right-empty strong{font-size:.82rem;color:var(--text-main);}
+  .act-right-empty span{font-size:.68rem;line-height:1.35;max-width:220px;}
+  .act-right-mini-bar{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:.4rem;
+    padding:.42rem .55rem;
+    border-bottom:1px solid var(--border-color);
+    background:var(--bg-header);
+    flex-shrink:0;
+  }
+  .act-right-mini-label{font-size:.62rem;font-weight:900;text-transform:uppercase;letter-spacing:.045em;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .act-right-mini-actions{display:flex;align-items:center;gap:.3rem;flex-shrink:0;}
+  .act-right-mini-actions button{
+    border:1px solid var(--border-color);
+    background:var(--bg-input);
+    color:var(--text-muted);
+    border-radius:6px;
+    width:25px;
+    height:25px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    cursor:pointer;
+  }
+  .act-right-mini-actions button:hover{color:var(--primary);border-color:var(--primary);background:var(--bg-card);}
+  body.act-right-hub-ready .act-middle-replaced-by-right-hub{display:none!important;}
+  body.act-right-hub-ready #act-right-hub-middle-note{display:flex!important;}
+  #act-right-hub-middle-note{
+    display:none;
+    align-items:center;
+    gap:6px;
+    width:100%;
+    padding:6px 8px;
+    border-radius:.65rem;
+    border:1px dashed color-mix(in srgb,var(--primary) 45%,var(--border-color));
+    color:var(--text-muted);
+    background:color-mix(in srgb,var(--primary) 5%,var(--bg-input));
+    font-size:10px;
+    font-weight:800;
+    line-height:1.25;
+  }
+  #act-right-hub-middle-note i{color:var(--primary);}
+  @media (max-width:900px){
+    .act-right-hub-tabs{grid-template-columns:repeat(2,minmax(0,1fr));}
+    .act-right-hub-tab{min-height:34px;}
+  }
+
+
+  #history-column.act-right-hub-column { overflow: visible !important; }
+  #history-column.act-right-hub-column #history-resizer,
+  #history-column.act-right-hub-column .act-right-panel-resizer {
+    position:absolute;
+    top:0;
+    bottom:0;
+    left:-9px;
+    width:14px;
+    z-index:80;
+    cursor:col-resize;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:999px;
+    background:transparent;
+    transition:background-color .15s ease;
+  }
+  #history-column.act-right-hub-column #history-resizer::after,
+  #history-column.act-right-hub-column .act-right-panel-resizer::after {
+    content:'';
+    width:4px;
+    height:48px;
+    border-radius:999px;
+    background:linear-gradient(to bottom, transparent, var(--primary), transparent);
+    opacity:.55;
+    box-shadow:0 0 0 1px rgba(255,255,255,.2);
+  }
+  #history-column.act-right-hub-column #history-resizer:hover,
+  #history-column.act-right-hub-column .act-right-panel-resizer:hover,
+  body.act-right-panel-resizing #history-column.act-right-hub-column #history-resizer,
+  body.act-right-panel-resizing #history-column.act-right-hub-column .act-right-panel-resizer {
+    background:color-mix(in srgb,var(--primary) 13%,transparent);
+  }
+  body.act-right-panel-resizing { cursor:col-resize !important; user-select:none !important; }
+  body.act-right-panel-resizing iframe { pointer-events:none !important; }
+  body.act-right-hub-v11-ready .act-right-hub-tabs { grid-template-columns:repeat(5,minmax(0,1fr)); }
+  body.act-right-hub-v11-ready .act-right-hub-tab[data-act-right-section="account"] i { color:#16a34a; opacity:.9; }
+  .act-right-refresh-all-btn {
+    width:28px;
+    height:28px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:7px;
+    border:1px solid var(--border-color);
+    background:var(--bg-input);
+    color:var(--text-muted);
+    cursor:pointer;
+    transition:all .15s ease;
+  }
+  .act-right-refresh-all-btn:hover { border-color:var(--primary); color:var(--primary); background:var(--bg-card); transform:translateY(-1px); }
+  .act-right-refresh-all-btn.is-refreshing i { animation:actRightRefreshSpin .75s linear infinite; }
+  @keyframes actRightRefreshSpin { to { transform:rotate(360deg); } }
+  #act-right-section-account .act-right-empty strong { color:var(--text-main); }
+  #act-right-section-account .act-right-frame-wrap { background:#fff; }
+  @media (max-width: 1100px){ body.act-right-hub-v11-ready .act-right-hub-tabs { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+  @media (max-width: 700px){ body.act-right-hub-v11-ready .act-right-hub-tabs { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+
+/* ACT (6) merged history sections - final scoped UI polish */
+#history-column.act-right-hub-column .act-right-hub-card{border-radius:.95rem;box-shadow:0 14px 34px rgba(15,23,42,.12);}
+#history-column .act-right-hub-header{min-height:44px;padding:.62rem .72rem;}
+#history-column .act-right-hub-tabs{padding:.42rem;gap:.3rem;background:color-mix(in srgb,var(--bg-input) 82%,transparent);}
+#history-column .act-right-hub-tab{min-width:0;border-radius:.58rem;padding:.46rem .55rem;transition:transform .14s ease,border-color .14s ease,background .14s ease;}
+#history-column .act-right-hub-tab:hover{transform:translateY(-1px);}
+#history-column .act-right-hub-tab.active{box-shadow:0 5px 14px rgba(37,99,235,.16);}
+#history-column .act-right-mini-bar{min-height:38px;padding:.48rem .62rem;}
+#history-column .act-right-frame-wrap,#history-column .act-right-section-scroll{min-height:0;}
+#history-column .act-right-empty{padding:1.3rem .9rem;line-height:1.45;}
+#history-column .act-right-empty i{width:2.3rem;height:2.3rem;display:inline-flex;align-items:center;justify-content:center;border-radius:.7rem;background:rgba(37,99,235,.10);color:var(--primary);}
+#history-column #act-right-section-history .history-toolbar{position:sticky;top:0;z-index:2;backdrop-filter:blur(8px);}
+#history-column #qb-notes-preview{padding:.55rem;scrollbar-gutter:stable;}
+#history-column .history-note-card{margin-bottom:.55rem;}
+#history-column .act-right-hub-tool-btn:focus-visible,#history-column .act-right-hub-tab:focus-visible,#history-column [data-act-right-refresh]:focus-visible,#history-column [data-act-right-open]:focus-visible{outline:2px solid var(--primary);outline-offset:2px;}
+@media(max-width:1100px){#history-column .act-right-hub-tab span{font-size:.64rem;}#history-column .act-right-hub-tabs{overflow-x:auto;scrollbar-width:thin;}}
+@media(prefers-reduced-motion:reduce){#history-column *{scroll-behavior:auto!important;}#history-column .act-right-hub-tab{transition:none!important;}}
+
+</style>
+<!-- ACT6_MERGED_HISTORY_SECTIONS_STYLE_END -->
 </head>
 <body class="p-2 md:p-4">
 
@@ -6831,5 +7140,482 @@ document.getElementById('script-modal').style.display='flex';
 })();
 </script>
 
+
+<!-- ACT6_MERGED_HISTORY_SECTIONS_SCRIPT_START -->
+<script id="act6-merged-history-sections-script">
+
+(function(){
+  if(window.__ACT_RIGHT_SECTIONS_HUB_V1__) return;
+  window.__ACT_RIGHT_SECTIONS_HUB_V1__ = true;
+
+  function $(id){return document.getElementById(id);}
+  function safeCurrentRecordId(){
+    try {
+      if(window.currentRecordId) return String(window.currentRecordId).trim();
+      return Function('return (typeof currentRecordId !== "undefined" && currentRecordId) ? String(currentRecordId).trim() : "";')();
+    } catch(e){ return ''; }
+  }
+  function toast(msg,type){ if(window.showToast) window.showToast(msg,type||'info'); }
+  function urlFor(section, acct){
+    if(!acct) return '';
+    if(section === 'summary') return 'https://go.masonville.com/#/customer/' + encodeURIComponent(acct);
+    if(section === 'sales') return 'https://go.masonville.com/#/report/' + encodeURIComponent(acct) + '/Four%20Month%20Sales';
+    if(section === 'csw') return 'https://wbmasonco.crm.dynamics.com/main.aspx?appid=9e06e7d4-8616-eb11-a817-000d3a8b6b20&pagetype=search&searchText=' + encodeURIComponent(acct);
+    return '';
+  }
+
+  var activeSection = 'history';
+  var lastLoadedAcct = '';
+  var sectionMeta = {
+    history:{label:'History', icon:'fa-clock-rotate-left'},
+    summary:{label:'Summary', icon:'fa-clipboard-list'},
+    sales:{label:'Sales', icon:'fa-file-invoice-dollar'},
+    csw:{label:'CSW', icon:'fa-headset'}
+  };
+
+  function sectionTemplate(id, label){
+    if(id === 'history'){
+      return '<section id="act-right-section-history" class="act-right-section active" data-section="history">' +
+        '<div class="act-right-section-scroll custom-scrollbar" id="qb-notes-preview"><div class="text-center italic mt-10" style="color: var(--text-muted);">Select an account.</div></div>' +
+      '</section>';
+    }
+    return '<section id="act-right-section-' + id + '" class="act-right-section" data-section="' + id + '">' +
+      '<div class="act-right-mini-bar"><div class="act-right-mini-label"><i class="fas ' + sectionMeta[id].icon + ' mr-1"></i>' + label + '</div>' +
+      '<div class="act-right-mini-actions"><button type="button" data-act-right-refresh="' + id + '" title="Refresh"><i class="fas fa-sync"></i></button><button type="button" data-act-right-open="' + id + '" title="Open in new tab"><i class="fas fa-up-right-from-square"></i></button></div></div>' +
+      '<div class="act-right-frame-wrap" id="act-right-frame-wrap-' + id + '">' +
+      '<div class="act-right-empty"><i class="fas ' + sectionMeta[id].icon + '"></i><strong>' + label + '</strong><span>Select an account to load this section in the right panel.</span></div>' +
+      '</div>' +
+    '</section>';
+  }
+
+  function buildHub(){
+    var col = $('history-column');
+    if(!col || $('act-right-hub')) return;
+    col.classList.add('act-right-hub-column');
+    var card = col.querySelector('.card') || document.createElement('div');
+    card.className = 'card act-right-hub-card';
+    card.innerHTML =
+      '<div id="act-right-hub" class="act-right-hub-card">' +
+        '<div class="act-right-hub-header"><div class="act-right-hub-title"><i class="fas fa-layer-group"></i><span>Account Sections</span></div>' +
+        '<div class="act-right-hub-tools"><button type="button" class="act-right-hub-tool-btn" id="act-right-hub-refresh" title="Refresh active section"><i class="fas fa-sync"></i></button></div></div>' +
+        '<div class="act-right-hub-tabs" role="tablist" aria-label="Right-hand account sections">' +
+          Object.keys(sectionMeta).map(function(id){return '<button type="button" class="act-right-hub-tab ' + (id==='history'?'active':'') + '" data-act-right-section="' + id + '" role="tab" aria-selected="' + (id==='history'?'true':'false') + '"><i class="fas ' + sectionMeta[id].icon + '"></i><span>' + sectionMeta[id].label + '</span></button>';}).join('') +
+        '</div>' +
+        '<div class="act-right-hub-body">' +
+          sectionTemplate('history','History') + sectionTemplate('summary','Summary') + sectionTemplate('sales','Sales') + sectionTemplate('csw','CSW') +
+        '</div>' +
+      '</div>';
+    if(!card.parentElement) col.appendChild(card);
+  }
+
+  function markMiddleDuplicates(){
+    var labels = ['Summary','Sales','CSW'];
+    document.querySelectorAll('button.quick-action-btn').forEach(function(btn){
+      var txt = (btn.innerText || btn.textContent || '').replace(/\s+/g,' ').trim();
+      if(labels.indexOf(txt) >= 0) btn.classList.add('act-middle-replaced-by-right-hub');
+    });
+    var first = document.querySelector('.act-middle-replaced-by-right-hub');
+    if(first && !$('act-right-hub-middle-note')){
+      var note = document.createElement('div');
+      note.id = 'act-right-hub-middle-note';
+      note.innerHTML = '<i class="fas fa-layer-group"></i><span>Summary, Sales, and CSW live in the right-side sections panel.</span>';
+      first.parentElement && first.parentElement.insertBefore(note, first);
+    }
+  }
+
+  function setActiveSection(id){
+    if(!sectionMeta[id]) id = 'history';
+    activeSection = id;
+    document.querySelectorAll('.act-right-hub-tab').forEach(function(btn){
+      var on = btn.getAttribute('data-act-right-section') === id;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('.act-right-section').forEach(function(sec){
+      sec.classList.toggle('active', sec.getAttribute('data-section') === id);
+    });
+    if(id !== 'history') loadSection(id, false);
+  }
+
+  function setFrame(section, acct, force){
+    var wrap = $('act-right-frame-wrap-' + section);
+    if(!wrap) return;
+    var target = urlFor(section, acct);
+    if(!target){
+      wrap.innerHTML = '<div class="act-right-empty"><i class="fas ' + sectionMeta[section].icon + '"></i><strong>' + sectionMeta[section].label + '</strong><span>Select an account to load this section in the right panel.</span></div>';
+      return;
+    }
+    var iframe = wrap.querySelector('iframe');
+    if(!iframe){
+      wrap.innerHTML = '<iframe title="' + sectionMeta[section].label + '" src="' + target + '"></iframe>';
+      if(window.logLinkGeneration) window.logLinkGeneration(sectionMeta[section].label, target, 'Right-side section: ' + section);
+    } else if(force || iframe.getAttribute('src') !== target){
+      iframe.setAttribute('src', target);
+      if(window.logLinkGeneration) window.logLinkGeneration(sectionMeta[section].label, target, 'Right-side section refresh: ' + section);
+    }
+  }
+
+  function loadSection(section, force){
+    var acct = safeCurrentRecordId();
+    setFrame(section, acct, !!force);
+  }
+
+  function refreshActive(){
+    if(activeSection === 'history'){
+      if(typeof window.updateNotesPreview === 'function') window.updateNotesPreview();
+      return;
+    }
+    loadSection(activeSection, true);
+  }
+
+  function openActiveExternal(section){
+    var id = section || activeSection;
+    var acct = safeCurrentRecordId();
+    var target = urlFor(id, acct);
+    if(!target){ toast('Select an account first','error'); return; }
+    if(window.logAndOpenLink) window.logAndOpenLink(sectionMeta[id].label, target);
+    else window.open(target, '_blank');
+  }
+
+  function refreshForRecordChange(){
+    var acct = safeCurrentRecordId();
+    if(acct === lastLoadedAcct) return;
+    lastLoadedAcct = acct;
+    ['summary','sales','csw'].forEach(function(id){
+      var wrap = $('act-right-frame-wrap-' + id);
+      var iframe = wrap && wrap.querySelector('iframe');
+      if(iframe || activeSection === id) setFrame(id, acct, true);
+    });
+    if(activeSection === 'history' && typeof window.updateNotesPreview === 'function'){
+      setTimeout(function(){ window.updateNotesPreview(); }, 0);
+    }
+  }
+
+  function bindHub(){
+    document.querySelectorAll('[data-act-right-section]').forEach(function(btn){
+      if(btn.__rightHubBound) return;
+      btn.__rightHubBound = true;
+      btn.addEventListener('click', function(){ setActiveSection(btn.getAttribute('data-act-right-section')); });
+    });
+    var refresh = $('act-right-hub-refresh');
+    if(refresh && !refresh.__rightHubBound){ refresh.__rightHubBound = true; refresh.addEventListener('click', refreshActive); }
+    document.querySelectorAll('[data-act-right-refresh]').forEach(function(btn){
+      if(btn.__rightHubBound) return;
+      btn.__rightHubBound = true;
+      btn.addEventListener('click', function(){ loadSection(btn.getAttribute('data-act-right-refresh'), true); });
+    });
+    document.querySelectorAll('[data-act-right-open]').forEach(function(btn){
+      if(btn.__rightHubBound) return;
+      btn.__rightHubBound = true;
+      btn.addEventListener('click', function(){ openActiveExternal(btn.getAttribute('data-act-right-open')); });
+    });
+  }
+
+  function wrapRecordSelectors(){
+    ['performSelect','selectRecord','loadRecordDetails','populateForm'].forEach(function(name){
+      if(typeof window[name] !== 'function' || window[name].__rightHubWrapped) return;
+      var original = window[name];
+      var wrapped = function(){
+        var result = original.apply(this, arguments);
+        setTimeout(refreshForRecordChange, 100);
+        setTimeout(refreshForRecordChange, 700);
+        return result;
+      };
+      wrapped.__rightHubWrapped = true;
+      window[name] = wrapped;
+    });
+  }
+
+  function run(){
+    buildHub();
+    bindHub();
+    markMiddleDuplicates();
+    wrapRecordSelectors();
+    refreshForRecordChange();
+    document.body.classList.add('act-right-hub-ready');
+  }
+
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
+  else run();
+  var obs = new MutationObserver(function(){ run(); });
+  if(document.body) obs.observe(document.body, {childList:true, subtree:true});
+  setInterval(refreshForRecordChange, 1200);
+  window.ACT_RightSectionsHub = { refresh: run, setActiveSection: setActiveSection, refreshActive: refreshActive, openActiveExternal: openActiveExternal };
+})();
+
+
+(function(){
+  if(window.__ACT_RIGHT_SECTIONS_HUB_V11__) return;
+  window.__ACT_RIGHT_SECTIONS_HUB_V11__ = true;
+
+  const WIDTH_KEY = 'ACT_RIGHT_HUB_PANEL_WIDTH_V11';
+  const MIN_W = 320;
+  const DEFAULT_W = 430;
+  const ACCOUNT_BASE = 'https://go.masonville.com/#';
+
+  function $(id){ return document.getElementById(id); }
+  function q(sel, root){ return (root || document).querySelector(sel); }
+  function qa(sel, root){ return Array.from((root || document).querySelectorAll(sel)); }
+  function clamp(n,min,max){ return Math.max(min, Math.min(max, n)); }
+  function acct(){
+    try {
+      if(window.currentRecordId) return String(window.currentRecordId).trim();
+      return Function('return (typeof currentRecordId !== "undefined" && currentRecordId) ? String(currentRecordId).trim() : "";')();
+    } catch(e){ return ''; }
+  }
+  function enc(v){ return encodeURIComponent(String(v || '')); }
+  function accountHubUrl(a){ return a ? ACCOUNT_BASE + '/pricing/' + enc(a) : ''; }
+  function toast(msg,type){ if(window.showToast) window.showToast(msg,type || 'info'); }
+
+  function applySavedWidth(){
+    const saved = parseInt(localStorage.getItem(WIDTH_KEY) || localStorage.getItem('act-history-width') || localStorage.getItem('ACT_HISTORY_WIDTH') || '', 10);
+    const max = Math.max(MIN_W, Math.min(760, Math.floor(window.innerWidth * .48)));
+    const width = clamp(Number.isFinite(saved) ? saved : DEFAULT_W, MIN_W, max);
+    document.documentElement.style.setProperty('--history-width', width + 'px');
+  }
+
+  function ensureResizer(){
+    const col = $('history-column');
+    if(!col) return;
+    let handle = $('history-resizer') || q('.act-right-panel-resizer', col);
+    if(!handle){
+      handle = document.createElement('div');
+      handle.id = 'history-resizer';
+      handle.className = 'act-right-panel-resizer';
+      handle.title = 'Drag to resize Account Sections panel';
+      col.insertBefore(handle, col.firstChild);
+    }
+    handle.classList.add('act-right-panel-resizer');
+    handle.title = 'Drag to resize Account Sections panel';
+    if(handle.__actRightResizeBound) return;
+    handle.__actRightResizeBound = true;
+    handle.addEventListener('mousedown', function(e){
+      e.preventDefault();
+      const colNow = $('history-column');
+      const startRect = colNow ? colNow.getBoundingClientRect() : null;
+      const startRight = startRect ? startRect.right : window.innerWidth - 16;
+      document.body.classList.add('act-right-panel-resizing');
+      function move(ev){
+        const max = Math.max(MIN_W, Math.min(820, Math.floor(window.innerWidth * .55)));
+        const width = clamp(Math.round(startRight - ev.clientX), MIN_W, max);
+        document.documentElement.style.setProperty('--history-width', width + 'px');
+        localStorage.setItem(WIDTH_KEY, String(width));
+        localStorage.setItem('act-history-width', String(width));
+      }
+      function up(){
+        document.body.classList.remove('act-right-panel-resizing');
+        window.removeEventListener('mousemove', move, true);
+        window.removeEventListener('mouseup', up, true);
+      }
+      window.addEventListener('mousemove', move, true);
+      window.addEventListener('mouseup', up, true);
+    });
+  }
+
+  function ensureAccountTab(){
+    const strip = q('.act-right-hub-tabs');
+    const body = q('.act-right-hub-body');
+    if(!strip || !body) return;
+
+    let btn = q('.act-right-hub-tab[data-act-right-section="account"]', strip);
+    if(!btn){
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'act-right-hub-tab';
+      btn.setAttribute('data-act-right-section','account');
+      btn.setAttribute('role','tab');
+      btn.setAttribute('aria-selected','false');
+      btn.innerHTML = '<i class="fas fa-store"></i><span>Account Hub</span>';
+      // Keep Account Hub near the front, after History.
+      const historyBtn = q('.act-right-hub-tab[data-act-right-section="history"]', strip);
+      if(historyBtn && historyBtn.nextSibling) strip.insertBefore(btn, historyBtn.nextSibling);
+      else strip.appendChild(btn);
+    }
+
+    let section = $('act-right-section-account');
+    if(!section){
+      section = document.createElement('section');
+      section.id = 'act-right-section-account';
+      section.className = 'act-right-section';
+      section.setAttribute('data-section','account');
+      section.innerHTML =
+        '<div class="act-right-mini-bar"><div class="act-right-mini-label"><i class="fas fa-store mr-1"></i>Account Hub</div>' +
+        '<div class="act-right-mini-actions"><button type="button" data-act-right-refresh="account" title="Refresh Account Hub"><i class="fas fa-sync"></i></button><button type="button" data-act-right-open="account" title="Open Account Hub in new tab"><i class="fas fa-up-right-from-square"></i></button></div></div>' +
+        '<div class="act-right-frame-wrap" id="act-right-frame-wrap-account"><div class="act-right-empty"><i class="fas fa-store"></i><strong>Account Hub</strong><span>Select an account to load MasonvilleGO Account Hub in the right panel.</span></div></div>';
+      body.appendChild(section);
+    }
+  }
+
+  function activeSectionId(){
+    const active = q('.act-right-section.active');
+    return active ? active.getAttribute('data-section') : 'history';
+  }
+
+  function showSection(id){
+    qa('.act-right-hub-tab').forEach(function(tab){
+      const on = tab.getAttribute('data-act-right-section') === id;
+      tab.classList.toggle('active', on);
+      tab.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    qa('.act-right-section').forEach(function(sec){ sec.classList.toggle('active', sec.getAttribute('data-section') === id); });
+    if(id === 'account') loadAccount(false);
+  }
+
+  function setAccountFrame(force){
+    const wrap = $('act-right-frame-wrap-account');
+    if(!wrap) return;
+    const a = acct();
+    const url = accountHubUrl(a);
+    if(!url){
+      wrap.innerHTML = '<div class="act-right-empty"><i class="fas fa-store"></i><strong>Account Hub</strong><span>Select an account to load MasonvilleGO Account Hub in the right panel.</span></div>';
+      return;
+    }
+    const iframe = q('iframe', wrap);
+    if(!iframe){
+      wrap.innerHTML = '<iframe title="Account Hub" src="' + url + '" style="width:100%;height:100%;border:0;background:#fff;display:block;"></iframe>';
+      if(window.logLinkGeneration) window.logLinkGeneration('Account Hub', url, 'Right-side section: account');
+    } else if(force || iframe.getAttribute('src') !== url){
+      iframe.setAttribute('src', url);
+      if(window.logLinkGeneration) window.logLinkGeneration('Account Hub', url, 'Right-side section refresh: account');
+    }
+  }
+
+  function loadAccount(force){ setAccountFrame(!!force); }
+
+  function refreshSection(id){
+    id = id || activeSectionId();
+    if(id === 'history'){
+      if(typeof window.updateNotesPreview === 'function') window.updateNotesPreview();
+      return;
+    }
+    if(id === 'account'){
+      loadAccount(true);
+      return;
+    }
+    const wrap = $('act-right-frame-wrap-' + id);
+    const iframe = wrap && q('iframe', wrap);
+    if(iframe){
+      try { iframe.contentWindow.location.reload(); }
+      catch(e){ iframe.setAttribute('src', iframe.getAttribute('src')); }
+      return;
+    }
+    // Fall back to original v1.0 API for built-in hubs.
+    if(window.ACT_RightSectionsHub && typeof window.ACT_RightSectionsHub.refreshActive === 'function'){
+      try { window.ACT_RightSectionsHub.refreshActive(); } catch(e){}
+    }
+  }
+
+  function openSectionExternal(id){
+    id = id || activeSectionId();
+    const a = acct();
+    if(!a){ toast('Select an account first','error'); return; }
+    let url = '';
+    if(id === 'account') url = accountHubUrl(a);
+    else {
+      const wrap = $('act-right-frame-wrap-' + id);
+      const iframe = wrap && q('iframe', wrap);
+      url = iframe ? iframe.getAttribute('src') : '';
+    }
+    if(!url){ toast('Open the hub first','error'); return; }
+    if(window.logAndOpenLink) window.logAndOpenLink(id === 'account' ? 'Account Hub' : id, url);
+    else window.open(url, '_blank');
+  }
+
+  function ensureRefreshControl(){
+    const tools = q('.act-right-hub-tools');
+    if(!tools) return;
+    const old = $('act-right-hub-refresh');
+    if(old && !old.__actRightRefreshRebound){
+      const clone = old.cloneNode(true);
+      clone.id = 'act-right-hub-refresh';
+      clone.title = 'Refresh current hub';
+      clone.setAttribute('aria-label','Refresh current hub');
+      clone.classList.add('act-right-refresh-all-btn');
+      old.parentNode.replaceChild(clone, old);
+    }
+    let btn = $('act-right-hub-refresh');
+    if(!btn){
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = 'act-right-hub-refresh';
+      btn.className = 'act-right-refresh-all-btn';
+      btn.title = 'Refresh current hub';
+      btn.setAttribute('aria-label','Refresh current hub');
+      btn.innerHTML = '<i class="fas fa-sync"></i>';
+      tools.insertBefore(btn, tools.firstChild);
+    }
+    if(btn.__actRightRefreshRebound) return;
+    btn.__actRightRefreshRebound = true;
+    btn.addEventListener('click', function(){
+      btn.classList.add('is-refreshing');
+      refreshSection(activeSectionId());
+      setTimeout(function(){ btn.classList.remove('is-refreshing'); }, 850);
+    });
+  }
+
+  function bindExtension(){
+    const accountBtn = q('.act-right-hub-tab[data-act-right-section="account"]');
+    if(accountBtn && !accountBtn.__actAccountTabBound){
+      accountBtn.__actAccountTabBound = true;
+      accountBtn.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); showSection('account'); }, true);
+    }
+    qa('[data-act-right-refresh="account"]').forEach(function(btn){
+      if(btn.__actAccountRefreshBound) return;
+      btn.__actAccountRefreshBound = true;
+      btn.addEventListener('click', function(e){ e.preventDefault(); loadAccount(true); });
+    });
+    qa('[data-act-right-open="account"]').forEach(function(btn){
+      if(btn.__actAccountOpenBound) return;
+      btn.__actAccountOpenBound = true;
+      btn.addEventListener('click', function(e){ e.preventDefault(); openSectionExternal('account'); });
+    });
+    // Upgrade all existing per-hub refresh/open buttons so the behavior is consistent in every hub.
+    qa('[data-act-right-refresh]').forEach(function(btn){
+      if(btn.__actUniversalRefreshBound) return;
+      btn.__actUniversalRefreshBound = true;
+      btn.addEventListener('click', function(e){
+        const id = btn.getAttribute('data-act-right-refresh');
+        if(id){ e.preventDefault(); refreshSection(id); }
+      }, true);
+    });
+    qa('[data-act-right-open]').forEach(function(btn){
+      if(btn.__actUniversalOpenBound) return;
+      btn.__actUniversalOpenBound = true;
+      btn.addEventListener('click', function(e){
+        const id = btn.getAttribute('data-act-right-open');
+        if(id){ e.preventDefault(); openSectionExternal(id); }
+      }, true);
+    });
+  }
+
+  let lastAcct = '';
+  function refreshOnAccountChange(){
+    const a = acct();
+    if(a === lastAcct) return;
+    lastAcct = a;
+    if(activeSectionId() === 'account') loadAccount(true);
+  }
+
+  function init(){
+    applySavedWidth();
+    ensureResizer();
+    ensureAccountTab();
+    ensureRefreshControl();
+    bindExtension();
+    refreshOnAccountChange();
+    document.body.classList.add('act-right-hub-v11-ready');
+  }
+
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+  const obs = new MutationObserver(init);
+  if(document.body) obs.observe(document.body, {childList:true, subtree:true});
+  window.addEventListener('resize', applySavedWidth);
+  setInterval(refreshOnAccountChange, 1000);
+  window.ACT_RightSectionsHubV11 = { refresh:init, showSection:showSection, refreshSection:refreshSection, resizeApply:applySavedWidth };
+})();
+
+</script>
+<!-- ACT6_MERGED_HISTORY_SECTIONS_END -->
 </body>
 </html>
