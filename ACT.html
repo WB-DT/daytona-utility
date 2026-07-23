@@ -1278,6 +1278,25 @@
         .mvq-list { max-height:55vh; overflow:auto; display:flex; flex-direction:column; gap:.55rem; }
         .mvq-row { padding:.7rem; border:1px solid var(--border-color); border-radius:.65rem; background:var(--bg-input); color:var(--text-main); }
         .mvq-state { padding:2px 7px; border-radius:999px; background:rgba(234,179,8,.13); color:var(--accent-warning); font-size:.64rem; font-weight:900; }
+
+        /* Masonville live send countdown */
+        #masonville-send-countdown {
+            position: fixed; inset: 0; z-index: 9988; display: none;
+            align-items: center; justify-content: center; pointer-events: none;
+            background: rgba(15,23,42,.28); backdrop-filter: blur(2px);
+        }
+        #masonville-send-countdown.is-visible { display: flex; }
+        .mv-send-countdown-card {
+            width: min(360px, 88vw); padding: 1.15rem 1.25rem; text-align: center;
+            border: 1px solid var(--border-color); border-radius: .9rem;
+            color: var(--text-main); background: var(--modal-bg); box-shadow: 0 18px 45px rgba(15,23,42,.34);
+        }
+        .mv-send-countdown-icon { color: var(--primary); font-size: 1.35rem; margin-bottom: .35rem; }
+        .mv-send-countdown-title { font-size: .95rem; font-weight: 950; }
+        .mv-send-countdown-copy { margin-top: .2rem; color: var(--text-muted); font-size: .72rem; font-weight: 700; }
+        .mv-send-countdown-number { margin: .65rem auto .45rem; font-size: 2.4rem; line-height: 1; font-weight: 950; color: var(--primary); }
+        .mv-send-countdown-track { height: 7px; overflow: hidden; border-radius: 999px; background: var(--bg-input); border: 1px solid var(--border-color); }
+        .mv-send-countdown-bar { width: 100%; height: 100%; transform-origin: left; background: linear-gradient(90deg,var(--primary),var(--accent-warning)); }
 </style>
 
 <script>
@@ -1887,12 +1906,44 @@
         return exponential + Math.floor(Math.random() * 5000);
     }
 
-    async function mvSend(item) {
-        // Never allow the Masonville Flow request to hold up the saved ACT record
-        // for more than 10 seconds. The item has already been placed in the durable
-        // queue before this function is called, so aborting here is safe.
+    function mvShowSendCountdown(seconds = 3) {
+        let overlay = document.getElementById("masonville-send-countdown");
+        if (!overlay) {
+            overlay = document.createElement("div");
+            overlay.id = "masonville-send-countdown";
+            overlay.setAttribute("role", "status");
+            overlay.setAttribute("aria-live", "polite");
+            overlay.innerHTML = `<div class="mv-send-countdown-card"><div class="mv-send-countdown-icon"><i class="fas fa-cloud-arrow-up fa-beat-fade"></i></div><div class="mv-send-countdown-title">Sending note to Masonville</div><div class="mv-send-countdown-copy">Still trying. If time runs out, the note will be queued automatically.</div><div id="masonville-send-countdown-number" class="mv-send-countdown-number">${seconds}</div><div class="mv-send-countdown-track"><div id="masonville-send-countdown-bar" class="mv-send-countdown-bar"></div></div></div>`;
+            document.body.appendChild(overlay);
+        }
+        const number = overlay.querySelector("#masonville-send-countdown-number");
+        const bar = overlay.querySelector("#masonville-send-countdown-bar");
+        const started = performance.now();
+        const duration = seconds * 1000;
+        overlay.classList.add("is-visible");
+        const update = () => {
+            const elapsed = performance.now() - started;
+            const remainingMs = Math.max(0, duration - elapsed);
+            const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+            if (number) number.textContent = String(remainingSeconds);
+            if (bar) bar.style.transform = `scaleX(${Math.max(0, remainingMs / duration)})`;
+        };
+        update();
+        const intervalId = setInterval(update, 50);
+        return () => {
+            clearInterval(intervalId);
+            overlay.classList.remove("is-visible");
+            if (bar) bar.style.transform = "scaleX(1)";
+        };
+    }
+
+    async function mvSend(item, options = {}) {
+        // The item is already in the durable queue. Give the live request three
+        // seconds, show the user a countdown, then continue with the ACT workflow.
+        const showCountdown = options.showCountdown === true;
+        const hideCountdown = showCountdown ? mvShowSendCountdown(3) : () => {};
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort("Masonville Flow timed out after 10 seconds."), 10000);
+        const timeoutId = setTimeout(() => controller.abort("Masonville Flow timed out after 3 seconds."), 3000);
         try {
             const response = await fetch(MASONVILLE_FLOW_URL, {
                 method: "POST",
@@ -1914,7 +1965,7 @@
             return { status: response.status };
         } catch (error) {
             if (error && error.name === "AbortError") {
-                const timeoutError = new Error("Masonville Flow timed out after 10 seconds.");
+                const timeoutError = new Error("Masonville Flow timed out after 3 seconds.");
                 timeoutError.status = 0;
                 timeoutError.isTimeout = true;
                 throw timeoutError;
@@ -1922,6 +1973,7 @@
             throw error;
         } finally {
             clearTimeout(timeoutId);
+            hideCountdown();
         }
     }
 
@@ -2031,7 +2083,7 @@
         // Store before attempting network delivery so a 503, timeout, tab close, or refresh cannot lose the update.
         await mvPut(item);
         try {
-            const result = await mvSend(item);
+            const result = await mvSend(item, { showCountdown: true });
             mvArchive(item, result);
             await mvDelete(item.id);
             console.log("Power Automate Sync Successful", item.id);
