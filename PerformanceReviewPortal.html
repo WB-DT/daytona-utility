@@ -3764,6 +3764,32 @@ body.card-format-dense .measure-label { display:none !important; }
 
   // ── State ──────────────────────────────────────────────────────────────────
   let currentReviewType = '';
+  // Employee Information record selected for the current review.
+  // This is populated by autoFillEmployee and used for reliable email routing
+  // and milestone-track visibility. The approval flow remains responsible for
+  // updating delivery/completion dates after final manager approval.
+  window.selectedEmployeeRecord = null;
+
+  function selectedEmployeeEmail() {
+    const emp = window.selectedEmployeeRecord || {};
+    return emp.cr714_emailaddress || emp.emailaddress || emp.email || '';
+  }
+
+  function getEmployeeMilestoneTrack(reviewType, emp = window.selectedEmployeeRecord || {}) {
+    const type = String(reviewType || '').trim().toLowerCase();
+    if (type === '30day') {
+      return emp.cr714__30afterpromotion && !emp.cr714__30dayreview
+        ? 'Position Change'
+        : 'New Hire';
+    }
+    if (type === '90day') {
+      return emp.cr714__90afterpromotion && !emp.cr714__90dayreview
+        ? 'Position Change'
+        : 'New Hire';
+    }
+    if (type === 'annual') return 'Annual';
+    return 'Not Required';
+  }
 
   const REVIEW_LABELS = {
     eom:    'End of Month (EOM)',
@@ -5044,6 +5070,7 @@ body.card-format-dense .measure-label { display:none !important; }
     const elLastReview = document.getElementById('last-review-date');
 
     if (!empName) {
+        window.selectedEmployeeRecord = null;
         elEmpId.value = ''; elJobTitle.value = ''; elDept.value = ''; elManager.value = ''; elSrManager.value = ''; elHireDate.value = ''; elTenure.value = '';
         if (elEmpShift) elEmpShift.value = '';
         if (elEmpBreak) elEmpBreak.value = '';
@@ -5068,7 +5095,18 @@ body.card-format-dense .measure-label { display:none !important; }
     
     try {
         const token = await window.getToken("https://org23279050.crm.dynamics.com//user_impersonation");
-        const queryUrl = `${DATAVERSE_URL}/cr714_employeeinformation1s?$filter=cr714_employeename eq '${empName}'`;
+        const escapedEmpName = String(empName).replace(/'/g, "''");
+        const employeeSelect = [
+          'cr714_employeeinformation1id','cr714_employeename','cr714_employeenumber',
+          'cr714_emailaddress','cr714_title','cr714_department','cr714_managerassigned',
+          'cr714_srmanager','cr714_startdate','cr714_shiftselection','cr714_breakselection',
+          'cr714_specialinstructions','cr714__30dayreview','cr714__90dayreview',
+          'cr714__30afterpromotion','cr714__90afterpromotion','cr714_thirtydeliverydate',
+          'cr714_ninetydeliverydate','cr714_afterdeliverydate','cr714_ninetyafterdeliverydate',
+          'cr714_annualreview','cr714_lastannualreview','cr714_annualreviewdeliverydate',
+          'statecode','statuscode'
+        ].join(',');
+        const queryUrl = `${DATAVERSE_URL}/cr714_employeeinformation1s?$select=${employeeSelect}&$filter=cr714_employeename eq '${escapedEmpName}'&$top=2`;
         
         const res = await fetch(queryUrl, { 
             headers: { 
@@ -5080,8 +5118,9 @@ body.card-format-dense .measure-label { display:none !important; }
         
         if (res.ok) {
             const data = await res.json();
-            if (data.value && data.value.length > 0) {
+            if (data.value && data.value.length === 1) {
                 const emp = data.value[0];
+                window.selectedEmployeeRecord = emp;
                 
                 elEmpId.value = emp.cr714_employeenumber || '';
                 elJobTitle.value = emp['cr714_title@OData.Community.Display.V1.FormattedValue'] || emp.cr714_title || '';
@@ -5098,6 +5137,10 @@ body.card-format-dense .measure-label { display:none !important; }
                 if (elSpecialInst) elSpecialInst.value = emp['cr714_specialinstructions'] || emp.cr714_specialinstructions || 'None';
 
             } else {
+                window.selectedEmployeeRecord = null;
+                if (data.value && data.value.length > 1) {
+                  showError('More than one Employee Information record matched this name. Use a unique employee ID before submitting.');
+                }
                 elEmpId.value = ''; elJobTitle.value = ''; elDept.value = ''; elManager.value = ''; elSrManager.value = ''; elHireDate.value = ''; elTenure.value = '';
                 if (elEmpShift) elEmpShift.value = ''; if (elEmpBreak) elEmpBreak.value = ''; if (elSpecialInst) elSpecialInst.value = '';
             }
@@ -5105,7 +5148,7 @@ body.card-format-dense .measure-label { display:none !important; }
 
         if (elLastReview) {
             try {
-                const reviewQueryUrl = `${DATAVERSE_URL}/cr714_employeeperformancereviews?$filter=cr714_employeename eq '${empName}'&$orderby=cr714_reviewdate desc&$top=1`;
+                const reviewQueryUrl = `${DATAVERSE_URL}/cr714_employeeperformancereviews?$filter=cr714_employeename eq '${escapedEmpName}'&$orderby=cr714_reviewdate desc&$top=1`;
                 const reviewRes = await fetch(reviewQueryUrl, { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } });
                 
                 if (reviewRes.ok) {
@@ -5641,7 +5684,7 @@ body.card-format-dense .measure-label { display:none !important; }
         
         const payload = {
             cr714_reviewtype: val('review-type'),
-            cr714_reviewdate: val('review-date'), 
+            cr714_reviewdate: val('review-date'),
             cr714_employeename: val('employee-name'),
             cr714_employeeid: val('employee-id'),
             cr714_jobtitle: val('job-title'),
@@ -5651,9 +5694,19 @@ body.card-format-dense .measure-label { display:none !important; }
             cr714_tenure: val('tenure'),
             cr714_reviewperiodstart: val('review-period'),
             cr714_reviewername: val('reviewer-name'),
-            cr714_employeesignature: val('employee-signature'),
-            cr714_managersignature: val('manager-signature')
+            // Existing review-table email field. The approval flow should use this
+            // instead of deriving an email address from the employee display name.
+            emailaddress: selectedEmployeeEmail(),
+            // This text value is the signature-flow launch gate.
+            cr714_approvalstatus: 'Ready for Employee Approval'
         };
+
+        // Typed names are preserved only for the physical-signature workflow.
+        // Digital signatures are stamped later from the actual Approval responders.
+        if (document.getElementById('physical-sig-toggle')?.checked) {
+            payload.cr714_employeesignature = val('employee-signature');
+            payload.cr714_managersignature = val('manager-signature');
+        }
 
         let periodStr = val('review-period');
         if (periodStr) {
