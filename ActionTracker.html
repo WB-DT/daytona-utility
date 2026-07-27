@@ -74,6 +74,9 @@
         .stat-val { font-size: 28px; font-weight: 800; display: block; margin-top: 8px; color: white; }
         .stat-label { font-size: 10px; color: #8b949e; font-weight: 800; text-transform: uppercase; }
 
+        .progress-track { width: 100%; background: var(--bg-color); height: 8px; border-radius: 10px; margin-top: 10px; }
+        .progress-fill { height: 100%; border-radius: 10px; background: linear-gradient(90deg, #2ea043, #3fb950); transition: width 1s ease; }
+
         .sync-pulse { width: 8px; height: 8px; background: var(--accent-green); border-radius: 50%; display: inline-block; margin-right: 6px; animation: pulse 2s infinite; }
         @keyframes pulse { 0% { transform: scale(0.9); opacity: 1; } 70% { transform: scale(1.5); opacity: 0; } 100% { transform: scale(0.9); opacity: 0; } }
     </style>
@@ -133,18 +136,17 @@
     <div class="stats-grid">
         <div class="stat-card">
             <div class="stat-card-header">
-                <span class="stat-label">Total Emails Sent</span>
+                <span class="stat-label">Total Records</span>
                 <button class="btn-export" onclick="exportReportCSV()" id="exportBtn">EXPORT REPORT</button>
             </div>
-            <span class="stat-val" id="dashTotal" style="color: var(--accent-green);">0</span>
+            <span class="stat-val" id="dashTotal">0</span>
         </div>
+        <div class="stat-card"><span class="stat-label" style="color: var(--accent-green);">Emails Sent</span><span class="stat-val" id="dashSent">0</span></div>
+        <div class="stat-card"><span class="stat-label" style="color: var(--accent-red);">Pending Unsent</span><span class="stat-val" id="dashRem">0</span></div>
         <div class="stat-card">
-            <span class="stat-label">Active Representatives</span>
-            <span class="stat-val" id="dashActive">0</span>
-        </div>
-        <div class="stat-card">
-            <span class="stat-label">Top Performer</span>
-            <span class="stat-val" id="dashTop" style="color: var(--accent-blue);">--</span>
+            <span class="stat-label">Team Completion</span>
+            <span class="stat-val" id="dashPct">0%</span>
+            <div class="progress-track"><div id="dashBar" class="progress-fill"></div></div>
         </div>
     </div>
 
@@ -154,8 +156,10 @@
                 <tr>
                     <th onclick="setSort('name')">Representative ↕</th>
                     <th onclick="setSort('manager')">Manager ↕</th>
-                    <th onclick="setSort('department')">Department ↕</th>
-                    <th class="td-num" onclick="setSort('sent')">Emails Sent ↕</th>
+                    <th class="td-num" onclick="setSort('total')">Total ↕</th>
+                    <th class="td-num" onclick="setSort('sent')">Sent ↕</th>
+                    <th class="td-num" onclick="setSort('unsent')">Unsent ↕</th>
+                    <th onclick="setSort('pct')">Progress ↕</th>
                 </tr>
             </thead>
             <tbody id="dashBody"></tbody>
@@ -322,6 +326,7 @@
             const repHR = hrData[repName];
             if (filterVal === "ALL" || repHR[filterLevel] === filterVal) {
                 currentMetrics[repName] = { 
+                    total: 0,
                     sent: 0, 
                     manager: repHR.cr714_managerassigned, 
                     department: repHR.cr714_department 
@@ -329,20 +334,29 @@
             }
         });
 
-        // Tally Sent Emails based on parsed Notes
+        // Tally Totals and Sent Emails based on parsed Notes
         allData.forEach(r => {
             const rep = (r[repCol] || "Unassigned").trim();
             if (currentMetrics[rep]) {
-                let actionsToCount = r._parsedSentActions || [];
+                currentMetrics[rep].total++; // Every record owned counts toward total
                 
-                // If filtering by a specific action, filter the array of matched notes
+                let actionsToCount = r._parsedSentActions || [];
                 if (selAction !== "ALL") {
                     actionsToCount = actionsToCount.filter(a => a === selAction);
                 }
                 
-                // Add the number of matching email notes found for this record
-                currentMetrics[rep].sent += actionsToCount.length;
+                // If this account has at least one matching action, it is "Sent"
+                if (actionsToCount.length > 0) {
+                    currentMetrics[rep].sent++;
+                }
             }
+        });
+
+        Object.keys(currentMetrics).forEach(k => {
+            const m = currentMetrics[k];
+            m.unsent = m.total - m.sent;
+            if (m.unsent < 0) m.unsent = 0; // Prevent weird data negatives
+            m.pct = m.total > 0 ? Math.round((m.sent / m.total) * 100) : 0;
         });
 
         updateDashboard();
@@ -373,34 +387,40 @@
         if (!body) return;
         body.innerHTML = '';
         
-        let gT = 0;
-        let activeCount = 0;
-        let topRep = { name: '--', sent: -1 };
+        let gT = 0, gS = 0;
 
         Object.keys(currentMetrics).sort(getSorter()).forEach(rep => {
             const m = currentMetrics[rep];
-            gT += m.sent;
-            
-            if (m.sent > 0) {
-                activeCount++;
-                if (m.sent > topRep.sent) {
-                    topRep = { name: rep, sent: m.sent };
-                }
-            }
+            gT += m.total;
+            gS += m.sent;
 
             body.innerHTML += `
                 <tr>
                     <td style="font-weight:bold;">${rep}</td>
                     <td style="color:#8b949e;">${m.manager || '--'}</td>
-                    <td style="color:#8b949e;">${m.department || '--'}</td>
-                    <td class="td-num" style="color:var(--accent-green); font-weight:bold; font-size:15px;">${m.sent.toLocaleString()}</td>
+                    <td class="td-num">${m.total}</td>
+                    <td class="td-num" style="color:var(--accent-green)">${m.sent}</td>
+                    <td class="td-num" style="color:var(--accent-red)">${m.unsent}</td>
+                    <td>
+                        <div style="font-size:10px; display:flex; justify-content:space-between;">
+                            <span>${m.pct}%</span>
+                        </div>
+                        <div class="progress-track">
+                            <div class="progress-fill" style="width:${m.pct}%;"></div>
+                        </div>
+                    </td>
                 </tr>`;
         });
         
+        const gU = gT - gS;
+        const gPct = gT > 0 ? Math.round((gS / gT) * 100) : 0;
+        
         // Update Stat Cards
         document.getElementById('dashTotal').innerText = gT.toLocaleString();
-        document.getElementById('dashActive').innerText = activeCount;
-        document.getElementById('dashTop').innerText = topRep.sent > -1 ? `${topRep.name} (${topRep.sent})` : '--';
+        document.getElementById('dashSent').innerText = gS.toLocaleString();
+        document.getElementById('dashRem').innerText = gU.toLocaleString();
+        document.getElementById('dashPct').innerText = gPct + "%";
+        document.getElementById('dashBar').style.width = gPct + "%";
     }
 
     function exportReportCSV() {
@@ -409,7 +429,7 @@
             const campaignVal = document.getElementById('actionFilter').value;
             const dsKey = document.getElementById('datasetFilter').value;
             
-            let csvContent = "Representative,Manager,Department,Emails Sent\n";
+            let csvContent = "Representative,Manager,Department,Total Records,Emails Sent,Unsent,Completion %\n";
             
             Object.keys(currentMetrics).sort(getSorter()).forEach(rep => {
                 const m = currentMetrics[rep];
@@ -417,7 +437,7 @@
                 const cleanManager = `"${String(m.manager || "").replace(/"/g, '""')}"`;
                 const cleanDept = `"${String(m.department || "").replace(/"/g, '""')}"`;
                 
-                csvContent += `${cleanName},${cleanManager},${cleanDept},${m.sent}\n`;
+                csvContent += `${cleanName},${cleanManager},${cleanDept},${m.total},${m.sent},${m.unsent},${m.pct}%\n`;
             });
 
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
