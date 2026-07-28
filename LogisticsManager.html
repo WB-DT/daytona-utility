@@ -76,7 +76,7 @@
         }
         .animate-number-update {
             animation: number-glow 0.8s ease-out;
-            display: inline-block; /* Required for the scale transform to work */
+            display: inline-block; 
         }
 
         #progress-container { width: 400px; height: 14px; background: rgba(0,0,0,0.5); border-radius: 7px; border: 1px solid var(--border); overflow: hidden; margin-top: 16px; position: relative; box-shadow: inset 0 2px 4px rgba(0,0,0,0.5); }
@@ -142,6 +142,12 @@
         
         /* Dropdowns properly layer over UI elements */
         .filters-bar { z-index: 100; position: relative; }
+
+        #new-ticket-modal.force-show {
+            display: flex !important;
+            opacity: 1 !important;
+            visibility: visible !important;
+        }
     </style>
 </head>
 <body data-theme="midnight" onclick="closeAllDropdowns(event)">
@@ -252,7 +258,9 @@
                 <div id="user-display-name" class="text-[10px] font-black uppercase text-white leading-none">Guest Rep</div>
                 <div class="text-[8px] text-[var(--brand)] font-mono uppercase tracking-widest mt-1">Authorized</div>
             </div>
-            <button onclick="createNew()" class="px-4 py-2 bg-[var(--brand)] text-black rounded font-black text-[10px] uppercase shadow hover:brightness-110 transition flex items-center gap-2 ml-2"><i class="fas fa-plus"></i> New Ticket</button>
+            <button onclick="createNew({})" class="px-4 py-2 bg-[var(--brand)] text-black rounded font-black text-[10px] uppercase shadow hover:brightness-110 transition flex items-center gap-2 ml-2">
+            <i class="fas fa-plus"></i> New Ticket
+        </button>
         </div>
     </header>
 
@@ -603,6 +611,8 @@
                     <div>GUID: <span id="sys-guid" class="select-all hover:text-white cursor-pointer transition-colors"></span></div><div>RID: <span id="sys-rid"></span></div><div class="text-right">API: Dataverse Direct Native</div>
                 </div>
             </div>
+
+            
         </main>
     </div>
 
@@ -3389,34 +3399,107 @@
                 L.circleMarker([p.lat, p.lng], { color: col, fillColor: col, fillOpacity: 0.6, radius: 6 }).bindPopup(`<b>Ticket #${p.id}</b><br>${p.status}`).addTo(mapLayerGroup); 
             }); 
         }
-        
-        async function createNew() {
-            const so = prompt("Enter Sales Order #:"); if(!so) return;
+
+        window.createNew = function(data = {}) {
+            console.log("Opening modal with data:", data);
+            const modal = document.getElementById('new-ticket-modal');
             
-            let assignedOwner = "Unassigned";
-            const existing = fullData.find(x => x.order === so && x.owner !== 'Unassigned');
-            if (existing) {
-                if (confirm(`Sales Order ${so} is already historically assigned to ${existing.owner}. Do you want to automatically sync this new ticket to them?`)) {
-                    assignedOwner = existing.owner;
-                }
+            // Auto-fill fields if data is provided
+            document.getElementById('nt-company').value = data.company || '';
+            document.getElementById('nt-account').value = data.account || '';
+            document.getElementById('nt-so').value = data.so || '';
+            document.getElementById('nt-address').value = data.address || '';
+            document.getElementById('nt-contact').value = data.contact || '';
+            document.getElementById('nt-warehouse').value = data.warehouse || '';
+            document.getElementById('nt-route').value = data.route || '';
+            document.getElementById('nt-driver').value = data.driver || '';
+            document.getElementById('nt-issue').value = data.issue || '';
+            document.getElementById('nt-desc').value = data.desc || '';
+        
+            modal.classList.remove('hidden');
+            modal.classList.add('force-show');
+        };
+
+        async function submitNewTicket() {
+            // Calculate the next M-series ID based on existing records
+            let nextIdNumber = 1;
+            const mRecords = fullData.filter(t => t.id && typeof t.id === 'string' && t.id.startsWith('M'));
+            if (mRecords.length > 0) {
+                const highestM = mRecords.reduce((max, t) => {
+                    const num = parseInt(t.id.substring(1), 10);
+                    return !isNaN(num) && num > max ? num : max;
+                }, 0);
+                nextIdNumber = highestM + 1;
+            }
+            const newTicketId = 'M' + String(nextIdNumber).padStart(5, '0');
+
+            const selectedOwner = document.getElementById('nt-owner').value || "Unassigned";
+            const payload = {
+                "cr714_id": newTicketId,
+                "cr714_companyordeliveryname": document.getElementById('nt-company').value,
+                "cr714_accountnumber": document.getElementById('nt-account').value,
+                "cr714_salesordernumber": document.getElementById('nt-so').value,
+                "cr714_shippingaddress": document.getElementById('nt-address').value,
+                "cr714_contactnamenumber": document.getElementById('nt-contact').value,
+                "cr714_warehouse": document.getElementById('nt-warehouse').value,
+                "cr714_route": document.getElementById('nt-route').value,
+                "cr714_drivernamenumber": document.getElementById('nt-driver').value,
+                "cr714_issue": document.getElementById('nt-issue').value,
+                "cr714_description": document.getElementById('nt-desc').value,
+                "cr714_disposition": "Pending",
+                "cr714_logisticsowner": selectedOwner
+            };
+
+            if (!payload.cr714_salesordernumber) {
+                Toastify({text: "Sales Order # Required", style: {background: "#ef4444"}}).showToast();
+                return;
             }
 
-            const token = await getToken(ENV_DATA);
-            try {
-                const res = await fetch(`${DATA_API}/${ENTITY_SET}`, { 
-                    method: 'POST', 
-                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, 
-                    body: JSON.stringify({ 
-                        "cr714_salesordernumber": so, 
-                        "cr714_companyordeliveryname": "New Entry", 
-                        "cr714_disposition": "Pending",
-                        "cr714_logisticsowner": assignedOwner
-                    }) 
-                });
-                if(res.ok) { Toastify({text:"Ticket Created", style:{background:"#10b981"}}).showToast(); refreshData(true); }
-            } catch(e){}
-        }
+            Toastify({text: "Creating ticket...", style: {background: "#fbbf24"}}).showToast();
+            
+            console.log("Sending payload to Dataverse:", JSON.stringify(payload, null, 2));
 
+            try {
+                const token = await getToken(ENV_DATA);
+                const res = await fetch(`${DATA_API}/${ENTITY_SET}`, {
+                    method: 'POST',
+                    headers: { 
+                        'Authorization': `Bearer ${token}`, 
+                        'Content-Type': 'application/json' 
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (res.ok) {
+                    Toastify({text: "Ticket Created Successfully", style: {background: "#10b981"}}).showToast();
+                    
+                    const modal = document.getElementById('new-ticket-modal');
+                    modal.classList.add('hidden');
+                    modal.classList.remove('force-show');
+                    
+                    // Clear inputs
+                    document.getElementById('nt-company').value = '';
+                    document.getElementById('nt-account').value = '';
+                    document.getElementById('nt-so').value = '';
+                    document.getElementById('nt-address').value = '';
+                    document.getElementById('nt-contact').value = '';
+                    document.getElementById('nt-warehouse').value = '';
+                    document.getElementById('nt-route').value = '';
+                    document.getElementById('nt-driver').value = '';
+                    document.getElementById('nt-owner').value = '';
+                    document.getElementById('nt-issue').value = '';
+                    document.getElementById('nt-desc').value = '';
+                    
+                    refreshData(true);
+                } else {
+                    throw new Error("API POST Failed");
+                }
+            } catch (e) {
+                console.error(e);
+                Toastify({text: "Creation Failed", style: {background: "#ef4444"}}).showToast();
+            }
+        }
+        
         async function deleteRecord() {
             if(!confirm("Delete permanently?")) return;
             const guid = document.getElementById('sys-guid').innerText;
@@ -3520,5 +3603,64 @@
             } catch(e) { console.error("Furniture notification failed", e); }
         }
     </script>
+    <!-- New Ticket Modal -->
+    <div id="new-ticket-modal" class="fixed inset-0 bg-black/80 z-[2000] hidden items-center justify-center p-4">
+        <div class="glass-panel rounded-xl w-[600px] max-w-full shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="p-5 border-b border-[var(--border)] flex justify-between items-center">
+                <h3 class="text-white font-black uppercase tracking-widest"><i class="fa fa-plus text-[var(--brand)] mr-2"></i> New Ticket</h3>
+                <button onclick="document.getElementById('new-ticket-modal').classList.add('hidden'); document.getElementById('new-ticket-modal').classList.remove('force-show');" class="text-[var(--text-dim)] hover:text-white">
+                    <i class="fa fa-times"></i>
+                </button>
+            </div>
+            <div class="p-5 space-y-3 overflow-y-auto">
+                <div class="grid grid-cols-2 gap-3">
+                    <input id="nt-company" type="text" placeholder="Company Name" class="input-dark">
+                    <input id="nt-account" type="text" placeholder="Account #" class="input-dark">
+                </div>
+                <input id="nt-so" type="text" placeholder="Sales Order #" class="input-dark">
+                <input id="nt-address" type="text" placeholder="Shipping Address" class="input-dark">
+                <input id="nt-contact" type="text" placeholder="Contact Name & Number" class="input-dark">
+                <div class="grid grid-cols-2 gap-3">
+                    <input id="nt-warehouse" type="text" placeholder="Warehouse" class="input-dark">
+                    <input id="nt-route" type="text" placeholder="Route" class="input-dark">
+                </div>
+                <input id="nt-driver" type="text" placeholder="Driver Name and Number" class="input-dark">
+                <select id="nt-owner" class="input-dark font-bold">
+                    <option value="" disabled selected>Assign Owner (Default: Unassigned)</option>
+                    <option value="Unassigned">Unassigned</option>
+                    <option value="Courtney Youngblood">Courtney Youngblood</option>
+                    <option value="Ebony Thomas">Ebony Thomas</option>
+                    <option value="Furniture">Furniture</option>
+                    <option value="Holly Evans">Holly Evans</option>
+                    <option value="Jewel Jenkins">Jewel Jenkins</option>
+                    <option value="Kari Westervelt">Kari Westervelt</option>
+                    <option value="Paula Bowen">Paula Bowen</option>
+                    <option value="Tier 2">Tier 2</option>
+                    <option value="Tobbitha Bishoff">Tobbitha Bishoff</option>
+                    <option value="Wayne Rendt">Wayne Rendt</option>
+                </select>
+                <select id="nt-issue" class="input-dark">
+                    <option value="" disabled selected>Select Issue Type</option>
+                    <option value="Missing Item(s) No Answer from Driver (Include Item # in description)">Missing Item(s) No Answer from Driver (Include Item # in description)</option>
+                    <option value="ETA">ETA</option>
+                    <option value="Text-a-Driver">Text-a-Driver</option>
+                    <option value="Closing Returns">Closing Returns</option>
+                    <option value="Wrong Delivery Location">Wrong Delivery Location</option>
+                    <option value="Route Update (Must provide current route, new route, and the contact from the branch requesting the change)">Route Update (Must provide current route, new route, and the contact from the branch requesting the change)</option>
+                    <option value="Pre-Approved Short & Reorder">Pre-Approved Short & Reorder</option>
+                    <option value="ASAP (Mgr Approved)">ASAP (Mgr Approved)</option>
+                    <option value="On going Driver/Delivery Issue">On going Driver/Delivery Issue</option>
+                    <option value="Furniture (If your item is furniture, you MUST choose this option!)">Furniture (If your item is furniture, you MUST choose this option!)</option>
+                    <option value="Shipping and Packing Items">Shipping and Packing Items</option>
+                    <option value="Schools & Municipalities (Release Review)">Schools & Municipalities (Release Review)</option>
+                </select>
+                <textarea id="nt-desc" placeholder="Description" rows="3" class="input-dark"></textarea>
+            </div>
+            <div class="p-5 border-t border-[var(--border)] flex justify-end gap-3">
+                <button onclick="document.getElementById('new-ticket-modal').classList.add('hidden'); document.getElementById('new-ticket-modal').classList.remove('force-show');" class="px-4 py-2 text-xs font-bold uppercase text-[var(--text-dim)]">Cancel</button>
+                <button onclick="submitNewTicket()" class="px-6 py-2 bg-[var(--brand)] text-black rounded font-black text-xs uppercase hover:brightness-110">Submit</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
