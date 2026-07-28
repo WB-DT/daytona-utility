@@ -5016,12 +5016,10 @@ body.card-format-dense .measure-label { display:none !important; }
                           
                           if (typeof docx !== 'undefined') {
                               const docxBlob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
-                              docx.renderAsync(docxBlob, docxContainer).then(() => {
-                                  cleanupDocxPreviewChrome(docxContainer);
-                                  if(iframeLoader) iframeLoader.style.display = 'none';
-                              }).catch(err => {
-                                  console.error("DOCX Render Error:", err);
-                                  docxContainer.innerHTML = '<div style="padding:20px; color:var(--danger); text-align:center;">Failed to render DOCX. Please open in a new tab natively.</div>';
+                              window.renderCompletePriorReviewDocx(docxBlob, docxContainer, fileName)
+                              .then(() => { if(iframeLoader) iframeLoader.style.display = 'none'; })
+                              .catch(err => {
+                                  console.error("Complete DOCX Render Error:", err);
                                   if(iframeLoader) iframeLoader.style.display = 'none';
                               });
                           } else {
@@ -6345,6 +6343,124 @@ textarea{min-height:116px!important;line-height:1.55!important}
  }
  function syncProgress(){const pct=document.getElementById('ux-progress-percent');const bar=document.querySelector('.ux-progress-bar');if(pct&&bar)bar.setAttribute('aria-valuenow',String(parseInt(pct.textContent,10)||0));}
  document.addEventListener('DOMContentLoaded',()=>{improveSemantics();syncProgress();new MutationObserver(syncProgress).observe(document.getElementById('ux-progress-percent')||document.body,{childList:true,subtree:true,characterData:true});});
+})();
+</script>
+
+<style id="v17-complete-docx-preview-fix">
+/* Full DOCX side-by-side viewer: preserve every page, table, header, footer and form field. */
+#comparison-modal-body{overflow:auto!important;min-height:0!important;overscroll-behavior:contain;background:#dfe5ec!important}
+html.dark #comparison-modal-body{background:#09111e!important}
+#comparison-zoom-stage,#comparison-zoom-stage.docx-preview-mode,#comparison-zoom-stage:has(#comparison-docx){
+ width:100%!important;min-width:100%!important;height:auto!important;min-height:100%!important;
+ padding:12px!important;margin:0!important;overflow:visible!important;transform:none!important;
+ display:block!important;background:transparent!important;
+}
+#comparison-docx{display:block!important;width:100%!important;max-width:none!important;height:auto!important;min-height:0!important;overflow:visible!important;margin:0!important;padding:0!important;background:transparent!important;transform:none!important}
+#comparison-docx .docx-wrapper{display:flex!important;flex-direction:column!important;align-items:center!important;gap:14px!important;width:100%!important;max-width:none!important;height:auto!important;min-height:0!important;margin:0!important;padding:0!important;background:transparent!important;overflow:visible!important}
+#comparison-docx .docx-wrapper>section,#comparison-docx section.docx,#comparison-docx .docx{
+ flex:0 0 auto!important;position:relative!important;display:block!important;margin:0 auto!important;
+ transform-origin:top center!important;box-shadow:0 6px 20px rgba(15,23,42,.18)!important;
+ background:#fff!important;color:#000!important;overflow:hidden!important;
+}
+/* Do not discard Word headers/footers: page number, logo and revision details are part of the form. */
+#comparison-docx header,#comparison-docx footer,#comparison-docx .docx-header,#comparison-docx .docx-footer,#comparison-docx [class*="header"],#comparison-docx [class*="footer"]{
+ display:block!important;visibility:visible!important;height:auto!important;min-height:0!important;max-height:none!important;overflow:visible!important;margin:0!important;
+}
+#comparison-docx table{border-collapse:collapse;max-width:100%}
+#comparison-docx td,#comparison-docx th{overflow-wrap:anywhere}
+.docx-preview-fallback{width:min(100%,980px);margin:0 auto;background:#fff;color:#111827;padding:22px;box-shadow:0 6px 20px rgba(15,23,42,.18)}
+.docx-preview-fallback table{width:100%;border-collapse:collapse;margin:.65rem 0}.docx-preview-fallback td,.docx-preview-fallback th{border:1px solid #9ca3af;padding:.45rem;vertical-align:top}.docx-preview-fallback p{margin:.45rem 0}.docx-preview-warning{padding:.65rem .8rem;margin-bottom:1rem;background:#fff7ed;border:1px solid #fdba74;color:#92400e;border-radius:8px;font-weight:700}
+@media(max-width:1100px){#comparison-zoom-stage{padding:8px!important}#comparison-docx .docx-wrapper{align-items:flex-start!important}}
+</style>
+<script id="v17-complete-docx-preview-script">
+(function(){
+ const RENDER_OPTIONS={
+  className:'docx',inWrapper:true,ignoreWidth:false,ignoreHeight:false,ignoreFonts:false,
+  breakPages:true,ignoreLastRenderedPageBreak:false,renderHeaders:true,renderFooters:true,
+  renderFootnotes:true,renderEndnotes:true,useBase64URL:true,trimXmlDeclaration:true,
+  experimental:true,debug:false
+ };
+ function freshDocxContainer(container){
+  const stage=document.getElementById('comparison-zoom-stage')||document.getElementById('comparison-modal-body');
+  const iframe=document.getElementById('comparison-iframe');
+  if(iframe){iframe.style.display='none';iframe.removeAttribute('src');}
+  if(!container){container=document.createElement('div');container.id='comparison-docx';stage.appendChild(container);}
+  if(container.parentElement!==stage)stage.appendChild(container);
+  stage.classList.add('docx-preview-mode');
+  container.style.display='block';container.innerHTML='';
+  return container;
+ }
+ function inspectRenderedDocument(container){
+  const sections=[...container.querySelectorAll('.docx-wrapper > section, section.docx')];
+  const tables=container.querySelectorAll('table').length;
+  const text=(container.innerText||container.textContent||'').replace(/\s+/g,' ').trim();
+  if(!sections.length)throw new Error('DOCX renderer returned no pages.');
+  if(text.length<40 && tables===0)throw new Error('DOCX renderer returned an empty document.');
+  container.dataset.pageCount=String(sections.length);
+  container.dataset.tableCount=String(tables);
+  return {pages:sections.length,tables,textLength:text.length};
+ }
+ async function mammothFallback(arrayBuffer,container,fileName,reason){
+  await window.ensureDocumentLibraries('docx');
+  if(typeof mammoth==='undefined')throw reason||new Error('Both DOCX renderers are unavailable.');
+  const result=await mammoth.convertToHtml({arrayBuffer:arrayBuffer.slice(0)},{
+   includeDefaultStyleMap:true,
+   styleMap:["p[style-name='Title'] => h1:fresh","p[style-name='Heading 1'] => h2:fresh","p[style-name='Heading 2'] => h3:fresh"]
+  });
+  container.innerHTML='<article class="docx-preview-fallback"><div class="docx-preview-warning">Layout-safe fallback view for '+String(fileName||'Word document').replace(/[&<>"']/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]})+'. All extracted paragraphs and tables are shown below.</div>'+result.value+'</article>';
+  container.dataset.renderMode='mammoth-full-html';
+  return {pages:1,tables:container.querySelectorAll('table').length,textLength:(container.innerText||'').length,fallback:true};
+ }
+ window.renderCompletePriorReviewDocx=async function(blobOrBuffer,container,fileName){
+  container=freshDocxContainer(container);
+  const arrayBuffer=blobOrBuffer instanceof ArrayBuffer?blobOrBuffer.slice(0):await blobOrBuffer.arrayBuffer();
+  try{
+   await window.ensureDocumentLibraries('docx');
+   if(!window.docx||typeof window.docx.renderAsync!=='function')throw new Error('docx-preview did not load.');
+   await window.docx.renderAsync(arrayBuffer.slice(0),container,null,RENDER_OPTIONS);
+   const info=inspectRenderedDocument(container);
+   container.dataset.renderMode='docx-preview-complete';
+   if(typeof window.fitDocPreviewToPanel==='function')requestAnimationFrame(()=>window.fitDocPreviewToPanel(true));
+   console.info('Complete DOCX preview rendered',info);
+   return info;
+  }catch(err){
+   console.warn('High-fidelity DOCX render failed; using complete HTML extraction.',err);
+   const info=await mammothFallback(arrayBuffer,container,fileName,err);
+   if(typeof window.fitDocPreviewToPanel==='function')requestAnimationFrame(()=>window.fitDocPreviewToPanel(true));
+   return info;
+  }
+ };
+ window.fitDocPreviewToPanel=function(resetUserZoom){
+  const body=document.getElementById('comparison-modal-body');
+  const container=document.getElementById('comparison-docx');
+  if(!body||!container)return;
+  const pages=[...container.querySelectorAll('.docx-wrapper > section, section.docx')];
+  if(!pages.length)return;
+  const widest=Math.max.apply(null,pages.map(p=>p.offsetWidth||p.scrollWidth||816));
+  const available=Math.max(280,body.clientWidth-28);
+  window.__docFitScale=Math.min(1,available/widest);
+  if(resetUserZoom)window.__docZoom=1;
+  window.applyDocZoom();
+ };
+ const oldApply=window.applyDocZoom;
+ window.applyDocZoom=function(){
+  const user=Math.max(.6,Math.min(2,Number(window.__docZoom)||1));window.__docZoom=user;
+  const fit=Math.max(.25,Math.min(1,Number(window.__docFitScale)||1));
+  document.documentElement.style.setProperty('--doc-zoom',String(user));
+  const container=document.getElementById('comparison-docx');
+  const pages=container?[...container.querySelectorAll('.docx-wrapper > section, section.docx')]:[];
+  if(pages.length){
+   pages.forEach(page=>{page.style.zoom=String(fit*user);page.style.transform='none';});
+  }else if(typeof oldApply==='function'){oldApply();}
+  localStorage.setItem('docZoom',String(user));
+ };
+ const oldToggle=window.toggleComparisonModal;
+ window.toggleComparisonModal=function(show){
+  const result=oldToggle(show);
+  if(show)setTimeout(()=>window.fitDocPreviewToPanel(false),80);
+  return result;
+ };
+ window.addEventListener('resize',()=>{clearTimeout(window.__docFitTimer);window.__docFitTimer=setTimeout(()=>window.fitDocPreviewToPanel(false),120);});
 })();
 </script>
 
