@@ -122,7 +122,6 @@ canvas{max-height:280px}
     <span class="sync-dot" id="syncStatus"></span>
     <div class="spacer"></div>
     <button class="btn ghost sm" id="syncBtn" title="Pull latest data from your linked Excel file">&#8635; Sync</button>
-    <button class="btn sm" id="adminBtn">Admin</button>
   </div>
   <nav id="nav"></nav>
 </header>
@@ -201,8 +200,6 @@ function renderCalendar(){
   const [f,t]=range();
   const recs=filteredRecords(), byDate={};
   recs.forEach(r=>{(byDate[r.date]=byDate[r.date]||[]).push(r);});
-  
-  // Get total headcount based on current active filters
   const totalEmps = filteredEmployees().length; 
 
   const head=`<div class="cal-head">
@@ -210,49 +207,40 @@ function renderCalendar(){
     <button class="btn ghost sm" id="calToday">Today</button>
     <button class="btn ghost sm" id="calNext">&#8250;</button>
     <h2>${fmt(f)}${f!==t?" – "+fmt(t):""}</h2>
-    ${UI.admin?`<button class="btn sm right" id="calAdd">+ Add record</button>`:""}
+    <button class="btn sm right" id="calAdd">+ Add record</button>
   </div>`;
 
   if(UI.preset==="day"||UI.preset==="week"||UI.preset==="adjusted"&&addDays(f,10)>t){
     let days=[]; for(let d=f; d<=t; d=addDays(d,1)) days.push(d);
     return head+`<div class="cal-list">${days.map(d=>{
       const allRs = byDate[d]||[];
-      // Calculate present count before filtering them out
       const presentCount = allRs.filter(r => r.type === "Present").length;
       const rs=allRs.filter(r => r.type !== "Present").sort((a,b)=>a.type.localeCompare(b.type));
       
       return `<div class="day-block card"><div class="row"><b>${fmtShort(d)}</b><span class="small muted">${presentCount}/${totalEmps} present · ${rs.length} occurrence record${rs.length===1?"":"s"}</span>
-        ${UI.admin?`<button class="btn ghost sm right" data-add-day="${d}">+ Add</button>`:""}</div>
+        <button class="btn ghost sm right" data-add-day="${d}">+ Add</button></div>
         ${rs.length? `<div class="tbl-wrap mt"><table><tbody>${rs.map(r=>rowRecord(r,true)).join("")}</tbody></table></div>`:`<div class="small muted mt">No records.</div>`}
       </div>`;}).join("")}</div>`;
   }
 
-  // month/quarter/annual → month grid(s)
   const months=[]; let d=parseISO(f); d.setDate(1);
   while(isoDate(d)<=t){ months.push(new Date(d)); d.setMonth(d.getMonth()+1); }
-  
-  // CHANGED: Ordered Sunday to Saturday
   const dows=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
   
   return head+months.map(m0=>{
     const y=m0.getFullYear(), mo=m0.getMonth();
     const first=new Date(y,mo,1), last=new Date(y,mo+1,0);
-    
-    // CHANGED: Simple getDay() replaces the offset calculation for a Sunday start
     const lead=first.getDay();
     let cells="";
     for(let i=0;i<lead;i++) cells+=`<div></div>`;
     
     for(let day=1;day<=last.getDate();day++){
       const ds=isoDate(new Date(y,mo,day)), rs=byDate[ds]||[];
-      // Find how many people are present for this specific cell
       const presentCount = rs.filter(r => r.type === "Present").length;
       const agg={}; 
-      
       rs.forEach(r=>{ if(r.type !== "Present") agg[r.type]=(agg[r.type]||0)+1; });
       const dim=ds<f||ds>t, isToday=ds===today();
       
-      // Inject fraction at the top of the cell using existing flex row/right classes
       cells+=`<div class="cal-cell ${dim?"dim":""} ${isToday?"today":""}" data-day="${ds}">
         <div class="row"><div class="d">${day}</div><div class="right muted" style="font-size:10.5px; font-weight:600;">${presentCount}/${totalEmps}</div></div>
         <div class="cal-mini">${Object.entries(agg).map(([ty,n])=>`<span class="dot" title="${esc(ty)}: ${n}" style="background:${TYPES[ty].color}">${n>1?n:TYPES[ty].abbr}</span>`).join("")}</div>
@@ -470,7 +458,13 @@ function importFile(file){
 }
 
 /* ---------- shell: nav + filters ---------- */
-const TABS=[["dashboard","Dashboard"],["calendar","Calendar"],["team","Team"],["makeup","Make-Up Time"],["records","Records"],["settings","Settings"]];
+const TABS=[["dashboard","Dashboard"],["calendar","Calendar"],["team","Team"],["makeup","Make-Up Time"],["records","Records"]];
+
+let S = load() || seed();
+let UI = { tab:"dashboard", preset:"month", anchor:today(), from:null, to:null,
+           dept:"", team:"", title:"", supervisor:"", manager:"", srManager:"", q:"", type:"",
+           sortKey:"date", sortDir:-1, muFilter:"" };
+let charts = [];=[["dashboard","Dashboard"],["calendar","Calendar"],["team","Team"],["makeup","Make-Up Time"],["records","Records"],["settings","Settings"]];
 function renderNav(){
   $("#nav").innerHTML = TABS.map(([k,l])=>`<button class="${UI.tab===k?"on":""}" data-tab="${k}">${l}</button>`).join("");
 }
@@ -529,21 +523,19 @@ function kpiModal(cat, title) {
     }
     html += `<div class="tbl-wrap"><table><thead><tr><th>Employee</th><th>Date missed</th><th>Hours owed</th><th>Due</th><th>Status</th><th>OSS</th><th>Notes</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
   } else {
-    // For standard records and occurrences
     let recs = cat === "Occurrences" ? m.recs.filter(isOcc) : m.recs.filter(r => r.type === cat);
-    recs.sort((a,b) => b.date.localeCompare(a.date)); // sort descending by date
+    recs.sort((a,b) => b.date.localeCompare(a.date));
     if(recs.length === 0) {
       rows = `<tr class="norow"><td colspan="6" class="empty">No records in this period.</td></tr>`;
     } else {
       rows = recs.map(r => rowRecord(r)).join("");
     }
-    html += `<div class="tbl-wrap"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type</th><th style="text-align:left">Hours</th><th style="text-align:left">Notes</th>${UI.admin?"<th></th>":""}</tr></thead><tbody>${rows}</tbody></table></div>`;
+    html += `<div class="tbl-wrap"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type</th><th style="text-align:left">Hours</th><th style="text-align:left">Notes</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   html += `<div class="mfoot mt"><button class="btn ghost" onclick="closeModal()">Close</button></div>`;
   openModal(html);
   
-  // Re-bind interactive buttons inside the newly created modal
   const mh = $("#modalHost");
   if (cat === "Perfect") {
       mh.querySelectorAll("tr[data-emp]").forEach(tr=>tr.onclick=()=>{closeModal(); empModal(tr.dataset.emp);});
@@ -657,7 +649,7 @@ function muRow(m){
     <td><span class="badge ${stCls}">${m.status}</span></td>
     <td>${m.oss?`<span class="badge">OSS</span>`:""}</td>
     <td class="small">${esc(m.notes)}</td>
-    <td>${UI.admin?muActions(m):""}</td></tr>`;
+    <td>${muActions(m)}</td></tr>`;
 }
   
 function muActions(m){
@@ -675,7 +667,7 @@ function renderMakeup(){
   const counts=MU_STATUS.map(s=>S.makeups.filter(m=>ids.has(m.empId)&&m.status===s).length);
   return `<div class="section-title"><h2>Make-Up Time</h2>
     <select id="muFilter">${["",...MU_STATUS].map(s=>`<option ${UI.muFilter===s?"selected":""} value="${s}">${s||"All statuses"}</option>`).join("")}</select>
-    ${UI.admin?`<button class="btn sm" id="muNew">+ New agreement</button>`:""}
+    <button class="btn sm" id="muNew">+ New agreement</button>
     <span class="small muted right">Pending ${counts[0]} · Approved ${counts[1]} · Completed ${counts[2]} · Missed ${counts[3]}</span></div>
   <div class="card small mb" style="border-left:4px solid var(--purple)">
     An <b>OSS</b> (Out / Short-Shift) lets an agent make up missed time instead of taking an occurrence or losing pay —
@@ -684,7 +676,7 @@ function renderMakeup(){
   </div>
   <div class="card tbl-wrap"><table><thead><tr>
     <th>Employee</th><th>Date missed</th><th>Hours owed</th><th>Due</th><th>Status</th><th>OSS</th><th>Notes</th><th></th>
-  </tr></thead><tbody>${list.map(muRow).join("")||`<tr class="norow"><td colspan="8" class="empty">No make-up agreements${UI.admin?" — create one with “+ New agreement”":""}.</td></tr>`}</tbody></table></div>`;
+  </tr></thead><tbody>${list.map(muRow).join("")||`<tr class="norow"><td colspan="8" class="empty">No make-up agreements — create one with “+ New agreement”.</td></tr>`}</tbody></table></div>`;
 }
   
 function setMuStatus(mid,status){
@@ -709,17 +701,17 @@ function rowRecord(r,slim){
     <td><b>${esc(e.name)}</b></td>
     <td>${pill(r.type)}${r.fmla?` <span class="badge" title="FMLA Protected">FMLA</span>`:""}${r.waived?` <span class="badge ok" title="Occurrence waived via completed make-up">waived</span>`:""}</td>
     <td>${r.hours||""}${r.hours?"h":""}</td><td class="small">${esc(r.notes)}</td>
-    ${UI.admin?`<td class="row" style="gap:4px"><button class="btn ghost sm" data-rec-edit="${r.rid}">Edit</button><button class="btn danger sm" data-rec-del="${r.rid}">✕</button></td>`:""}</tr>`;
+    <td class="row" style="gap:4px"><button class="btn ghost sm" data-rec-edit="${r.rid}">Edit</button><button class="btn danger sm" data-rec-del="${r.rid}">✕</button></td></tr>`;
 }
-  
+
 function renderRecords(){
   const recs=filteredRecords().sort((a,b)=>UI.sortDir*(a[UI.sortKey]<b[UI.sortKey]?-1:a[UI.sortKey]>b[UI.sortKey]?1:0));
   return `<div class="section-title"><h2>Records (${recs.length})</h2>
-    ${UI.admin?`<button class="btn sm" id="recNew">+ Add record</button>`:""}
+    <button class="btn sm" id="recNew">+ Add record</button>
     <button class="btn ghost sm right" id="recExport">Export CSV</button></div>
   <div class="card tbl-wrap"><table><thead><tr>
     <th data-sort="date">Date ${UI.sortKey==="date"?(UI.sortDir<0?"↓":"↑"):""}</th><th data-sort="empId">Employee</th>
-    <th data-sort="type">Type</th><th>Hours</th><th>Notes</th>${UI.admin?"<th></th>":""}
+    <th data-sort="type">Type</th><th>Hours</th><th>Notes</th><th></th>
   </tr></thead><tbody>${recs.map(r=>rowRecord(r)).join("")||`<tr class="norow"><td colspan="6" class="empty">No records in this period.</td></tr>`}</tbody></table></div>`;
 }
 function exportCSV(){
@@ -731,42 +723,6 @@ function exportCSV(){
   a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"})); a.download="workforce-records.csv"; a.click();
 }
 
-/* ---------- settings ---------- */
-function renderSettings(){
-  return `<div class="grid two">
-  <div class="card"><h3>Live data link</h3>
-    <p class="small muted">Paste the <b>share link</b> to your Microsoft Forms results workbook (OneDrive / SharePoint Excel).
-    The app converts it to a direct download and pulls fresh data automatically on every load.</p>
-    <label>Excel share link</label><input id="setUrl" placeholder="https://…sharepoint.com/… or https://1drv.ms/…" value="${esc(S.settings.liveUrl)}" style="width:100%;border:1px solid var(--line);background:var(--bg);border-radius:8px;padding:8px 10px">
-    <div class="row mt">
-      <button class="btn" id="setSave">Save &amp; sync now</button>
-      <label class="row small" style="text-transform:none;letter-spacing:0"><input type="checkbox" id="setAuto" ${S.settings.autoSync?"checked":""} style="width:auto"> Auto-sync on load</label>
-    </div>
-    <p class="small muted mt">${S.settings.lastSync?"Last sync: "+esc(S.settings.lastSync):"Never synced."}</p>
-    <hr style="border:none;border-top:1px solid var(--line)">
-    <h3>File import (fallback)</h3>
-    <p class="small muted">If the live link is blocked by your tenant's sharing policy, import the .xlsx / .csv directly:</p>
-    <input type="file" id="setFile" accept=".xlsx,.xls,.csv">
-  </div>
-  <div class="card"><h3>Data &amp; security</h3>
-    <p class="small">${S.employees.length} employees · ${S.records.length} records · ${S.makeups.length} make-up agreements</p>
-    <div class="row mt">
-      <button class="btn ghost sm" id="setBackup">Download backup (JSON)</button>
-      <label class="btn ghost sm" style="display:inline-block">Restore backup<input type="file" id="setRestore" accept=".json" hidden></label>
-    </div>
-    <div class="row mt">
-      ${UI.admin?`<button class="btn ghost sm" id="setPin">Change admin PIN</button>`:""}
-      <button class="btn ghost sm" id="setSample">Load sample data</button>
-      <button class="btn danger sm" id="setClear">Clear all data</button>
-    </div>
-    <hr style="border:none;border-top:1px solid var(--line)">
-    <h3>Expected columns</h3>
-    <p class="small muted"><b>Employees sheet</b> (name contains “Employees” or “Roster”): Employee ID, Name, Department, Team, Title, Supervisor, Manager, Senior Manager, Location, Status.<br>
-    <b>Attendance sheet</b> (any other sheet, incl. Forms exports): Date, Employee ID (or Name), Type, Hours, Notes.
-    Column names are matched flexibly — “Emp ID”, “Attendance Type”, “Comments”, etc. all work.
-    Types recognized: ${TYPE_NAMES.join(", ")} (plus synonyms like “late”, “no call no show”, “vacation”).</p>
-  </div></div>`;
-}
 
 /* ---------- modals ---------- */
 function openModal(html){ $("#modalHost").innerHTML=`<div class="overlay" id="ovl"><div class="modal">${html}</div></div>`;
@@ -838,16 +794,15 @@ function makeupModal(mid,fromRec){
 }
   
 function dayModal(ds){
-  // Use the central filteredRecords function and filter out "Present" records
   const rs = filteredRecords(ds, ds)
     .filter(r => r.type !== "Present")
     .sort((a,b)=>a.type.localeCompare(b.type));
   
   openModal(`<h2>${fmtShort(ds)}</h2>
     ${rs.length?`<div class="tbl-wrap"><table><tbody>${rs.map(r=>rowRecord(r,true)).join("")}</tbody></table></div>`:`<div class="empty">No occurrence records match the current filters for this day.</div>`}
-    <div class="mfoot">${UI.admin?`<button class="btn" id="dAdd">+ Add record</button>`:""}<button class="btn ghost" onclick="closeModal()">Close</button></div>`);
+    <div class="mfoot"><button class="btn" id="dAdd">+ Add record</button><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
     
-  if(UI.admin) $("#dAdd").onclick=()=>recordModal(null,ds);
+  $("#dAdd").onclick=()=>recordModal(null,ds);
   bindRecordButtons($("#modalHost"));
 }
   
@@ -868,31 +823,13 @@ function empModal(id){
     ${rs.length?`<div class="tbl-wrap"><table><tbody>${rs.map(r=>`<tr><td>${fmt(r.date)}</td><td>${pill(r.type)}${r.waived?` <span class="badge ok">waived</span>`:""}</td><td>${r.hours||""}h</td><td class="small">${esc(r.notes)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="small muted">None in period.</div>`}
     <h3 style="font-size:13px" class="mt">Make-up agreements (${mus.length})</h3>
     ${mus.length?`<div class="tbl-wrap"><table><tbody>${mus.map(m=>`<tr><td>${fmt(m.dateMissed)}</td><td>${m.hoursOwed}h</td><td><span class="badge ${{Pending:"warn",Approved:"",Completed:"ok",Missed:"bad"}[m.status]}">${m.status}</span></td><td>${m.oss?"OSS":""}</td></tr>`).join("")}</tbody></table></div>`:`<div class="small muted">None.</div>`}
-    <div class="mfoot">${UI.admin?`<button class="btn ghost" id="eMu">+ Make-up agreement</button>`:""}<button class="btn ghost" onclick="closeModal()">Close</button></div>`);
-  if(UI.admin) $("#eMu").onclick=()=>makeupModal(null,{empId:id,date:today(),hours:0});
-}
-async function pinModal(change){
-  openModal(`<h2>${change?"Change admin PIN":"Admin sign-in"}</h2>
-    ${change?`<div class="mb"><label>New PIN</label><input id="pNew" type="password" inputmode="numeric" autocomplete="off"></div>`
-    :`<p class="small muted">Enter the admin PIN to unlock editing. ${S.settings.pinHash?"":"(Default PIN: <b>"+DEFAULT_PIN+"</b> — change it in Settings.)"}</p>
-      <div class="mb"><label>PIN</label><input id="pIn" type="password" inputmode="numeric" autocomplete="off"></div>`}
-    <div class="mfoot"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn" id="pGo">${change?"Save PIN":"Unlock"}</button></div>`);
-  const go=async()=>{
-    if(change){ const v=$("#pNew").value.trim(); if(v.length<4) return toast("PIN must be at least 4 digits");
-      S.settings.pinHash=await sha(v); save(); closeModal(); toast("PIN updated"); return; }
-    const want=S.settings.pinHash||await sha(DEFAULT_PIN);
-    if(await sha($("#pIn").value)===want){ UI.admin=true; sessionStorage.setItem("wf.admin","1"); closeModal(); render(); toast("Admin mode on"); }
-    else toast("Incorrect PIN");
-  };
-  $("#pGo").onclick=go;
-  $("#modalHost").querySelector("input").addEventListener("keydown",e=>{ if(e.key==="Enter") go(); });
-  $("#modalHost").querySelector("input").focus();
+    <div class="mfoot"><button class="btn ghost" id="eMu">+ Make-up agreement</button><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
+  $("#eMu").onclick=()=>makeupModal(null,{empId:id,date:today(),hours:0});
 }
 
 /* ---------- render & events ---------- */
 function render(){
   renderNav(); renderFilters(); setSync("");
-  $("#adminBtn").textContent=UI.admin?"Admin ✓":"Admin";
   const v=$("#view");
   switch(UI.tab){
     case "dashboard": v.innerHTML=renderDashboard(); drawCharts(); break;
@@ -900,7 +837,6 @@ function render(){
     case "team":      v.innerHTML=renderTeam(); break;
     case "makeup":    v.innerHTML=renderMakeup(); break;
     case "records":   v.innerHTML=renderRecords(); break;
-    case "settings":  v.innerHTML=renderSettings(); bindSettings(); break;
   }
   bindView();
 }
@@ -910,17 +846,15 @@ function bindRecordButtons(root){
   root.querySelectorAll("[data-rec-del]").forEach(b=>b.onclick=e=>{e.stopPropagation();
     if(confirm("Delete this record?")){ S.records=S.records.filter(r=>r.rid!==b.dataset.recDel); save(); closeModal(); render(); toast("Record deleted"); }});
 }
-  
+
 function bindView(){
   const v=$("#view");
   v.querySelectorAll("tr[data-emp]").forEach(tr=>tr.onclick=()=>empModal(tr.dataset.emp));
   v.querySelectorAll(".cal-cell[data-day]").forEach(c=>c.onclick=()=>dayModal(c.dataset.day));
   v.querySelectorAll("[data-add-day]").forEach(b=>b.onclick=e=>{e.stopPropagation();recordModal(null,b.dataset.addDay);});
   
-  // ADDED: Make record rows clickable to open the edit modal
   v.querySelectorAll("tr[data-rec]").forEach(tr=> {
      tr.onclick = (e) => {
-         // Don't fire if they specifically clicked an admin action button inside the row
          if(!e.target.closest("button")) { 
              recordModal(tr.dataset.rec);
          }
@@ -932,7 +866,7 @@ function bindView(){
     const act=b.dataset.muAct, id=b.dataset.id;
     if(act==="edit") makeupModal(id);
     else setMuStatus(id, act==="approve"?"Approved":act==="complete"?"Completed":"Missed");});
-  v.querySelectorAll("tr[data-mu]").forEach(tr=>tr.onclick=()=>{ if(UI.admin) makeupModal(tr.dataset.mu); });
+  v.querySelectorAll("tr[data-mu]").forEach(tr=>tr.onclick=()=>{ makeupModal(tr.dataset.mu); });
   v.querySelectorAll("th[data-sort]").forEach(th=>th.onclick=()=>{
     const k=th.dataset.sort; UI.sortDir=UI.sortKey===k?-UI.sortDir:-1; UI.sortKey=k; render();});
   const on=(id,ev,fn)=>{ const el=$(id); if(el) el[ev]=fn; };
@@ -943,25 +877,6 @@ function bindView(){
   on("#recExport","onclick",exportCSV);
   on("#muNew","onclick",()=>makeupModal());
   on("#muFilter","onchange",()=>{UI.muFilter=$("#muFilter").value;render();});
-}
-  
-function bindSettings(){
-  $("#setSave").onclick=()=>{ S.settings.liveUrl=$("#setUrl").value.trim(); S.settings.autoSync=$("#setAuto").checked; save(); syncNow(false); };
-  $("#setAuto").onchange=e=>{ S.settings.autoSync=e.target.checked; save(); };
-  $("#setFile").onchange=e=>{ if(e.target.files[0]) importFile(e.target.files[0]); e.target.value=""; };
-  $("#setBackup").onclick=()=>{ const a=document.createElement("a");
-    a.href=URL.createObjectURL(new Blob([JSON.stringify(S,null,1)],{type:"application/json"}));
-    a.download="workforce-backup-"+today()+".json"; a.click(); };
-  $("#setRestore").onchange=e=>{ const f=e.target.files[0]; if(!f) return;
-    const rd=new FileReader(); rd.onload=ev=>{ try{ const s=JSON.parse(ev.target.result);
-      if(!s.employees||!s.records) throw new Error("not a workforce backup");
-      S=s; S.makeups=S.makeups||[]; S.settings=S.settings||{}; save(); render(); toast("Backup restored");
-    }catch(err){ toast("Restore failed: "+err.message); } }; rd.readAsText(f); e.target.value=""; };
-  const pinBtn=$("#setPin"); if(pinBtn) pinBtn.onclick=()=>pinModal(true);
-  $("#setSample").onclick=()=>{ if(confirm("Replace current data with sample data?")){ const st=S.settings; S=seed(); S.settings=st; save(); render(); toast("Sample data loaded"); } };
-  $("#setClear").onclick=()=>{ if(confirm("Delete ALL local data? (Your Excel file is untouched.)")){
-    S={employees:[],records:[],makeups:[],settings:{liveUrl:S.settings.liveUrl,autoSync:S.settings.autoSync,pinHash:S.settings.pinHash,lastSync:""}};
-    save(); render(); toast("Cleared"); } };
 }
 
 /* global events */
@@ -979,7 +894,6 @@ $("#filterBar").addEventListener("input",e=>{ if(e.target.id==="fQ"){ UI.q=e.tar
   clearTimeout(window._qh); window._qh=setTimeout(render,250); }});
 $("#filterBar").addEventListener("click",e=>{ if(e.target.id==="fClear"){
   Object.assign(UI,{preset:"month",anchor:today(),from:null,to:null,dept:"",team:"",title:"",supervisor:"",manager:"",srManager:"",q:"",type:""}); render(); }});
-$("#adminBtn").onclick=()=>{ if(UI.admin){ UI.admin=false; sessionStorage.removeItem("wf.admin"); render(); toast("Admin mode off"); } else pinModal(false); };
 $("#syncBtn").onclick=()=>syncNow(false);
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
 
