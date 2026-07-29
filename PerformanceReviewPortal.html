@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Performance Review Portal</title>
+  <title>Performance Review Portal - Dynamic Flow v23</title>
   <!-- Document/PDF parsers are lazy-loaded only when archive preview/parsing is needed. -->
   <!-- Authentication & UI -->
   <script src="https://alcdn.msauth.net/browser/2.14.2/js/msal-browser.min.js"></script>
@@ -5335,6 +5335,137 @@ body.card-format-dense .measure-label { display:none !important; }
       }
   }
 
+
+  // v23 - Dynamic Power Automate field contract + employee milestone date PATCH
+  const FLOW_FIELD_ALIASES = {
+    login: {
+      rowDate: ['logout date','login date','row date','date','activity date'],
+      shift: ['shift','shift selection','scheduled shift'],
+      shortShift: ['short/ext shift','short shift','short extension shift','exception shift'],
+      loginTime: ['login time','log in time','start time'],
+      logoutTime: ['logout time','log out time','end time'],
+      workedHours: ['worked hours26','worked hours','hours worked','total worked hours']
+    },
+    avaya: {
+      rowDate: ['row date','date','activity date'],
+      breakTime: ['time in break','break time','average break','avg break'],
+      lunchTime: ['time in lunch','lunch time','average lunch','avg lunch'],
+      personalTime: ['time in personal misc','personal misc','personal time'],
+      oeTime: ['time in oe/payment processing','oe payment processing','payment processing'],
+      techTime: ['time in tech issues','tech issues','technical issues'],
+      approvedTime: ['time in email/approved','email approved','approved time'],
+      printingTime: ['time in printing/stamps','printing stamps','printing time'],
+      adherence: ['adherence','aux adherence','schedule adherence'],
+      accuracy: ['accuracy','aux accuracy','reporting accuracy']
+    }
+  };
+  function normalizeReturnedFieldName(value) {
+    return String(value || '')
+      .replace(/^.*?\[/, '').replace(/\]$/, '')
+      .replace(/\s*\(raw\)\s*/ig, '')
+      .replace(/26$/,'')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '');
+  }
+  function canonicalFlowField(type, fieldName) {
+    const normalized = normalizeReturnedFieldName(fieldName);
+    const aliases = FLOW_FIELD_ALIASES[type] || {};
+    for (const [canonical, names] of Object.entries(aliases)) {
+      if (names.some(name => normalizeReturnedFieldName(name) === normalized)) return canonical;
+    }
+    return null;
+  }
+  function normalizePowerAutomateRows(rows, type) {
+    if (!Array.isArray(rows)) return [];
+    const discovered = new Set();
+    const unmatched = new Set();
+    const normalizedRows = rows.map((row, rowIndex) => {
+      const source = row && typeof row === 'object' ? row : { Value: row };
+      const output = {};
+      const canonicalValues = {};
+      Object.entries(source).forEach(([key, value]) => {
+        if (key === '_isTrouble') return;
+        discovered.add(key);
+        output[key] = unwrapOutputValue(value);
+        const canonical = canonicalFlowField(type, key);
+        if (canonical && (canonicalValues[canonical] === undefined || canonicalValues[canonical] === '')) canonicalValues[canonical] = unwrapOutputValue(value);
+        if (!canonical) unmatched.add(key);
+      });
+      Object.defineProperty(output, '__canonical', { value: canonicalValues, enumerable: false, configurable: true });
+      Object.defineProperty(output, '__sourceIndex', { value: rowIndex, enumerable: false, configurable: true });
+      return output;
+    });
+    window.flowFieldContract = window.flowFieldContract || {};
+    window.flowFieldContract[type] = {
+      returnedFields: [...discovered],
+      unmatchedFields: [...unmatched],
+      rowCount: normalizedRows.length,
+      capturedAt: new Date().toISOString()
+    };
+    console.info(`Power Automate ${type} field contract`, window.flowFieldContract[type]);
+    return normalizedRows;
+  }
+  function getCanonicalFlowValue(row, type, canonicalName) {
+    if (!row) return undefined;
+    if (row.__canonical && row.__canonical[canonicalName] !== undefined) return row.__canonical[canonicalName];
+    const key = Object.keys(row).find(k => canonicalFlowField(type, k) === canonicalName);
+    return key ? unwrapOutputValue(row[key]) : undefined;
+  }
+  function createdRecordIdFromResponse(response) {
+    const entityUrl = response.headers.get('OData-EntityId') || response.headers.get('odata-entityid') || '';
+    const match = entityUrl.match(/\(([^)]+)\)\s*$/);
+    return match ? match[1].replace(/[{}]/g, '') : null;
+  }
+  function employeeDatePatchForReview(reviewType, reviewDate, employeeRecord) {
+    if (!reviewDate) return {};
+    const type = String(reviewType || '').toLowerCase();
+    const track = getEmployeeMilestoneTrack(type, employeeRecord || {});
+    // Delivery-date fields are updated at submission. The underlying milestone/due-date
+    // fields remain untouched so a submission cannot erase the employee's source schedule.
+    if (type === '30day') return track === 'Position Change'
+      ? { cr714_afterdeliverydate: reviewDate }
+      : { cr714_thirtydeliverydate: reviewDate };
+    if (type === '90day') return track === 'Position Change'
+      ? { cr714_ninetyafterdeliverydate: reviewDate }
+      : { cr714_ninetydeliverydate: reviewDate };
+    if (type === 'annual') return { cr714_annualreviewdeliverydate: reviewDate, cr714_lastannualreview: reviewDate };
+    return {};
+  }
+  async function patchEmployeeInformationDates(token, reviewType, reviewDate) {
+    const emp = window.selectedEmployeeRecord || {};
+    let employeeId = emp.cr714_employeeinformation1id;
+    if (!employeeId) {
+      const name = val('employee-name');
+      if (!name) return { skipped: true, reason: 'No employee selected.' };
+      const escaped = name.replace(/'/g, "''");
+      const lookup = await fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeeinformation1id&$filter=cr714_employeename eq '${escaped}'&$top=2`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }
+      });
+      if (!lookup.ok) throw new Error(`Employee lookup failed (${lookup.status}).`);
+      const lookupData = await lookup.json();
+      if (!Array.isArray(lookupData.value) || lookupData.value.length !== 1) throw new Error('Employee date update requires one unique Employee Information record.');
+      employeeId = lookupData.value[0].cr714_employeeinformation1id;
+    }
+    const patch = employeeDatePatchForReview(reviewType, reviewDate, emp);
+    if (!Object.keys(patch).length) return { skipped: true, reason: 'This review type has no Employee Information delivery-date field.' };
+    const patchUrl = `${DATAVERSE_URL}/cr714_employeeinformation1s(${employeeId})`;
+    const patchResponse = await fetch(patchUrl, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'If-Match': '*'
+      },
+      body: JSON.stringify(patch)
+    });
+    if (!patchResponse.ok) {
+      let detail = `${patchResponse.status} ${patchResponse.statusText}`;
+      try { detail = (await patchResponse.json()).error?.message || detail; } catch (_) {}
+      throw new Error(`Employee Information date PATCH failed: ${detail}`);
+    }
+    Object.assign(emp, patch);
+    return { skipped: false, employeeId, patch };
+  }
+
   async function fetchAllPbiDataInBackground(showToasts = false, forceRefresh = false) {
       window.setConnectionStatus('pbi', 'loading', 'Metrics: Syncing', 'Checking Power BI metric data.');
       const empName = val('employee-name');
@@ -5392,7 +5523,7 @@ body.card-format-dense .measure-label { display:none !important; }
           const avayaQuery = `EVALUATE CALCULATETABLE('Avaya Details', FILTER('Rep Details', ${repFilter}), 'Avaya Details'[Row Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), 'Avaya Details'[Row Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
 
           const avayaData = await executePowerBIQueryViaTunnel(avayaId, avayaQuery);
-          window.pbiCache.avayaData = avayaData;
+          window.pbiCache.avayaData = normalizePowerAutomateRows(avayaData, 'avaya');
 
           if (avayaData.length > 0) {
               let totalACDTime = 0, totalACWTime = 0, totalInbound = 0, totalOutbound = 0;
@@ -5462,7 +5593,7 @@ body.card-format-dense .measure-label { display:none !important; }
           const llQuery = `EVALUATE CALCULATETABLE('${llTableName}', FILTER('${llTableName}', ${llFilter}), '${llTableName}'[Logout Date] >= DATE(${dates.startYear}, ${dates.startMonth}, 1), '${llTableName}'[Logout Date] < DATE(${dates.endYear}, ${dates.endMonth}, 1))`;
 
           const llData = await executePowerBIQueryViaTunnel(llId, llQuery);
-          window.pbiCache.loginData = llData;
+          window.pbiCache.loginData = normalizePowerAutomateRows(llData, 'login');
 
           const uniqueDays = new Set();
           llData.forEach(row => {
@@ -5940,7 +6071,11 @@ body.card-format-dense .measure-label { display:none !important; }
 
         const response = await fetch(submitUrl, {
             method: 'POST',
-            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+              'Prefer': 'return=representation'
+            },
             body: JSON.stringify(payload)
         });
 
@@ -5950,7 +6085,26 @@ body.card-format-dense .measure-label { display:none !important; }
             throw new Error(errStr);
         }
 
-        const confNum = 'REV-' + Date.now().toString().slice(-6);
+        const createdReviewId = createdRecordIdFromResponse(response);
+        window.lastSubmittedReview = {
+          id: createdReviewId,
+          entitySet: 'cr714_employeeperformancereviews',
+          submittedAt: new Date().toISOString()
+        };
+
+        let employeeDatePatchResult = null;
+        try {
+          employeeDatePatchResult = await patchEmployeeInformationDates(token, currentReviewType, val('review-date'));
+          window.lastSubmittedReview.employeeInformationPatch = employeeDatePatchResult;
+        } catch (employeePatchError) {
+          console.error(employeePatchError);
+          window.lastSubmittedReview.employeeInformationPatchError = employeePatchError.message;
+          showError(`Review created, but Employee Information dates were not updated: ${employeePatchError.message}`);
+        }
+
+        const confNum = createdReviewId
+          ? `REV-${createdReviewId.replace(/-/g, '').slice(-8).toUpperCase()}`
+          : 'REV-' + Date.now().toString().slice(-6);
         document.getElementById('conf-number').textContent = confNum;
 
         const empName = val('employee-name');
