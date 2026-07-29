@@ -161,7 +161,7 @@ const MU_STATUS = ["Pending","Approved","Completed","Missed"];
 /* ---------- state ---------- */
 let S = load() || seed();
 let UI = { tab:"dashboard", preset:"month", anchor:today(), from:null, to:null,
-           dept:"", team:"", title:"", supervisor:"", manager:"", srManager:"", q:"",
+           dept:"", team:"", title:"", supervisor:"", manager:"", srManager:"", q:"", type:"",
            sortKey:"date", sortDir:-1, muFilter:"", admin: sessionStorage.getItem("wf.admin")==="1" };
 let charts = [];
 
@@ -276,7 +276,8 @@ function filteredEmployees(){
 function filteredRecords(from,to){
   const ids = new Set(filteredEmployees().map(e=>e.id));
   const [f,t] = from?[from,to]:range();
-  return S.records.filter(r => ids.has(r.empId) && r.date>=f && r.date<=t);
+  // Added the UI.type filter check here
+  return S.records.filter(r => ids.has(r.empId) && r.date>=f && r.date<=t && (!UI.type || r.type === UI.type));
 }
 function emp(id){ return S.employees.find(e=>e.id===id); }
 function isOcc(r){ return !!TYPES[r.type]?.occ && !r.waived; }
@@ -474,6 +475,10 @@ function renderNav(){
   $("#nav").innerHTML = TABS.map(([k,l])=>`<button class="${UI.tab===k?"on":""}" data-tab="${k}">${l}</button>`).join("");
 }
 function opts(list,cur){ return `<option value="">All</option>`+list.map(v=>`<option ${v===cur?"selected":""} value="${esc(v)}">${esc(v)}</option>`).join(""); }
+
+  /* ---------- shell: nav + filters ---------- */
+// ... (keep renderNav and opts functions the same)
+
 function renderFilters(){
   const bar=$("#filterBar");
   if(UI.tab==="settings"){ bar.innerHTML=""; return; }
@@ -487,6 +492,9 @@ function renderFilters(){
          <div class="fgroup"><label>To</label><input type="date" id="fTo" value="${UI.to||t}"></div>`
       : `<div class="fgroup"><label>Anchor date</label><input type="date" id="fAnchor" value="${UI.anchor}"></div>`}
     ${ORG_FIELDS.map(([k,l])=>{ const v=vals(k); return v.length?`<div class="fgroup"><label>${l}</label><select data-f="${k}" class="ffield">${opts(v,UI[k])}</select></div>`:""; }).join("")}
+    
+    <div class="fgroup"><label>Type</label><select data-f="type" class="ffield">${opts(TYPE_NAMES,UI.type)}</select></div>
+    
     <div class="fgroup"><label>Search</label><input id="fQ" placeholder="Name or ID…" value="${esc(UI.q)}"></div>
     <button class="chip-clear" id="fClear">Reset</button>
     <span class="small muted right">${fmt(f)} → ${fmt(t)}</span>`;
@@ -586,6 +594,7 @@ function renderDashboard(){
     </div>
   </div>`;
 }
+  
 function drawCharts(){
   charts.forEach(c=>c.destroy()); charts=[];
   if(typeof Chart==="undefined") return;
@@ -650,6 +659,7 @@ function muRow(m){
     <td class="small">${esc(m.notes)}</td>
     <td>${UI.admin?muActions(m):""}</td></tr>`;
 }
+  
 function muActions(m){
   let b="";
   if(m.status==="Pending")  b+=`<button class="btn sm" data-mu-act="approve" data-id="${m.mid}">Approve</button> `;
@@ -657,6 +667,7 @@ function muActions(m){
   b+=`<button class="btn ghost sm" data-mu-act="edit" data-id="${m.mid}">Edit</button>`;
   return `<div class="row" style="gap:4px">${b}</div>`;
 }
+  
 function renderMakeup(){
   const ids=new Set(filteredEmployees().map(e=>e.id));
   const list=S.makeups.filter(m=>ids.has(m.empId)&&(!UI.muFilter||m.status===UI.muFilter))
@@ -675,6 +686,7 @@ function renderMakeup(){
     <th>Employee</th><th>Date missed</th><th>Hours owed</th><th>Due</th><th>Status</th><th>OSS</th><th>Notes</th><th></th>
   </tr></thead><tbody>${list.map(muRow).join("")||`<tr class="norow"><td colspan="8" class="empty">No make-up agreements${UI.admin?" — create one with “+ New agreement”":""}.</td></tr>`}</tbody></table></div>`;
 }
+  
 function setMuStatus(mid,status){
   const m=S.makeups.find(x=>x.mid===mid); if(!m) return;
   m.status=status;
@@ -692,12 +704,13 @@ function setMuStatus(mid,status){
 /* ---------- records ---------- */
 function rowRecord(r,slim){
   const e=emp(r.empId)||{name:r.empId};
-  return `<tr data-rec="${r.rid}">
+  return `<tr data-rec="${r.rid}" style="cursor:pointer" title="Click to edit record">
     ${slim?"":`<td>${fmt(r.date)}</td>`}
     <td><b>${esc(e.name)}</b></td><td>${pill(r.type)}${r.waived?` <span class="badge ok" title="Occurrence waived via completed make-up">waived</span>`:""}</td>
     <td>${r.hours||""}${r.hours?"h":""}</td><td class="small">${esc(r.notes)}</td>
     ${UI.admin?`<td class="row" style="gap:4px"><button class="btn ghost sm" data-rec-edit="${r.rid}">Edit</button><button class="btn danger sm" data-rec-del="${r.rid}">✕</button></td>`:""}</tr>`;
 }
+  
 function renderRecords(){
   const recs=filteredRecords().sort((a,b)=>UI.sortDir*(a[UI.sortKey]<b[UI.sortKey]?-1:a[UI.sortKey]>b[UI.sortKey]?1:0));
   return `<div class="section-title"><h2>Records (${recs.length})</h2>
@@ -869,16 +882,29 @@ function render(){
   }
   bindView();
 }
+  
 function bindRecordButtons(root){
   root.querySelectorAll("[data-rec-edit]").forEach(b=>b.onclick=e=>{e.stopPropagation();recordModal(b.dataset.recEdit);});
   root.querySelectorAll("[data-rec-del]").forEach(b=>b.onclick=e=>{e.stopPropagation();
     if(confirm("Delete this record?")){ S.records=S.records.filter(r=>r.rid!==b.dataset.recDel); save(); closeModal(); render(); toast("Record deleted"); }});
 }
+  
 function bindView(){
   const v=$("#view");
   v.querySelectorAll("tr[data-emp]").forEach(tr=>tr.onclick=()=>empModal(tr.dataset.emp));
   v.querySelectorAll(".cal-cell[data-day]").forEach(c=>c.onclick=()=>dayModal(c.dataset.day));
   v.querySelectorAll("[data-add-day]").forEach(b=>b.onclick=e=>{e.stopPropagation();recordModal(null,b.dataset.addDay);});
+  
+  // ADDED: Make record rows clickable to open the edit modal
+  v.querySelectorAll("tr[data-rec]").forEach(tr=> {
+     tr.onclick = (e) => {
+         // Don't fire if they specifically clicked an admin action button inside the row
+         if(!e.target.closest("button")) { 
+             recordModal(tr.dataset.rec);
+         }
+     };
+  });
+
   bindRecordButtons(v);
   v.querySelectorAll("[data-mu-act]").forEach(b=>b.onclick=e=>{e.stopPropagation();
     const act=b.dataset.muAct, id=b.dataset.id;
@@ -896,6 +922,7 @@ function bindView(){
   on("#muNew","onclick",()=>makeupModal());
   on("#muFilter","onchange",()=>{UI.muFilter=$("#muFilter").value;render();});
 }
+  
 function bindSettings(){
   $("#setSave").onclick=()=>{ S.settings.liveUrl=$("#setUrl").value.trim(); S.settings.autoSync=$("#setAuto").checked; save(); syncNow(false); };
   $("#setAuto").onchange=e=>{ S.settings.autoSync=e.target.checked; save(); };
@@ -929,7 +956,7 @@ $("#filterBar").addEventListener("change",e=>{
 $("#filterBar").addEventListener("input",e=>{ if(e.target.id==="fQ"){ UI.q=e.target.value;
   clearTimeout(window._qh); window._qh=setTimeout(render,250); }});
 $("#filterBar").addEventListener("click",e=>{ if(e.target.id==="fClear"){
-  Object.assign(UI,{preset:"month",anchor:today(),from:null,to:null,dept:"",team:"",title:"",supervisor:"",manager:"",srManager:"",q:""}); render(); }});
+  Object.assign(UI,{preset:"month",anchor:today(),from:null,to:null,dept:"",team:"",title:"",supervisor:"",manager:"",srManager:"",q:"",type:""}); render(); }});
 $("#adminBtn").onclick=()=>{ if(UI.admin){ UI.admin=false; sessionStorage.removeItem("wf.admin"); render(); toast("Admin mode off"); } else pinModal(false); };
 $("#syncBtn").onclick=()=>syncNow(false);
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
