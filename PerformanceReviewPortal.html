@@ -4898,8 +4898,10 @@ body.card-format-dense .measure-label { display:none !important; }
               }
           }
           
-          // Ensure we pull the array of files properly depending on flow's structure
-          const files = normalizeSharePointHistoryResponse(rawData, resText);
+          // Flow-only contract: the Flow returns exactly one selected file plus its Base64 content.
+          // Do not rebuild a file list or fall back to SharePoint URLs in the browser.
+          const selectedFlowFile = getSelectedFileFromFlowPayload(rawData);
+          const files = selectedFlowFile ? [selectedFlowFile] : [];
           // Flow response has returned; unlock Panel 1 while preview/extraction continues in the background.
           if (typeof window.setPanel1ArchiveLock === 'function') window.setPanel1ArchiveLock(false);
 
@@ -5038,22 +5040,39 @@ body.card-format-dense .measure-label { display:none !important; }
                           }
                       }
                   } catch (decodeErr) {
-                      console.warn("Base64 preview unavailable; falling back to SharePoint embed link.", decodeErr);
-                      showSharePointEmbedPreview(newestFile, compIframe, iframeLoader);
+                      console.error("The Flow returned unusable file content.", decodeErr);
+                      if (compIframe) { compIframe.src = ''; compIframe.style.display = 'none'; }
+                      let errorContainer = document.getElementById('comparison-docx');
+                      if (!errorContainer) {
+                          errorContainer = document.createElement('div');
+                          errorContainer.id = 'comparison-docx';
+                          (document.getElementById('comparison-zoom-stage') || document.getElementById('comparison-modal-body')).appendChild(errorContainer);
+                      }
+                      errorContainer.style.display = 'block';
+                      errorContainer.innerHTML = `<div class="error-box" style="margin:20px;padding:20px;color:var(--text-error);"><strong>Preview unavailable.</strong><br>The Flow returned file content, but it could not be decoded as ${fileName}.</div>`;
+                      if (iframeLoader) iframeLoader.style.display = 'none';
                   }
               } else {
-                  // Fallback if the flow does not return usable base64 content.
-                  showSharePointEmbedPreview(newestFile, compIframe, iframeLoader);
+                  // Flow-only mode: never attempt a direct SharePoint iframe or browser fetch.
+                  if (compIframe) { compIframe.src = ''; compIframe.style.display = 'none'; }
+                  let errorContainer = document.getElementById('comparison-docx');
+                  if (!errorContainer) {
+                      errorContainer = document.createElement('div');
+                      errorContainer.id = 'comparison-docx';
+                      (document.getElementById('comparison-zoom-stage') || document.getElementById('comparison-modal-body')).appendChild(errorContainer);
+                  }
+                  errorContainer.style.display = 'block';
+                  errorContainer.innerHTML = '<div class="error-box" style="margin:20px;padding:20px;color:var(--text-error);"><strong>No file content was returned.</strong><br>Confirm the Flow response contains a nonblank <code>fileContentBase64</code> value.</div>';
+                  if (iframeLoader) iframeLoader.style.display = 'none';
               }
 
               };
-              // Use the actual SharePoint/Word file as the primary viewer. The binary
-              // renderer remains available as an explicit fallback because docx-preview
-              // cannot reproduce every Word drawing layer, legacy form field, or text box.
+              // Flow-only viewer: render only the Base64 content returned by the Flow.
+              // Never use the SharePoint link as the iframe source.
               window.__currentComparisonFile = newestFile;
               window.__currentComparisonFileName = fileName;
               window.__pendingComparisonRender = async function() {
-                  return window.openActualSharePointReview(newestFile, fileName, compIframe, iframeLoader);
+                  return window.__binaryComparisonRender();
               };
               if (iframeLoader) iframeLoader.style.display = 'none';
               if (document.getElementById('comparison-modal')?.classList.contains('open')) {
@@ -6531,6 +6550,41 @@ html.dark #comparison-modal-body{background:#09111e!important}
    if(typeof window.__binaryComparisonRender==='function')return window.__binaryComparisonRender();
  };
  document.addEventListener('DOMContentLoaded',ensureModeButtons);
+})();
+</script>
+
+
+<script>
+/* Flow-only prior-review viewer: no direct SharePoint iframe mode. */
+(function () {
+  function enforceFlowOnlyViewer() {
+    const nativeButton = document.getElementById('comparison-mode-native');
+    const binaryButton = document.getElementById('comparison-mode-binary');
+    if (nativeButton) nativeButton.style.display = 'none';
+    if (binaryButton) binaryButton.style.display = 'none';
+
+    const subtitle = document.getElementById('comparison-subtitle');
+    if (subtitle && window.__currentComparisonFileName) {
+      subtitle.textContent = 'Secure preview from file content returned by Power Automate';
+    }
+  }
+
+  window.showActualComparisonFile = function () {
+    enforceFlowOnlyViewer();
+    return typeof window.showBinaryComparisonFile === 'function'
+      ? window.showBinaryComparisonFile()
+      : (typeof window.__binaryComparisonRender === 'function' ? window.__binaryComparisonRender() : undefined);
+  };
+
+  window.openActualSharePointReview = function () {
+    enforceFlowOnlyViewer();
+    return typeof window.__binaryComparisonRender === 'function'
+      ? window.__binaryComparisonRender()
+      : undefined;
+  };
+
+  document.addEventListener('DOMContentLoaded', enforceFlowOnlyViewer);
+  new MutationObserver(enforceFlowOnlyViewer).observe(document.documentElement, { childList: true, subtree: true });
 })();
 </script>
 
