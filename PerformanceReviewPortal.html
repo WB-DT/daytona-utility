@@ -5113,15 +5113,16 @@ body.card-format-dense .measure-label { display:none !important; }
                           if (typeof pdfjsLib !== 'undefined') {
                               const loadingTask = pdfjsLib.getDocument({data: bytes});
                               loadingTask.promise.then(async function(pdf) {
-                                  let fullText = '';
-                                  for (let i = 1; i <= pdf.numPages; i++) {
-                                      const page = await pdf.getPage(i);
-                                      const textContent = await page.getTextContent();
-                                      fullText += textContent.items.map(s => s.str).join(' ') + ' ';
+                                  const cellResult = await window.extractPdfTableCells(pdf);
+                                  const parseText = cellResult && cellResult.text ? cellResult.text : '';
+                                  if (parseText) {
+                                      window.parseLastMonthMetrics(parseText, fileName);
+                                      window.__lastCellParseResult = cellResult;
+                                  } else {
+                                      console.warn('No KPI table cells were detected. The previous-review viewer remains available for manual comparison.');
                                   }
-                                  const cleanedPdfText = cleanupPriorReviewText(fullText);
-                                  window.parseLastMonthMetrics(cleanedPdfText, fileName);
-                                  setLastReviewCompletedFromText(cleanedPdfText, fileName);
+                                  const dateText = cellResult && cellResult.allText ? cellResult.allText : parseText;
+                                  setLastReviewCompletedFromText(dateText, fileName);
                               }).catch(err => console.error("PDF Parse Error:", err));
                           }
                       } else {
@@ -8713,6 +8714,105 @@ body.admin-walkthrough-active{overflow:auto!important}
     ['btn-ocr-lasso','btn-smart-kpi-extract','ocr-lasso-modal','ocr-selection-preview-modal','smart-kpi-modal'].forEach(id=>document.getElementById(id)?.remove());
   }
   document.addEventListener('DOMContentLoaded',removeDeprecatedExtractionUi);
+})();
+</script>
+
+
+<style id="v43-cell-parser-side-by-side-css">
+#btn-always-side-by-side{order:2;display:inline-flex!important;min-height:34px!important;height:34px!important;padding:.3rem .65rem!important;border-radius:10px!important;white-space:nowrap!important;font-size:.72rem!important;font-weight:850!important}
+#btn-always-side-by-side[data-ready="false"]{opacity:.72}
+.cell-parse-badge{display:inline-flex;align-items:center;gap:.3rem;padding:.2rem .45rem;border-radius:999px;border:1px solid var(--border);background:var(--bg-card);color:var(--text-muted);font-size:.68rem;font-weight:800}
+@media(max-width:760px){#btn-always-side-by-side span{display:none}}
+@media print{#btn-always-side-by-side{display:none!important}}
+</style>
+<script id="v43-cell-parser-side-by-side-js">
+(function(){
+ const clean=v=>String(v||'').replace(/\s+/g,' ').trim();
+ const norm=v=>clean(v).toLowerCase().replace(/[^a-z0-9]+/g,' ');
+ const valueRx=/^(?:[↑→↓▶▲▼]\s*)?(?:\$?\d|EE\b|ME\b|BE\b|N\/?A\b|NA\b)/i;
+ const markerRx=/^(last|this|current)\s+month\b/i;
+ function itemBox(item,viewport){
+   const tx=pdfjsLib.Util.transform(viewport.transform,item.transform);
+   const h=Math.max(Math.abs(tx[3]),7),w=Math.max((Number(item.width)||0)*viewport.scale,2);
+   return {text:clean(item.str),x:tx[4],y:tx[5]-h,w,h,cx:tx[4]+w/2,cy:tx[5]-h/2};
+ }
+ function groupLines(items){
+   const lines=[];
+   items.slice().sort((a,b)=>a.cy-b.cy||a.x-b.x).forEach(item=>{
+     let line=lines.find(x=>Math.abs(x.y-item.cy)<=Math.max(3.5,item.h*.48));
+     if(!line){line={y:item.cy,items:[]};lines.push(line);}
+     line.items.push(item);
+   });
+   lines.forEach(line=>line.items.sort((a,b)=>a.x-b.x));
+   lines.sort((a,b)=>a.y-b.y);
+   return lines;
+ }
+ function lineText(line){return clean(line.items.map(x=>x.text).join(' '));}
+ function clusterValueCells(items){
+   const sorted=items.slice().sort((a,b)=>a.x-b.x),cells=[];
+   for(const item of sorted){
+     const prior=cells[cells.length-1];
+     if(prior && item.x-(prior.x+prior.w)<18){
+       prior.text=clean(prior.text+' '+item.text);prior.w=Math.max(prior.w,item.x+item.w-prior.x);prior.cx=prior.x+prior.w/2;
+     }else cells.push({...item});
+   }
+   return cells;
+ }
+ function nearestIndex(x,centers){let best=0,dist=Infinity;centers.forEach((c,i)=>{const d=Math.abs(x-c);if(d<dist){dist=d;best=i;}});return best;}
+ function parseKpiBand(lines,start,end,pageNo){
+   const band=lines.slice(start+1,end);
+   if(!band.length)return null;
+   let valueLineIndex=-1,valueCells=[];
+   for(let i=band.length-1;i>=0;i--){
+     const candidates=clusterValueCells(band[i].items.filter(x=>valueRx.test(x.text)));
+     if(candidates.length>=2){valueLineIndex=i;valueCells=candidates;break;}
+   }
+   if(valueLineIndex<0)return null;
+   const centers=valueCells.map(x=>x.cx),labels=centers.map(()=>[]);
+   band.slice(0,valueLineIndex).forEach(line=>line.items.forEach(item=>{
+     if(!item.text||markerRx.test(item.text)||valueRx.test(item.text))return;
+     labels[nearestIndex(item.cx,centers)].push(item);
+   }));
+   const labelText=labels.map(parts=>{
+     const ls=groupLines(parts);return clean(ls.map(lineText).join(' '));
+   });
+   const pairs=[];
+   valueCells.forEach((cell,i)=>{if(labelText[i]&&cell.text)pairs.push({label:labelText[i],value:clean(cell.text),page:pageNo,column:i+1});});
+   return pairs.length>=2?pairs:null;
+ }
+ window.extractPdfTableCells=async function(pdf){
+   const periods=[],allText=[];
+   for(let p=1;p<=pdf.numPages;p++){
+     const page=await pdf.getPage(p),viewport=page.getViewport({scale:1.5}),content=await page.getTextContent();
+     const items=content.items.map(x=>itemBox(x,viewport)).filter(x=>x.text),lines=groupLines(items);
+     allText.push(lines.map(lineText).join('\n'));
+     for(let i=0;i<lines.length;i++){
+       const t=lineText(lines[i]);if(!markerRx.test(t))continue;
+       let end=lines.length;
+       for(let j=i+1;j<lines.length;j++){if(markerRx.test(lineText(lines[j]))||/^(opportunities|best practices|action plan|daily sales)/i.test(lineText(lines[j]))){end=j;break;}}
+       const pairs=parseKpiBand(lines,i,end,p);
+       if(pairs)periods.push({heading:t,page:p,pairs});
+     }
+   }
+   const prior=periods.find(x=>/^last\s+month/i.test(x.heading));
+   if(!prior)return {text:'',allText:allText.join('\n\n'),periods};
+   const lines=[prior.heading,...prior.pairs.map(x=>x.label),...prior.pairs.map(x=>x.value)];
+   const opportunities=[];
+   return {text:lines.join('\n'),allText:allText.join('\n\n'),periods,cells:prior.pairs,opportunities};
+ };
+ function addTopButton(){
+   if(document.getElementById('btn-always-side-by-side'))return;
+   const controls=document.querySelector('header .header-controls');if(!controls)return;
+   const button=document.createElement('button');button.id='btn-always-side-by-side';button.type='button';button.className='theme-toggle-btn';button.dataset.ready='false';button.title='Open the previous review beside the current form';button.innerHTML='<i class="fas fa-columns"></i><span>Side-by-Side</span>';
+   button.onclick=function(){
+     const hasPreview=!!(window.__binaryComparisonRender||document.getElementById('comparison-iframe')?.src||document.getElementById('comparison-docx'));
+     if(!hasPreview&&typeof window.showToast==='function')window.showToast('The previous review is still loading. The side-by-side panel will open and update when the file becomes available.');
+     window.toggleComparisonModal?.(true);
+   };
+   const history=document.getElementById('btn-nav-history');controls.insertBefore(button,history||controls.firstChild);
+ }
+ function updateReady(){const b=document.getElementById('btn-always-side-by-side');if(!b)return;const ready=!!window.__binaryComparisonRender;b.dataset.ready=String(ready);b.title=ready?'Open the previous review beside the current form':'Open side-by-side viewer. Previous review is not loaded yet.';}
+ document.addEventListener('DOMContentLoaded',()=>{addTopButton();updateReady();setInterval(updateReady,1500);});
 })();
 </script>
 
