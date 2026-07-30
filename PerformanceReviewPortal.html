@@ -3331,7 +3331,7 @@ body.card-format-dense .measure-label { display:none !important; }
     <div class="card success-card">
       <div class="success-icon"><i class="fas fa-check"></i></div>
       <h2>Review Submitted Successfully</h2>
-      <p>The performance review has been securely recorded into Dataverse.<br>Print or save a copy for your records.</p>
+      <p>The performance review has been securely recorded into Dataverse.<br>Print or save a copy for your records. After presenting the review to the representative, make sure URED is updated through the approved URED process.</p>
       <div class="confirmation-number" id="conf-number">REV-000000</div>
       <div id="success-meta" style="font-size:0.95rem;color:var(--text-muted);margin-bottom:2.5rem; background: var(--bg-table-alt); padding: 1rem; border-radius: var(--radius-sm); border: 1px solid var(--border);"></div>
 
@@ -4085,9 +4085,9 @@ body.card-format-dense .measure-label { display:none !important; }
             <input type="${m.type}" id="${m.id}" placeholder="${placeholder}" step="${m.step}" min="0" oninput="calculateArrow('${m.id}')" style="flex:1;"${inputValue} />
             <select id="${m.id}-arrow" class="styled-arrow-select" style="width: 135px; text-align: left; padding-left: 0.75rem; transition: color 0.3s ease;" onchange="updateArrowSelectStatus(this.id.replace('-arrow',''))">
               <option value="" ${arrowValue === '' ? 'selected' : ''}>-</option>
-              <option value="Green" ${arrowValue === 'Green' ? 'selected' : ''}>▲ (Up)</option>
-              <option value="Yellow" ${arrowValue === 'Yellow' ? 'selected' : ''}>▶ (Flat)</option>
-              <option value="Red" ${arrowValue === 'Red' ? 'selected' : ''}>▼ (Down)</option>
+              <option value="Green" ${arrowValue === 'Green' ? 'selected' : ''}>EE</option>
+              <option value="Yellow" ${arrowValue === 'Yellow' ? 'selected' : ''}>ME</option>
+              <option value="Red" ${arrowValue === 'Red' ? 'selected' : ''}>BE</option>
             </select>
           </div>
         </div>`;
@@ -5047,7 +5047,14 @@ body.card-format-dense .measure-label { display:none !important; }
           // Flow-only contract: the Flow returns exactly one selected file plus its Base64 content.
           // Do not rebuild a file list or fall back to SharePoint URLs in the browser.
           const selectedFlowFile = getSelectedFileFromFlowPayload(rawData);
-          const files = selectedFlowFile ? [selectedFlowFile] : [];
+          // Accept the full archive array when the Flow returns one, while keeping the selected
+          // file first because it is the record whose Base64 content is included in the response.
+          let files = normalizeSharePointHistoryResponse(rawData, resText);
+          if (!Array.isArray(files)) files = [];
+          if (selectedFlowFile) {
+              const selectedName = selectedFlowFile['{FilenameWithExtension}'] || selectedFlowFile.Name || '';
+              files = [selectedFlowFile, ...files.filter(f => (f?.['{FilenameWithExtension}'] || f?.Name || '') !== selectedName)];
+          }
           // Flow response has returned; unlock Panel 1 while preview/extraction continues in the background.
           if (typeof window.setPanel1ArchiveLock === 'function') window.setPanel1ArchiveLock(false);
 
@@ -5222,6 +5229,14 @@ body.card-format-dense .measure-label { display:none !important; }
                   return window.__binaryComparisonRender();
               };
               if (iframeLoader) iframeLoader.style.display = 'none';
+              // Parse the returned file immediately so the KPI Helper has data before the
+              // side-by-side viewer is opened. Rendering remains reusable when the modal opens.
+              Promise.resolve(window.__binaryComparisonRender())
+                .then(() => {
+                    window.__comparisonPreviewRendered = true;
+                    window.dispatchEvent(new CustomEvent('previous-review-file-processed', { detail: { fileName } }));
+                })
+                .catch(err => console.error('Background previous-review extraction failed:', err));
               if (document.getElementById('comparison-modal')?.classList.contains('open')) {
                   window.runPendingComparisonPreview();
               }
@@ -5575,18 +5590,8 @@ body.card-format-dense .measure-label { display:none !important; }
     return match ? match[1].replace(/[{}]/g, '') : null;
   }
   function employeeDatePatchForReview(reviewType, reviewDate, employeeRecord) {
-    if (!reviewDate) return {};
-    const type = String(reviewType || '').toLowerCase();
-    const track = getEmployeeMilestoneTrack(type, employeeRecord || {});
-    // Delivery-date fields are updated at submission. The underlying milestone/due-date
-    // fields remain untouched so a submission cannot erase the employee's source schedule.
-    if (type === '30day') return track === 'Position Change'
-      ? { cr714_afterdeliverydate: reviewDate }
-      : { cr714_thirtydeliverydate: reviewDate };
-    if (type === '90day') return track === 'Position Change'
-      ? { cr714_ninetyafterdeliverydate: reviewDate }
-      : { cr714_ninetydeliverydate: reviewDate };
-    if (type === 'annual') return { cr714_annualreviewdeliverydate: reviewDate, cr714_lastannualreview: reviewDate };
+    // URED / Employee Information updates are intentionally disabled.
+    // Review submission creates the review record only and does not PATCH employee dates.
     return {};
   }
   async function patchEmployeeInformationDates(token, reviewType, reviewDate) {
@@ -8616,6 +8621,89 @@ body.admin-walkthrough-active{overflow:auto!important}
  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.getElementById('kpi-flow-helper-modal')?.classList.contains('open'))closeKpiFlowHelper();});
  document.getElementById('kpi-flow-helper-modal')?.addEventListener('click',e=>{if(e.target.id==='kpi-flow-helper-modal')closeKpiFlowHelper();});
  document.addEventListener('DOMContentLoaded',addLauncher);
+})();
+</script>
+
+
+
+<style id="v37-operational-fixes-css">
+#btn-powerbi-metrics{display:inline-flex;align-items:center;gap:.35rem;text-decoration:none}
+.kpi-helper-debug{margin:.55rem 0 0;padding:.55rem .7rem;border:1px dashed var(--border);border-radius:9px;font-size:.72rem;color:var(--text-muted);white-space:pre-wrap;overflow-wrap:anywhere}
+@media print{#btn-powerbi-metrics{display:none!important}}
+</style>
+<script id="v37-operational-fixes-js">
+(function(){
+  // Dashboard launcher. Admin can paste the direct dashboard/report URL once; it is stored locally.
+  function addPowerBiToolbarLink(){
+    if(document.getElementById('btn-powerbi-metrics'))return;
+    const history=document.getElementById('btn-nav-history');
+    if(!history)return;
+    const link=document.createElement('a');
+    link.id='btn-powerbi-metrics';link.className='theme-toggle-btn';link.href='#';link.title='Open the Power BI metrics dashboard';link.innerHTML='<span>Power BI Metrics</span>';
+    link.addEventListener('click',function(e){
+      let url=localStorage.getItem('performanceReviewPowerBiDashboardUrl')||'';
+      if(!url){url=window.prompt('Paste the Power BI dashboard or report URL. It will be saved on this device.','https://app.powerbi.com/');if(url)localStorage.setItem('performanceReviewPowerBiDashboardUrl',url);}
+      if(!url){e.preventDefault();return;}this.href=url;this.target='_blank';this.rel='noopener';
+    });
+    history.parentNode.insertBefore(link,history);
+  }
+
+  // Fix split view opening halfway down the left form.
+  const previousToggle=window.toggleComparisonModal;
+  window.toggleComparisonModal=function(show){
+    if(show){
+      const page=document.querySelector('.page-wrap');
+      if(page)page.scrollTop=0;
+      window.scrollTo({top:0,left:0,behavior:'auto'});
+    }
+    return previousToggle.apply(this,arguments);
+  };
+  try{toggleComparisonModal=window.toggleComparisonModal;}catch(_){ }
+
+  // Helper diagnostic/fallback: the file may exist before PDF/DOCX text extraction finishes.
+  const previousOpen=window.openKpiFlowHelper;
+  window.openKpiFlowHelper=function(auto){
+    const result=previousOpen.apply(this,arguments);
+    const snap=window.previousReviewSnapshot||{};
+    const count=Object.keys(snap.metrics||{}).length;
+    const grid=document.getElementById('kpi-helper-grid');
+    if(!count&&grid){
+      const file=window.__currentComparisonFileName||document.getElementById('parsed-file-name')?.textContent||'';
+      const note=document.createElement('div');note.className='kpi-helper-debug';
+      note.textContent=file
+        ? `File received: ${file}\nThe file is being decoded and parsed now. Use Refresh in a moment. If this remains blank, verify that the Flow returns fileContentBase64 and the file is PDF or DOCX.`
+        : 'No selected file metadata or parsed KPI values are available yet.';
+      grid.appendChild(note);
+      if(typeof window.__binaryComparisonRender==='function'){
+        Promise.resolve(window.__binaryComparisonRender()).then(()=>setTimeout(()=>window.refreshKpiFlowHelper?.(),100)).catch(console.error);
+      }
+    }
+    return result;
+  };
+
+  // Refresh helper after either parsing stage completes.
+  window.addEventListener('previous-review-file-processed',()=>window.refreshKpiFlowHelper?.());
+  window.addEventListener('previous-review-parsed',()=>window.refreshKpiFlowHelper?.());
+
+  // Replace directional icon output with EE / ME / BE while keeping existing color logic.
+  const oldFormat=window.formatMetricWithArrow||((typeof formatMetricWithArrow==='function')?formatMetricWithArrow:null);
+  if(oldFormat){
+    window.formatMetricWithArrow=function(id,label){
+      const rendered=oldFormat(id,label);
+      return String(rendered)
+        .replace(/<i[^>]*fa-arrow-up[^>]*><\/i>/gi,' <strong style="color:var(--success)">EE</strong>')
+        .replace(/<i[^>]*fa-arrow-right[^>]*><\/i>/gi,' <strong style="color:var(--warning)">ME</strong>')
+        .replace(/<i[^>]*fa-arrow-down[^>]*><\/i>/gi,' <strong style="color:var(--danger)">BE</strong>');
+    };
+    try{formatMetricWithArrow=window.formatMetricWithArrow;}catch(_){ }
+  }
+
+  // URED safety net: even stale callers cannot PATCH Employee Information.
+  window.employeeDatePatchForReview=function(){return {};};
+  window.patchEmployeeInformationDates=async function(){return {skipped:true,reason:'URED / Employee Information updates are disabled in this app.'};};
+  try{employeeDatePatchForReview=window.employeeDatePatchForReview;patchEmployeeInformationDates=window.patchEmployeeInformationDates;}catch(_){ }
+
+  document.addEventListener('DOMContentLoaded',addPowerBiToolbarLink);
 })();
 </script>
 
