@@ -8310,5 +8310,196 @@ body.admin-walkthrough-active{overflow:auto!important}
 })();
 </script>
 
+
+
+<style id="v35-editable-flow-comparison-css">
+.current-month-comparison .comparison-editable-input{
+  width:100%; min-width:92px; min-height:34px; padding:.35rem .45rem;
+  border:1px solid var(--border); border-radius:7px; background:var(--bg-input);
+  color:var(--text-main); font:inherit; font-weight:800; text-align:center;
+}
+.current-month-comparison .comparison-editable-input:focus{
+  outline:none; border-color:var(--brand-light); box-shadow:0 0 0 2px rgba(37,99,168,.16);
+}
+.current-month-comparison .comparison-source-note{
+  display:flex; align-items:center; gap:.4rem; margin-top:.45rem; color:var(--text-muted); font-size:.74rem;
+}
+.current-month-comparison .comparison-source-note::before{content:"✎";font-weight:900;color:var(--text-brand)}
+@media print{
+  .current-month-comparison .comparison-editable-input{
+    border:0!important; box-shadow:none!important; background:transparent!important;
+    color:#111!important; padding:0!important; min-height:0!important; appearance:none;
+  }
+  .current-month-comparison .comparison-source-note{display:none!important}
+}
+</style>
+<script id="v35-editable-flow-comparison-js">
+(function(){
+  const html = value => typeof escapeHtmlSafe === 'function'
+    ? escapeHtmlSafe(value == null || value === '' ? '—' : String(value))
+    : String(value == null || value === '' ? '—' : value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const attr = value => html(value).replace(/—/g,'');
+  const norm = value => String(value || '').toLowerCase().replace(/[\u2191\u2192\u2193▶]/g,'').replace(/[^a-z0-9#%≤+]+/g,' ').trim();
+  const clean = value => String(value || '').replace(/\*+/g,'').replace(/\u00a0/g,' ').replace(/[ \t]+/g,' ').trim();
+
+  function fieldValue(id){
+    const el=document.getElementById(id); if(!el) return '';
+    return el.tagName==='SELECT' ? ((el.options[el.selectedIndex]||{}).text||el.value||'') : String(el.value||'').trim();
+  }
+  function setFieldValue(id,value){
+    const el=document.getElementById(id); if(!el) return;
+    const next=String(value||'').replace(/^\s*[↑→↓▶]\s*/,'').trim();
+    if(el.tagName==='SELECT'){
+      const wanted=norm(next);
+      const option=[...el.options].find(o=>norm(o.value)===wanted||norm(o.text)===wanted);
+      if(option) el.value=option.value; else return;
+    } else el.value=next;
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+    el.dispatchEvent(new Event('change',{bubbles:true}));
+  }
+
+  function linesFromFlowText(rawText){
+    return String(rawText||'')
+      .replace(/\r/g,'\n')
+      .replace(/<br\s*\/?\s*>/gi,'\n')
+      .replace(/<\/?(?:p|div|tr|th|td|table|li|h\d)[^>]*>/gi,'\n')
+      .replace(/\*+/g,'')
+      .split(/\n+/).map(clean).filter(Boolean)
+      .filter(x=>!/^page\s+\d+\s+of\s+\d+/i.test(x)&&!/^wb\s*mason\s*\|/i.test(x));
+  }
+  function looksLikeMetricLabel(line){
+    const t=clean(line);
+    if(!t||t.length>115) return false;
+    if(/^(last|this|current)\s+month\b/i.test(t)) return false;
+    if(/^(date|agent name|manager|subject|summary|opportunities|best practices|action plan|statement|signature)/i.test(t)) return false;
+    return /[A-Za-z]/.test(t) && !/^[↑→↓▶]?\s*(?:\d|EE\b|ME\b|BE\b|N\/A\b)/i.test(t);
+  }
+  function looksLikeMetricValue(line){
+    const t=clean(line);
+    return /^(?:[↑→↓▶]\s*)?(?:\d|EE\b|ME\b|BE\b|N\/A\b|NA\b)/i.test(t);
+  }
+  function parseMetricBlock(lines,start,end){
+    const block=lines.slice(start+1,end);
+    let split=block.findIndex(looksLikeMetricValue);
+    if(split<1) return {};
+    const labels=block.slice(0,split).filter(looksLikeMetricLabel);
+    const values=block.slice(split).filter(looksLikeMetricValue);
+    const result={};
+    labels.slice(0,values.length).forEach((label,i)=>{ result[clean(label)]=clean(values[i]); });
+    return result;
+  }
+  function addLegacyAliases(metrics){
+    const aliases={
+      'Outbound Calls':['outbound calls'], 'Inbound Calls':['inbound calls'],
+      'Avg. Talk Time':['avg talk time','average talk time'], 'AUX Accuracy':['aux accuracy'],
+      'Handle Time':['handle time'], 'QA Score':['qa score','quality score'],
+      'Avg. Lunch':['average lunch','avg lunch'], 'Avg. Break':['average break','avg break'],
+      'Avg. Personal Time':['average personal','avg personal'], 'Reporting Accuracy':['reporting accuracy'],
+      'Working Days Present':['availability per shift','working days','days worked']
+    };
+    Object.entries(aliases).forEach(([canonical,needles])=>{
+      if(metrics[canonical]) return;
+      const key=Object.keys(metrics).find(k=>needles.some(n=>norm(k).includes(norm(n))));
+      if(key) metrics[canonical]=metrics[key];
+    });
+  }
+  function sectionText(lines,label,nextLabels){
+    const start=lines.findIndex(x=>norm(x).startsWith(norm(label))); if(start<0)return'';
+    let end=lines.length;
+    for(let i=start+1;i<lines.length;i++) if(nextLabels.some(n=>norm(lines[i]).startsWith(norm(n)))){end=i;break;}
+    return lines.slice(start+1,end).join('\n').replace(/^[-•\s]+/,'').trim();
+  }
+
+  window.parseLastMonthMetrics=function(rawText,fileName){
+    if(!rawText) return window.previousReviewSnapshot;
+    const lines=linesFromFlowText(rawText);
+    const lastIndex=lines.findIndex(x=>/^last\s+month\b/i.test(x));
+    const thisIndex=lines.findIndex((x,i)=>i>lastIndex&&/^(this|current)\s+month\b/i.test(x));
+    const stopIndex=lines.findIndex((x,i)=>i>(thisIndex>-1?thisIndex:lastIndex)&&/^(last\s+month\s+daily|opportunities\s+last\s+month)/i.test(x));
+    const metrics=lastIndex>-1 ? parseMetricBlock(lines,lastIndex,thisIndex>-1?thisIndex:(stopIndex>-1?stopIndex:lines.length)) : {};
+    addLegacyAliases(metrics);
+    const periodMatch=(lines[lastIndex]||'').match(/last\s+month\s*[-:]?\s*(.+)$/i);
+    const snapshot={
+      fileName:fileName||'', rawText:String(rawText), previousPeriod:periodMatch?clean(periodMatch[1]):'', metrics,
+      opportunities:sectionText(lines,'Opportunities Last Month',['Opportunities This Month','Opportunities for This Year','Best Practices','Action Plan'])
+    };
+    window.previousReviewSnapshot=snapshot;
+    try{window.dispatchEvent(new CustomEvent('previous-review-parsed',{detail:snapshot}));}catch(_){ }
+    return snapshot;
+  };
+
+  function priorForLabel(label){
+    const metrics=(window.previousReviewSnapshot||{}).metrics||{};
+    const wanted=norm(label);
+    let key=Object.keys(metrics).find(k=>norm(k)===wanted);
+    if(!key) key=Object.keys(metrics).find(k=>norm(k).includes(wanted)||wanted.includes(norm(k)));
+    const groups=[
+      ['availability','working days','days present'],['average lunch','avg lunch','lunch adherence'],
+      ['average break','avg break','break adherence'],['average personal','avg personal','personal time'],
+      ['log emails assigned','outbound calls'],['log entries completed'],['issues addressed'],['oldest log email date']
+    ];
+    if(!key){
+      const group=groups.find(g=>g.some(x=>wanted.includes(norm(x))));
+      if(group) key=Object.keys(metrics).find(k=>group.some(x=>norm(k).includes(norm(x))));
+    }
+    return key ? metrics[key] : '';
+  }
+  function status(value,id,isCurrent){
+    const arrow=isCurrent&&id?fieldValue(id+'-arrow').toLowerCase():'';
+    const t=String(value||'').toLowerCase();
+    if(arrow==='green'||/\b(ee|green|exceeds)\b/.test(t)||t.includes('↑'))return'kpi-good';
+    if(arrow==='yellow'||/\b(me|yellow|meets)\b/.test(t)||/[→▶]/.test(t))return'kpi-watch';
+    if(arrow==='red'||/\b(be|red|below)\b/.test(t)||t.includes('↓'))return'kpi-bad';
+    return'kpi-neutral';
+  }
+  function rows(){
+    const list=[];
+    (currentMetrics||[]).slice(0,10).forEach((m,i)=>list.push({id:m.id,label:metricDisplayLabel(m,i)}));
+    [['Working Days Present','m-days-present'],['Overall Performance Rating','eom-overall-rating'],['Attendance Rating','eom-attendance-rating']]
+      .forEach(([label,id])=>{if(document.getElementById(id)&&!list.some(x=>x.id===id))list.push({label,id});});
+    return list.map(x=>({ ...x, prior:priorForLabel(x.label), current:fieldValue(x.id) }));
+  }
+  function editableInput(role,row,value){
+    return `<input class="comparison-editable-input" type="text" value="${attr(value)}" data-comparison-role="${role}" data-metric-label="${attr(row.label)}" data-field-id="${attr(row.id||'')}" aria-label="${attr((role==='prior'?'Last month ':'Current ')+row.label)}">`;
+  }
+  function buildEditableComparison(){
+    const list=rows(); if(!list.length)return'';
+    const snap=window.previousReviewSnapshot||{};
+    const period=typeof selectedReviewPeriodText==='function'?selectedReviewPeriodText():fieldValue('review-period');
+    return `<section class="current-month-comparison review-print-section">
+      <div class="current-month-comparison-title">Current Review Compared with Last Month</div>
+      <div class="current-month-comparison-subtitle">Previous values were parsed from ${html(snap.fileName||'the Previous Review Document supplied by Power Automate Flow')}. Both rows can be corrected before submission.</div>
+      <table><thead><tr><th>Period</th>${list.map(x=>`<th>${html(x.label)}</th>`).join('')}</tr></thead><tbody>
+        <tr><td class="period-cell prior-period">${html(snap.previousPeriod||'Last Month')}</td>${list.map(x=>`<td class="${status(x.prior,x.id,false)}">${editableInput('prior',x,x.prior)}</td>`).join('')}</tr>
+        <tr><td class="period-cell current-period">${html(period||'Current Review')}</td>${list.map(x=>`<td class="${status(x.current,x.id,true)}">${editableInput('current',x,x.current)}</td>`).join('')}</tr>
+      </tbody></table>
+      <div class="comparison-source-note">Edits to Last Month are retained in the parsed Flow snapshot. Edits to the current row update the matching Screen 2 field.</div>
+    </section>`;
+  }
+  function currentDoc(conf){
+    const holder=document.createElement('div'); holder.innerHTML=buildReviewSummaryHtml(false);
+    const band=holder.querySelector('.familiar-review-band');
+    if(band)band.insertAdjacentHTML('afterend',buildEditableComparison());else holder.insertAdjacentHTML('afterbegin',buildEditableComparison());
+    if(conf)holder.insertAdjacentHTML('beforeend',`<div class="print-confirmation" style="padding:.35rem;text-align:right;font-size:.72rem;font-weight:800;">Confirmation: ${html(conf)}</div>`);
+    return holder.innerHTML;
+  }
+  window.buildLastMonthComparisonHtml=buildEditableComparison;
+  window.buildCurrentEomDocument=currentDoc;
+  window.buildSummaryPreview=function(){const target=document.getElementById('summary-preview');if(target)target.innerHTML=currentReviewType==='eom'?currentDoc(''):buildReviewSummaryHtml(false);};
+  window.buildPrintSummary=function(conf){const review=currentReviewType==='eom'?currentDoc(conf):buildReviewSummaryHtml(false);const full=review+(typeof buildPrintableReports==='function'?buildPrintableReports():'');const target=document.getElementById('print-summary');if(target)target.innerHTML=full;return full;};
+  buildSummaryPreview=window.buildSummaryPreview; buildPrintSummary=window.buildPrintSummary;
+
+  document.addEventListener('input',function(event){
+    const input=event.target.closest&&event.target.closest('.comparison-editable-input'); if(!input)return;
+    const role=input.dataset.comparisonRole,label=input.dataset.metricLabel,id=input.dataset.fieldId,value=input.value;
+    if(role==='prior'){
+      const snap=window.previousReviewSnapshot=window.previousReviewSnapshot||{fileName:'',metrics:{}};
+      snap.metrics=snap.metrics||{}; snap.metrics[label]=value; addLegacyAliases(snap.metrics);
+    }else if(role==='current'&&id){ setFieldValue(id,value); }
+  });
+  window.addEventListener('previous-review-parsed',()=>{if(document.getElementById('panel-3')?.style.display!=='none')window.buildSummaryPreview();});
+})();
+</script>
+
 </body>
 </html>
