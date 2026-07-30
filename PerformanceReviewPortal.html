@@ -8431,5 +8431,96 @@ html.dark .tabulator-row:is(.row-good,.row-watch,.row-bad,.status-good,.status-w
 })();
 </script>
 
+
+
+<!-- v39 prior-month label-aware text parser -->
+<script id="v39-prior-month-label-aware-parser">
+(function(){
+ const original=window.parseLastMonthMetrics;
+ const definitions=[
+  {key:'Inbound Calls', aliases:['Inbound 75+','Inbound Calls','Inbound Contacts','Contact: In/Combo']},
+  {key:'Outbound Calls', aliases:['Outbound 75+','Outbound Calls','Outbound Contacts','Contact: Out/Comb']},
+  {key:'Call Linking', aliases:['% Call Linking','Call Linking','% Linking']},
+  {key:'Call Notes', aliases:['% Call Notes','Call Notes','% Notes']},
+  {key:'ACW', aliases:['ACW','After Call Work']},
+  {key:'Availability', aliases:['Availability Per Shift Total Working Days/Days Worked/Average Hours','Availability Per Shift','Availability','Total Working Days/Days Worked/Average Hours']},
+  {key:'AUX Accuracy', aliases:['AUX Accuracy','Aux Accuracy']},
+  {key:'Avg. Break', aliases:['Average Break - 30 Minutes','Average Break 30 Minutes','Avg. Break','Average Break']},
+  {key:'Avg. Lunch', aliases:['Average Lunch - 60 Minutes','Average Lunch 60 Minutes','Avg. Lunch','Average Lunch']},
+  {key:'Avg. Personal Time', aliases:['Average Personal ≤ 10 Minutes','Average Personal <= 10 Minutes','Average Personal 10 Minutes','Avg. Personal Time','Average Personal']},
+  {key:'Handle Time', aliases:['Average Handle Time','Avg. Handle Time','Handle Time']},
+  {key:'QA Score', aliases:['QA Score','Quality Score','Quality Assurance']},
+  {key:'Reporting Accuracy', aliases:['Reporting Accuracy']},
+  {key:'Working Days Present', aliases:['Working Days Present','Days Present']},
+  {key:'Daily Sales Average', aliases:['Last Month Daily Sales Average','Daily Sales Average']}
+ ];
+ const norm=s=>String(s||'').replace(/[‐‑‒–—]/g,'-').replace(/[≤]/g,'<=').replace(/\s+/g,' ').trim();
+ const low=s=>norm(s).toLowerCase();
+ function detectedDefinitions(text){return definitions.filter(d=>d.aliases.some(a=>low(text).includes(low(a))));}
+ function previousBlock(text){
+  const t=norm(text), l=t.toLowerCase();
+  const starts=['last month','previous month','prior month'].map(x=>l.indexOf(x)).filter(x=>x>=0);
+  if(!starts.length)return t;
+  const start=Math.min(...starts),after=l.slice(start+1);
+  const rel=['this month','current month'].map(x=>after.indexOf(x)).filter(x=>x>=0);
+  const end=rel.length?start+1+Math.min(...rel):t.length;
+  return t.slice(start,end);
+ }
+ function cleanValue(v){return norm(v).replace(/^[|:;,-]+|[|:;,-]+$/g,'').trim()}
+ function tokenValues(block){
+  const out=[];
+  const re=/(?:↑|↓|→|▶|▲|▼)?\s*(?:EE|ME|BE)?\s*(?:\$?\d{1,3}(?:,\d{3})+(?:\.\d+)?|\$?\d+(?:\.\d+)?%?|\d{1,3}:\d{2}(?::\d{2})?|\d+\/\d+\/\d{1,2}:\d{2}(?::\d{2})?|EE|ME|BE)(?:\s*(?:↑|↓|→|▶|▲|▼|EE|ME|BE))?/gi;
+  for(const m of block.matchAll(re)){
+   const v=cleanValue(m[0]);if(!v)continue;
+   if(/^\d{1,2}\/\d{4}$/.test(v)||/^20\d{2}$/.test(v))continue;
+   out.push(v)
+  }
+  return out;
+ }
+ function parseTableSequence(raw){
+  const text=norm(raw), defs=detectedDefinitions(text);if(defs.length<2)return{};
+  let block=previousBlock(text);
+  // Remove the period/date phrase and sales summary so only the KPI value row remains.
+  block=block.replace(/^(?:last|previous|prior) month\b[^\d]*(?:[A-Za-z]+\s+20\d{2}|\d{1,2}[\/-]\d{2,4})?/i,' ');
+  block=block.split(/(?:Last Month Daily Sales Average|Opportunities Last Month)/i)[0];
+  // Prefer the text after the final recognized KPI label when PDFs emit headers before values.
+  let last=-1;defs.forEach(d=>d.aliases.forEach(a=>{last=Math.max(last,low(block).lastIndexOf(low(a)))}));
+  if(last>=0){const tail=block.slice(last);const hit=defs.flatMap(d=>d.aliases).map(a=>({a,i:low(tail).indexOf(low(a))})).filter(x=>x.i>=0).sort((a,b)=>b.i-a.i)[0];if(hit)block=tail.slice(hit.i+hit.a.length)}
+  const vals=tokenValues(block),result={};
+  defs.forEach((d,i)=>{if(vals[i]!==undefined)result[d.key]=vals[i]});
+  return result;
+ }
+ function parseDirectPairs(raw){
+  const text=norm(raw),result={};
+  definitions.forEach(d=>{for(const alias of d.aliases){const a=alias.replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/\s+/g,'\\s*');const re=new RegExp(a+'\\s*[:=-]?\\s*((?:↑|↓|→|▶|▲|▼)?\\s*(?:EE|ME|BE)?\\s*(?:\\$?\\d[\\d,]*(?:\\.\\d+)?%?|\\d{1,3}:\\d{2}(?::\\d{2})?|\\d+\\/\\d+\\/\\d{1,2}:\\d{2}(?::\\d{2})?|EE|ME|BE)(?:\\s*(?:↑|↓|→|▶|▲|▼|EE|ME|BE))?)','i');const m=text.match(re);if(m){result[d.key]=cleanValue(m[1]);break}}});return result
+ }
+ function aliases(metrics){
+  if(metrics['Availability']&&!metrics['Working Days Present'])metrics['Working Days Present']=metrics['Availability'];
+  if(metrics['Avg. Break'])metrics['Break Adherence']=metrics['Break Adherence']||metrics['Avg. Break'];
+  if(metrics['Avg. Lunch'])metrics['Lunch Adherence']=metrics['Lunch Adherence']||metrics['Avg. Lunch'];
+  return metrics
+ }
+ window.parseLastMonthMetrics=function(rawText,fileName){
+  if(!rawText)return;
+  // Keep legacy extraction as a fallback, then replace only values confidently read from the prior-month row.
+  try{original?.(rawText,fileName)}catch(e){console.warn('Legacy prior-month parser:',e)}
+  const legacy={...((window.previousReviewSnapshot&&window.previousReviewSnapshot.metrics)||{})};
+  const direct=parseDirectPairs(previousBlock(rawText));
+  const sequence=parseTableSequence(rawText);
+  const parsed=aliases({...legacy,...direct,...sequence});
+  window.previousReviewSnapshot={...(window.previousReviewSnapshot||{}),fileName:fileName||window.previousReviewSnapshot?.fileName||'',metrics:parsed,parserVersion:'label-aware-v39',detectedLabels:detectedDefinitions(rawText).map(x=>x.key)};
+  console.info('Prior-month parser v39',window.previousReviewSnapshot);
+ };
+ function lookup(label){
+  const p=window.previousReviewSnapshot?.metrics||{},l=low(label);
+  const map=[['inbound','Inbound Calls'],['outbound','Outbound Calls'],['linking','Call Linking'],['notes','Call Notes'],['acw','ACW'],['availability','Availability'],['working','Working Days Present'],['days present','Working Days Present'],['aux','AUX Accuracy'],['break','Avg. Break'],['lunch','Avg. Lunch'],['personal','Avg. Personal Time'],['talk','Avg. Talk Time'],['handle','Handle Time'],['qa','QA Score'],['quality','QA Score'],['reporting','Reporting Accuracy'],['sales','Daily Sales Average']];
+  for(const [needle,key] of map)if(l.includes(needle)&&p[key]!==undefined)return p[key];return''
+ }
+ window.getPriorMetricByCurrentLabel=lookup;
+ // Override all known comparison lookup entry points by exposing the canonical resolver.
+ window.addEventListener('beforeprint',()=>{window.previousReviewSnapshot&&(window.previousReviewSnapshot.metrics=aliases(window.previousReviewSnapshot.metrics||{}))});
+})();
+</script>
+
 </body>
 </html>
