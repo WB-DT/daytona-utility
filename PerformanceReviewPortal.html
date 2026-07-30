@@ -8840,5 +8840,193 @@ body.admin-walkthrough-active{overflow:auto!important}
 })();
 </script>
 
+
+
+<style id="v40-ocr-preview-css">
+#ocr-selection-preview-modal{display:none;position:fixed;inset:0;z-index:25000;background:rgba(15,23,42,.78);padding:clamp(10px,2vw,24px);align-items:center;justify-content:center}
+#ocr-selection-preview-modal.open{display:flex}
+.ocr-preview-dialog{width:min(1180px,100%);max-height:92vh;display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:var(--bg-card);color:var(--text-main);border:1px solid var(--border);border-radius:16px;overflow:hidden;box-shadow:0 28px 90px rgba(0,0,0,.48)}
+.ocr-preview-head,.ocr-preview-foot{display:flex;align-items:center;gap:.65rem;flex-wrap:wrap;padding:.85rem 1rem;background:var(--bg-table-alt)}
+.ocr-preview-head{border-bottom:1px solid var(--border)}.ocr-preview-foot{border-top:1px solid var(--border);justify-content:space-between}
+.ocr-preview-title{font-size:1.05rem;font-weight:950;color:var(--text-brand)}.ocr-preview-subtitle{font-size:.76rem;color:var(--text-muted);margin-top:.16rem}
+.ocr-preview-grid{min-height:0;overflow:auto;padding:1rem;display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:.85rem;align-content:start;background:var(--bg-body)}
+.ocr-preview-card{border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--bg-card)}
+.ocr-preview-card-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem;padding:.55rem .7rem;background:var(--bg-table-alt);border-bottom:1px solid var(--border);font-size:.75rem;font-weight:900;color:var(--text-brand)}
+.ocr-preview-image-wrap{padding:.65rem;background:#64748b;overflow:auto;max-height:360px}.ocr-preview-image-wrap canvas{display:block;max-width:100%;height:auto;margin:0 auto;background:#fff;box-shadow:0 4px 14px rgba(0,0,0,.24)}
+.ocr-preview-guidance{padding:.55rem .7rem;font-size:.7rem;line-height:1.35;color:var(--text-muted)}
+.ocr-preview-warning{padding:.55rem .68rem;border:1px solid var(--border-warning,#fdba74);border-radius:9px;background:var(--bg-warning-light,#fff7ed);color:var(--text-warning,#92400e);font-size:.74rem;font-weight:750}
+.ocr-preview-actions{display:flex;gap:.45rem;flex-wrap:wrap}.ocr-preview-actions button{min-height:36px;padding:.42rem .72rem;border:1px solid var(--border);border-radius:9px;background:var(--btn-secondary-bg);color:var(--text-main);font-weight:850;cursor:pointer}.ocr-preview-actions button.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+.ocr-preview-loading{grid-column:1/-1;padding:2rem;text-align:center;color:var(--text-muted);font-weight:850}
+@media(max-width:700px){.ocr-preview-grid{grid-template-columns:1fr}.ocr-preview-foot{align-items:flex-start;flex-direction:column}}
+@media print{#ocr-selection-preview-modal{display:none!important}}
+</style>
+
+<div id="ocr-selection-preview-modal" role="dialog" aria-modal="true" aria-labelledby="ocr-selection-preview-title" aria-hidden="true">
+ <div class="ocr-preview-dialog">
+  <div class="ocr-preview-head">
+   <div style="margin-right:auto"><div id="ocr-selection-preview-title" class="ocr-preview-title">Preview OCR Selections</div><div class="ocr-preview-subtitle">Confirm that every image includes the complete KPI labels and their corresponding value row before recognition begins.</div></div>
+   <button type="button" class="btn btn-secondary" onclick="closeOcrSelectionPreview()">Close</button>
+  </div>
+  <div id="ocr-selection-preview-grid" class="ocr-preview-grid"><div class="ocr-preview-loading">Preparing selection previews...</div></div>
+  <div class="ocr-preview-foot">
+   <div class="ocr-preview-warning"><strong>Table recognition tip:</strong> if a label or value is cut off, return to the lasso and redraw that area with a little extra space around the table.</div>
+   <div class="ocr-preview-actions"><button type="button" onclick="returnToOcrLasso()">Back to Lasso</button><button type="button" class="primary" onclick="confirmOcrSelectionPreview()"><i class="fas fa-text-width"></i> Confirm and Run OCR</button></div>
+  </div>
+ </div>
+</div>
+
+<script id="v40-ocr-preview-js">
+(function(){
+ let confirmedRunner=null,previewSelections=[];
+ const $=id=>document.getElementById(id);
+ function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+ async function pdfDocument(){
+   await window.ensureDocumentLibraries?.('pdf');
+   if(!window.pdfjsLib||!window.__priorReviewBytes)throw new Error('The PDF source is not ready.');
+   if(!window.__ocrPreviewPdf)window.__ocrPreviewPdf=await pdfjsLib.getDocument({data:window.__priorReviewBytes.slice(0)}).promise;
+   return window.__ocrPreviewPdf;
+ }
+ async function renderPage(pageNumber){
+   const pdf=await pdfDocument(),page=await pdf.getPage(pageNumber),viewport=page.getViewport({scale:2.35}),canvas=document.createElement('canvas');
+   canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
+   await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
+   return canvas;
+ }
+ function crop(base,selection,displayCanvas){
+   const sourceCanvas=$('ocr-source-canvas');
+   const scaleX=base.width/sourceCanvas.width,scaleY=base.height/sourceCanvas.height;
+   const sx=Math.max(0,selection.x*scaleX),sy=Math.max(0,selection.y*scaleY);
+   const sw=Math.min(base.width-sx,selection.w*scaleX),sh=Math.min(base.height-sy,selection.h*scaleY);
+   displayCanvas.width=Math.max(1,Math.round(sw));displayCanvas.height=Math.max(1,Math.round(sh));
+   displayCanvas.getContext('2d').drawImage(base,sx,sy,sw,sh,0,0,displayCanvas.width,displayCanvas.height);
+ }
+ function selectionStore(){
+   // v39 keeps its array inside a closure, so read the saved chips and green rectangles by
+   // temporarily exposing selections through the public Add/Remove UI state collector below.
+   return window.__ocrSavedSelections||[];
+ }
+ function installSelectionMirror(){
+   if(window.__ocrSelectionMirrorInstalled)return;window.__ocrSelectionMirrorInstalled=true;
+   window.__ocrSavedSelections=window.__ocrSavedSelections||[];
+   const originalSave=window.saveCurrentOcrSelection;
+   window.saveCurrentOcrSelection=function(){
+     // Capture the blue active rectangle from the overlay by instrumenting pointer movement.
+     const candidate=window.__ocrActivePreviewRect;
+     const page=Number($('ocr-page-select')?.value)||1;
+     const before=document.querySelectorAll('.ocr-selection-chip').length;
+     const result=originalSave.apply(this,arguments);
+     const after=document.querySelectorAll('.ocr-selection-chip').length;
+     if(after>before&&candidate)window.__ocrSavedSelections.push({...candidate,page});
+     return result;
+   };
+   const originalRemove=window.removeOcrSelection;
+   window.removeOcrSelection=function(i){window.__ocrSavedSelections.splice(i,1);return originalRemove.apply(this,arguments);};
+   const originalClear=window.clearAllOcrSelections;
+   window.clearAllOcrSelections=function(){window.__ocrSavedSelections=[];return originalClear.apply(this,arguments);};
+   const overlay=$('ocr-lasso-overlay');
+   if(overlay){
+     overlay.addEventListener('pointerdown',e=>{const r=overlay.getBoundingClientRect(),p={x:(e.clientX-r.left)*overlay.width/r.width,y:(e.clientY-r.top)*overlay.height/r.height};window.__ocrPreviewStart=p;window.__ocrActivePreviewRect={x:p.x,y:p.y,w:0,h:0};},true);
+     overlay.addEventListener('pointermove',e=>{if(!window.__ocrPreviewStart)return;const r=overlay.getBoundingClientRect(),p={x:(e.clientX-r.left)*overlay.width/r.width,y:(e.clientY-r.top)*overlay.height/r.height},a=window.__ocrPreviewStart;window.__ocrActivePreviewRect={x:Math.min(a.x,p.x),y:Math.min(a.y,p.y),w:Math.abs(p.x-a.x),h:Math.abs(p.y-a.y)};},true);
+     overlay.addEventListener('pointerup',()=>{window.__ocrPreviewStart=null;},true);
+   }
+ }
+ async function buildPreview(){
+   const grid=$('ocr-selection-preview-grid');grid.innerHTML='<div class="ocr-preview-loading">Rendering the saved OCR areas for review...</div>';
+   previewSelections=selectionStore().slice();
+   if(!previewSelections.length){grid.innerHTML='<div class="ocr-preview-loading">No mirrored selection areas were found. Return to the lasso, redraw each area, and select Add Area.</div>';return;}
+   grid.innerHTML='';const pages=new Map();
+   for(let i=0;i<previewSelections.length;i++){
+     const item=previewSelections[i];let page=pages.get(item.page);if(!page){page=await renderPage(item.page);pages.set(item.page,page);}
+     const card=document.createElement('article');card.className='ocr-preview-card';card.innerHTML=`<div class="ocr-preview-card-head"><span>Page ${item.page} · Area ${i+1}</span><span>${Math.round(item.w)} × ${Math.round(item.h)} px</span></div><div class="ocr-preview-image-wrap"><canvas></canvas></div><div class="ocr-preview-guidance">Verify that the preview contains complete column headings and the full corresponding value row. Cropped labels reduce automatic KPI matching.</div>`;
+     grid.appendChild(card);crop(page,item,card.querySelector('canvas'));
+   }
+ }
+ window.openOcrSelectionPreview=async function(runner){confirmedRunner=runner;const modal=$('ocr-selection-preview-modal');modal.classList.add('open');modal.setAttribute('aria-hidden','false');try{await buildPreview();}catch(e){console.error(e);$('ocr-selection-preview-grid').innerHTML=`<div class="ocr-preview-loading">Preview failed: ${esc(e.message||e)}</div>`;}};
+ window.closeOcrSelectionPreview=function(){$('ocr-selection-preview-modal').classList.remove('open');$('ocr-selection-preview-modal').setAttribute('aria-hidden','true');};
+ window.returnToOcrLasso=function(){closeOcrSelectionPreview();};
+ window.confirmOcrSelectionPreview=async function(){const run=confirmedRunner;closeOcrSelectionPreview();if(run)await run();};
+ function interceptRunner(){
+   installSelectionMirror();
+   if(window.__ocrPreviewRunnerInstalled)return;
+   const original=window.runMultiPageOcr;if(typeof original!=='function')return;
+   window.__ocrPreviewRunnerInstalled=true;
+   window.runMultiPageOcr=function(){const args=arguments,ctx=this;return window.openOcrSelectionPreview(()=>original.apply(ctx,args));};
+ }
+ const oldOpen=window.openOcrLasso;
+ window.openOcrLasso=async function(){const result=await oldOpen.apply(this,arguments);installSelectionMirror();interceptRunner();return result;};
+ document.addEventListener('DOMContentLoaded',()=>setTimeout(interceptRunner,0));
+ document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('ocr-selection-preview-modal')?.classList.contains('open'))closeOcrSelectionPreview();});
+})();
+</script>
+
+
+<style id="v41-smart-extractor-css">
+#btn-ocr-lasso{display:none!important}
+#btn-smart-kpi-extract{white-space:nowrap}
+#smart-kpi-modal{display:none;position:fixed;inset:0;z-index:27000;background:rgba(15,23,42,.76);padding:12px;align-items:center;justify-content:center}
+#smart-kpi-modal.open{display:flex}
+.smart-kpi-dialog{width:min(1400px,100%);height:min(95vh,980px);display:grid;grid-template-rows:auto minmax(0,1fr) auto;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;overflow:hidden;box-shadow:0 30px 90px rgba(0,0,0,.48)}
+.smart-kpi-head,.smart-kpi-foot{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;padding:.72rem .9rem;background:var(--bg-table-alt)}
+.smart-kpi-head{border-bottom:1px solid var(--border)}.smart-kpi-foot{border-top:1px solid var(--border);justify-content:space-between}
+.smart-kpi-title{margin-right:auto}.smart-kpi-title strong{display:block;color:var(--text-brand);font-size:1.04rem}.smart-kpi-title span{display:block;color:var(--text-muted);font-size:.73rem;margin-top:.12rem}
+.smart-kpi-head button,.smart-kpi-head select,.smart-kpi-foot button{min-height:35px;padding:.4rem .66rem;border:1px solid var(--border);border-radius:9px;background:var(--btn-secondary-bg);color:var(--text-main);font-weight:850;cursor:pointer}
+.smart-kpi-head button.primary,.smart-kpi-foot button.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+.smart-kpi-work{min-height:0;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(340px,.72fr);overflow:hidden}
+.smart-kpi-canvas-pane{min-height:0;overflow:auto;background:#475569;padding:14px}.smart-kpi-stage{position:relative;width:max-content;margin:0 auto;background:#fff;box-shadow:0 8px 26px rgba(0,0,0,.32);line-height:0;cursor:crosshair}.smart-kpi-stage canvas{display:block}.smart-kpi-overlay{position:absolute;inset:0;touch-action:none}
+.smart-kpi-side{min-height:0;overflow:auto;padding:.85rem;border-left:1px solid var(--border);display:flex;flex-direction:column;gap:.7rem}.smart-box{border:1px solid var(--border);border-radius:11px;padding:.7rem;background:var(--bg-table-alt)}.smart-box h3{font-size:.78rem;color:var(--text-brand);margin-bottom:.42rem}.smart-box p{font-size:.71rem;color:var(--text-muted);line-height:1.4}.smart-box textarea{min-height:190px;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}
+.smart-selection-list{display:grid;gap:.38rem}.smart-selection{display:flex;align-items:center;justify-content:space-between;gap:.45rem;padding:.42rem .5rem;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);font-size:.72rem}.smart-selection button{border:0;background:transparent;color:var(--danger);cursor:pointer;font-weight:900}
+.smart-preview-list{display:grid;gap:.55rem}.smart-preview-card{border:1px solid var(--border);border-radius:9px;overflow:hidden;background:var(--bg-card)}.smart-preview-card-head{padding:.4rem .5rem;background:var(--bg-table-alt);border-bottom:1px solid var(--border);font-size:.7rem;font-weight:900;color:var(--text-brand)}.smart-preview-card pre{margin:0;padding:.55rem;white-space:pre-wrap;font:11px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;max-height:185px;overflow:auto;color:var(--text-main)}
+.smart-status{font-size:.75rem;color:var(--text-muted)}.smart-callout{padding:.55rem .65rem;border:1px solid var(--border-accent);border-radius:9px;background:var(--bg-accent);font-size:.72rem;line-height:1.4;color:var(--text-main)}
+.smart-busy{display:none;position:absolute;inset:0;z-index:12;background:rgba(15,23,42,.82);color:#fff;align-items:center;justify-content:center;text-align:center}.smart-busy.show{display:flex}.smart-busy-card{width:min(440px,90%);padding:1rem;border-radius:14px;background:#111827;border:1px solid #475569}.smart-spinner{width:46px;height:46px;margin:0 auto .7rem;border:4px solid #475569;border-top-color:#60a5fa;border-radius:50%;animation:spin .8s linear infinite}
+@media(max-width:900px){.smart-kpi-work{grid-template-columns:1fr}.smart-kpi-side{border-left:0;border-top:1px solid var(--border);max-height:45vh}}
+@media print{#smart-kpi-modal,#btn-smart-kpi-extract{display:none!important}}
+</style>
+<div id="smart-kpi-modal" role="dialog" aria-modal="true" aria-labelledby="smart-kpi-title" aria-hidden="true">
+ <div class="smart-kpi-dialog">
+  <div class="smart-kpi-head">
+   <div class="smart-kpi-title"><strong id="smart-kpi-title">Smart KPI Region Extractor</strong><span>Uses the PDF text layer and coordinates, not visual OCR, so table labels and values stay aligned.</span></div>
+   <label style="display:flex;align-items:center;gap:.35rem;text-transform:none;letter-spacing:0">Page <select id="smart-kpi-page" onchange="smartRenderPage(Number(this.value))"></select></label>
+   <button type="button" onclick="smartSaveArea()">Save Area</button>
+   <button type="button" onclick="smartClearAreas()">Clear Areas</button>
+   <button type="button" class="primary" onclick="smartPreviewExtraction()">Preview Extracted Text</button>
+   <button type="button" onclick="smartClose()">Close</button>
+  </div>
+  <div class="smart-kpi-work">
+   <div class="smart-kpi-canvas-pane"><div id="smart-kpi-stage" class="smart-kpi-stage"><canvas id="smart-kpi-canvas"></canvas><canvas id="smart-kpi-overlay" class="smart-kpi-overlay"></canvas><div id="smart-kpi-busy" class="smart-busy"><div class="smart-busy-card"><div class="smart-spinner"></div><strong id="smart-busy-title">Reading PDF text layer</strong><div id="smart-busy-message" style="margin-top:.3rem;font-size:.8rem;color:#cbd5e1">Please keep this window open.</div></div></div></div></div>
+   <aside class="smart-kpi-side">
+    <div class="smart-callout"><strong>How to select the table:</strong> include the entire header row and its value row. You can save the “Last month” block and “This month” block separately, even across different pages.</div>
+    <div class="smart-box"><h3>Saved Areas</h3><div id="smart-selection-list" class="smart-selection-list"><p>No areas saved yet.</p></div></div>
+    <div class="smart-box"><h3>Preview Before Parsing</h3><div id="smart-preview-list" class="smart-preview-list"><p>Save one or more areas, then select Preview Extracted Text.</p></div></div>
+    <div class="smart-box"><h3>Combined Extracted Text</h3><textarea id="smart-extracted-text" placeholder="The coordinate-based table text appears here. You can correct it before parsing."></textarea></div>
+   </aside>
+  </div>
+  <div class="smart-kpi-foot"><div id="smart-kpi-status" class="smart-status">Draw a rectangle around a KPI table area, then choose Save Area.</div><div style="display:flex;gap:.45rem;flex-wrap:wrap"><button type="button" onclick="smartCopyText()">Copy Text</button><button type="button" onclick="smartBackToSelection()">Adjust Selections</button><button type="button" class="primary" onclick="smartParseToKpis()">Parse Preview into KPI Helper</button></div></div>
+ </div>
+</div>
+<script id="v41-smart-extractor-js">
+(function(){
+ let pdf=null,pageNo=1,page=null,viewport=null,textItems=[],saved=[],active=null,down=false,start=null;
+ const $=id=>document.getElementById(id),status=t=>{$('smart-kpi-status').textContent=t;},busy=(on,title,msg)=>{const e=$('smart-kpi-busy');e.classList.toggle('show',on);if(title)$('smart-busy-title').textContent=title;if(msg)$('smart-busy-message').textContent=msg;};
+ const canvas=()=>$('smart-kpi-canvas'),overlay=()=>$('smart-kpi-overlay');
+ function point(e){const r=overlay().getBoundingClientRect();return{x:(e.clientX-r.left)*overlay().width/r.width,y:(e.clientY-r.top)*overlay().height/r.height};}
+ function draw(){const o=overlay(),c=o.getContext('2d');c.clearRect(0,0,o.width,o.height);saved.filter(x=>x.page===pageNo).forEach((r,i)=>{c.fillStyle='rgba(16,185,129,.14)';c.strokeStyle='#10b981';c.lineWidth=3;c.setLineDash([7,4]);c.fillRect(r.x,r.y,r.w,r.h);c.strokeRect(r.x,r.y,r.w,r.h);c.fillStyle='#065f46';c.font='bold 16px sans-serif';c.fillText(`Saved ${saved.indexOf(r)+1}`,r.x+6,r.y+20);});if(active){c.fillStyle='rgba(37,99,235,.17)';c.strokeStyle='#2563eb';c.lineWidth=3;c.setLineDash([8,5]);c.fillRect(active.x,active.y,active.w,active.h);c.strokeRect(active.x,active.y,active.w,active.h);}}
+ function install(){const o=overlay();o.onpointerdown=e=>{down=true;start=point(e);active={x:start.x,y:start.y,w:0,h:0};o.setPointerCapture(e.pointerId);draw();};o.onpointermove=e=>{if(!down)return;const p=point(e);active={x:Math.min(start.x,p.x),y:Math.min(start.y,p.y),w:Math.abs(p.x-start.x),h:Math.abs(p.y-start.y)};draw();};o.onpointerup=()=>{down=false;if(active&&(active.w<12||active.h<12))active=null;draw();};}
+ async function getPdf(){if(pdf)return pdf;await window.ensureDocumentLibraries?.('pdf');if(!window.pdfjsLib||!window.__priorReviewBytes)throw new Error('The Flow PDF bytes are not ready. Open the previous review first.');pdf=await pdfjsLib.getDocument({data:window.__priorReviewBytes.slice(0)}).promise;const sel=$('smart-kpi-page');sel.innerHTML=Array.from({length:pdf.numPages},(_,i)=>`<option value="${i+1}">Page ${i+1} of ${pdf.numPages}</option>`).join('');return pdf;}
+ window.smartRenderPage=async function(n=1){try{busy(true,'Rendering PDF page',`Loading page ${n} and its text coordinates...`);const doc=await getPdf();pageNo=Math.max(1,Math.min(doc.numPages,n));$('smart-kpi-page').value=String(pageNo);page=await doc.getPage(pageNo);viewport=page.getViewport({scale:1.8});const c=canvas();c.width=Math.ceil(viewport.width);c.height=Math.ceil(viewport.height);await page.render({canvasContext:c.getContext('2d'),viewport}).promise;const content=await page.getTextContent();textItems=content.items.map(item=>{const tx=pdfjsLib.Util.transform(viewport.transform,item.transform);const h=Math.max(Math.abs(tx[3]),8),w=Math.max(item.width*viewport.scale,2);return{text:String(item.str||''),x:tx[4],y:tx[5]-h,w,h};}).filter(x=>x.text.trim());const o=overlay();o.width=c.width;o.height=c.height;o.style.width=`${c.width}px`;o.style.height=`${c.height}px`;active=null;install();draw();busy(false);status(`Page ${pageNo}: ${textItems.length} positioned text fragments available. Draw around the KPI rows.`);}catch(e){console.error(e);busy(false);status(e.message||String(e));}};
+ function list(){const box=$('smart-selection-list');box.innerHTML=saved.length?saved.map((r,i)=>`<div class="smart-selection"><span>Area ${i+1} · Page ${r.page}</span><button type="button" onclick="smartRemoveArea(${i})">Remove</button></div>`).join(''):'<p>No areas saved yet.</p>';}
+ window.smartSaveArea=function(){if(!active){status('Draw a rectangle before saving an area.');return;}saved.push({...active,page:pageNo});active=null;list();draw();status(`Saved ${saved.length} area${saved.length===1?'':'s'} across ${new Set(saved.map(x=>x.page)).size} page(s).`);};
+ window.smartRemoveArea=i=>{saved.splice(i,1);list();draw();status('Area removed.');};window.smartClearAreas=()=>{saved=[];active=null;list();draw();$('smart-preview-list').innerHTML='<p>Save one or more areas, then select Preview Extracted Text.</p>';$('smart-extracted-text').value='';status('All saved areas cleared.');};
+ function overlaps(a,b){const cx=a.x+a.w/2,cy=a.y+a.h/2;return cx>=b.x&&cx<=b.x+b.w&&cy>=b.y&&cy<=b.y+b.h;}
+ function linesFrom(items){const sorted=items.slice().sort((a,b)=>a.y-b.y||a.x-b.x),lines=[];for(const item of sorted){let line=lines.find(l=>Math.abs(l.y-(item.y+item.h/2))<Math.max(4,item.h*.55));if(!line){line={y:item.y+item.h/2,items:[]};lines.push(line);}line.items.push(item);}lines.sort((a,b)=>a.y-b.y);return lines.map(line=>{line.items.sort((a,b)=>a.x-b.x);let out='',last=null;for(const i of line.items){if(last!==null){const gap=i.x-last;if(gap>48)out+='     ';else if(gap>3)out+=' ';}out+=i.text;last=i.x+i.w;}return out.trim();}).filter(Boolean);}
+ async function extractArea(area){const doc=await getPdf(),pg=await doc.getPage(area.page),vp=pg.getViewport({scale:1.8}),content=await pg.getTextContent(),items=content.items.map(item=>{const tx=pdfjsLib.Util.transform(vp.transform,item.transform),h=Math.max(Math.abs(tx[3]),8),w=Math.max(item.width*vp.scale,2);return{text:String(item.str||''),x:tx[4],y:tx[5]-h,w,h};}).filter(x=>x.text.trim());return linesFrom(items.filter(i=>overlaps(i,area))).join('\n');}
+ window.smartPreviewExtraction=async function(){if(active)window.smartSaveArea();if(!saved.length){status('Save at least one area before previewing.');return;}try{busy(true,'Building extraction preview',`Reading ${saved.length} saved area${saved.length===1?'':'s'} from the PDF text layer...`);const previews=[];for(let i=0;i<saved.length;i++)previews.push({area:saved[i],text:await extractArea(saved[i])});$('smart-preview-list').innerHTML=previews.map((p,i)=>`<article class="smart-preview-card"><div class="smart-preview-card-head">Area ${i+1} · Page ${p.area.page}</div><pre>${p.text.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))||'[No text found in this area]'}</pre></article>`).join('');$('smart-extracted-text').value=previews.map((p,i)=>`--- Page ${p.area.page}, Area ${i+1} ---\n${p.text}`).join('\n\n');busy(false);status('Preview ready. Verify the labels and values, correct the combined text if needed, then parse it.');}catch(e){console.error(e);busy(false);status(`Preview failed: ${e.message||e}`);}};
+ window.smartParseToKpis=function(){const text=$('smart-extracted-text').value.trim();if(!text){status('Preview or enter extracted text before parsing.');return;}busy(true,'Parsing KPI fields','Matching labels and values to the previous-review KPI structure...');setTimeout(()=>{try{window.parseLastMonthMetrics?.(text,`${window.__currentComparisonFileName||'Previous Review'} - Smart Extract`);window.refreshKpiFlowHelper?.();busy(false);status('Parsing complete. The KPI Helper now contains the extracted previous-review fields.');window.openKpiFlowHelper?.(false);}catch(e){console.error(e);busy(false);status(`Parsing failed: ${e.message||e}`);}},50);};
+ window.smartCopyText=async()=>{try{await navigator.clipboard.writeText($('smart-extracted-text').value);status('Extracted text copied.');}catch(_){status('Browser blocked clipboard access.');}};window.smartBackToSelection=()=>{status('Adjust the rectangles, save the corrected areas, and preview again.');};
+ window.smartOpen=async function(){const m=$('smart-kpi-modal');m.classList.add('open');m.setAttribute('aria-hidden','false');await smartRenderPage(1);};window.smartClose=()=>{$('smart-kpi-modal').classList.remove('open');$('smart-kpi-modal').setAttribute('aria-hidden','true');};
+ function addButton(){if($('btn-smart-kpi-extract'))return;const controls=document.querySelector('#comparison-modal-header > div:last-child');if(!controls)return;const b=document.createElement('button');b.id='btn-smart-kpi-extract';b.type='button';b.className='btn btn-primary';b.innerHTML='<i class="fas fa-vector-square"></i> Smart KPI Extract';b.onclick=()=>smartOpen();controls.insertBefore(b,controls.lastElementChild);}
+ document.addEventListener('DOMContentLoaded',addButton);document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('smart-kpi-modal')?.classList.contains('open'))smartClose();});
+})();
+</script>
+
 </body>
 </html>
