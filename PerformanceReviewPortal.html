@@ -8618,5 +8618,93 @@ html.dark .tabulator-row:is(.row-good,.row-watch,.row-bad,.status-good,.status-w
 })();
 </script>
 
+
+
+<!-- v41 Previous-review table parser + directly editable comparison -->
+<style id="v41-editable-prior-comparison-style">
+.current-month-comparison td.comparison-edit-cell{padding:.22rem!important}
+.comparison-edit-input{width:100%!important;min-width:64px!important;min-height:34px!important;padding:.3rem .38rem!important;border:1px solid #94a3b8!important;border-radius:6px!important;background:#fff!important;color:#111!important;-webkit-text-fill-color:#111!important;text-align:center!important;font:inherit!important;font-weight:800!important;box-shadow:none!important}
+.comparison-edit-input:focus{border-color:#2563a8!important;box-shadow:0 0 0 2px rgba(37,99,168,.16)!important;outline:0!important}
+.comparison-edit-note{display:flex;justify-content:space-between;align-items:center;gap:.6rem;padding:.35rem .55rem;background:#eff6ff;border-top:1px solid #bfdbfe;color:#1e3a8a;font-size:.72rem;font-weight:750}
+.comparison-source-badge{display:inline-flex;padding:.13rem .42rem;border-radius:999px;background:#dbeafe;border:1px solid #93c5fd;color:#1e3a8a;font-size:.64rem;font-weight:900}
+@media print{.comparison-edit-input{border:0!important;background:transparent!important;padding:0!important;min-height:0!important}.comparison-edit-note{display:none!important}}
+</style>
+<script id="v41-editable-prior-comparison-script">
+(function(){
+ const aliases=[
+  {key:'Inbound Calls',tests:[/inbound/i,/contact.*in/i,/log.?emails?\s*assigned/i]},
+  {key:'Outbound Calls',tests:[/outbound/i,/contact.*out/i]},
+  {key:'Call Linking',tests:[/call\s*link/i,/linking/i]},
+  {key:'Call Notes',tests:[/call\s*notes?/i,/%\s*notes?/i]},
+  {key:'ACW',tests:[/^acw$/i,/after\s*call\s*work/i]},
+  {key:'Availability',tests:[/availability/i,/working\s*days/i]},
+  {key:'AUX Accuracy',tests:[/aux\s*accuracy/i]},
+  {key:'Avg. Break',tests:[/(?:average|avg).*break/i]},
+  {key:'Avg. Lunch',tests:[/(?:average|avg).*lunch/i]},
+  {key:'Avg. Personal Time',tests:[/(?:average|avg).*personal/i]},
+  {key:'Handle Time',tests:[/(?:average|avg).*handle/i]},
+  {key:'QA Score',tests:[/qa\s*score/i,/quality\s*score/i]},
+  {key:'Reporting Accuracy',tests:[/reporting\s*accuracy/i]},
+  {key:'Daily Sales Average',tests:[/daily\s*sales\s*average/i]}
+ ];
+ const clean=s=>String(s||'').replace(/\s+/g,' ').trim();
+ function canonical(label){const t=clean(label);const hit=aliases.find(a=>a.tests.some(re=>re.test(t)));return hit?.key||''}
+ function extractFromRenderedDocx(root=document.getElementById('comparison-docx')){
+  if(!root)return null;
+  for(const table of root.querySelectorAll('table')){
+   const rows=[...table.rows];if(rows.length<3)continue;
+   const lastIndex=rows.findIndex(r=>/\blast\s*month\b|\bprevious\s*month\b|\bprior\s*month\b/i.test(clean(r.innerText)));
+   if(lastIndex<0)continue;
+   const thisIndex=rows.findIndex((r,i)=>i>lastIndex&&/\bthis\s*month\b|\bcurrent\s*month\b/i.test(clean(r.innerText)));
+   let headerRow=null,valueRow=null;
+   // Typical Word layout: month marker, KPI labels, KPI values.
+   for(let i=lastIndex+1;i<(thisIndex>0?thisIndex:Math.min(rows.length,lastIndex+5));i++){
+    const cells=[...rows[i].cells],text=clean(rows[i].innerText);
+    const recognized=cells.filter(c=>canonical(c.innerText)).length;
+    if(recognized>=2&&!headerRow)headerRow=rows[i];
+    else if(headerRow&&cells.length>=Math.max(2,headerRow.cells.length-1)&&text)valueRow=rows[i];
+    if(headerRow&&valueRow)break;
+   }
+   if(!headerRow||!valueRow)continue;
+   const heads=[...headerRow.cells],vals=[...valueRow.cells],metrics={};
+   heads.forEach((cell,i)=>{const key=canonical(cell.innerText);if(key&&vals[i])metrics[key]=clean(vals[i].innerText)});
+   if(Object.keys(metrics).length)return {metrics,parserVersion:'docx-table-v41',tableIndex:[...root.querySelectorAll('table')].indexOf(table)};
+  }
+  return null;
+ }
+ function applyExtracted(found,fileName){
+  if(!found)return false;const snap=window.previousReviewSnapshot||{};
+  snap.metrics={...(snap.metrics||{}),...found.metrics};
+  if(snap.metrics.Availability&&!snap.metrics['Working Days Present'])snap.metrics['Working Days Present']=snap.metrics.Availability;
+  snap.fileName=fileName||snap.fileName||'';snap.parserVersion=found.parserVersion;snap.tableDiagnostics={tableIndex:found.tableIndex,metricCount:Object.keys(found.metrics).length};window.previousReviewSnapshot=snap;
+  try{localStorage.setItem('priorReviewManual:'+snap.fileName,JSON.stringify(snap.metrics))}catch(_){ }
+  window.refreshEditableComparison?.();return true
+ }
+ const originalRender=window.renderCompletePriorReviewDocx;
+ if(typeof originalRender==='function')window.renderCompletePriorReviewDocx=async function(blob,container,fileName){const result=await originalRender.apply(this,arguments);requestAnimationFrame(()=>applyExtracted(extractFromRenderedDocx(container),fileName));return result};
+ window.extractPriorMetricsFromRenderedDocx=()=>extractFromRenderedDocx();
+ window.applyPriorMetricsFromRenderedDocx=(fileName)=>applyExtracted(extractFromRenderedDocx(),fileName);
+ function metricKey(label){return canonical(label)||({'primary kpi':'Primary KPI','secondary kpi':'Secondary KPI'}[clean(label).toLowerCase()]||clean(label))}
+ function loadOverrides(){const snap=window.previousReviewSnapshot||{};try{return JSON.parse(localStorage.getItem('priorReviewManual:'+String(snap.fileName||''))||'{}')}catch(_){return{}}}
+ function setPrior(key,value){const snap=window.previousReviewSnapshot||(window.previousReviewSnapshot={fileName:'',metrics:{}});snap.metrics=snap.metrics||{};snap.metrics[key]=value;const saved={...loadOverrides(),[key]:value};try{localStorage.setItem('priorReviewManual:'+String(snap.fileName||''),JSON.stringify(saved))}catch(_){}}
+ function syncCurrent(id,value){const el=document.getElementById(id);if(!el)return;el.value=value;el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))}
+ function makeEditable(section){
+  if(!section||section.dataset.editableReady==='1')return;section.dataset.editableReady='1';const table=section.querySelector('table');if(!table)return;
+  const headers=[...table.querySelectorAll('thead th')].slice(1).map(th=>clean(th.textContent));const rows=[...table.querySelectorAll('tbody tr')];
+  const prior=rows[0],current=rows[1];
+  headers.forEach((label,i)=>{
+   const key=metricKey(label),pCell=prior?.cells[i+1],cCell=current?.cells[i+1],metric=(window.currentMetrics||currentMetrics||[])[i];
+   if(pCell){const raw=(window.previousReviewSnapshot?.metrics||{})[key]??clean(pCell.textContent).replace(/^—$/,'');pCell.classList.add('comparison-edit-cell');pCell.innerHTML=`<input class="comparison-edit-input prior-comparison-input" type="text" value="${escapeHtmlSafe(raw)}" data-prior-key="${escapeHtmlSafe(key)}" aria-label="Last month ${escapeHtmlSafe(label)}">`}
+   if(cCell&&metric){const el=document.getElementById(metric.id),raw=el?.value??clean(cCell.textContent).replace(/[↑↓→▶▲▼].*$/,'').trim();cCell.classList.add('comparison-edit-cell');cCell.innerHTML=`<input class="comparison-edit-input current-comparison-input" type="text" value="${escapeHtmlSafe(raw)}" data-current-id="${escapeHtmlSafe(metric.id)}" aria-label="Current ${escapeHtmlSafe(label)}">`}
+  });
+  section.insertAdjacentHTML('beforeend','<div class="comparison-edit-note"><span>Edit either row here. Current values update the matching Current Review fields; last-month edits are saved for this source file.</span><span class="comparison-source-badge">Editable</span></div>');
+  section.addEventListener('input',e=>{if(e.target.matches('[data-prior-key]'))setPrior(e.target.dataset.priorKey,e.target.value);if(e.target.matches('[data-current-id]'))syncCurrent(e.target.dataset.currentId,e.target.value)});
+ }
+ function scan(){document.querySelectorAll('.current-month-comparison').forEach(makeEditable)}
+ window.refreshEditableComparison=scan;const mo=new MutationObserver(()=>requestAnimationFrame(scan));
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{scan();mo.observe(document.body,{childList:true,subtree:true})},{once:true});else{scan();mo.observe(document.body,{childList:true,subtree:true})}
+})();
+</script>
+
 </body>
 </html>
