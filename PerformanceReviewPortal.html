@@ -5631,7 +5631,7 @@ body.card-format-dense .measure-label { display:none !important; }
     return { skipped: false, employeeId, patch };
   }
 
-  async function fetchAllPbiDataInBackground(showToasts = false, forceRefresh = false) {
+  window.fetchAllPbiDataInBackground = async function fetchAllPbiDataInBackground(showToasts = false, forceRefresh = false) {
       window.setConnectionStatus('pbi', 'loading', 'Metrics: Syncing', 'Checking Power BI metric data.');
       const empName = val('employee-name');
       const period = val('review-period');
@@ -6192,13 +6192,13 @@ body.card-format-dense .measure-label { display:none !important; }
 
         if(currentReviewType === 'eom' || currentReviewType === 'eoq') {
             payload.cr714_outboundcalls = getValSafe('m-outbound-calls') ? parseInt(getValSafe('m-outbound-calls'), 10) : null;
-            payload.cr714_averagetalktime = getValSafe('m-talk-time') ? parseFloat(getValSafe('m-talk-time')) : null;
-            payload.cr714_averagebreaktime = getValSafe('m-avg-break') ? parseFloat(getValSafe('m-avg-break')) : null; 
-            payload.cr714_averagelunchtime = getValSafe('m-lunch') ? parseFloat(getValSafe('m-lunch')) : null; 
-            payload.cr714_averagepersonaltime = getValSafe('m-personal-time') ? parseFloat(getValSafe('m-personal-time')) : null; 
+            payload.cr714_averagetalktime = getValSafe('m-talk-time') ? Math.round(parseFloat(getValSafe('m-talk-time'))) : null;
+            payload.cr714_averagebreaktime = getValSafe('m-avg-break') ? Math.round(parseFloat(getValSafe('m-avg-break'))) : null; 
+            payload.cr714_averagelunchtime = getValSafe('m-lunch') ? Math.round(parseFloat(getValSafe('m-lunch'))) : null; 
+            payload.cr714_averagepersonaltime = getValSafe('m-personal-time') ? Math.round(parseFloat(getValSafe('m-personal-time'))) : null; 
             payload.cr714_cr714_inboundcalls = getValSafe('m-inbound-calls') ? parseInt(getValSafe('m-inbound-calls'), 10) : null;
-            payload.cr714_cr714_avghandletime = getValSafe('m-handle-time') ? parseFloat(getValSafe('m-handle-time')) : null;
-            payload.cr714_cr714_primarymetric = getValSafe('m-primary-metric') ? parseFloat(getValSafe('m-primary-metric')) : null;
+            payload.cr714_cr714_avghandletime = getValSafe('m-handle-time') ? Math.round(parseFloat(getValSafe('m-handle-time'))) : null;
+            payload.cr714_cr714_primarymetric = getValSafe('m-primary-metric') ? Math.round(parseFloat(getValSafe('m-primary-metric'))) : null;
             payload.cr714_cr714_dayspresent = getValSafe('m-days-present') ? parseInt(getValSafe('m-days-present'), 10) : null;
 
             payload.cr714_auxiliaryaccuracy = getValSafe('m-aux-accuracy') ? (parseFloat(getValSafe('m-aux-accuracy')) / 100) : null; 
@@ -6231,26 +6231,40 @@ body.card-format-dense .measure-label { display:none !important; }
             payload.cr714_extendedemployeevoice = val('ext-employee-voice');
         }
 
+        // Presentation bridge: store the complete review in one parseable multiline-text column.
+        // Display name: Full Review | Suggested logical name: cr714_fullreview
+        payload.cr714_fullreview = window.buildDelimitedFullReview ? window.buildDelimitedFullReview() : '';
         payload.cr714_finalsummary = buildPrintSummary();
 
         Object.keys(payload).forEach(key => {
             if (payload[key] === null || payload[key] === undefined || payload[key] === '') delete payload[key];
         });
 
-        const response = await fetch(submitUrl, {
+        const postReview = body => fetch(submitUrl, {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${token}`,
               'Content-Type': 'application/json',
               'Prefer': 'return=representation'
             },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(body)
         });
-
+        let response = await postReview(payload);
         if (!response.ok) {
             let errStr = response.statusText;
             try { const errObj = await response.json(); errStr = errObj.error?.message || errStr; } catch(e){}
-            throw new Error(errStr);
+            // Temporary presentation fallback. If Full Review has not been created/published yet,
+            // preserve the delimited record locally and submit the existing schema without it.
+            if (/cr714_fullreview|full review/i.test(errStr) && /undeclared|property|not found|invalid/i.test(errStr)) {
+                try { localStorage.setItem('pendingFullReview|' + (payload.cr714_employeeid || payload.cr714_employeename || Date.now()), payload.cr714_fullreview || ''); } catch (_) {}
+                const compatiblePayload = {...payload}; delete compatiblePayload.cr714_fullreview;
+                response = await postReview(compatiblePayload);
+                if (!response.ok) {
+                    try { const errObj = await response.json(); errStr = errObj.error?.message || response.statusText; } catch(e){ errStr=response.statusText; }
+                    throw new Error(errStr);
+                }
+                showError('Review submitted. Full Review is stored locally as a pending placeholder until the Dataverse column is published.');
+            } else throw new Error(errStr);
         }
 
         const createdReviewId = createdRecordIdFromResponse(response);
@@ -8893,6 +8907,112 @@ body.admin-walkthrough-active{overflow:auto!important}
  window.refreshKpiFlowHelper=function(){const r=oldRefresh?.apply(this,arguments);setTimeout(enhance,0);return r;};
  const observer=new MutationObserver(()=>{if(document.getElementById('kpi-flow-helper-modal')?.classList.contains('open'))requestAnimationFrame(enhance);});
  document.addEventListener('DOMContentLoaded',()=>{const grid=document.getElementById('kpi-helper-grid');if(grid)observer.observe(grid,{childList:true});});
+})();
+</script>
+
+
+<style id="v45-month-workspace-css">
+#month-kpi-workspace{margin:0 0 1.35rem;border:1px solid var(--border);border-radius:15px;background:var(--bg-card);overflow:hidden}
+.month-kpi-head{display:flex;align-items:center;justify-content:space-between;gap:.75rem;flex-wrap:wrap;padding:.8rem 1rem;background:var(--bg-table-alt);border-bottom:1px solid var(--border)}
+.month-kpi-title{font-weight:900;color:var(--text-brand)}
+.month-kpi-sub{font-size:.75rem;color:var(--text-muted)}
+.month-kpi-refresh{min-height:34px;padding:.35rem .65rem;border:1px solid var(--border);border-radius:9px;background:var(--btn-secondary-bg);color:var(--text-main);font-weight:850;cursor:pointer}
+.month-kpi-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0}
+.month-kpi-column{min-width:0;padding:.85rem}
+.month-kpi-column:first-child{border-right:1px solid var(--border)}
+.month-kpi-column-title{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.65rem;font-size:.78rem;font-weight:900;text-transform:uppercase;letter-spacing:.05em;color:var(--text-brand)}
+.month-kpi-list{display:grid;gap:.55rem}
+.month-kpi-pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);border:1px solid var(--border);border-radius:11px;overflow:hidden;background:var(--bg-table-alt)}
+.month-kpi-side{padding:.65rem;min-width:0}
+.month-kpi-side:first-child{border-right:1px solid var(--border)}
+.month-kpi-label{font-size:.69rem;font-weight:900;color:var(--text-brand);text-transform:uppercase;line-height:1.25;overflow-wrap:anywhere}
+.month-kpi-value{margin-top:.3rem;min-height:36px;padding:.42rem .5rem;border:1px solid var(--border);border-radius:8px;background:var(--bg-input);font-weight:850;overflow-wrap:anywhere}
+.month-kpi-map{width:100%;min-height:34px!important;height:34px!important;margin-top:.42rem;padding:.28rem 1.8rem .28rem .45rem!important;font-size:.7rem!important;border-radius:8px!important}
+.month-kpi-actions{display:flex;gap:.35rem;margin-top:.4rem;flex-wrap:wrap}
+.month-kpi-actions button{min-height:30px;padding:.25rem .48rem;border:1px solid var(--border);border-radius:8px;background:var(--btn-secondary-bg);color:var(--text-main);font-size:.7rem;font-weight:850;cursor:pointer}
+.month-kpi-actions .apply{background:var(--brand);border-color:var(--brand);color:#fff}
+.month-kpi-actions .omit{color:var(--text-error);border-color:var(--border-error);background:var(--bg-error)}
+.month-kpi-empty{padding:.75rem;border:1px dashed var(--border);border-radius:10px;color:var(--text-muted);font-size:.77rem}
+@media(max-width:900px){.month-kpi-columns{grid-template-columns:1fr}.month-kpi-column:first-child{border-right:0;border-bottom:1px solid var(--border)}.month-kpi-pair{grid-template-columns:1fr}.month-kpi-side:first-child{border-right:0;border-bottom:1px solid var(--border)}}
+@media print{#month-kpi-workspace{display:none!important}}
+</style>
+<script id="v45-month-workspace-js">
+(function(){
+ const clean=v=>String(v??'').replace(/<br\s*\/?\s*>/gi,' ').replace(/\s+/g,' ').trim();
+ const esc=v=>clean(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+ const norm=v=>clean(v).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+ const omitted=new Set();
+ function labelFor(el){const l=document.querySelector(`label[for="${CSS.escape(el.id)}"]`)||el.closest('.field,.metric-item')?.querySelector('label');return clean(l?.textContent||el.id);}
+ function fields(){const seen=new Set();return [...document.querySelectorAll('#main-app input[id],#main-app select[id],#main-app textarea[id]')].filter(el=>el.type!=='hidden'&&!el.disabled&&!/-arrow$/.test(el.id)&&!seen.has(el.id)&&seen.add(el.id)).map(el=>({id:el.id,label:labelFor(el),el})).filter(x=>x.label).sort((a,b)=>a.label.localeCompare(b.label));}
+ function priorRows(){return (window.__kpiFlowHelperRows||Object.entries(window.previousReviewSnapshot?.metrics||{}).map(([label,value])=>({label,value,target:null}))).filter(x=>!omitted.has(norm(x.label)+'|'+clean(x.value)));}
+ function findTarget(row,list){if(row.target?.id)return list.find(x=>x.id===row.target.id)||row.target;const a=norm(row.label);return list.find(x=>norm(x.label)===a)||list.find(x=>norm(x.label).includes(a)||a.includes(norm(x.label)))||null;}
+ function currentValue(target){const el=document.getElementById(target?.id||'');if(!el)return 'Not mapped';if(el.tagName==='SELECT')return clean(el.options[el.selectedIndex]?.text||el.value)||'Empty';return clean(el.value)||'Empty';}
+ function setElement(target,value){const el=document.getElementById(target?.id||'');if(!el)return false;const v=clean(value).replace(/^[↑→↓▶▲▼]\s*/,'');if(el.tagName==='SELECT'){const n=norm(v);const o=[...el.options].find(x=>norm(x.value)===n||norm(x.text).includes(n));if(!o)return false;el.value=o.value;}else el.value=v;el.removeAttribute('readonly');el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return true;}
+ function ensure(){if(document.getElementById('month-kpi-workspace'))return;const eom=document.getElementById('eom-panel'),anchor=document.getElementById('parsed-file-info')||document.getElementById('metrics-container');if(!eom||!anchor)return;const box=document.createElement('section');box.id='month-kpi-workspace';box.innerHTML='<div class="month-kpi-head"><div><div class="month-kpi-title">Month-to-Month KPI Field Workspace</div><div class="month-kpi-sub">Last Month comes from the archived review. This Month comes from reporting and the live fields on this page.</div></div><button type="button" class="month-kpi-refresh" id="month-kpi-report-refresh">Refresh This Month Reporting</button></div><div id="month-kpi-body"></div>';anchor.insertAdjacentElement('afterend',box);document.getElementById('month-kpi-report-refresh').onclick=refreshReporting;}
+ function render(){ensure();const body=document.getElementById('month-kpi-body');if(!body)return;const list=fields(),rows=priorRows();if(!rows.length){body.innerHTML='<div class="month-kpi-columns"><div class="month-kpi-column"><div class="month-kpi-column-title">Last Month</div><div class="month-kpi-empty">No archived KPI cells have been parsed yet.</div></div><div class="month-kpi-column"><div class="month-kpi-column-title">This Month</div><div class="month-kpi-empty">Reporting remains active. Select an employee and period, then refresh reporting.</div></div></div>';return;}
+ const options=list.map(x=>`<option value="${esc(x.id)}">${esc(x.label)} (${esc(x.id)})</option>`).join('');
+ body.innerHTML='<div class="month-kpi-list">'+rows.map((r,i)=>{const t=findTarget(r,list),key=norm(r.label)+'|'+clean(r.value);return `<article class="month-kpi-pair" data-key="${esc(key)}"><div class="month-kpi-side"><div class="month-kpi-label">Last Month · ${esc(r.label)}</div><div class="month-kpi-value">${esc(r.value)||'—'}</div><select class="month-kpi-map" data-index="${i}"><option value="">Choose This Month field...</option>${options}</select><div class="month-kpi-actions"><button class="apply" type="button">Put in Selected Field</button><button class="omit" type="button">Omit</button></div></div><div class="month-kpi-side"><div class="month-kpi-label">This Month · <span class="current-label">${esc(t?.label||'Not mapped')}</span></div><div class="month-kpi-value current-value">${esc(currentValue(t))}</div><div class="month-kpi-sub" style="margin-top:.4rem">Live value from reporting/main form</div></div></article>`}).join('')+'</div>';
+ [...body.querySelectorAll('.month-kpi-pair')].forEach((card,i)=>{const row=rows[i],select=card.querySelector('select'),initial=findTarget(row,list);if(initial)select.value=initial.id;const update=()=>{const t=list.find(x=>x.id===select.value);row.target=t?{id:t.id,label:t.label}:null;card.querySelector('.current-label').textContent=t?.label||'Not mapped';card.querySelector('.current-value').textContent=currentValue(t);};select.onchange=update;card.querySelector('.apply').onclick=()=>{const t=list.find(x=>x.id===select.value);if(setElement(t,row.value)){update();window.refreshKpiFlowHelper?.();}};card.querySelector('.omit').onclick=()=>{omitted.add(card.dataset.key);card.remove();};});
+ }
+ async function refreshReporting(){const b=document.getElementById('month-kpi-report-refresh');if(b){b.disabled=true;b.textContent='Refreshing...';}try{if(typeof window.fetchAllPbiDataInBackground==='function')await window.fetchAllPbiDataInBackground(true,true);}finally{if(b){b.disabled=false;b.textContent='Refresh This Month Reporting';}render();}}
+ const oldGo=window.goToPanel2||goToPanel2;window.goToPanel2=function(){const result=oldGo.apply(this,arguments);setTimeout(async()=>{ensure();render();if((window.currentReviewType||currentReviewType)==='eom'&&typeof window.fetchAllPbiDataInBackground==='function'){await window.fetchAllPbiDataInBackground(false,false);render();}},80);return result;};try{goToPanel2=window.goToPanel2}catch(_){}
+ ['previous-review-parsed','previous-review-file-processed'].forEach(name=>window.addEventListener(name,()=>setTimeout(render,40)));
+ document.addEventListener('input',e=>{if(e.target.closest('#main-app')){const card=[...document.querySelectorAll('.month-kpi-pair')].find(x=>x.querySelector('select')?.value===e.target.id);if(card)card.querySelector('.current-value').textContent=currentValue({id:e.target.id});}});
+ document.addEventListener('DOMContentLoaded',ensure);
+})();
+</script>
+
+
+<style id="v46-presentation-ready-css">
+.kpi-fixed-assignment{display:flex;align-items:center;justify-content:space-between;gap:.5rem;min-height:36px;margin-top:.42rem;padding:.42rem .55rem;border:1px solid var(--border);border-radius:8px;background:var(--bg-accent);color:var(--text-brand);font-size:.72rem;font-weight:900}
+.kpi-fixed-assignment span:last-child{color:var(--text-muted);font-size:.65rem;text-transform:uppercase;letter-spacing:.05em}
+.kpi-field-map-select option[data-group="other"]{color:var(--text-muted)}
+#dataverse-kpi-placeholder{margin:1rem 0 1.35rem;border:1px dashed var(--border);border-radius:13px;padding:.75rem .9rem;background:var(--bg-table-alt)}
+#dataverse-kpi-placeholder summary{cursor:pointer;font-weight:900;color:var(--text-brand)}
+#dataverse-kpi-placeholder p{margin-top:.45rem;color:var(--text-muted);font-size:.78rem;line-height:1.45}
+@media print{#dataverse-kpi-placeholder{display:none!important}}
+</style>
+<script id="v46-presentation-ready-js">
+(function(){
+ const clean=v=>String(v??'').replace(/[|_]+/g,' ').replace(/\s+/g,' ').trim();
+ const raw=v=>{const el=document.getElementById(v);if(!el)return'';if(el.tagName==='SELECT')return clean(el.options[el.selectedIndex]?.text||el.value);return clean(el.value);};
+ const pair=(k,v)=>`${clean(k)}_${clean(v)||'blank'}`;
+ const section=(name,items)=>`${clean(name)}_${items.filter(x=>clean(x[1])!=='').map(x=>pair(x[0],x[1])).join('_')}`;
+ window.buildDelimitedFullReview=function(){
+   const metrics=(window.currentMetrics||currentMetrics||[]).map((m,i)=>[typeof metricDisplayLabel==='function'?metricDisplayLabel(m,i):(m.label||m.id),raw(m.id)]);
+   const prior=Object.entries(window.previousReviewSnapshot?.metrics||{}).map(([k,v])=>[k,v]);
+   const parts=[
+     section('Employee', [['Review Type',raw('review-type')],['Review Date',raw('review-date')],['Employee Name',raw('employee-name')],['Employee ID',raw('employee-id')],['Job Title',raw('job-title')],['Department',raw('department')],['Manager',raw('manager-name')],['Senior Manager',raw('sr-manager-name')],['Reviewer',raw('reviewer-name')],['Review Period',raw('review-period')]]),
+     section('Last Month KPI',prior),
+     section('This Month KPI',metrics.concat([['Working Days Present',raw('m-days-present')],['Lunch Adherence',raw('m-lunch-adherence')],['Break Adherence',raw('m-break-adherence')],['Reporting Accuracy',raw('m-reporting-accuracy')]])),
+     section('Ratings', [['Overall Rating',raw('eom-overall-rating')],['Attendance Rating',raw('eom-attendance-rating')]]),
+     section('Development', [['Monthly Opportunities',raw('eom-opportunities-month')],['Yearly Opportunities',raw('eom-opportunities-year')],['Best Practices',raw('eom-best-practices')],['Smart Plan',raw('eom-smart-plan')],['Employee Voice',raw('eom-employee-voice')],['Reviewer Comments',raw('ext-reviewer-comments')],['Action Plan',raw('ext-action-plan')],['Extended Employee Voice',raw('ext-employee-voice')]])
+   ];
+   return parts.join('|');
+ };
+ function kpiFields(){
+   const metricIds=(window.currentMetrics||currentMetrics||[]).map(x=>x.id);
+   return [...new Set([...metricIds,'m-days-present','m-lunch-adherence','m-break-adherence','m-reporting-accuracy','eom-overall-rating','eom-attendance-rating'])].map(id=>{const el=document.getElementById(id);const label=document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent||id;return el?{id,label:clean(label)}:null}).filter(Boolean);
+ }
+ function cleanAssignments(){
+   const fields=kpiFields();
+   document.querySelectorAll('#kpi-helper-grid .kpi-helper-card, #month-kpi-body .month-kpi-pair').forEach((card,i)=>{
+     const select=card.querySelector('.kpi-field-map-select,.month-kpi-map');if(!select||select.dataset.kpiCleaned==='1')return;
+     const fixed=fields[i]?.id || (i===0?'m-primary-metric':i===1?'m-secondary-metric':'');
+     if(i<2){
+       const target=fields[i]||{id:fixed,label:i===0?'Primary KPI':'Secondary KPI'};select.value=target.id;select.dispatchEvent(new Event('change',{bubbles:true}));
+       const box=document.createElement('div');box.className='kpi-fixed-assignment';box.innerHTML=`<span>${clean(target.label)}</span><span>${i===0?'Primary KPI':'Secondary KPI'} · Fixed</span>`;select.replaceWith(box);
+     }else{
+       const selected=select.value;select.innerHTML='<option value="">Choose KPI destination...</option>'+fields.map(x=>`<option value="${x.id}">${clean(x.label)}</option>`).join('');select.value=fields.some(x=>x.id===selected)?selected:'';select.dataset.kpiCleaned='1';
+     }
+   });
+ }
+ function placeholder(){
+   if(document.getElementById('dataverse-kpi-placeholder'))return;const workspace=document.getElementById('month-kpi-workspace');if(!workspace)return;const d=document.createElement('details');d.id='dataverse-kpi-placeholder';d.innerHTML='<summary>Future Dataverse KPI Model Placeholder</summary><p>Deferred for the presentation build. The target design uses KPI Definitions and Review KPI Results child tables. For now, the complete record is serialized into the Full Review multiline-text column using section pipes and field underscores. Detailed table design is saved in the companion workbook.</p>';workspace.insertAdjacentElement('afterend',d);
+ }
+ const run=()=>setTimeout(()=>{cleanAssignments();placeholder();},70);
+ ['previous-review-parsed','previous-review-file-processed'].forEach(n=>window.addEventListener(n,run));
+ const observer=new MutationObserver(run);document.addEventListener('DOMContentLoaded',()=>{const root=document.getElementById('eom-panel');if(root)observer.observe(root,{childList:true,subtree:true});run();});
 })();
 </script>
 
