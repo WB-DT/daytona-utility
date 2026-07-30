@@ -5107,11 +5107,22 @@ body.card-format-dense .measure-label { display:none !important; }
                               const loadingTask = pdfjsLib.getDocument({data: bytes});
                               loadingTask.promise.then(async function(pdf) {
                                   let fullText = '';
+                                  const spatialPages = [];
                                   for (let i = 1; i <= pdf.numPages; i++) {
                                       const page = await pdf.getPage(i);
                                       const textContent = await page.getTextContent();
-                                      fullText += textContent.items.map(s => s.str).join(' ') + ' ';
+                                      const spatialItems = textContent.items.map(item => ({
+                                          text: String(item.str || '').trim(),
+                                          x: Number(item.transform && item.transform[4]) || 0,
+                                          y: Number(item.transform && item.transform[5]) || 0,
+                                          width: Number(item.width) || 0,
+                                          height: Number(item.height) || 0,
+                                          page: i
+                                      })).filter(item => item.text);
+                                      spatialPages.push({page:i, items:spatialItems});
+                                      fullText += spatialItems.map(item => item.text).join(' ') + ' ';
                                   }
+                                  window.previousReviewSpatialPages = spatialPages;
                                   const cleanedPdfText = cleanupPriorReviewText(fullText);
                                   window.parseLastMonthMetrics(cleanedPdfText, fileName);
                                   setLastReviewCompletedFromText(cleanedPdfText, fileName);
@@ -8519,6 +8530,91 @@ html.dark .tabulator-row:is(.row-good,.row-watch,.row-bad,.status-good,.status-w
  window.getPriorMetricByCurrentLabel=lookup;
  // Override all known comparison lookup entry points by exposing the canonical resolver.
  window.addEventListener('beforeprint',()=>{window.previousReviewSnapshot&&(window.previousReviewSnapshot.metrics=aliases(window.previousReviewSnapshot.metrics||{}))});
+})();
+</script>
+
+
+
+<!-- v40 spatially anchored prior-month KPI extraction -->
+<script id="v40-spatial-prior-month-kpi-parser">
+(function(){
+ const priorParser=window.parseLastMonthMetrics;
+ const specs=[
+  {key:'Inbound Calls',tests:[/inbound/i,/contact.*in/i]},
+  {key:'Outbound Calls',tests:[/outbound/i,/contact.*out/i]},
+  {key:'Call Linking',tests:[/call\s*link/i,/linking/i]},
+  {key:'Call Notes',tests:[/call\s*notes?/i,/%\s*notes?/i]},
+  {key:'ACW',tests:[/^acw$/i,/after\s*call\s*work/i]},
+  {key:'Availability',tests:[/availability/i,/working\s*days/i]},
+  {key:'AUX Accuracy',tests:[/aux\s*accuracy/i]},
+  {key:'Avg. Break',tests:[/(?:average|avg).*break/i]},
+  {key:'Avg. Lunch',tests:[/(?:average|avg).*lunch/i]},
+  {key:'Avg. Personal Time',tests:[/(?:average|avg).*personal/i]},
+  {key:'Handle Time',tests:[/(?:average|avg).*handle/i]},
+  {key:'QA Score',tests:[/qa\s*score/i,/quality\s*score/i]},
+  {key:'Reporting Accuracy',tests:[/reporting\s*accuracy/i]}
+ ];
+ const norm=s=>String(s||'').replace(/[‐‑‒–—]/g,'-').replace(/\s+/g,' ').trim();
+ const valueLike=s=>/^(?:(?:↑|↓|→|▶|▲|▼)\s*)?(?:(?:EE|ME|BE)\s*)?(?:\$?[\d,.]+%?|\d{1,3}:\d{2}(?::\d{2})?|\d+\/\d+\/\d{1,2}:\d{2}(?::\d{2})?|EE|ME|BE)(?:\s*(?:↑|↓|→|▶|▲|▼|EE|ME|BE))?$/i.test(norm(s));
+ function lines(items){
+  const sorted=[...items].sort((a,b)=>b.y-a.y||a.x-b.x),out=[];
+  sorted.forEach(item=>{let line=out.find(l=>Math.abs(l.y-item.y)<=3.5);if(!line){line={y:item.y,items:[]};out.push(line)}line.items.push(item)});
+  return out.sort((a,b)=>b.y-a.y).map(l=>{l.items.sort((a,b)=>a.x-b.x);l.text=norm(l.items.map(x=>x.text).join(' '));return l});
+ }
+ function markerY(pageLines,re){const hit=pageLines.find(l=>re.test(l.text));return hit?hit.y:null}
+ function combineLabelFragments(pageLines,topY,bottomY){
+  const band=pageLines.filter(l=>l.y<topY&&l.y>bottomY);
+  const fragments=[];band.forEach(l=>l.items.forEach(i=>fragments.push(i)));
+  return fragments;
+ }
+ function anchorsFromBand(items){
+  const anchors=[];
+  specs.forEach(spec=>{
+   const matches=items.filter(i=>spec.tests.some(re=>re.test(i.text)));
+   if(matches.length){const minX=Math.min(...matches.map(i=>i.x)),maxX=Math.max(...matches.map(i=>i.x+i.width));anchors.push({key:spec.key,x:(minX+maxX)/2})}
+  });
+  return anchors.sort((a,b)=>a.x-b.x);
+ }
+ function parsePage(page){
+  const ls=lines(page.items),lastY=markerY(ls,/\blast\s*month\b|\bprevious\s*month\b|\bprior\s*month\b/i),thisY=markerY(ls,/\bthis\s*month\b|\bcurrent\s*month\b/i);
+  if(lastY==null||thisY==null||lastY<=thisY)return null;
+  const between=ls.filter(l=>l.y<lastY&&l.y>thisY);
+  if(!between.length)return null;
+  const valueLines=between.filter(l=>l.items.some(i=>valueLike(i.text)));
+  if(!valueLines.length)return null;
+  const valueLine=valueLines.sort((a,b)=>a.y-b.y)[0];
+  const labelItems=combineLabelFragments(ls,lastY,valueLine.y+2.5);
+  let anchors=anchorsFromBand(labelItems);
+  if(anchors.length<2){
+   const allLabelText=between.filter(l=>l.y>valueLine.y).flatMap(l=>l.items);
+   anchors=anchorsFromBand(allLabelText);
+  }
+  if(!anchors.length)return null;
+  const values=valueLine.items.filter(i=>valueLike(i.text)).sort((a,b)=>a.x-b.x),result={};
+  anchors.forEach((a,index)=>{
+   let candidate=values.reduce((best,v)=>Math.abs((v.x+v.width/2)-a.x)<Math.abs((best?.x+(best?.width||0)/2)-a.x)?v:best,null);
+   if(!candidate&&values[index])candidate=values[index];
+   if(candidate)result[a.key]=norm(candidate.text);
+  });
+  return {metrics:result,page:page.page,lastY,thisY,anchorCount:anchors.length,valueCount:values.length};
+ }
+ function spatialExtract(){
+  const pages=Array.isArray(window.previousReviewSpatialPages)?window.previousReviewSpatialPages:[];
+  for(const page of pages){const parsed=parsePage(page);if(parsed&&Object.keys(parsed.metrics).length)return parsed}return null;
+ }
+ window.parseLastMonthMetrics=function(rawText,fileName){
+  priorParser?.(rawText,fileName);
+  const spatial=spatialExtract();if(!spatial)return;
+  const snap=window.previousReviewSnapshot||{metrics:{}};
+  snap.metrics={...(snap.metrics||{}),...spatial.metrics};
+  if(snap.metrics['Availability']&&!snap.metrics['Working Days Present'])snap.metrics['Working Days Present']=snap.metrics['Availability'];
+  if(snap.metrics['Avg. Break'])snap.metrics['Break Adherence']=snap.metrics['Avg. Break'];
+  if(snap.metrics['Avg. Lunch'])snap.metrics['Lunch Adherence']=snap.metrics['Avg. Lunch'];
+  snap.fileName=fileName||snap.fileName||'';snap.parserVersion='spatial-v40';snap.spatialDiagnostics={page:spatial.page,labels:spatial.anchorCount,values:spatial.valueCount};
+  window.previousReviewSnapshot=snap;
+  console.info('Prior-month spatial parser v40',snap);
+ };
+ window.extractPriorMonthFromSpatialPdf=spatialExtract;
 })();
 </script>
 
