@@ -3158,6 +3158,16 @@ select.status-red, .exact-kpi-rating.status-red { color:var(--status-red-text) !
 #btn-open-powerbi-top { order:3; text-decoration:none !important; min-width:78px !important; }
 #btn-open-powerbi-top::before { content:"↗"; font-weight:900; margin-right:.32rem; }
 @media print { #btn-open-powerbi-top { display:none !important; } }
+</style><style id="manual-pbi-import-print-style">
+.manual-report-importer{margin:1rem 0 2rem;border-top:4px solid var(--warning)!important;display:flex;flex-direction:column;gap:.8rem}
+.manual-report-importer h4{color:var(--text-brand);font-size:1.05rem}.manual-report-importer p{color:var(--text-muted);font-size:.86rem}
+.manual-report-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.8rem}.manual-report-actions{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center}
+#manual-report-file{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}.manual-file-label{cursor:pointer}.manual-report-item{margin-top:1rem;padding:.8rem;border:1px solid var(--border);border-radius:12px;background:var(--bg-card)}
+.manual-report-item-head{display:flex;justify-content:space-between;gap:.7rem;align-items:center;margin-bottom:.55rem}.manual-report-item-head strong{color:var(--text-brand)}
+.manual-report-image{display:block;max-width:100%;max-height:850px;margin:.5rem auto;object-fit:contain}.manual-report-remove{min-height:30px!important;padding:.28rem .55rem!important}
+.print-hide-column{display:none!important}
+@media(max-width:700px){.manual-report-grid{grid-template-columns:1fr}}
+@media print{#manual-report-importer{display:none!important}.manual-print-page{page-break-before:always;break-before:page}.manual-print-page img{display:block!important;max-width:100%!important;max-height:9in!important;object-fit:contain!important}.print-hide-column{display:none!important}.manual-print-page .report-table{font-size:7.5pt!important}}
 </style></head>
 <body>
 <div id="toast-container"></div>
@@ -3643,7 +3653,23 @@ select.status-red, .exact-kpi-rating.status-red { color:var(--status-red-text) !
             </button>
 </div>
 </div>
+<div class="sig-box manual-report-importer" id="manual-report-importer">
+<h4><i class="fas fa-paste"></i> Manual Report Attachment</h4>
+<p>For managers without Power BI report access: paste copied report rows, attach a CSV/TSV/TXT export, or attach report screenshots. The attachment is included in Print Preview and the final printed review.</p>
+<div class="manual-report-grid">
+<div class="field"><label for="manual-report-type">Report Type</label><select id="manual-report-type"><option value="login">Login / Logout</option><option value="avaya">Lunch / Break</option><option value="other">Other Supporting Report</option></select></div>
+<div class="field"><label for="manual-report-title">Printed Title</label><input id="manual-report-title" placeholder="Optional custom report title" type="text"/></div>
 </div>
+<div class="field"><label for="manual-report-paste">Paste report table</label><textarea id="manual-report-paste" placeholder="Paste rows copied from Power BI or Excel. Tab-separated, comma-separated, and pipe-separated data are supported."></textarea></div>
+<div class="manual-report-actions">
+<button class="btn btn-secondary" id="btn-import-pasted-report" onclick="window.importPastedPbiReport()" type="button"><i class="fas fa-paste"></i> Add Pasted Report</button>
+<label class="btn btn-secondary manual-file-label" for="manual-report-file"><i class="fas fa-paperclip"></i> Attach File or Screenshot</label>
+<input accept=".csv,.tsv,.txt,image/png,image/jpeg,image/webp" id="manual-report-file" multiple="" type="file"/>
+<button class="btn btn-secondary" onclick="window.clearManualPbiReports()" type="button"><i class="fas fa-trash"></i> Clear Manual Attachments</button>
+</div>
+<div class="report-data-note" id="manual-report-status">No manual reports attached.</div>
+<div id="manual-report-preview"></div>
+</div></div>
 <div id="login-logout-container" style="display:none; margin-bottom: 2.5rem; overflow-x: auto;"></div>
 <div id="lunch-break-container" style="display:none; margin-bottom: 2.5rem; overflow-x: auto;"></div>
 <div style="margin-top:2rem;">
@@ -4298,7 +4324,11 @@ select.status-red, .exact-kpi-rating.status-red { color:var(--status-red-text) !
     }
 
     // Auto calculate and fetch data entirely in background when period changes
-    document.getElementById('review-period').addEventListener('change', () => fetchAllPbiDataInBackground(false));
+    const periodEl = document.getElementById('review-period');
+    if (periodEl && !periodEl.dataset.pbiChangeBound) {
+      periodEl.addEventListener('change', window.__onReviewPeriodChange = window.__onReviewPeriodChange || (() => fetchAllPbiDataInBackground(false)));
+      periodEl.dataset.pbiChangeBound = '1';
+    }
 
     // Fetch active employees to populate dropdown
     fetchActiveEmployees();
@@ -6333,6 +6363,7 @@ select.status-red, .exact-kpi-rating.status-red { color:var(--status-red-text) !
               });
 
               await window.ensureTabulatorLibrary();
+              if (window[`table_${type}`] && typeof window[`table_${type}`].destroy === 'function') { window[`table_${type}`].destroy(); }
               window[`table_${type}`] = new Tabulator(`#${tableId}`, {
                   data,
                   layout: "fitDataStretch",
@@ -10278,6 +10309,43 @@ body.kpi-title-editing .month-kpi-edit{background:var(--brand)!important;color:#
   if(typeof oldRender==='function') window.renderExactKpiWorkspace=function(){const result=oldRender.apply(this,arguments);setTimeout(apply,0);return result;};
   window.normalizeKpiArrows=normalizeArrowOptions;
   window.applyParsedKpiFallbackRule=applyParsedFallbackRule;
+})();
+</script><script id="manual-pbi-import-print-script">
+(() => {
+  'use strict';
+  const state = window.__manualPbiState = window.__manualPbiState || {items:[], objectUrls:new Set(), nextId:1};
+  const titleFor = type => type === 'login' ? 'Manual Login / Logout Report' : type === 'avaya' ? 'Manual Lunch / Break Report' : 'Manual Supporting Report';
+  const cleanCell = value => String(value == null ? '' : value).replace(/\u0000/g,'').trim();
+  function detectDelimiter(line){ const scores=[['\t',(line.match(/\t/g)||[]).length],[',',(line.match(/,/g)||[]).length],['|',(line.match(/\|/g)||[]).length]]; scores.sort((a,b)=>b[1]-a[1]); return scores[0][1] ? scores[0][0] : '\t'; }
+  function parseDelimited(text){
+    text=String(text||'').replace(/^\uFEFF/,'').trim(); if(!text) return [];
+    const delimiter=detectDelimiter(text.split(/\r?\n/)[0]); const rows=[]; let row=[], cell='', quoted=false;
+    for(let i=0;i<text.length;i++){ const c=text[i], n=text[i+1]; if(c==='"'){ if(quoted&&n==='"'){cell+='"';i++;} else quoted=!quoted; } else if(c===delimiter&&!quoted){row.push(cleanCell(cell));cell='';} else if((c==='\n'||c==='\r')&&!quoted){if(c==='\r'&&n==='\n')i++;row.push(cleanCell(cell));cell='';if(row.some(Boolean))rows.push(row);row=[];} else cell+=c; }
+    row.push(cleanCell(cell)); if(row.some(Boolean)) rows.push(row); if(rows.length<2) return [];
+    const width=Math.min(Math.max(...rows.map(r=>r.length)),30); const headers=rows[0].slice(0,width).map((h,i)=>h||`Column ${i+1}`);
+    return rows.slice(1).filter(r=>r.some(Boolean)).slice(0,1000).map(r=>Object.fromEntries(headers.map((h,i)=>[h,cleanCell(r[i]||'')])));
+  }
+  const reportPriority = /date|day|employee|name|shift|login|logout|hours|worked|lunch|break|personal|adherence|accuracy|exception|status/i;
+  function selectColumns(rows,max=7){ const keys=[...new Set(rows.flatMap(r=>Object.keys(r)))]; const useful=keys.filter(k=>rows.some(r=>cleanCell(r[k])!=='')); return useful.sort((a,b)=>(reportPriority.test(b)?1:0)-(reportPriority.test(a)?1:0)).slice(0,max); }
+  function tableHtml(rows){ const cols=selectColumns(rows,7); if(!cols.length) return '<div class="report-data-note">No printable rows found.</div>'; return `<div class="report-table-wrap"><table class="report-table"><thead><tr>${cols.map(c=>`<th>${escapeHtmlSafe(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${escapeHtmlSafe(r[c]||'')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`; }
+  function revokeItem(item){ if(item?.url && state.objectUrls.has(item.url)){ URL.revokeObjectURL(item.url); state.objectUrls.delete(item.url); } }
+  function renderPreview(){ const host=document.getElementById('manual-report-preview'), status=document.getElementById('manual-report-status'); if(!host)return; host.innerHTML=state.items.map(item=>`<div class="manual-report-item"><div class="manual-report-item-head"><strong>${escapeHtmlSafe(item.title)}</strong><button class="btn btn-secondary manual-report-remove" type="button" onclick="window.removeManualPbiReport(${item.id})">Remove</button></div>${item.kind==='image'?`<img class="manual-report-image" src="${item.url}" alt="${escapeHtmlSafe(item.name||item.title)}">`:tableHtml(item.rows)}</div>`).join(''); if(status)status.textContent=state.items.length?`${state.items.length} manual report attachment${state.items.length===1?'':'s'} ready for print.`:'No manual reports attached.'; }
+  function addRows(rows,name){ if(!rows.length){showError('No table rows were detected. Include a header row, then paste or attach the report again.');return;} const type=val('manual-report-type')||'other', custom=val('manual-report-title'); state.items.push({id:state.nextId++,kind:'table',type,title:custom||titleFor(type),name,rows}); renderPreview(); showError('Manual report attached and ready for print.'); }
+  window.importPastedPbiReport=()=>{ const el=document.getElementById('manual-report-paste'); addRows(parseDelimited(el?.value),'Pasted report'); if(el)el.value=''; };
+  window.removeManualPbiReport=id=>{ const index=state.items.findIndex(x=>x.id===id); if(index>=0){revokeItem(state.items[index]);state.items.splice(index,1);renderPreview();} };
+  window.clearManualPbiReports=()=>{ state.items.forEach(revokeItem);state.items.length=0;renderPreview(); };
+  window.manualPbiPrintHtml=()=>state.items.map(item=>`<section class="manual-print-page attached-report-page review-print-section"><div class="section-heading"><i class="fas fa-paperclip"></i> ${escapeHtmlSafe(item.title)}</div>${item.kind==='image'?`<img class="manual-report-image" src="${item.url}" alt="${escapeHtmlSafe(item.name||item.title)}">`:tableHtml(item.rows)}</section>`).join('');
+  window.trimReportTablesForPrint=root=>{ (root||document).querySelectorAll('.report-table').forEach(table=>{ const heads=[...table.querySelectorAll('thead th')]; if(heads.length<=7)return; const ranked=heads.map((h,i)=>({i,score:reportPriority.test(h.textContent)?1:0})).sort((a,b)=>b.score-a.score||a.i-b.i); const keep=new Set(ranked.slice(0,7).map(x=>x.i)); [...table.rows].forEach(row=>[...row.cells].forEach((cell,i)=>cell.classList.toggle('print-hide-column',!keep.has(i)))); }); };
+  const input=document.getElementById('manual-report-file');
+  if(input&&!input.dataset.bound){ input.dataset.bound='1'; input.addEventListener('change',async e=>{ const files=[...(e.target.files||[])].slice(0,10); for(const file of files){ if(file.type.startsWith('image/')){ const url=URL.createObjectURL(file);state.objectUrls.add(url);const type=val('manual-report-type')||'other';state.items.push({id:state.nextId++,kind:'image',type,title:val('manual-report-title')||titleFor(type),name:file.name,url}); } else { const text=await file.text();addRows(parseDelimited(text),file.name); } } e.target.value='';renderPreview(); }); }
+  const originalBuildPrintSummary=window.buildPrintSummary||buildPrintSummary;
+  const wrapped=function(conf){ const html=originalBuildPrintSummary(conf); const host=document.getElementById('print-summary'); if(host){host.insertAdjacentHTML('beforeend',window.manualPbiPrintHtml());window.trimReportTablesForPrint(host);} return host?host.innerHTML:html; };
+  window.buildPrintSummary=wrapped; try{buildPrintSummary=wrapped;}catch(_){}
+  const originalStartOver=window.startOver||startOver;
+  const wrappedStartOver=function(){ window.clearManualPbiReports(); ['login','avaya'].forEach(type=>{const t=window[`table_${type}`];if(t&&typeof t.destroy==='function')t.destroy();window[`table_${type}`]=null;}); clearTimeout(window.__panel1ArchiveLockFailsafe); return originalStartOver.apply(this,arguments); };
+  window.startOver=wrappedStartOver; try{startOver=wrappedStartOver;}catch(_){}
+  window.addEventListener('beforeunload',()=>state.items.forEach(revokeItem),{once:true});
+  renderPreview();
 })();
 </script></body>
 </html>
