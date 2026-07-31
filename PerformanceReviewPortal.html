@@ -2838,6 +2838,21 @@ body.card-format-dense .measure-label { display:none !important; }
 <button class="btn btn-primary" onclick="window.login()" style="width: 100%; justify-content: center;"><i class="fab fa-microsoft"></i> Sign In and Verify Report Access</button>
 <div class="hidden" id="login-error" style="display: none;"></div>
 </div>
+</div><div aria-labelledby="powerbi-fallback-title" aria-modal="true" id="powerbi-fallback-modal" role="dialog" style="display:none;position:fixed;inset:0;z-index:10050;background:rgba(15,23,42,.72);align-items:center;justify-content:center;padding:1rem;">
+<div style="width:min(520px,95vw);background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-error);border-radius:16px;padding:1.35rem;box-shadow:var(--shadow-lg);">
+<div style="display:flex;gap:.8rem;align-items:flex-start;">
+<i class="fas fa-chart-bar" style="font-size:1.45rem;color:var(--warning);margin-top:.15rem;"></i>
+<div style="min-width:0;flex:1;">
+<h2 id="powerbi-fallback-title" style="font-size:1.15rem;color:var(--text-brand);margin:0 0 .45rem;">Power BI reporting needs attention</h2>
+<p id="powerbi-fallback-message" style="font-size:.9rem;color:var(--text-muted);margin:0;line-height:1.5;">Open the Power BI workspace, confirm that you can access the reports, then return here and retry reporting.</p>
+</div>
+</div>
+<div style="display:flex;gap:.65rem;justify-content:flex-end;flex-wrap:wrap;margin-top:1.15rem;">
+<button class="btn btn-secondary" onclick="window.closePowerBiFallbackPrompt()" type="button">Close</button>
+<a class="btn btn-primary" href="https://app.powerbi.com/groups/d1e5aa3d-3806-40da-b2ef-97cbe82690e7/list?experience=power-bi" onclick="window.__powerBiWorkspaceOpened=true" rel="noopener noreferrer" target="_blank"><i class="fas fa-external-link-alt"></i> Open Power BI Workspace</a>
+<button class="btn btn-success" onclick="window.retryPowerBiAfterLaunch()" type="button"><i class="fas fa-rotate"></i> Retry Reporting</button>
+</div>
+</div>
 </div>
 <header>
 <div>
@@ -3724,6 +3739,41 @@ body.card-format-dense .measure-label { display:none !important; }
   window.refreshRatingSelectColors = refreshRatingSelectColors;
   window.addEventListener('load', () => setTimeout(refreshRatingSelectColors, 0));
 
+  // Power BI reporting fallback: give users a direct, user-clicked route to the workspace.
+  window.POWER_BI_WORKSPACE_URL = "https://app.powerbi.com/groups/d1e5aa3d-3806-40da-b2ef-97cbe82690e7/list?experience=power-bi";
+  window.closePowerBiFallbackPrompt = function() {
+    const modal = document.getElementById('powerbi-fallback-modal');
+    if (modal) modal.style.display = 'none';
+  };
+  window.showPowerBiFallbackPrompt = function(message, force = false) {
+    const modal = document.getElementById('powerbi-fallback-modal');
+    const messageEl = document.getElementById('powerbi-fallback-message');
+    if (!modal) return;
+    const now = Date.now();
+    if (!force && window.__lastPowerBiFallbackAt && now - window.__lastPowerBiFallbackAt < 15000) return;
+    window.__lastPowerBiFallbackAt = now;
+    if (messageEl) messageEl.textContent = message || 'Open the Power BI workspace, confirm that you can access the reports, then return here and retry reporting.';
+    modal.style.display = 'flex';
+  };
+  window.openPowerBiWorkspace = function() {
+    window.__powerBiWorkspaceOpened = true;
+    return window.open(window.POWER_BI_WORKSPACE_URL, '_blank', 'noopener,noreferrer');
+  };
+  window.retryPowerBiAfterLaunch = async function() {
+    window.closePowerBiFallbackPrompt();
+    try {
+      if (document.getElementById('login-overlay')?.style.display !== 'none') {
+        await window.connectReportsAndOpenApp();
+      } else if (typeof window.fetchAllPbiDataInBackground === 'function') {
+        const result = await window.fetchAllPbiDataInBackground(true, true);
+        if (result?.hasErrors) window.showPowerBiFallbackPrompt('Reporting still failed. Verify that the Power BI workspace opens for your account and that you can view the required reports, then retry.', true);
+      }
+    } catch (err) {
+      console.error('Power BI retry failed:', err);
+      window.showPowerBiFallbackPrompt('Reporting still failed. Open the Power BI workspace and confirm report access for the signed-in account, then return and retry.', true);
+    }
+  };
+
   // Graceful getToken function: Handles silent failovers and explicit interaction requests cleanly.
   window.getToken = async function(scopeStr, silentFallback = false) {
     const isPbiScope = String(scopeStr || '').includes('analysis.windows.net/powerbi');
@@ -3778,7 +3828,7 @@ body.card-format-dense .measure-label { display:none !important; }
   window.showLoginConnectionError = function(message, allowRetry = true) {
     const errEl = document.getElementById('login-error');
     if (!errEl) return;
-    const retry = allowRetry ? ` <button type="button" class="btn btn-secondary" style="margin-left:auto;padding:.35rem .65rem;min-height:32px;" onclick="window.connectReportsAndOpenApp()">Connect Reports</button>` : '';
+    const retry = allowRetry ? ` <a class="btn btn-primary" style="margin-left:auto;padding:.35rem .65rem;min-height:32px;" href="${window.POWER_BI_WORKSPACE_URL}" target="_blank" rel="noopener noreferrer"><i class="fas fa-external-link-alt"></i> Open Power BI</a><button type="button" class="btn btn-secondary" style="padding:.35rem .65rem;min-height:32px;" onclick="window.connectReportsAndOpenApp()">Retry Reports</button>` : '';
     errEl.innerHTML = `<i class="fas fa-exclamation-triangle"></i><span style="flex:1;">${escapeHtmlSafe(message)}</span>${retry}`;
     errEl.style.display = 'flex';
     errEl.classList.remove('hidden');
@@ -3815,7 +3865,8 @@ body.card-format-dense .measure-label { display:none !important; }
     } catch (err) {
       console.error('Power BI access verification failed:', err);
       window.setConnectionStatus('pbi', 'error', 'Metrics: Access required', err.message || 'Unable to verify Power BI access.');
-      window.showLoginConnectionError('Microsoft sign-in completed, but report access could not be verified. Select Connect Reports and accept the Microsoft permissions prompt.');
+      window.showLoginConnectionError('Microsoft sign-in completed, but report access could not be verified. Open Power BI, confirm that the workspace and reports load for your account, then return and select Retry Reports.');
+      window.showPowerBiFallbackPrompt('Report access could not be verified. Open the Power BI workspace, confirm that the reports load for your signed-in account, then return and retry.', true);
     }
   };
 
@@ -5795,12 +5846,17 @@ body.card-format-dense .measure-label { display:none !important; }
       window.pbiCache.period = period;
       labelEl.innerText = `/ ${totalWorkingDays} Days`;
       if(loader) loader.style.display = 'none';
-      if (hasErrors) window.setConnectionStatus('pbi', 'warning', 'Metrics: Partial', 'Power BI sync completed, but one or more data pulls failed.');
-      else window.setConnectionStatus('pbi', 'ok', 'Metrics: Connected', 'Power BI metrics synced successfully.');
+      if (hasErrors) {
+          window.setConnectionStatus('pbi', 'warning', 'Metrics: Partial', 'Power BI sync completed, but one or more data pulls failed.');
+          window.showPowerBiFallbackPrompt('Some Power BI reporting data failed to load. Open the Power BI workspace, confirm that you can view the required reports, then return and select Retry Reporting.');
+      } else {
+          window.setConnectionStatus('pbi', 'ok', 'Metrics: Connected', 'Power BI metrics synced successfully.');
+          window.closePowerBiFallbackPrompt();
+      }
 
       if (showToasts) {
           if (!hasErrors) showError("Successfully refreshed Power BI metrics.");
-          else showError("Refresh completed with missing Power BI data. Check the browser console for the exact tunnel/direct API error.");
+          else showError("Refresh completed with missing Power BI data. Open the Power BI workspace, verify report access, then retry reporting.");
       }
       return { hasErrors, loginCount: (window.pbiCache.loginData || []).length, avayaCount: (window.pbiCache.avayaData || []).length };
   }
