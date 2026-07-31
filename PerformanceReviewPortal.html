@@ -9668,5 +9668,184 @@ body.kpi-title-editing .month-kpi-edit{background:var(--brand)!important;color:#
 })();
 </script>
 
+
+
+<!-- v25 EOQ parser, parser defaults, and duplicate-card guard -->
+<script id="v25-eoq-parser-dedupe-defaults">
+(function(){
+  'use strict';
+  const DEFAULT_TEXT = 'Not provided';
+  const EOQ_METRIC_DEFAULTS = Object.freeze({
+    'Mentoring Hours': DEFAULT_TEXT,
+    'Trainings': DEFAULT_TEXT,
+    '% of Agents Mentored': DEFAULT_TEXT,
+    'Supervisor Meeting Participation': DEFAULT_TEXT,
+    'Availability Per Shift': DEFAULT_TEXT,
+    'AUX Accuracy': DEFAULT_TEXT,
+    'Average Break': DEFAULT_TEXT,
+    'Average Lunch': DEFAULT_TEXT,
+    'Average Personal': DEFAULT_TEXT,
+    'Daily Sales Average': DEFAULT_TEXT
+  });
+  const EOM_METRIC_DEFAULTS = Object.freeze({
+    'Outbound Calls': DEFAULT_TEXT,
+    'Avg. Talk Time': DEFAULT_TEXT,
+    'AUX Accuracy': DEFAULT_TEXT,
+    'Avg. Break': DEFAULT_TEXT,
+    'Avg. Lunch': DEFAULT_TEXT,
+    'Avg. Personal Time': DEFAULT_TEXT,
+    'Lunch Adherence': DEFAULT_TEXT,
+    'Break Adherence': DEFAULT_TEXT,
+    'Reporting Accuracy': DEFAULT_TEXT,
+    'Working Days Present': DEFAULT_TEXT
+  });
+  const clean = value => String(value == null ? '' : value)
+    .replace(/\*+/g,'').replace(/\u00a0/g,' ').replace(/\r/g,'\n')
+    .replace(/[ \t]+/g,' ').trim();
+  const plain = value => clean(value).replace(/[↑→↓▶]/g,'').trim();
+  const escRx = value => String(value).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+
+  function normalizeDocumentText(raw){
+    return String(raw || '')
+      .replace(/<br\s*\/?\s*>/gi,'\n')
+      .replace(/<\/?(?:p|div|tr|th|td|table|li|h\d)[^>]*>/gi,'\n')
+      .replace(/\*+/g,'')
+      .replace(/\u00a0/g,' ')
+      .replace(/Page\s+\d+\s+of\s+\d+/gi,' ')
+      .replace(/WB\s*Mason\s*\|[^\n]*/gi,' ')
+      .replace(/[ \t]+/g,' ')
+      .replace(/\n{3,}/g,'\n\n');
+  }
+  function between(text,start,end){
+    const s=text.search(start); if(s<0) return '';
+    const tail=text.slice(s); const e=tail.search(end);
+    return e>0 ? tail.slice(0,e) : tail;
+  }
+  function firstMatch(text, patterns, fallback=DEFAULT_TEXT){
+    for(const rx of patterns){ const m=text.match(rx); if(m && clean(m[1])) return clean(m[1]); }
+    return fallback;
+  }
+  function section(text,label,nextLabels){
+    const next=nextLabels.map(escRx).join('|');
+    const rx=new RegExp(escRx(label)+'\\s*:?\\s*([\\s\\S]*?)(?=\\n\\s*(?:'+next+')\\s*:?|$)','i');
+    const m=text.match(rx); return m ? clean(m[1]).replace(/^[-•\s]+/,'') : DEFAULT_TEXT;
+  }
+  function metricFromBlock(block,label,nextLabels){
+    const next=nextLabels.map(escRx).join('|');
+    const rx=new RegExp(escRx(label)+'(?:[^\\n]*\\n)+?\\s*([↑→↓▶]?\\s*(?:NA|N\\/A|BE|ME|EE|\\$?\\s*[0-9][^\\n]*))(?=\\n|$)','i');
+    const m=block.match(rx);
+    if(m && clean(m[1])) return clean(m[1]);
+    const inline=new RegExp(escRx(label)+'\\s*:?\\s*([↑→↓▶]?\\s*(?:NA|N\\/A|BE|ME|EE|\\$?\\s*[0-9][^\\n]*))','i').exec(block);
+    return inline && clean(inline[1]) ? clean(inline[1]) : DEFAULT_TEXT;
+  }
+  function buildEoqSnapshot(rawText,fileName){
+    const text=normalizeDocumentText(rawText);
+    if(!/\b(?:LAST|THIS)\s+QUARTER\b/i.test(text) && !/End\s+of\s+Quarter/i.test(text)) return null;
+    const lastBlock=between(text,/\bLAST\s+QUARTER\b/i,/\bTHIS\s+QUARTER\b/i);
+    const thisBlock=between(text,/\bTHIS\s+QUARTER\b/i,/\b(?:Opportunities\s+Last\s+Quarter|Opportunities\s+This\s+Quarter)\b/i);
+    const labels=['Mentoring Hours','Trainings','% of Agents Mentored','Supervisor Meeting Participation','Availability Per Shift','AUX Accuracy','Average Break','Average Lunch','Average Personal','Daily Sales Average'];
+    const parseBlock=block=>Object.fromEntries(labels.map((label,i)=>[label,metricFromBlock(block,label,labels.slice(i+1))]));
+    const meta={
+      agentName:firstMatch(text,[/Agent\s+Name\s*:?\s*\n?\s*([^\n]+)/i]),
+      manager:firstMatch(text,[/Manager\s*:?\s*\n?\s*([^\n]+)/i]),
+      reviewDate:firstMatch(text,[/\bDate\s*:?\s*\n?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i]),
+      subject:firstMatch(text,[/Subject\s*\/\s*Driving\s+Factor\s*:?\s*([^\n]+)/i])
+    };
+    const feedback={
+      opportunitiesLastQuarter:section(text,'Opportunities Last Quarter',['Opportunities This Quarter','Opportunities for This Year','Best Practices and Tips','Best Practices & Tips','Action Plan']),
+      opportunitiesThisQuarter:section(text,'Opportunities This Quarter',['Opportunities for This Year','Best Practices and Tips','Best Practices & Tips','Action Plan']),
+      opportunitiesThisYear:section(text,'Opportunities for This Year',['Best Practices and Tips','Best Practices & Tips','Action Plan']),
+      bestPractices:section(text,/Best Practices and Tips/i.test(text)?'Best Practices and Tips':'Best Practices & Tips',['Action Plan','Agent’s Voice','Agent\'s Voice']),
+      actionPlan:section(text,'Action Plan',['Agent’s Voice','Agent\'s Voice','Statement of Understanding']),
+      employeeVoice:section(text,/Agent’s Voice/i.test(text)?'Agent’s Voice':'Agent\'s Voice',['Statement of Understanding','Agent Signature'])
+    };
+    return {
+      fileName:fileName||'', rawText:String(rawText||''), reviewType:'eoq', parserVersion:'v25-eoq',
+      meta, lastQuarter:Object.assign({},EOQ_METRIC_DEFAULTS,parseBlock(lastBlock)),
+      thisQuarter:Object.assign({},EOQ_METRIC_DEFAULTS,parseBlock(thisBlock)), feedback,
+      metrics:Object.assign({},EOQ_METRIC_DEFAULTS,parseBlock(thisBlock)),
+      defaultsApplied:true
+    };
+  }
+
+  const originalParser=window.parseLastMonthMetrics;
+  window.parseLastMonthMetrics=function(rawText,fileName){
+    const eoq=buildEoqSnapshot(rawText,fileName);
+    let snapshot;
+    if(eoq) snapshot=eoq;
+    else {
+      snapshot=typeof originalParser==='function' ? (originalParser(rawText,fileName)||{}) : {};
+      snapshot.fileName=snapshot.fileName||fileName||'';
+      snapshot.rawText=snapshot.rawText||String(rawText||'');
+      snapshot.reviewType=snapshot.reviewType||'eom';
+      snapshot.metrics=Object.assign({},EOM_METRIC_DEFAULTS,snapshot.metrics||{});
+      snapshot.defaultsApplied=true;
+    }
+    window.previousReviewSnapshot=snapshot;
+    if(eoq){ try{window.dispatchEvent(new CustomEvent('previous-review-parsed',{detail:snapshot}));}catch(_){} }
+    return snapshot;
+  };
+
+  function setIfBlank(id,value){
+    const el=document.getElementById(id); if(!el || String(el.value||'').trim()) return;
+    el.value=value && value!==DEFAULT_TEXT ? plain(value) : '';
+    el.placeholder=value===DEFAULT_TEXT ? DEFAULT_TEXT : el.placeholder;
+  }
+  function applyEoqToForm(snapshot){
+    if(!snapshot || snapshot.reviewType!=='eoq') return;
+    setIfBlank('eom-opportunities-month',snapshot.feedback?.opportunitiesThisQuarter);
+    setIfBlank('eom-opportunities-year',snapshot.feedback?.opportunitiesThisYear);
+    setIfBlank('eom-best-practices',snapshot.feedback?.bestPractices);
+    setIfBlank('eom-smart-plan',snapshot.feedback?.actionPlan);
+    setIfBlank('eom-employee-voice',snapshot.feedback?.employeeVoice);
+    document.querySelectorAll('#metrics-container input[type="number"]').forEach(el=>{ if(!el.value) el.placeholder='Not provided'; });
+  }
+  window.addEventListener('previous-review-parsed',e=>applyEoqToForm(e.detail));
+
+  function canonicalCard(card){
+    return String(card.textContent||'').replace(/\s+/g,' ').trim().toLowerCase();
+  }
+  function dedupeCards(root){
+    if(!root) return;
+    const sections=new Map();
+    root.querySelectorAll('.attached-report-page[data-report-section]').forEach(section=>{
+      const key=section.getAttribute('data-report-section');
+      if(sections.has(key)) section.remove(); else sections.set(key,section);
+    });
+    root.querySelectorAll('.abbrev-grid').forEach(grid=>{
+      const seen=new Set();
+      grid.querySelectorAll(':scope > .abbrev-card').forEach(card=>{
+        const key=canonicalCard(card);
+        if(key && seen.has(key)) card.remove(); else if(key) seen.add(key);
+      });
+    });
+    const reportSeen=new Set();
+    root.querySelectorAll('.print-report-attachment[data-report-key], .review-print-section[data-report-section]').forEach(node=>{
+      const key=node.getAttribute('data-report-key')||node.getAttribute('data-report-section');
+      if(key && reportSeen.has(key)) node.remove(); else if(key) reportSeen.add(key);
+    });
+  }
+  window.dedupePerformanceReportCards=dedupeCards;
+
+  function wrapBuilder(name){
+    const original=window[name]; if(typeof original!=='function'||original.__v25Dedupe) return;
+    const wrapped=function(){ const result=original.apply(this,arguments); dedupeCards(document.getElementById('summary-preview')); dedupeCards(document.getElementById('print-summary')); return result; };
+    wrapped.__v25Dedupe=true; window[name]=wrapped;
+    try{ if(name==='buildSummaryPreview') buildSummaryPreview=wrapped; if(name==='buildPrintSummary') buildPrintSummary=wrapped; }catch(_){}
+  }
+  wrapBuilder('buildSummaryPreview'); wrapBuilder('buildPrintSummary');
+  ['summary-preview','print-summary','login-logout-container','lunch-break-container'].forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    new MutationObserver(()=>dedupeCards(el)).observe(el,{childList:true,subtree:true});
+  });
+  document.addEventListener('DOMContentLoaded',()=>{
+    wrapBuilder('buildSummaryPreview'); wrapBuilder('buildPrintSummary');
+    applyEoqToForm(window.previousReviewSnapshot);
+    dedupeCards(document.getElementById('summary-preview'));
+    dedupeCards(document.getElementById('print-summary'));
+  });
+})();
+</script>
+
 </body>
 </html>
