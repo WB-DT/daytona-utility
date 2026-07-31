@@ -709,7 +709,12 @@ function rowRecord(r,slim){
   return `<tr data-rec="${r.rid}" style="cursor:pointer" title="Click to edit record">
     ${slim?"":`<td>${fmt(r.date)}</td>`}
     <td><b>${esc(e.name)}</b></td>
-    <td>${pill(r.type)}${r.fmla?` <span class="badge" title="FMLA Protected">FMLA</span>`:""}${r.waived?` <span class="badge ok" title="Occurrence waived via completed make-up">waived</span>`:""}</td>
+    <td>
+      ${pill(r.type)}
+      ${r.fmla?` <span class="badge" title="FMLA Protected">FMLA</span>`:""}
+      ${r.voicemail?` <span class="badge" title="Called in via Voicemail">Voicemail</span>`:""}
+      ${r.waived?` <span class="badge ok" title="Occurrence waived via completed make-up">waived</span>`:""}
+    </td>
     <td>${r.hours||""}${r.hours?"h":""}</td><td class="small">${esc(r.notes)}</td>
     <td class="row" style="gap:4px"><button class="btn ghost sm" data-rec-edit="${r.rid}">Edit</button><button class="btn danger sm" data-rec-del="${r.rid}">✕</button></td></tr>`;
 }
@@ -741,9 +746,12 @@ function closeModal(){ $("#modalHost").innerHTML=""; }
 function empSelect(id,cur){ return `<select id="${id}">${filteredEmployees().length?filteredEmployees().map(e=>`<option ${e.id===cur?"selected":""} value="${esc(e.id)}">${esc(e.name)} (${esc(e.id)})</option>`).join(""):S.employees.map(e=>`<option ${e.id===cur?"selected":""} value="${esc(e.id)}">${esc(e.name)}</option>`).join("")}</select>`; }
 
 function recordModal(rid,presetDate){
-  // Initialize fmla to false for new records
-  const r=rid? S.records.find(x=>x.rid===rid) : {date:presetDate||today(),empId:S.employees[0]?.id,type:"Present",hours:8,notes:"",fmla:false};
+  // Initialize fmla, voicemail, and occurrence properties
+  const r=rid? S.records.find(x=>x.rid===rid) : {date:presetDate||today(),empId:S.employees[0]?.id,type:"Present",hours:8,notes:"",fmla:false,voicemail:false};
   
+  // Get current occurrence count for the modal; fallback to calculating if not saved on the record yet
+  const currentOcc = r.occurrence !== undefined ? r.occurrence : occCount(r.empId, today());
+
   openModal(`<h2>${rid?"Edit":"Add"} record</h2>
     <div class="mrow">
       <div><label>Employee</label>${empSelect("mEmp",r.empId)}</div>
@@ -751,12 +759,24 @@ function recordModal(rid,presetDate){
       ${rid ? "" : `<div><label>To</label><input type="date" id="mDateTo" value="${r.date}"></div>`}
     </div>
     
-    <div class="mrow"><div><label>Type</label><select id="mType">${TYPE_NAMES.map(t=>`<option ${t===r.type?"selected":""}>${t}</option>`).join("")}</select></div>
-    <div><label>Hours</label><input type="number" id="mHours" step="0.25" min="0" value="${r.hours}"></div></div>
+    <div class="mrow">
+      <div><label>Type</label><select id="mType">${TYPE_NAMES.map(t=>`<option ${t===r.type?"selected":""}>${t}</option>`).join("")}</select></div>
+      <div><label>Hours</label><input type="number" id="mHours" step="0.25" min="0" value="${r.hours}"></div>
+      <div><label>Occurrences</label>
+        <div class="row" style="gap:4px">
+          <button class="btn ghost sm" id="occMinus" style="padding:4px 10px; font-size:16px;">-</button>
+          <input type="number" id="mOcc" value="${currentOcc}" style="width:60px; text-align:center" step="1">
+          <button class="btn ghost sm" id="occPlus" style="padding:4px 10px; font-size:16px;">+</button>
+        </div>
+      </div>
+    </div>
     
-    <div class="mb">
+    <div class="mrow mb" style="gap:16px;">
       <label class="row" style="font-size:13.5px;font-weight:600;cursor:pointer;">
         <input type="checkbox" id="mFmla" ${r.fmla?"checked":""} style="width:auto;cursor:pointer;"> FMLA
+      </label>
+      <label class="row" style="font-size:13.5px;font-weight:600;cursor:pointer;">
+        <input type="checkbox" id="mVoicemail" ${r.voicemail?"checked":""} style="width:auto;cursor:pointer;"> Voicemail
       </label>
     </div>
     
@@ -765,25 +785,39 @@ function recordModal(rid,presetDate){
       ${rid?"":`<span class="small muted right" style="margin-right:auto">Tip: for an occurrence type you can create a make-up agreement after saving.</span>`}
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
       <button class="btn" id="mSave">Save</button></div>`);
+
+  // Handle Occurrence + and - buttons
+  $("#occMinus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = Math.max(0, parseInt(inp.value||0) - 1); };
+  $("#occPlus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = parseInt(inp.value||0) + 1; };
+
+  // Dynamically update the occurrence counter if the user switches employees for a new record
+  if (!rid) {
+    $("#mEmp").onchange = (e) => {
+      $("#mOcc").value = occCount(e.target.value, today());
+    };
+  }
       
   $("#mSave").onclick=()=>{
     // Capture the dates
     const dFrom = $("#mDate").value;
     const elTo = $("#mDateTo");
-    const dTo = elTo ? elTo.value : dFrom; // Default to 'From' date if 'To' input doesn't exist (Edit mode)
+    const dTo = elTo ? elTo.value : dFrom; 
     
     if(!dFrom||!$("#mEmp").value) return toast("Date and employee are required");
     if(dFrom > dTo) return toast("From date must be before To date");
     
+    // Capture the input fields including the new variables
     const empId = $("#mEmp").value;
     const type = $("#mType").value;
     const hours = parseFloat($("#mHours").value)||0;
     const notes = $("#mNotes").value.trim();
     const fmla = $("#mFmla").checked;
+    const voicemail = $("#mVoicemail").checked;
+    const occurrence = parseInt($("#mOcc").value, 10) || 0;
 
     if (rid) {
       // Editing a single existing record
-      Object.assign(S.records.find(x=>x.rid===rid), { date: dFrom, empId, type, hours, notes, fmla });
+      Object.assign(S.records.find(x=>x.rid===rid), { date: dFrom, empId, type, hours, notes, fmla, voicemail, occurrence });
     } else {
       // Adding new records (loop through the date range)
       let current = parseISO(dFrom);
@@ -799,7 +833,9 @@ function recordModal(rid,presetDate){
           notes, 
           source: "local", 
           waived: false, 
-          fmla 
+          fmla,
+          voicemail,
+          occurrence
         });
         current.setDate(current.getDate() + 1); // increment by 1 day
       }
