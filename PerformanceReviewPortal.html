@@ -3501,14 +3501,8 @@ select.styled-arrow-select { width: auto !important; min-width: 7.5rem; flex: 0 
   // ── MSAL / Authentication Configuration ────────────────────────────────────
   const DATAVERSE_URL = "https://org23279050.crm.dynamics.com/api/data/v9.2";
   
-  // Fresh-session policy: never reuse another manager's cached app or MSAL identity.
-  window.__freshLoginPolicy = true;
-  try {
-    localStorage.clear();
-    sessionStorage.clear();
-  } catch (cacheErr) {
-    console.warn('Browser storage could not be fully cleared:', cacheErr);
-  }
+  // Persistent-session policy: reuse the current manager's MSAL account until they explicitly sign out.
+  window.__freshLoginPolicy = false;
 
   const msalConfig = {
     auth: {
@@ -3517,7 +3511,7 @@ select.styled-arrow-select { width: auto !important; min-width: 7.5rem; flex: 0 
       redirectUri: window.location.href.split('?')[0] // Use current page
     },
     cache: {
-      cacheLocation: "sessionStorage",
+      cacheLocation: "localStorage",
       storeAuthStateInCookie: false
     }
   };
@@ -4069,7 +4063,7 @@ select.styled-arrow-select { width: auto !important; min-width: 7.5rem; flex: 0 
     try {
       const resp = await msalInstance.loginPopup({
         scopes: ["User.Read", "https://org23279050.crm.dynamics.com//user_impersonation"],
-        prompt: "login"
+        prompt: "select_account"
       });
       if (!resp?.account) throw new Error('Microsoft sign-in did not return an account.');
       msalAccount = resp.account;
@@ -4141,19 +4135,26 @@ select.styled-arrow-select { width: auto !important; min-width: 7.5rem; flex: 0 
     fetchAllPbiDataInBackground(false);
   };
 
-  // ── Mandatory Fresh Login on Every App Load ────────────────────────────────
+  // Reuse a cached Microsoft account and only show the login overlay when no account exists.
   document.addEventListener('DOMContentLoaded', () => {
-    msalAccount = null;
-    currentUserRepName = null;
-    window.__verifiedPowerBiToken = null;
-    window.pbiCache = { loginData: null, avayaData: null, empName: null, period: null };
+    const accounts = msalInstance.getAllAccounts();
     const overlay = document.getElementById('login-overlay');
     const app = document.getElementById('main-app');
-    if (app) app.style.display = 'none';
-    if (overlay) overlay.style.display = 'flex';
-    window.setConnectionStatus('auth', 'pending', 'Auth: Fresh sign-in required', 'Sign in as the manager currently using the app.');
-    window.setConnectionStatus('pbi', 'idle', 'Metrics: Waiting for sign-in', 'Report access will be verified before the app opens.');
-    window.setConnectionStatus('archive', 'idle', 'Archive: Waiting for sign-in', 'Archive access will use the signed-in manager.');
+    if (accounts.length > 0) {
+      msalAccount = accounts[0];
+      currentUserRepName = msalAccount.name || msalAccount.username || '';
+      msalInstance.setActiveAccount?.(msalAccount);
+      if (overlay) overlay.style.display = 'none';
+      if (app) app.style.display = 'block';
+      window.setConnectionStatus('auth', 'ok', 'Auth: Connected', `Signed in as ${msalAccount.username || currentUserRepName}.`);
+      window.initializeApp();
+    } else {
+      if (app) app.style.display = 'none';
+      if (overlay) overlay.style.display = 'flex';
+      window.setConnectionStatus('auth', 'pending', 'Auth: Sign-in required', 'Sign in once; the session will be reused until you sign out.');
+      window.setConnectionStatus('pbi', 'idle', 'Metrics: Flow waiting', 'Power Automate metrics will load after sign-in.');
+      window.setConnectionStatus('archive', 'idle', 'Archive: Waiting for sign-in', 'Archive access will use the signed-in manager.');
+    }
   });
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -10131,8 +10132,10 @@ restoreAll();render();
  window.PERFORMANCE_DATA_FLOW_URL='https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/22/workflows/17df004c0ac944288c05ab85e3adb841/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=7KkG1ro706S_GOL9hEoT8X8nvUZZ2Ttfy5R6wceiW28';
  const val=id=>document.getElementById(id)?.value||''; const n=x=>{const y=Number(x);return Number.isFinite(y)?y:null};
  const set=(id,x)=>{const e=document.getElementById(id),y=n(x);if(e&&y!==null){e.value=e.step==='1'?Math.round(y):y.toFixed(1);window.calculateArrow?.(id)}};
- function range(p){const m=String(p).match(/^(\d{4})-(\d{2})$/);if(!m)return {startDate:'',endDate:''};return {startDate:`${m[1]}-${m[2]}-01`,endDate:new Date(Date.UTC(+m[1],+m[2],0)).toISOString().slice(0,10)}}
+ function range(p){let y,mo;const raw=String(p||'').trim(),iso=raw.match(/^(\d{4})-(\d{2})$/);if(iso){y=+iso[1];mo=+iso[2]}else{const d=new Date(`1 ${raw}`);if(!Number.isNaN(d.getTime())){y=d.getFullYear();mo=d.getMonth()+1}}if(!y||!mo)return {startDate:'',endDate:''};return {startDate:`${y}-${String(mo).padStart(2,'0')}-01`,endDate:new Date(Date.UTC(y,mo,0)).toISOString().slice(0,10)}}
  window.loadPerformanceDataFromFlow=async function(show=true){const employeeName=val('employee-name'),employeeId=val('employee-id'),reviewPeriod=val('review-period'),reviewType=val('review-type');if(!employeeName||!reviewPeriod)return false;try{window.setConnectionStatus?.('pbi','loading','Metrics: Flow','Loading Power BI metrics through Power Automate...');const r=await fetch(window.PERFORMANCE_DATA_FLOW_URL.replace(/&amp;/g,'&'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({employeeName,employeeId,reviewPeriod,reviewType,...range(reviewPeriod)})});if(!r.ok)throw new Error(`Flow returned HTTP ${r.status}`);const d=await r.json(),m=d.metrics||d.body?.metrics||{},rows=d.dailyRows||d.body?.dailyRows||[];set('m-outbound-calls',m.outboundCalls);set('m-inbound-calls',m.inboundCalls);set('m-talk-time',m.averageTalkTimeMinutes);set('m-handle-time',m.averageHandleTimeMinutes);set('m-aux-accuracy',m.auxAccuracyPercent);set('m-reporting-accuracy',m.reportingAccuracyPercent);set('m-lunch',m.averageLunchMinutes);set('m-avg-break',m.averageBreakMinutes);set('m-personal-time',m.averagePersonalMinutes);set('m-lunch-adherence',m.lunchAdherencePercent);set('m-break-adherence',m.breakAdherencePercent);const day=document.getElementById('m-days-present');if(day)day.value=m.daysPresent??0;window.pbiCache=window.pbiCache||{};Object.assign(window.pbiCache,{empName:employeeName,period:reviewPeriod,avayaData:rows,loginData:rows});window.dataverseDetailRows=rows;window.setDataverseDetailRows?.(rows);window.setConnectionStatus?.('pbi','ok','Metrics: Flow Ready',`${rows.length} daily row(s) received.`);if(show)window.showError?.('Power Automate metrics loaded successfully.');return d}catch(e){console.error(e);window.setConnectionStatus?.('pbi','error','Metrics: Flow Error',e.message);if(show)window.showError?.(`Power Automate metrics failed: ${e.message}`);return false}};
+ // Route every existing refresh button/listener through the new Power Automate flow.
+ window.fetchAllPbiDataInBackground = function(showToasts=false){ return window.loadPerformanceDataFromFlow(showToasts); };
  document.addEventListener('DOMContentLoaded',()=>{document.getElementById('review-period')?.addEventListener('change',()=>setTimeout(()=>window.loadPerformanceDataFromFlow(false),150));document.getElementById('employee-name')?.addEventListener('change',()=>setTimeout(()=>window.loadPerformanceDataFromFlow(false),150))});
 })();
 </script>
