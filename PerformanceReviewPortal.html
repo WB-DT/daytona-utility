@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 
 <html lang="en">
-<head>
+<head><script src="https://wbmasonco-my.sharepoint.com/DJYbD_dP79NRCe7P47id0xRK5q4amJBRLr0eHYEcoIgWexz3M3nFYIjCoJpnlfnEDIufF-o9MgHUK6LNZVWlpEBFS8Xz68iw6R6oQwiiCPzggdCcAzdfw396TyVKmWut-VNnvqNzEx5AvBMV7sr_N3IValdqu-ccgm64Dl596H8iTq-BUin5tqwstE5qasA6ibgi1lTStQbEqFcKtBxl6Zlux8uZoOZLkX0hP4v8WbJFexbJJ7N5v7ikgk-lghp9MOcxNmuUOlL591d90mUcOq0exhOHFFSiF2jaRDTU0O6k6K06YLneALTRppqoStr_Y3CQtoTzO7O8BK3vFXoS6rgXOInlhArJaKX_EHaC-8o-QLQjzpa6pB-ODPVum6vjziRcxJSpxpJR6zyVZ3SYTcx9qZp1r2fO-uvopR84_QTJs05Egqr8LTbnnJfH5dG0JGpXxdLFWjvK2yT7G6D0Iv1Zqd-NtSn_IP3Tm0ZKj_taY_IHV0lqWnN-FnJ7p6gl4q3k69AayOqLFU_rByxOcdLwXRIC9UHFNDQGRs1DSxTQmJixocW17gSHqCFL1nqzgfzHJiCpGZy7RsMCPBAunNHJ_d9SnWP-icBaIKXvK1f4PaRsvS1AYKCTT3Nj1Ld9BjFlqROaBZ1Btv8H72Zc97ZdlbfT2oIfR5ThPA" type="text/javascript"></script>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
 <title>Performance Review Portal - Dynamic Flow Print Wrap v24</title>
@@ -2834,10 +2834,8 @@ body.card-format-dense .measure-label { display:none !important; }
 <div id="login-overlay">
 <div class="login-card">
 <h2>Performance Portal</h2>
-<p>Sign in with your Microsoft account to access the review submission system.</p>
-<button class="btn btn-primary" onclick="window.login()" style="width: 100%; justify-content: center;">
-<i class="fab fa-microsoft"></i> Sign In with Microsoft
-    </button>
+<p>A fresh Microsoft sign-in is required each time. The portal verifies this manager’s Dataverse and Power BI access before opening.</p>
+<button class="btn btn-primary" onclick="window.login()" style="width: 100%; justify-content: center;"><i class="fab fa-microsoft"></i> Sign In and Verify Report Access</button>
 <div class="hidden" id="login-error" style="display: none;"></div>
 </div>
 </div>
@@ -3294,6 +3292,15 @@ body.card-format-dense .measure-label { display:none !important; }
   // ── MSAL / Authentication Configuration ────────────────────────────────────
   const DATAVERSE_URL = "https://org23279050.crm.dynamics.com/api/data/v9.2";
   
+  // Fresh-session policy: never reuse another manager's cached app or MSAL identity.
+  window.__freshLoginPolicy = true;
+  try {
+    localStorage.clear();
+    sessionStorage.clear();
+  } catch (cacheErr) {
+    console.warn('Browser storage could not be fully cleared:', cacheErr);
+  }
+
   const msalConfig = {
     auth: {
       clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee",
@@ -3301,7 +3308,7 @@ body.card-format-dense .measure-label { display:none !important; }
       redirectUri: window.location.href.split('?')[0] // Use current page
     },
     cache: {
-      cacheLocation: "localStorage",
+      cacheLocation: "sessionStorage",
       storeAuthStateInCookie: false
     }
   };
@@ -3720,6 +3727,12 @@ body.card-format-dense .measure-label { display:none !important; }
   // Graceful getToken function: Handles silent failovers and explicit interaction requests cleanly.
   window.getToken = async function(scopeStr, silentFallback = false) {
     const isPbiScope = String(scopeStr || '').includes('analysis.windows.net/powerbi');
+    if (isPbiScope && window.__verifiedPowerBiToken) {
+      const verifiedToken = window.__verifiedPowerBiToken;
+      window.__verifiedPowerBiToken = null;
+      window.setConnectionStatus('pbi', 'ok', 'Metrics: Connected', 'Using the Power BI access verified during sign-in.');
+      return verifiedToken;
+    }
     const isDataverseScope = String(scopeStr || '').includes('crm.dynamics.com');
     if (isPbiScope) window.setConnectionStatus('pbi', 'loading', 'Metrics: Token', 'Requesting a Power BI access token.');
     else if (isDataverseScope || String(scopeStr || '').includes('User.Read')) window.setConnectionStatus('auth', 'loading', 'Auth: Token', 'Requesting a Microsoft/Dataverse access token.');
@@ -3762,19 +3775,68 @@ body.card-format-dense .measure-label { display:none !important; }
     }
   };
 
-  window.login = function () {
-    window.setConnectionStatus('auth', 'loading', 'Auth: Signing in', 'Opening Microsoft sign-in.');
-    msalInstance
-      .loginPopup({ scopes: ["User.Read", "https://org23279050.crm.dynamics.com//user_impersonation"] })
-      .then(resp => window.handleMsalResponse(resp))
-      .catch(err => {
-        console.error(err);
-        window.setConnectionStatus('auth', 'error', 'Auth: Login failed', err.message || 'Microsoft sign-in failed.');
-        const errEl = document.getElementById('login-error');
-        errEl.innerHTML = `<i class="fas fa-exclamation-triangle"></i> Login Failed: ${err.message}`;
-        errEl.style.display = 'flex';
-        errEl.classList.remove('hidden');
+  window.showLoginConnectionError = function(message, allowRetry = true) {
+    const errEl = document.getElementById('login-error');
+    if (!errEl) return;
+    const retry = allowRetry ? ` <button type="button" class="btn btn-secondary" style="margin-left:auto;padding:.35rem .65rem;min-height:32px;" onclick="window.connectReportsAndOpenApp()">Connect Reports</button>` : '';
+    errEl.innerHTML = `<i class="fas fa-exclamation-triangle"></i><span style="flex:1;">${escapeHtmlSafe(message)}</span>${retry}`;
+    errEl.style.display = 'flex';
+    errEl.classList.remove('hidden');
+  };
+
+  window.connectReportsAndOpenApp = async function() {
+    const account = msalAccount || msalInstance.getAllAccounts()[0];
+    if (!account) {
+      window.showLoginConnectionError('Please sign in with Microsoft first.', false);
+      return;
+    }
+    const request = {
+      scopes: ["https://analysis.windows.net/powerbi/api/.default"],
+      account,
+      authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401"
+    };
+    window.setConnectionStatus('pbi', 'loading', 'Metrics: Verifying access', 'Checking Power BI permissions for the signed-in manager.');
+    try {
+      let tokenResponse;
+      try {
+        tokenResponse = await msalInstance.acquireTokenSilent(request);
+      } catch (silentErr) {
+        const message = String(silentErr?.message || silentErr || '');
+        const needsInteraction = silentErr instanceof msal.InteractionRequiredAuthError || /consent_required|interaction_required|login_required|AADSTS65001/i.test(message);
+        if (!needsInteraction) throw silentErr;
+        tokenResponse = await msalInstance.acquireTokenPopup({ ...request, prompt: 'consent' });
+      }
+      if (!tokenResponse?.accessToken) throw new Error('Microsoft did not return a Power BI access token.');
+      window.__verifiedPowerBiToken = tokenResponse.accessToken;
+      window.setConnectionStatus('pbi', 'ok', 'Metrics: Access verified', 'Power BI access was verified for the signed-in manager.');
+      const errEl = document.getElementById('login-error');
+      if (errEl) { errEl.style.display = 'none'; errEl.classList.add('hidden'); }
+      window.initializeApp();
+    } catch (err) {
+      console.error('Power BI access verification failed:', err);
+      window.setConnectionStatus('pbi', 'error', 'Metrics: Access required', err.message || 'Unable to verify Power BI access.');
+      window.showLoginConnectionError('Microsoft sign-in completed, but report access could not be verified. Select Connect Reports and accept the Microsoft permissions prompt.');
+    }
+  };
+
+  window.login = async function () {
+    window.setConnectionStatus('auth', 'loading', 'Auth: Signing in', 'Opening a fresh Microsoft sign-in.');
+    try {
+      const resp = await msalInstance.loginPopup({
+        scopes: ["User.Read", "https://org23279050.crm.dynamics.com//user_impersonation"],
+        prompt: "login"
       });
+      if (!resp?.account) throw new Error('Microsoft sign-in did not return an account.');
+      msalAccount = resp.account;
+      currentUserRepName = msalAccount.name;
+      msalInstance.setActiveAccount?.(msalAccount);
+      window.setConnectionStatus('auth', 'ok', 'Auth: Connected', `Signed in as ${msalAccount.username || msalAccount.name || 'current user'}.`);
+      await window.connectReportsAndOpenApp();
+    } catch (err) {
+      console.error(err);
+      window.setConnectionStatus('auth', 'error', 'Auth: Login failed', err.message || 'Microsoft sign-in failed.');
+      window.showLoginConnectionError(`Login failed: ${err.message || err}`, false);
+    }
   };
 
   window.logout = function () {
@@ -3834,27 +3896,19 @@ body.card-format-dense .measure-label { display:none !important; }
     fetchAllPbiDataInBackground(false);
   };
 
-  // ── Session Restore on Load ────────────────────────────────────────────────
+  // ── Mandatory Fresh Login on Every App Load ────────────────────────────────
   document.addEventListener('DOMContentLoaded', () => {
-    msalInstance.handleRedirectPromise().then(resp => {
-      if (resp && resp.account) {
-        window.handleMsalResponse(resp);
-      } else {
-        const accounts = msalInstance.getAllAccounts();
-        if (accounts.length > 0) {
-          msalAccount = accounts[0];
-          currentUserRepName = msalAccount.name;
-          window.initializeApp();
-        } else {
-          // Show Login
-          window.setConnectionStatus('auth', 'pending', 'Auth: Sign in', 'Sign in with Microsoft to continue.');
-          document.getElementById('login-overlay').style.display = 'flex';
-        }
-      }
-    }).catch(e => {
-       console.error(e);
-       document.getElementById('login-overlay').style.display = 'flex';
-    });
+    msalAccount = null;
+    currentUserRepName = null;
+    window.__verifiedPowerBiToken = null;
+    window.pbiCache = { loginData: null, avayaData: null, empName: null, period: null };
+    const overlay = document.getElementById('login-overlay');
+    const app = document.getElementById('main-app');
+    if (app) app.style.display = 'none';
+    if (overlay) overlay.style.display = 'flex';
+    window.setConnectionStatus('auth', 'pending', 'Auth: Fresh sign-in required', 'Sign in as the manager currently using the app.');
+    window.setConnectionStatus('pbi', 'idle', 'Metrics: Waiting for sign-in', 'Report access will be verified before the app opens.');
+    window.setConnectionStatus('archive', 'idle', 'Archive: Waiting for sign-in', 'Archive access will use the signed-in manager.');
   });
 
   // ── State ──────────────────────────────────────────────────────────────────
