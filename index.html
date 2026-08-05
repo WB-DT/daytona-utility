@@ -7774,5 +7774,184 @@ document.getElementById('script-modal').style.display='flex';
   window.ACT_HARQuickAccess={pages:pages,show:show,refresh:()=>updateFrame(true)};
 })();
 </script>
+
+<!-- ACT Expanded History Modal + 12-Month Fact Table History -->
+<style>
+  #act-expanded-history-modal { z-index: 9700; }
+  #act-expanded-history-modal .act-history-modal-window {
+    width: min(1180px, 96vw); height: min(860px, 92vh); max-width: 96vw; max-height: 92vh;
+    padding: 0; overflow: hidden; display: flex; flex-direction: column;
+  }
+  .act-history-modal-header { display:flex; align-items:center; justify-content:space-between; gap:.75rem; padding:.75rem 1rem; border-bottom:1px solid var(--border-color); background:var(--bg-header); }
+  .act-history-modal-title { display:flex; align-items:center; gap:.65rem; min-width:0; }
+  .act-history-modal-title i { color:var(--primary); }
+  .act-history-modal-subtitle { color:var(--text-muted); font-size:.72rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .act-history-modal-toolbar { display:flex; align-items:center; gap:.55rem; flex-wrap:wrap; padding:.65rem 1rem; border-bottom:1px solid var(--border-color); background:var(--bg-card); }
+  .act-history-modal-toolbar select { width:auto; min-width:210px; height:36px; }
+  .act-history-load-note { display:none; align-items:center; gap:.4rem; color:var(--accent-warning); font-size:.72rem; font-weight:800; }
+  .act-history-load-note.is-visible { display:inline-flex; }
+  #act-expanded-history-body { flex:1 1 auto; min-height:0; overflow:auto; padding:1rem; background:var(--bg-app); }
+  #act-expanded-history-launch { display:none; width:100%; margin:.45rem 0 0; justify-content:center; align-items:center; gap:.45rem; }
+  #act-expanded-history-launch.is-visible { display:flex; }
+  .act-fact-history-card { border:1px solid var(--border-color); border-left:4px solid var(--primary); border-radius:.7rem; background:var(--bg-card); margin-bottom:.7rem; padding:.75rem; box-shadow:var(--shadow); }
+  .act-fact-history-head { display:flex; justify-content:space-between; gap:.75rem; flex-wrap:wrap; margin-bottom:.45rem; }
+  .act-fact-history-type { font-weight:900; color:var(--text-main); }
+  .act-fact-history-date { color:var(--text-muted); font-size:.72rem; font-weight:700; }
+  .act-fact-history-note { white-space:pre-wrap; overflow-wrap:anywhere; font-size:.84rem; line-height:1.45; color:var(--text-main); }
+  .act-fact-history-meta { display:flex; flex-wrap:wrap; gap:.35rem; margin-top:.55rem; }
+  .act-fact-history-meta span { padding:2px 7px; border-radius:999px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-muted); font-size:.65rem; font-weight:750; }
+  @media(max-width:700px){ .act-history-modal-toolbar{align-items:stretch}.act-history-modal-toolbar select,.act-history-modal-toolbar button{width:100%} }
+</style>
+
+<div id="act-expanded-history-modal" class="modal-overlay" style="display:none;">
+  <div class="modal-content act-history-modal-window" role="dialog" aria-modal="true" aria-labelledby="act-expanded-history-title">
+    <div class="act-history-modal-header">
+      <div class="act-history-modal-title">
+        <i class="fas fa-clock-rotate-left"></i>
+        <div>
+          <div id="act-expanded-history-title" class="font-bold">Expanded Account History</div>
+          <div id="act-expanded-history-subtitle" class="act-history-modal-subtitle">Select an account to view history.</div>
+        </div>
+      </div>
+      <button type="button" class="btn-secondary" id="act-expanded-history-close" aria-label="Close expanded history"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="act-history-modal-toolbar">
+      <select id="act-expanded-history-source" aria-label="History source">
+        <option value="notes">Note History</option>
+        <option value="fact">Fact Table History (12 Months)</option>
+      </select>
+      <button type="button" class="btn-primary" id="act-expanded-history-load"><i class="fas fa-rotate"></i> Load Selected History</button>
+      <span id="act-expanded-history-load-note" class="act-history-load-note"><i class="fas fa-hourglass-half"></i> Fact history is requested per click and may take a short minute to load.</span>
+    </div>
+    <div id="act-expanded-history-body" class="custom-scrollbar"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+  const modal = $('act-expanded-history-modal');
+  const body = $('act-expanded-history-body');
+  const source = $('act-expanded-history-source');
+  const loadBtn = $('act-expanded-history-load');
+  const loadNote = $('act-expanded-history-load-note');
+  let factRequestSequence = 0;
+
+  function accountNumber(){
+    return String(window.currentSelectedRecord?.cr714_id || window.currentRecordId || '').trim();
+  }
+  function accountLabel(){
+    const rec = window.currentSelectedRecord || {};
+    return [rec.cr714_company || '', accountNumber()].filter(Boolean).join(' - ');
+  }
+  function state(icon, title, detail){
+    body.innerHTML = '<div class="history-feed-state"><i class="fas '+esc(icon)+'"></i><div><div class="font-bold">'+esc(title)+'</div>'+(detail?'<div class="text-[11px] mt-1">'+esc(detail)+'</div>':'')+'</div></div>';
+  }
+  function syncLoadMessage(){
+    loadNote.classList.toggle('is-visible', source.value === 'fact');
+  }
+  function renderNoteHistory(){
+    const existing = $('qb-notes-preview');
+    if(!existing){ state('fa-circle-exclamation','Note history is unavailable','The history feed could not be found.'); return; }
+    body.innerHTML = existing.innerHTML;
+  }
+  function dateText(value){
+    if(!value) return 'Date unavailable';
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? String(value) : d.toLocaleString();
+  }
+  function renderFactRows(rows, account, cutoff){
+    if(!rows.length){
+      state('fa-inbox','No Fact Table history found','No activity was returned for AccountNumber '+account+' in the last 12 months.');
+      return;
+    }
+    body.innerHTML = '<div class="text-xs text-muted mb-3 font-bold">'+rows.length+' Fact Table event'+(rows.length===1?'':'s')+' since '+esc(cutoff.toLocaleDateString())+'</div>' + rows.map(row => {
+      const type = row.cr714_activitytype || row.cr714_emailaction || row.cr714_effectiveaction || row.cr714_action || 'Activity';
+      const note = row.cr714_notetext || row.cr714_actionmessage || row.cr714_emailsubject || row.cr714_notetextraw || 'No detail was recorded.';
+      const date = row.cr714_activitydate || row.cr714_notedate || row.cr714_emaildate || row.createdon;
+      const chips = [
+        row.cr714_accountrep && 'Rep: '+row.cr714_accountrep,
+        row.cr714_sourcetype && 'Source: '+row.cr714_sourcetype,
+        row.cr714_effectiveaction && 'Action: '+row.cr714_effectiveaction,
+        row.cr714_emailstatus && 'Email: '+row.cr714_emailstatus,
+        row.cr714_effectiveopportunitytype && 'Opportunity: '+row.cr714_effectiveopportunitytype
+      ].filter(Boolean);
+      return '<article class="act-fact-history-card"><div class="act-fact-history-head"><div class="act-fact-history-type">'+esc(type)+'</div><div class="act-fact-history-date">'+esc(dateText(date))+'</div></div><div class="act-fact-history-note">'+esc(note)+'</div>'+(chips.length?'<div class="act-fact-history-meta">'+chips.map(x=>'<span>'+esc(x)+'</span>').join('')+'</div>':'')+'</article>';
+    }).join('');
+  }
+  async function loadFactHistory(){
+    const account = accountNumber();
+    if(!account){ state('fa-user-slash','Select an account first','Fact history requires the ACT customerID.'); return; }
+    const requestId = ++factRequestSequence;
+    loadBtn.disabled = true;
+    state('fa-spinner fa-spin','Loading Fact Table history','Searching AccountNumber for ACT customerID '+account+'. This may take a short minute.');
+    try{
+      const cutoff = new Date();
+      cutoff.setMonth(cutoff.getMonth() - 12);
+      const odataAccount = account.replace(/'/g, "''");
+      const filter = "cr714_accountnumber eq '"+odataAccount+"' and cr714_activitydate ge "+cutoff.toISOString();
+      const select = [
+        'cr714_dt_act_fctblid','cr714_accountnumber','cr714_activitydate','cr714_activitytype','cr714_notedate','cr714_notetext','cr714_notetextraw','cr714_actionmessage','cr714_action','cr714_effectiveaction','cr714_effectiveopportunitytype','cr714_accountrep','cr714_sourcetype','cr714_emailaction','cr714_emaildate','cr714_emailstatus','cr714_emailsubject','createdon'
+      ].join(',');
+      const token = await window.getToken('https://org23279050.crm.dynamics.com//user_impersonation', true);
+      const url = DATAVERSE_URL+'/'+ACT_FACT_ENTITY_SET+'?$select='+encodeURIComponent(select)+'&$filter='+encodeURIComponent(filter)+'&$orderby='+encodeURIComponent('cr714_activitydate desc')+'&$top=5000';
+      const response = await fetch(url, {headers:{'Authorization':'Bearer '+token,'Accept':'application/json','Prefer':'odata.maxpagesize=5000'}, cache:'no-store'});
+      if(!response.ok) throw new Error('Fact history request failed ('+response.status+').');
+      const payload = await response.json();
+      if(requestId !== factRequestSequence) return;
+      renderFactRows(Array.isArray(payload.value) ? payload.value : [], account, cutoff);
+    }catch(err){
+      console.error('ACT Fact Table history load failed:', err);
+      state('fa-triangle-exclamation','Unable to load Fact Table history',err?.message || 'The request did not complete. Please try again.');
+    }finally{
+      if(requestId === factRequestSequence) loadBtn.disabled = false;
+    }
+  }
+  async function loadSelected(){
+    syncLoadMessage();
+    if(source.value === 'fact') await loadFactHistory(); else renderNoteHistory();
+  }
+  function openModal(){
+    $('act-expanded-history-subtitle').textContent = accountLabel() || 'Select an account to view history.';
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    loadSelected();
+  }
+  function closeModal(){ modal.style.display='none'; document.body.style.overflow=''; factRequestSequence++; }
+
+  function ensureLaunchButton(){
+    const col = $('history-column');
+    if(!col || $('act-expanded-history-launch')) return;
+    const btn = document.createElement('button');
+    btn.type='button'; btn.id='act-expanded-history-launch'; btn.className='btn-secondary';
+    btn.innerHTML='<i class="fas fa-up-right-and-down-left-from-center"></i> Open Expanded History';
+    btn.addEventListener('click', openModal);
+    const tabs = col.querySelector('.act-right-hub-tabs');
+    if(tabs) tabs.insertAdjacentElement('afterend', btn); else col.prepend(btn);
+  }
+  function updateLaunchVisibility(){
+    ensureLaunchButton();
+    const btn = $('act-expanded-history-launch');
+    const active = document.querySelector('.act-right-hub-tab.active[data-act-right-section]');
+    const section = active?.getAttribute('data-act-right-section') || 'history';
+    if(btn) btn.classList.toggle('is-visible', section !== 'history');
+  }
+
+  source.addEventListener('change', syncLoadMessage);
+  loadBtn.addEventListener('click', loadSelected);
+  $('act-expanded-history-close').addEventListener('click', closeModal);
+  modal.addEventListener('click', e => { if(e.target === modal) closeModal(); });
+  document.addEventListener('keydown', e => { if(e.key === 'Escape' && modal.style.display === 'flex') closeModal(); });
+  document.addEventListener('click', e => { if(e.target.closest('.act-right-hub-tab')) setTimeout(updateLaunchVisibility, 0); });
+
+  const init = () => { ensureLaunchButton(); updateLaunchVisibility(); syncLoadMessage(); };
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, {once:true}); else init();
+  setInterval(updateLaunchVisibility, 850);
+  window.ACTExpandedHistory = { open: openModal, close: closeModal, loadFactHistory };
+})();
+</script>
+
 </body>
 </html>
