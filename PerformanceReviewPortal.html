@@ -2962,7 +2962,7 @@ select.styled-arrow-select { width: auto !important; min-width: 7.5rem; flex: 0 
 .kpi-duplicate-section-hidden,#summary-preview #metrics-container,#print-summary #metrics-container{display:none!important}
 </style>
 <meta name="application-name" content="Performance Review Submission Portal"/>
-<meta name="build" content="Corrected Production UI v1.18 - 2026-08-04"/>
+<meta name="build" content="Corrected Production UI v1.19 - 2026-08-04"/>
 
 <style id="production-ui-css">
 /* Consolidated production UI layer. Generated from the eight accepted UI passes. */
@@ -3905,17 +3905,22 @@ body.pass8-modal-open{overflow:hidden!important}
   window.ensureDocumentLibraries = async function(kind = 'all') {
     const needsPdf = kind === 'all' || kind === 'pdf';
     const needsDocx = kind === 'all' || kind === 'docx';
+    const jobs = [];
     if (needsPdf && typeof pdfjsLib === 'undefined') {
-      await window.loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js', 'pdfjsLib');
-      if (typeof pdfjsLib !== 'undefined') {
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
-      }
+      jobs.push(window.loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js', 'pdfjsLib').then(() => {
+        if (typeof pdfjsLib !== 'undefined') pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+      }));
     }
     if (needsDocx) {
-      if (typeof JSZip === 'undefined') await window.loadScriptOnce('https://unpkg.com/jszip/dist/jszip.min.js', 'JSZip');
-      if (typeof docx === 'undefined') await window.loadScriptOnce('https://unpkg.com/docx-preview/dist/docx-preview.min.js', 'docx');
-      if (typeof mammoth === 'undefined') await window.loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js', 'mammoth');
+      if (typeof JSZip === 'undefined') jobs.push(window.loadScriptOnce('https://unpkg.com/jszip/dist/jszip.min.js', 'JSZip'));
+      if (typeof docx === 'undefined') jobs.push(window.loadScriptOnce('https://unpkg.com/docx-preview/dist/docx-preview.min.js', 'docx'));
+      // Mammoth is only needed for KPI text extraction. Load it in parallel, but do not
+      // delay the visible side-by-side document while the extractor downloads.
+      if (typeof mammoth === 'undefined' && !window.__mammothWarmupPromise) {
+        window.__mammothWarmupPromise = window.loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js', 'mammoth').catch(err => { console.warn('Mammoth warmup failed:', err); return null; });
+      }
     }
+    await Promise.all(jobs);
     return true;
   };
   window.ensureTabulatorLibrary = async function() {
@@ -5701,7 +5706,7 @@ body.pass8-modal-open{overflow:hidden!important}
                       if (!bytes) throw new Error('Flow returned file content, but it was not valid base64.');
 
                       if (fileNameLower.endsWith('.pdf') || returnedExtension === 'pdf' || String(returnedContentType).toLowerCase().includes('pdf')) {
-                          await window.ensureDocumentLibraries('pdf');
+                          const pdfLibraryPromise = window.ensureDocumentLibraries('pdf');
                           // Feed raw blob to iframe for PDFs (bypasses SP blocks completely)
                           const blob = new Blob([bytes], { type: 'application/pdf' });
                           if (window.__historyObjectUrl) { try { URL.revokeObjectURL(window.__historyObjectUrl); } catch (_) {} }
@@ -5715,6 +5720,7 @@ body.pass8-modal-open{overflow:hidden!important}
                           if (iframeLoader) iframeLoader.style.display = 'none';
 
                           // Silent Background Parse
+                          await pdfLibraryPromise;
                           if (typeof pdfjsLib !== 'undefined') {
                               const loadingTask = pdfjsLib.getDocument({data: bytes});
                               loadingTask.promise.then(async function(pdf) {
@@ -5831,13 +5837,18 @@ body.pass8-modal-open{overflow:hidden!important}
               window.__currentComparisonFile = newestFile;
               window.__currentComparisonFileName = fileName;
               if (typeof window.enforceFlowOnlyViewer === 'function') window.enforceFlowOnlyViewer();
-              window.__pendingComparisonRender = async function() {
-                  return window.__binaryComparisonRender();
+              window.__comparisonRenderPromise = null;
+              window.__pendingComparisonRender = function() {
+                  if (window.__comparisonPreviewRendered) return Promise.resolve(true);
+                  if (!window.__comparisonRenderPromise) {
+                      window.__comparisonRenderPromise = Promise.resolve(window.__binaryComparisonRender()).finally(() => { window.__comparisonRenderPromise = null; });
+                  }
+                  return window.__comparisonRenderPromise;
               };
               if (iframeLoader) iframeLoader.style.display = 'none';
               // Parse the returned file immediately so the KPI Helper has data before the
               // side-by-side viewer is opened. Rendering remains reusable when the modal opens.
-              Promise.resolve(window.__binaryComparisonRender())
+              Promise.resolve(window.__pendingComparisonRender())
                 .then(() => {
                     window.__comparisonPreviewRendered = true;
                     window.dispatchEvent(new CustomEvent('previous-review-file-processed', { detail: { fileName } }));
@@ -10458,7 +10469,7 @@ const importer=document.getElementById('manual-report-importer');if(importer){im
 // One printing path for draft and submitted review.
 const originalPrepare=window.preparePrintPreview||preparePrintPreview;window.preparePrintPreview=async conf=>window.preparePortalPrint(conf);try{preparePrintPreview=window.preparePrintPreview}catch(_){}
 // Release report data, grids, pending previews, object URLs, and timers.
-window.cleanupReviewResources=function({clearManual=false}={}){window.__portalRequestGeneration=(window.__portalRequestGeneration||0)+1;window.__portalFetchControllers?.forEach(c=>c.abort());window.__portalFetchControllers?.clear();['login','avaya'].forEach(type=>{const t=window[`table_${type}`];if(t&&typeof t.destroy==='function')try{t.destroy()}catch(_){}window[`table_${type}`]=null;});if(window.pbiCache){window.pbiCache.loginData=null;window.pbiCache.avayaData=null;window.pbiCache.empName=null;window.pbiCache.period=null;}clearTimeout(window.__panel1ArchiveLockFailsafe);clearTimeout(window.metricRenderTimer);clearTimeout(window.assistantGuideTimer);const iframe=document.getElementById('comparison-iframe');if(iframe){iframe.src='about:blank';iframe.removeAttribute('srcdoc');}document.getElementById('comparison-docx')?.remove();window.__binaryComparisonRender=null;window.__pendingComparisonRender=null;window.__comparisonPreviewRendered=false;window.__currentComparisonFile=null;window.__currentComparisonFileName='';if(clearManual)window.clearManualPbiReports();};
+window.cleanupReviewResources=function({clearManual=false}={}){window.__portalRequestGeneration=(window.__portalRequestGeneration||0)+1;window.__portalFetchControllers?.forEach(c=>c.abort());window.__portalFetchControllers?.clear();['login','avaya'].forEach(type=>{const t=window[`table_${type}`];if(t&&typeof t.destroy==='function')try{t.destroy()}catch(_){}window[`table_${type}`]=null;});if(window.pbiCache){window.pbiCache.loginData=null;window.pbiCache.avayaData=null;window.pbiCache.empName=null;window.pbiCache.period=null;}clearTimeout(window.__panel1ArchiveLockFailsafe);clearTimeout(window.metricRenderTimer);clearTimeout(window.assistantGuideTimer);const iframe=document.getElementById('comparison-iframe');if(iframe){iframe.src='about:blank';iframe.removeAttribute('srcdoc');}document.getElementById('comparison-docx')?.remove();window.__binaryComparisonRender=null;window.__comparisonRenderPromise=null;window.__pendingComparisonRender=null;window.__comparisonPreviewRendered=false;window.__currentComparisonFile=null;window.__currentComparisonFileName='';if(clearManual)window.clearManualPbiReports();};
 // Abort fetches on review-context changes and ignore stale report completion state.
 if(!window.__fetchLifecycleInstalled){window.__fetchLifecycleInstalled=true;window.__portalFetchControllers=new Set();const nativeFetch=window.fetch.bind(window);window.fetch=(input,init={})=>{if(init.signal)return nativeFetch(input,init);const c=new AbortController();window.__portalFetchControllers.add(c);return nativeFetch(input,{...init,signal:c.signal}).finally(()=>window.__portalFetchControllers.delete(c));};}
 ['employee-name','review-period'].forEach(id=>document.getElementById(id)?.addEventListener('change',()=>{window.cleanupReviewResources({clearManual:false});},{capture:true}));
@@ -11967,6 +11978,26 @@ html.dark #page3-stable-shell{background:#0b1220}
   window.requestFastMonthWorkspaceRender=requestFastRender;
   ['previous-review-parsed','previous-review-file-processed','kpi-flow-data-ready'].forEach(name=>window.addEventListener(name,()=>requestFastRender(true),{passive:true}));
   document.addEventListener('change',event=>{if(['employee-name','review-period','department','review-type'].includes(event.target?.id))requestFastRender(true)},true);
+})();
+</script>
+
+
+<script id="side-by-side-fast-open-v119">
+(function(){
+  if(window.__sideBySideFastOpenV119)return;window.__sideBySideFastOpenV119=true;
+  function prewarm(){
+    if(window.__viewerPrewarmStarted)return;window.__viewerPrewarmStarted=true;
+    Promise.allSettled([
+      window.ensureDocumentLibraries?.('pdf'),
+      window.ensureDocumentLibraries?.('docx')
+    ]).then(()=>{window.__viewerPrewarmReady=true});
+  }
+  function schedulePrewarm(){
+    if('requestIdleCallback' in window)requestIdleCallback(prewarm,{timeout:750});
+    else setTimeout(prewarm,150);
+  }
+  document.addEventListener('DOMContentLoaded',schedulePrewarm,{once:true});
+  window.addEventListener('previous-review-file-processed',()=>{window.__comparisonPreviewRendered=true},{passive:true});
 })();
 </script>
 
