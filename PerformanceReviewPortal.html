@@ -2962,7 +2962,7 @@ select.styled-arrow-select { width: auto !important; min-width: 7.5rem; flex: 0 
 .kpi-duplicate-section-hidden,#summary-preview #metrics-container,#print-summary #metrics-container{display:none!important}
 </style>
 <meta name="application-name" content="Performance Review Submission Portal"/>
-<meta name="build" content="Best Restored Production v1.25 - 2026-08-04"/>
+<meta name="build" content="Best Restored Production v1.27 - 2026-08-04"/>
 
 <style id="production-ui-css">
 /* Consolidated production UI layer. Generated from the eight accepted UI passes. */
@@ -5874,14 +5874,10 @@ body.pass8-modal-open{overflow:hidden!important}
                   return window.__comparisonRenderPromise;
               };
               if (iframeLoader) iframeLoader.style.display = 'none';
-              // Parse the returned file immediately so the KPI Helper has data before the
-              // side-by-side viewer is opened. Rendering remains reusable when the modal opens.
-              Promise.resolve(window.__pendingComparisonRender())
-                .then(() => {
-                    window.__comparisonPreviewRendered = true;
-                    window.dispatchEvent(new CustomEvent('previous-review-file-processed', { detail: { fileName } }));
-                })
-                .catch(err => console.error('Background previous-review extraction failed:', err));
+              // v1.26: keep binary extraction lazy. Running DOCX/PDF extraction here competed with
+              // Page 2 KPI construction on the main thread and could hard-freeze the browser.
+              // The existing modal-open path calls runPendingComparisonPreview() on demand.
+              window.__comparisonPreviewRendered = false;
               if (document.getElementById('comparison-modal')?.classList.contains('open')) {
                   window.runPendingComparisonPreview();
               }
@@ -12005,7 +12001,8 @@ html.dark #page3-stable-shell{background:#0b1220}
     if('requestIdleCallback' in window)requestIdleCallback(prewarm,{timeout:750});
     else setTimeout(prewarm,150);
   }
-  document.addEventListener('DOMContentLoaded',schedulePrewarm,{once:true});
+  // v1.26: no eager PDF+DOCX parser prewarm; avoid competing with Page 2 generation.
+  window.__viewerPrewarmStarted=true;
   window.addEventListener('previous-review-file-processed',()=>{window.__comparisonPreviewRendered=true},{passive:true});
 })();
 </script>
@@ -12105,6 +12102,107 @@ html.dark #page3-stable-shell{background:#0b1220}
   };
   try{renderCachedReport=window.renderCachedReport}catch(_){}
  }
+})();
+</script>
+<style id="side-by-side-freeze-repair-v126-css">
+body.comparison-rendering #month-kpi-workspace{content-visibility:auto;contain:layout paint;}
+body.comparison-rendering #comparison-modal{cursor:progress;}
+</style>
+<script id="side-by-side-freeze-repair-v126-js">
+(function(){
+ if(window.__sideBySideFreezeRepairV126)return;window.__sideBySideFreezeRepairV126=true;
+ let flight=null;
+ const originalRun=window.runPendingComparisonPreview;
+ window.runPendingComparisonPreview=function(){
+  if(window.__comparisonPreviewRendered)return Promise.resolve(true);
+  if(flight)return flight;
+  if(typeof window.__pendingComparisonRender!=='function')return Promise.resolve(false);
+  const loader=document.getElementById('iframe-loader');
+  if(loader)loader.style.display='flex';
+  document.body.classList.add('comparison-rendering');
+  flight=new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))
+   .then(()=>window.__pendingComparisonRender())
+   .then(result=>{window.__comparisonPreviewRendered=true;return result})
+   .catch(err=>{console.error('On-demand comparison render failed:',err);throw err})
+   .finally(()=>{flight=null;document.body.classList.remove('comparison-rendering');if(loader)loader.style.display='none'});
+  return flight;
+ };
+ try{runPendingComparisonPreview=window.runPendingComparisonPreview}catch(_){}
+})();
+</script>
+<style id="review-data-index-v127-css">
+/* Uniform indexed-state treatment across header, Page 2, and confirmation. */
+.review-index-pill{display:inline-flex;align-items:center;gap:.38rem;min-height:var(--nav-control-h,36px);padding:.38rem .58rem;border:1px solid var(--border);border-radius:var(--nav-radius,12px);background:var(--bg-card);color:var(--text-muted);font-size:.7rem;font-weight:850;line-height:1.15;white-space:nowrap}
+.review-index-pill .dot{width:8px;height:8px;border-radius:50%;background:var(--gray-400);box-shadow:0 0 0 3px rgba(148,163,184,.14)}
+.review-index-pill[data-state="loading"]{color:var(--text-brand);border-color:var(--border-accent);background:var(--bg-accent)}
+.review-index-pill[data-state="loading"] .dot{background:var(--brand-light)}
+.review-index-pill[data-state="ready"]{color:var(--text-success);border-color:var(--border-success);background:var(--bg-success-light)}
+.review-index-pill[data-state="ready"] .dot{background:var(--success)}
+.review-index-pill[data-state="warning"]{color:var(--text-warning);border-color:var(--border-warning);background:var(--bg-warning-light)}
+.review-index-pill[data-state="warning"] .dot{background:var(--warning)}
+.review-index-source{display:flex;align-items:center;gap:.45rem;margin:.45rem 0 0;padding:.48rem .62rem;border:1px solid var(--border);border-radius:9px;background:var(--bg-table-alt);color:var(--text-muted);font-size:.72rem;font-weight:750}
+.review-index-source strong{color:var(--text-brand)}
+@media(max-width:760px){.review-index-pill{flex:1 1 9rem;justify-content:center;white-space:normal;text-align:center}}
+@media print{.review-index-pill,.review-index-source{display:none!important}}
+</style>
+<script id="review-data-index-v127-js">
+(function(){
+ 'use strict';
+ if(window.__reviewDataIndexV127)return;window.__reviewDataIndexV127=true;
+ const DB='PerformanceReviewPortalIndex',STORE='reviewIndexes',VERSION=1,SCHEMA=1,TTL=1000*60*60*24*30;
+ const clean=v=>String(v??'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+ const norm=v=>clean(v).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+ const clone=v=>{try{return structuredClone(v)}catch(_){try{return JSON.parse(JSON.stringify(v))}catch(__){return null}}};
+ const selectedText=id=>{const e=document.getElementById(id);return clean(e?.selectedOptions?.[0]?.textContent||e?.value)};
+ const identity=()=>({
+  account:clean(window.msalAccount?.username||window.msalAccount?.homeAccountId||window.currentUserRepName||'session'),
+  employeeId:clean(document.getElementById('employee-id')?.value),employeeName:selectedText('employee-name'),
+  period:clean(document.getElementById('review-period')?.value||selectedText('review-period')),
+  fileName:clean(document.getElementById('parsed-file-name')?.textContent||window.previousReviewSnapshot?.fileName)
+ });
+ const keyFrom=x=>[x.account,x.employeeId||x.employeeName,x.period,x.fileName].map(norm).join('|');
+ const store=window.reviewStore={schemaVersion:SCHEMA,priorReviewIndex:null,currentReview:{fields:{},metrics:{},ratings:{},feedback:{}},mappings:{},dirtyFields:new Set(),revision:0,summaryDirty:true,indexKey:'',indexStatus:'idle'};
+ window.reviewStore=store;
+ function emit(path,value,source='system'){store.revision++;store.summaryDirty=true;window.dispatchEvent(new CustomEvent('review-store-changed',{detail:{path,value,source,revision:store.revision}}))}
+ function setPath(obj,path,value){const parts=String(path).split('.');let p=obj;parts.slice(0,-1).forEach(k=>p=p[k]||(p[k]={}));p[parts.at(-1)]=value}
+ window.updateReviewField=function(path,value,source='user'){setPath(store.currentReview,path,value);if(source==='user')store.dirtyFields.add(path);emit(path,value,source);return value};
+ function setStatus(state,label,detail){store.indexStatus=state;let el=document.getElementById('review-index-status');if(!el){const hub=document.getElementById('connection-hub');if(hub){el=document.createElement('span');el.id='review-index-status';el.className='review-index-pill';el.innerHTML='<span class="dot"></span><span class="label"></span>';hub.appendChild(el)}}if(el){el.dataset.state=state;el.querySelector('.label').textContent=label;el.title=detail||label}}
+ function openDb(){return new Promise((resolve,reject)=>{if(!('indexedDB'in window))return reject(new Error('IndexedDB unavailable'));const r=indexedDB.open(DB,VERSION);r.onupgradeneeded=()=>{const db=r.result;if(!db.objectStoreNames.contains(STORE)){const os=db.createObjectStore(STORE,{keyPath:'key'});os.createIndex('updatedAt','updatedAt')}};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}
+ async function dbGet(key){const db=await openDb();return new Promise((resolve,reject)=>{const t=db.transaction(STORE,'readonly'),r=t.objectStore(STORE).get(key);r.onsuccess=()=>resolve(r.result||null);r.onerror=()=>reject(r.error);t.oncomplete=()=>db.close()})}
+ async function dbPut(record){const db=await openDb();return new Promise((resolve,reject)=>{const t=db.transaction(STORE,'readwrite');t.objectStore(STORE).put(record);t.oncomplete=()=>{db.close();resolve(record)};t.onerror=()=>reject(t.error)})}
+ async function dbClear(){const db=await openDb();return new Promise((resolve,reject)=>{const t=db.transaction(STORE,'readwrite');t.objectStore(STORE).clear();t.oncomplete=()=>{db.close();resolve(true)};t.onerror=()=>reject(t.error)})}
+ window.clearReviewDataIndex=()=>dbClear().catch(()=>false);
+ function normalizedPrior(){
+  const snapshot=clone(window.previousReviewSnapshot)||{fileName:'',metrics:{}};
+  const rows=(window.__parsedKpiRows?.length?window.__parsedKpiRows:window.__kpiFlowHelperRows)||[];
+  const metrics={};Object.entries(snapshot.metrics||{}).forEach(([k,v])=>{if(clean(k))metrics[clean(k)]=v});rows.forEach(x=>{const k=clean(x?.label),v=x?.value;if(k&&!Object.keys(metrics).some(m=>norm(m)===norm(k)))metrics[k]=v});
+  return {schemaVersion:SCHEMA,employee:{id:identity().employeeId,name:identity().employeeName},review:{period:identity().period,type:clean(document.getElementById('review-type')?.value)},metrics,rows:clone(rows)||[],ratings:clone(snapshot.ratings)||{},feedback:clone(snapshot.feedback)||{},source:{fileName:identity().fileName||snapshot.fileName||'',indexedAt:new Date().toISOString()}};
+ }
+ function applyIndex(index,source='cache'){
+  if(!index)return false;store.priorReviewIndex=clone(index);window.previousReviewSnapshot={...(window.previousReviewSnapshot||{}),fileName:index.source?.fileName||'',metrics:clone(index.metrics)||{},ratings:clone(index.ratings)||{},feedback:clone(index.feedback)||{}};
+  window.__parsedKpiRows=clone(index.rows)||Object.entries(index.metrics||{}).map(([label,value])=>({label,value}));
+  window.__parsedKpiLabels=window.__parsedKpiRows.map(x=>x.label);window.__kpiFlowHelperRows=clone(window.__parsedKpiRows);
+  const info=document.getElementById('parsed-file-info');if(info)info.style.display='flex';const name=document.getElementById('parsed-file-name');if(name&&index.source?.fileName)name.textContent=index.source.fileName;
+  setStatus('ready',source==='cache'?'Index: Ready':'Index: Updated',`${Object.keys(index.metrics||{}).length} prior-review fields are available throughout the app.`);
+  addSourceNote(source,index);window.dispatchEvent(new CustomEvent('previous-review-index-ready',{detail:{source,index:clone(index)}}));window.dispatchEvent(new CustomEvent('previous-review-parsed',{detail:{source:'index'}}));emit('priorReviewIndex',index,source);return true;
+ }
+ function addSourceNote(source,index){const host=document.getElementById('month-kpi-workspace');if(!host)return;let n=document.getElementById('review-index-source');if(!n){n=document.createElement('div');n.id='review-index-source';n.className='review-index-source';host.querySelector('.month-kpi-head')?.after(n)}n.innerHTML=`<i class="fas fa-database"></i><span><strong>Indexed review data:</strong> ${Object.keys(index.metrics||{}).length} fields · ${source==='cache'?'restored from local index':'updated from source document'}</span>`}
+ let lookupFlight=null;
+ async function loadIndex(){const x=identity(),key=keyFrom(x);if(!x.period||!(x.employeeId||x.employeeName)||!x.fileName)return false;if(store.indexKey===key&&store.priorReviewIndex)return true;if(lookupFlight)return lookupFlight;setStatus('loading','Index: Checking','Checking the reusable prior-review data index.');lookupFlight=dbGet(key).then(r=>{if(!r||r.schemaVersion!==SCHEMA||Date.now()-r.updatedAt>TTL){setStatus('warning','Index: Source needed','No current index exists for this prior review.');return false}store.indexKey=key;return applyIndex(r.index,'cache')}).catch(e=>{console.warn('Review index lookup skipped:',e);setStatus('warning','Index: Session only','Browser storage is unavailable; the app will use session memory.');return false}).finally(()=>lookupFlight=null);return lookupFlight}
+ async function saveIndex(){const index=normalizedPrior(),x=identity(),key=keyFrom({...x,fileName:index.source.fileName});if(!x.period||!(x.employeeId||x.employeeName)||!index.source.fileName||!Object.keys(index.metrics||{}).length)return false;store.indexKey=key;store.priorReviewIndex=clone(index);try{await dbPut({key,schemaVersion:SCHEMA,account:x.account,employeeId:x.employeeId,employeeName:x.employeeName,period:x.period,fileName:index.source.fileName,updatedAt:Date.now(),index});applyIndex(index,'document');return true}catch(e){console.warn('Review index persistence skipped:',e);applyIndex(index,'memory');return false}}
+ const debouncedLookup=window.__debounce?window.__debounce(loadIndex,100):(()=>{let t;return()=>{clearTimeout(t);t=setTimeout(loadIndex,100)}})();
+ ['employee-name','employee-id','review-period'].forEach(id=>document.addEventListener('change',e=>{if(e.target?.id===id){store.priorReviewIndex=null;store.indexKey='';debouncedLookup()}},true));
+ window.addEventListener('previous-review-file-processed',()=>queueMicrotask(saveIndex),{passive:true});
+ window.addEventListener('previous-review-parsed',e=>{if(e.detail?.source!=='index')queueMicrotask(saveIndex)},{passive:true});
+ const observerStart=()=>{const n=document.getElementById('parsed-file-name');if(n)new MutationObserver(debouncedLookup).observe(n,{childList:true,characterData:true,subtree:true})};
+ function classify(el){if(el.matches('#eom-opportunities-month,#eom-opportunities-year,#eom-best-practices,#eom-smart-plan,#eom-employee-voice,#ext-reviewer-comments,#ext-action-plan,#ext-employee-voice'))return'feedback';if(el.matches('.rating-select,.rating-status-select'))return'ratings';if(el.id?.startsWith('m-')||el.closest('#month-kpi-workspace'))return'metrics';return'fields'}
+ function bindFields(){document.addEventListener('input',e=>{const el=e.target;if(!el?.id||!el.matches('input,textarea,select'))return;const group=classify(el);window.updateReviewField(`${group}.${el.id}`,el.type==='checkbox'?el.checked:el.value,'user')},true);document.addEventListener('change',e=>{const el=e.target;if(!el?.id||!el.matches('input,textarea,select'))return;const group=classify(el);window.updateReviewField(`${group}.${el.id}`,el.type==='checkbox'?el.checked:el.value,'user')},true)}
+ function seedCurrent(){document.querySelectorAll('#main-app input[id],#main-app select[id],#main-app textarea[id]').forEach(el=>setPath(store.currentReview,`${classify(el)}.${el.id}`,el.type==='checkbox'?el.checked:el.value))}
+ const oldBuild=window.buildSummaryPreview;if(typeof oldBuild==='function'){window.buildSummaryPreview=function(){if(!store.summaryDirty&&document.getElementById('summary-preview')?.children.length)return true;const r=oldBuild.apply(this,arguments);store.summaryDirty=false;return r};try{buildSummaryPreview=window.buildSummaryPreview}catch(_){}}
+ const oldStart=window.startOver;if(typeof oldStart==='function'){window.startOver=function(){store.priorReviewIndex=null;store.currentReview={fields:{},metrics:{},ratings:{},feedback:{}};store.mappings={};store.dirtyFields.clear();store.revision++;store.summaryDirty=true;store.indexKey='';setStatus('idle','Index: Idle','Select an employee and review period.');return oldStart.apply(this,arguments)};try{startOver=window.startOver}catch(_){}}
+ const oldReset=window.resetLocalCache;if(typeof oldReset==='function'){window.resetLocalCache=function(){window.clearReviewDataIndex();return oldReset.apply(this,arguments)}}
+ document.addEventListener('DOMContentLoaded',()=>{setStatus('idle','Index: Idle','Select an employee and review period.');bindFields();seedCurrent();observerStart();setTimeout(loadIndex,250)},{once:true});
+ window.reviewIndexApi={load:loadIndex,save:saveIndex,apply:applyIndex,clear:window.clearReviewDataIndex,get identity(){return identity()},get state(){return store}};
 })();
 </script>
 </body>
