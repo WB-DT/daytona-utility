@@ -12087,5 +12087,241 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
  if(!el('standalone-eom-print-root')){const r=document.createElement('div');r.id='standalone-eom-print-root';r.setAttribute('aria-hidden','true');document.body.appendChild(r)}
 })();
 </script>
+
+
+<!-- EOQ Format Parser + Print Compatibility Pass v28 -->
+<style id="eoq-format-compatibility-v28-css">
+  .v27-doc.eoq-print .v27-title { letter-spacing: .02em; }
+  .v27-doc.eoq-print .eoq-period-band {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+    margin: .08in 0 .12in; border: 1px solid #111;
+  }
+  .v27-doc.eoq-print .eoq-period-band > div { padding: .07in .1in; font-weight: 850; }
+  .v27-doc.eoq-print .eoq-period-band > div + div { border-left: 1px solid #111; }
+  .v27-doc.eoq-print .eoq-period-label { display:block; font-size: 7.2pt; text-transform:uppercase; color:#555; }
+  .v27-doc.eoq-print .eoq-period-value { display:block; margin-top:2px; font-size:9pt; color:#111; }
+  @media print {
+    .v27-doc.eoq-print .eoq-period-band { break-inside: avoid; page-break-inside: avoid; }
+  }
+</style>
+<script id="eoq-format-compatibility-v28-js">
+(() => {
+  'use strict';
+  if (window.__eoqFormatCompatibilityV28) return;
+  window.__eoqFormatCompatibilityV28 = true;
+
+  const clean = value => String(value == null ? '' : value)
+    .replace(/[\u00a0\u2007\u202f]/g, ' ')
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/[‐‑‒–—]/g, '-')
+    .replace(/\s+/g, ' ').trim();
+  const esc = value => clean(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const el = id => document.getElementById(id);
+  const value = id => {
+    const node = el(id); if (!node) return '';
+    if (node.matches?.('select')) return clean(node.selectedOptions?.[0]?.textContent || node.value);
+    return clean(node.value ?? node.textContent);
+  };
+  const first = (...ids) => { for (const id of ids) { const v=value(id); if(v) return v; } return ''; };
+  const currentType = () => clean(window.currentReviewType || el('review-type')?.value).toLowerCase();
+  const isEoq = () => currentType() === 'eoq';
+
+  const EOQ_ALIASES = {
+    'mentoring hours':['mentoring hours','mentor hours'],
+    'trainings':['trainings','training sessions','training'],
+    'percent of agents mentored':['percent of agents mentored','agents mentored','% of agents mentored'],
+    'supervisor meeting participation':['supervisor meeting participation','supervisor meetings','meeting participation'],
+    'availability per shift':['availability per shift','availability'],
+    'total working days days worked average hours':['total working days days worked average hours','working days days worked average hours','days worked average hours'],
+    'aux accuracy':['aux accuracy','aux'],
+    'average break 30 minutes':['average break 30 minutes','average break','break 30 minutes'],
+    'average lunch 60 minutes':['average lunch 60 minutes','average lunch','lunch 60 minutes'],
+    'average personal 10 minutes':['average personal 10 minutes','average personal','personal 10 minutes']
+  };
+  const canonical = label => {
+    const k=clean(label).toLowerCase().replace(/%/g,' percent ').replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim();
+    for (const [name, aliases] of Object.entries(EOQ_ALIASES)) {
+      if (aliases.some(a => k === a || k.includes(a) || a.includes(k))) return name;
+    }
+    return k;
+  };
+  const valid = v => !!clean(v) && !/^(?:-|—|n\/?a|na|null|undefined)$/i.test(clean(v));
+  const arrowValue = text => {
+    const t=clean(text); const m=t.match(/([↑↓↔])?\s*([^|;]{1,90})/);
+    return m ? clean(`${m[1]||''} ${m[2]||''}`) : t;
+  };
+
+  function flattenStrings(input, output=[], seen=new WeakSet()) {
+    if (input == null) return output;
+    if (typeof input === 'string' || typeof input === 'number') { const t=clean(input); if(t) output.push(t); return output; }
+    if (typeof input !== 'object') return output;
+    if (seen.has(input)) return output; seen.add(input);
+    if (Array.isArray(input)) input.forEach(x=>flattenStrings(x,output,seen));
+    else Object.entries(input).forEach(([k,v])=>{ if(!/data:image|font|style|html/i.test(k)) flattenStrings(v,output,seen); });
+    return output;
+  }
+
+  function parseEoqText(input) {
+    const strings=Array.isArray(input) ? input.map(clean).filter(Boolean) : flattenStrings(input);
+    const text=clean(strings.join(' | '));
+    const signature=/end of quarter\s*(?:&|and)?\s*performance action plan|quarter over quarter|last quarter.*this quarter/i.test(text);
+    if(!signature) return null;
+    const lower=strings.map(x=>x.toLowerCase());
+    const lastIndex=lower.findIndex(x=>/\blast quarter\b/.test(x));
+    const thisIndex=lower.findIndex((x,i)=>i>lastIndex && /\bthis quarter\b/.test(x));
+    const stopIndex=lower.findIndex((x,i)=>i>thisIndex && /last quarter daily sales|opportunit(?:y|ies)|best practices|action plan/i.test(x));
+    const section=(a,b)=>strings.slice(Math.max(0,a+1), b>0?b:strings.length);
+    const headers=Object.keys(EOQ_ALIASES);
+    function collect(segment){
+      const map={};
+      segment.forEach((token,i)=>{
+        const c=canonical(token); if(!headers.includes(c) || map[c]) return;
+        const candidates=segment.slice(i+1,i+7).filter(x=>valid(x) && !headers.includes(canonical(x)) && !/^(last|this) quarter$/i.test(x));
+        if(candidates.length) map[c]=arrowValue(candidates.join(' '));
+      });
+      return map;
+    }
+    const last=collect(section(lastIndex,thisIndex));
+    const current=collect(section(thisIndex,stopIndex));
+    const pairs=[];
+    headers.forEach(name=>{
+      if(valid(last[name])) pairs.push({label:name,value:last[name],period:'prior-quarter',source:'EOQ example format'});
+      if(valid(current[name])) pairs.push({label:name,value:current[name],period:'current-quarter',source:'EOQ example format'});
+    });
+    const sales={prior:[],current:[]};
+    const monthSale=/\b(january|february|march|april|may|june|july|august|september|october|november|december)\s*:\s*\$?\s*([0-9][0-9,]*(?:\.\d{1,2})?)/ig;
+    let m; while((m=monthSale.exec(text))){
+      const month=m[1], row={month,value:m[2]};
+      (/^(january|february|march|april|may|june)$/i.test(month) && sales.prior.length<3 ? sales.prior : sales.current).push(row);
+    }
+    return {format:'eoq-quarter-over-quarter',reviewType:'eoq',pairs,lastQuarter:last,thisQuarter:current,sales,
+      diagnostics:{version:'v28-eoq',formatMatched:true,pairsFound:pairs.length,headings:['LAST QUARTER','THIS QUARTER'],warnings:pairs.length?[]:['EOQ document recognized, but KPI values require manual review.']}};
+  }
+  window.parseEoqFormatText=parseEoqText;
+
+  function mergeEoq(result, eoQ) {
+    if(!eoQ) return result;
+    const out=(result && typeof result==='object') ? result : {};
+    const existing=Array.isArray(out.pairs)?out.pairs:[];
+    const token=x=>`${canonical(x.label)}|${x.period||''}`;
+    const seen=new Set(existing.map(token));
+    eoQ.pairs.forEach(p=>{if(!seen.has(token(p))){existing.push(p);seen.add(token(p));}});
+    out.pairs=existing; out.reviewType='eoq'; out.detectedFormat=eoQ.format;
+    out.eoqSnapshot={lastQuarter:eoQ.lastQuarter,thisQuarter:eoQ.thisQuarter,sales:eoQ.sales};
+    out.parseDiagnostics={...(out.parseDiagnostics||{}),...eoQ.diagnostics,pairsFound:existing.length};
+    window.__lastEoqParseResult=out;
+    return out;
+  }
+
+  function installParserWrapper(){
+    const original=window.extractPdfTableCells;
+    if(typeof original!=='function' || original.__eoqV28) return false;
+    const wrapped=async function(){
+      const result=await original.apply(this,arguments);
+      const eoQ=parseEoqText(result) || parseEoqText(arguments[0]);
+      const merged=mergeEoq(result,eoQ);
+      if(eoQ){
+        window.dispatchEvent(new CustomEvent('previous-review-parser-diagnostics',{detail:merged.parseDiagnostics}));
+        window.dispatchEvent(new CustomEvent('previous-review-eoq-parsed',{detail:merged}));
+      }
+      return merged;
+    };
+    wrapped.__eoqV28=true; wrapped.__original=original; window.extractPdfTableCells=wrapped; return true;
+  }
+  if(!installParserWrapper()){
+    let attempts=0; const timer=setInterval(()=>{attempts++;if(installParserWrapper()||attempts>60)clearInterval(timer)},100);
+  }
+
+  function quarterName(offset=0){
+    const raw=first('review-date','date','reviewDate'); const d=raw?new Date(raw):new Date();
+    const date=isNaN(d)?new Date():d; let q=Math.floor(date.getMonth()/3)+1+offset, y=date.getFullYear();
+    while(q<1){q+=4;y--;} while(q>4){q-=4;y++;} return `Q${q} ${y}`;
+  }
+  function patchEoqPrint(root){
+    if(!root || !isEoq()) return root;
+    const doc=root.querySelector('.v27-doc'); if(!doc) return root;
+    doc.classList.add('eoq-print');
+    const title=doc.querySelector('.v27-title'); if(title) title.textContent='End of Quarter & Performance Action Plan';
+    doc.querySelectorAll('*').forEach(node=>{
+      if(node.children.length) return;
+      node.textContent=node.textContent
+        .replace(/monthly performance/gi,'quarterly performance')
+        .replace(/this month/gi,'this quarter')
+        .replace(/last month/gi,'last quarter')
+        .replace(/month over month/gi,'quarter over quarter');
+    });
+    const meta=doc.querySelector('.v27-meta');
+    if(meta && !doc.querySelector('.eoq-period-band')){
+      const band=document.createElement('div'); band.className='eoq-period-band';
+      band.innerHTML=`<div><span class="eoq-period-label">Last Quarter</span><span class="eoq-period-value">${esc(quarterName(-1))}</span></div><div><span class="eoq-period-label">This Quarter</span><span class="eoq-period-value">${esc(quarterName(0))}</span></div>`;
+      meta.insertAdjacentElement('afterend',band);
+    }
+    const statement=[...doc.querySelectorAll('.v27-statement')][0];
+    if(statement) statement.innerHTML='<strong>Statement of Understanding:</strong> I understand this is not corrective action; this is an overview of my quarterly performance based on set expectations. I agree to work with management to improve on any performance opportunities, using the action plan outlined in this document.';
+    return root;
+  }
+
+  function installPrintOverride(){
+    const originalBuild=window.buildStandaloneEomPrint;
+    if(typeof originalBuild!=='function' || originalBuild.__eoqV28) return false;
+    const build=function(conf='DRAFT'){ return patchEoqPrint(originalBuild(conf)); };
+    build.__eoqV28=true; build.__original=originalBuild;
+    window.buildStandaloneEomPrint=build;
+    window.preparePrintPreview=function(conf='DRAFT'){
+      window.buildSummaryPreview?.();
+      if(!build(conf)){window.showError?.(`Unable to create the ${isEoq()?'EOQ':'EOM'} print document.`);return false;}
+      window.__page3Printed=true; window.syncPage3Completion?.();
+      document.body.classList.remove('page3-printing','template-print-active','exact-preview-print-active');
+      document.body.classList.add('standalone-eom-print-active');
+      const cleanup=()=>{document.body.classList.remove('standalone-eom-print-active');const r=el('standalone-eom-print-root');if(r){r.innerHTML='';r.setAttribute('aria-hidden','true')}};
+      window.addEventListener('afterprint',cleanup,{once:true}); setTimeout(()=>window.print(),50); return true;
+    };
+    try{preparePrintPreview=window.preparePrintPreview}catch(_){ }
+    return true;
+  }
+  if(!installPrintOverride()){
+    let attempts=0; const timer=setInterval(()=>{attempts++;if(installPrintOverride()||attempts>60)clearInterval(timer)},100);
+  }
+})();
+</script>
+
+
+
+<!-- Raw EOM PDF/DOCX Compatibility Pass v30 -->
+<style id="raw-eom-v30-css">
+.eom-month-grid{width:100%;border-collapse:collapse;table-layout:fixed;margin:.08in 0 .12in;font-size:7pt}.eom-month-grid th,.eom-month-grid td{border:1px solid #777;padding:.035in;text-align:center;vertical-align:middle;overflow-wrap:anywhere}.eom-month-grid thead th{background:#1a3f6f;color:#fff;font-weight:850}.eom-month-grid .eom-period-row th{background:#e9edf3;color:#111;text-align:left}.eom-month-grid .status-good{background:#dcfce7;color:#14532d}.eom-month-grid .status-watch{background:#fef3c7;color:#713f12}.eom-month-grid .status-bad{background:#fee2e2;color:#7f1d1d}
+@media print{.eom-month-grid{font-size:6pt!important;break-inside:avoid;page-break-inside:avoid}.eom-month-grid th,.eom-month-grid td{padding:.02in!important}.eom-month-grid thead th{background:#111!important;color:#fff!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}.eom-month-grid .eom-period-row th{background:#eee!important;color:#111!important}}
+</style>
+<script id="raw-eom-v30-js">
+(()=>{'use strict';if(window.__rawEomV30)return;window.__rawEomV30=true;
+const clean=v=>String(v==null?'':v).replace(/[\u00a0\u2007\u202f]/g,' ').replace(/[\u200b-\u200d\ufeff]/g,'').replace(/[‐‑‒–—]/g,'-').replace(/\s+/g,' ').trim();
+const canonical=v=>clean(v).toLowerCase().replace(/≤/g,' <= ').replace(/%/g,' percent ').replace(/#/g,' number ').replace(/[^a-z0-9<>=]+/g,' ').replace(/\b(kpi|metric|actual|result)\b/g,' ').replace(/\s+/g,' ').trim();
+const aliases={
+ 'outbound 50 plus':['outbound 50','outbound'], 'average talk time':['avg talk time','average talk time'], 'percent call notes':['percent call notes','call notes percent'], 'call notes':['call notes'], 'invoices':['invoices'],
+ 'logs emails assigned':['log emails assigned','logs emails assigned','emails assigned'], 'log entries completed':['log entries completed','entries completed'], 'percent entries completed':['percent of entries completed','percent entries completed'], 'completed entries assigned':['completed entries assigned'], 'number escalations':['number of escalations','escalations'],
+ 'availability working days average hours':['availability per shift total working days days worked average hours','availability per shift','total working days days worked average hours'], 'aux accuracy':['aux accuracy','aux'], 'average break 30 minutes':['average break 30 minutes','average break'], 'average lunch':['average lunch 60 minutes','average lunch 30 minutes','average lunch'], 'average personal 10 minutes':['average personal 10 minutes','average personal']
+};
+function metricKey(v){const k=canonical(v);for(const [name,list] of Object.entries(aliases)){if(list.some(a=>k===canonical(a)||k.includes(canonical(a))||canonical(a).includes(k)))return name}return k}
+function flatten(v,out=[],seen=new WeakSet()){if(v==null)return out;if(typeof v==='string'||typeof v==='number'){const s=clean(v);if(s)out.push(s);return out}if(typeof v!=='object'||seen.has(v))return out;seen.add(v);if(Array.isArray(v))v.forEach(x=>flatten(x,out,seen));else Object.entries(v).forEach(([k,x])=>{if(!/image|base64|font|style|html/i.test(k))flatten(x,out,seen)});return out}
+function rows(v,out=[],seen=new WeakSet()){if(!v||typeof v!=='object'||seen.has(v))return out;seen.add(v);if(Array.isArray(v)){if(v.length>=4&&v.every(x=>x==null||typeof x!=='object'))out.push(v.map(clean));v.forEach(x=>rows(x,out,seen))}else Object.values(v).forEach(x=>rows(x,out,seen));return out}
+const periodOf=s=>/last\s*month/i.test(s)?'prior':/this\s*month|current\s*month/i.test(s)?'current':'';
+const isValue=s=>{s=clean(s);return !!s&&!/^(?:last|this|current) month/i.test(s)&&!Object.keys(aliases).includes(metricKey(s))&&!/^(?:subject|summary|opportunities|best practices|action plan|agent'?s voice|statement)/i.test(s)&&(/^(?:NA|ME|EE|BE)$/i.test(s)||/[0-9]/.test(s)||/^[↑↓→↔]/.test(s))};
+function structured(input){const rr=rows(input),out={prior:{},current:{},headers:[]};let period='';for(let i=0;i<rr.length;i++){const joined=clean(rr[i].join(' ')),p=periodOf(joined);if(p){period=p;continue}if(!period)continue;const keys=rr[i].map(metricKey),hits=keys.filter(k=>Object.keys(aliases).includes(k));if(hits.length>=4&&rr[i+1]){const vals=rr[i+1].map(clean).filter(Boolean);out.headers=keys.filter(k=>Object.keys(aliases).includes(k));out.headers.forEach((k,n)=>{if(vals[n]!=null)out[period][k]=vals[n]});i++}}return out}
+function flatPeriods(lines){const lower=lines.map(x=>x.toLowerCase()),li=lower.findIndex(x=>periodOf(x)==='prior'),ci=lower.findIndex((x,i)=>i>li&&periodOf(x)==='current'),stop=lower.findIndex((x,i)=>i>ci&&/last\s*month\s*(?:daily|monthly)\s*sales average|opportunities last month/i.test(x));function parse(a,b){const seg=lines.slice(a+1,b>a?b:lines.length);let headers=[],last=-1;seg.forEach((s,i)=>{const k=metricKey(s);if(Object.keys(aliases).includes(k)){if(!headers.includes(k))headers.push(k);last=i}});const vals=seg.slice(last+1).filter(isValue).slice(0,headers.length);const o={};headers.forEach((k,i)=>{if(vals[i])o[k]=vals[i]});return{o,headers}}const p=parse(li,ci),c=parse(ci,stop);return{prior:p.o,current:c.o,headers:p.headers.length>=c.headers.length?p.headers:c.headers}}
+function parseEom(input){const lines=flatten(input),text=clean(lines.join(' | '));if(!/inside sales rep end of month|end of month\s*&\s*performance action plan|performance mom|last month.*this month/i.test(text))return null;const s=structured(input),f=flatPeriods(lines),prior={...f.prior,...s.prior},current={...f.current,...s.current},headers=[...new Set([...(s.headers||[]),...(f.headers||[]),...Object.keys(prior),...Object.keys(current)])];const pairs=[];headers.forEach(k=>{if(prior[k])pairs.push({label:k,value:prior[k],period:'prior-month',metricKey:k,source:'EOM raw format'});if(current[k])pairs.push({label:k,value:current[k],period:'current-month',metricKey:k,source:'EOM raw format'})});
+const lc=lines.map(x=>x.toLowerCase()),meta={};[['agent','agent name'],['manager','manager'],['date','date']].forEach(([k,l])=>{const i=lc.findIndex(x=>x===l||x.startsWith(l+':'));if(i>=0)meta[k]=clean(lines[i].split(':').slice(1).join(':'))||clean(lines[i+1])});
+const sales={prior:'',current:'',basis:/monthly sales average/i.test(text)?'Monthly':'Daily'};const re=/(last|this)\s*month\s*(?:daily|monthly)\s*sales average\s*\|?\s*([^|]{1,90})/ig;let m;while((m=re.exec(text)))sales[m[1].toLowerCase()==='last'?'prior':'current']=clean(m[2]);
+function section(a,b){const ai=lc.findIndex(x=>x.startsWith(a)),bi=b?lc.findIndex((x,i)=>i>ai&&x.startsWith(b)):-1;return ai>=0?clean(lines.slice(ai+1,bi>ai?bi:lines.length).join('\n')):''}const narratives={opportunitiesLast:section('opportunities last month','opportunities this month'),opportunitiesThis:section('opportunities this month','opportunities for this year'),opportunitiesYear:section('opportunities for this year','best practices'),bestPractices:section('best practices','action plan'),actionPlan:section('action plan',"agent's voice"),agentVoice:section("agent's voice",'statement of understanding')};
+const detailRows=[];for(let i=0;i<lines.length-4;i++){if(/^[A-Za-z' -]+,\s*[A-Za-z' -]+$/.test(lines[i])&&/^\d{1,2}[\/-]\d{1,2}[\/-]20\d{2}$/.test(lines[i+1]))detailRows.push({agent:lines[i],date:lines[i+1],values:lines.slice(i+2,i+8).filter(x=>/^\d{1,2}:\d{2}(?::\d{2})?$|^over|coupon|town hall/i.test(x))})}
+return{format:'eom-raw-v30',reviewType:'eom',meta,headers,priorMonth:prior,currentMonth:current,sales,narratives,detailRows,pairs,parseDiagnostics:{version:'v30-eom-raw',formatMatched:true,pairsFound:pairs.length,detailRowsFound:detailRows.length,sourceKinds:['PDF text','DOCX table'],warnings:pairs.length>=10?[]:['EOM recognized; review any blank KPI cells.']}}}
+window.parseRawEomExamples=parseEom;
+function merge(result,p){if(!p)return result;const out=result&&typeof result==='object'?result:{},existing=Array.isArray(out.pairs)?out.pairs:[],seen=new Set(existing.map(x=>`${metricKey(x.label)}|${x.period||''}`));p.pairs.forEach(x=>{const id=`${metricKey(x.label)}|${x.period}`;if(!seen.has(id)){existing.push(x);seen.add(id)}});out.pairs=existing;out.reviewType='eom';out.detectedFormat=p.format;out.eomSnapshot={headers:p.headers,priorMonth:p.priorMonth,currentMonth:p.currentMonth,sales:p.sales,narratives:p.narratives,meta:p.meta,detailRows:p.detailRows};out.parseDiagnostics={...(out.parseDiagnostics||{}),...p.parseDiagnostics,pairsFound:existing.length};window.__lastEomParseResult=out;return out}
+function installParser(){const orig=window.extractPdfTableCells;if(typeof orig!=='function'||orig.__eomV30)return false;const w=async function(){const r=await orig.apply(this,arguments),p=parseEom(r)||parseEom(arguments[0]),m=merge(r,p);if(p){window.dispatchEvent(new CustomEvent('previous-review-parser-diagnostics',{detail:m.parseDiagnostics}));window.dispatchEvent(new CustomEvent('previous-review-eom-parsed',{detail:m}))}return m};w.__eomV30=true;w.__original=orig;window.extractPdfTableCells=w;return true}if(!installParser()){let n=0,t=setInterval(()=>{n++;if(installParser()||n>80)clearInterval(t)},100)}
+const label=k=>({'outbound 50 plus':'Outbound 50+','average talk time':'Avg Talk Time','percent call notes':'% Call Notes','call notes':'Call Notes','invoices':'Invoices','logs emails assigned':'Logs / Emails Assigned','log entries completed':'Log Entries Completed','percent entries completed':'% Entries Completed','completed entries assigned':'Completed Entries / Assigned','number escalations':'# Escalations','availability working days average hours':'Availability / Working Days / Avg Hours','aux accuracy':'AUX Accuracy','average break 30 minutes':'Average Break','average lunch':'Average Lunch','average personal 10 minutes':'Average Personal'}[k]||k);
+function status(v){v=clean(v).toUpperCase();if(/^(?:EE|GREEN)|↑/.test(v))return'status-good';if(/^(?:ME|YELLOW)|→|↔/.test(v))return'status-watch';if(/^(?:BE|RED)|↓/.test(v))return'status-bad';return''}function table(s){const h=s.headers.map(k=>`<th>${label(k)}</th>`).join(''),row=(name,d)=>`<tr class="eom-period-row"><th colspan="${s.headers.length}">${name}</th></tr><tr>${s.headers.map(k=>`<td class="${status(d[k])}">${clean(d[k])||'—'}</td>`).join('')}</tr>`;return`<table class="eom-month-grid"><thead><tr>${h}</tr></thead><tbody>${row('LAST MONTH',s.priorMonth)}${row('THIS MONTH',s.currentMonth)}</tbody></table>`}
+function installPrint(){const orig=window.buildStandaloneEomPrint;if(typeof orig!=='function'||orig.__eomV30)return false;const w=function(conf){const root=orig(conf),type=clean(window.currentReviewType||document.getElementById('review-type')?.value);if(type==='eom'&&root){const doc=root.querySelector('.v27-doc'),s=window.__lastEomParseResult?.eomSnapshot;if(doc&&s&&!doc.querySelector('.eom-month-grid')){const anchor=doc.querySelector('.v27-meta');anchor?.insertAdjacentHTML('afterend',table(s));const sales=doc.querySelector('.v27-sales');if(sales&&(s.sales?.prior||s.sales?.current))sales.innerHTML=`<div><strong>Last Month ${clean(s.sales.basis)} Sales Average:</strong> ${clean(s.sales.prior)||'—'}</div><div><strong>This Month ${clean(s.sales.basis)} Sales Average:</strong> ${clean(s.sales.current)||'—'}</div>`}}return root};w.__eomV30=true;w.__original=orig;window.buildStandaloneEomPrint=w;return true}if(!installPrint()){let n=0,t=setInterval(()=>{n++;if(installPrint()||n>80)clearInterval(t)},100)}
+})();
+</script>
+
 </body>
 </html>
