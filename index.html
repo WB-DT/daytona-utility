@@ -1588,6 +1588,10 @@
         .alt-address-label { display: block; color: var(--text-muted); font-size: .52rem; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; margin-bottom: .08rem; }
         .alt-address-value { color: var(--text-main); font-size: .66rem; font-weight: 700; white-space: pre-wrap; overflow-wrap: anywhere; }
         .alt-address-state { padding: .7rem; color: var(--text-muted); font-size: .68rem; text-align: center; }
+        .alt-distance-summary { margin-bottom:.5rem; padding:.48rem .55rem; border:1px solid rgba(37,99,235,.24); border-radius:.5rem; background:rgba(37,99,235,.08); color:var(--text-main); font-size:.64rem; line-height:1.35; }
+        .alt-distance-summary strong { color:var(--primary); }
+        .alt-distance-pill { display:inline-flex; align-items:center; gap:.25rem; padding:2px 7px; border-radius:999px; color:var(--accent-success); background:rgba(34,197,94,.10); border:1px solid rgba(34,197,94,.30); font-size:.6rem; font-weight:900; white-space:nowrap; }
+        .alt-distance-pill.is-estimate { color:var(--accent-warning); background:rgba(234,179,8,.10); border-color:rgba(234,179,8,.32); }
         @media (max-width: 640px) { .alt-address-grid { grid-template-columns: 1fr; } .alt-address-field.wide { grid-column: auto; } }
 
     </style>
@@ -3118,7 +3122,7 @@ window.preloadTemplateImages = async function() {
             const select = [
                 'customeraddressid','_parentid_value','name','line1','line2','line3',
                 'city','stateorprovince','postalcode','country','addresstypecode',
-                'mss_modeofdelivery','mss_altaddressrecid','createdon','modifiedon'
+                'mss_modeofdelivery','mss_altaddressrecid','latitude','longitude','createdon','modifiedon'
             ].join(',');
             const filter = `_parentid_value eq ${cleanGuid}`;
             const url = `${PRIMARY_CRM_URL}/customeraddresses?$select=${select}&$filter=${encodeURIComponent(filter)}&$orderby=name asc`;
@@ -3135,13 +3139,43 @@ window.preloadTemplateImages = async function() {
         }
     };
 
-    window.renderD365AltAddresses = function(addresses) {
+    // Distance logic mirrors LogiLeap: use Dataverse latitude/longitude first, then its ZIP-3 coordinate fallback.
+    const ACT_ZIP_MAP = {'010':[42.2,-72.6],'020':[42.1,-71.2],'030':[42.9,-71.5],'040':[43.6,-70.3],'050':[43.6,-72.5],'060':[41.8,-72.7],'070':[40.8,-74.2],'080':[39.8,-75.0],'100':[40.7,-74.0],'110':[40.7,-73.7],'120':[42.7,-74.0],'130':[43.2,-76.3],'140':[42.8,-78.7],'150':[40.6,-80.2],'160':[40.9,-79.9],'170':[40.4,-77.2],'180':[40.7,-75.3],'190':[40.0,-75.3],'200':[38.9,-77.0],'210':[39.4,-76.6],'220':[38.8,-77.3],'230':[37.7,-77.1],'240':[37.2,-80.1],'250':[38.4,-81.6],'260':[40.1,-80.7],'270':[36.2,-80.3],'280':[35.4,-80.6],'290':[33.9,-80.9],'300':[33.9,-84.4],'310':[32.6,-83.5],'320':[30.0,-81.8],'330':[25.8,-80.2],'340':[29.0,-82.0],'350':[33.4,-86.7],'360':[32.2,-86.3],'370':[36.1,-86.8],'380':[35.1,-89.9],'390':[32.3,-90.2],'400':[38.2,-85.7],'410':[38.9,-84.5],'420':[36.9,-88.4],'430':[40.1,-83.0],'440':[41.4,-81.6],'450':[39.2,-84.4],'460':[39.9,-86.0],'470':[39.1,-85.0],'480':[42.5,-83.0],'490':[42.2,-85.5],'500':[41.6,-93.6],'530':[43.1,-88.0],'540':[45.0,-90.0],'550':[44.9,-93.0],'600':[42.1,-87.9],'630':[38.6,-90.4],'700':[29.9,-90.0],'730':[35.5,-97.5],'750':[33.0,-96.7],'770':[29.7,-95.3],'800':[39.7,-104.9],'850':[33.4,-112.0],'900':[34.0,-118.2],'940':[37.5,-122.3],'970':[45.4,-122.6],'980':[47.5,-122.2]};
+    window.actCoords = function(row, addressText) {
+        const lat = Number(row?.latitude ?? row?.address1_latitude ?? row?.cr714_latitude);
+        const lng = Number(row?.longitude ?? row?.address1_longitude ?? row?.cr714_longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lng) && lat && lng) return {lat,lng,estimated:false};
+        const zip = String(row?.postalcode || row?.address1_postalcode || addressText || '').match(/\b\d{5}(?:-\d{4})?\b/)?.[0]?.slice(0,3);
+        const z = zip && ACT_ZIP_MAP[zip];
+        return z ? {lat:z[0],lng:z[1],estimated:true} : null;
+    };
+    window.actMiles = function(a,b) {
+        if(!a || !b) return null;
+        const rad=x=>x*Math.PI/180, R=3958.7613;
+        const dLat=rad(b.lat-a.lat), dLng=rad(b.lng-a.lng);
+        const h=Math.sin(dLat/2)**2+Math.cos(rad(a.lat))*Math.cos(rad(b.lat))*Math.sin(dLng/2)**2;
+        return 2*R*Math.asin(Math.min(1,Math.sqrt(h)));
+    };
+    window.getActWarehouseContext = function(logisticsRows) {
+        const rows=(Array.isArray(logisticsRows)?logisticsRows:[]).slice().sort((a,b)=>new Date(b.modifiedon||b.createdon||0)-new Date(a.modifiedon||a.createdon||0));
+        for(const r of rows) {
+            const coords=window.actCoords(r, r.cr714_shippingaddress||r.cr714_address||'');
+            if(coords) return {name:r['cr714_warehouse@OData.Community.Display.V1.FormattedValue']||r.cr714_warehouse||'Serving Warehouse',coords};
+        }
+        return null;
+    };
+
+    window.renderD365AltAddresses = function(addresses, account, logisticsRows) {
         const section = document.getElementById('alt-address-section');
         const body = document.getElementById('alt-address-body');
         const count = document.getElementById('alt-address-count');
         if (!section || !body || !count) return;
 
         const rows = Array.isArray(addresses) ? addresses : [];
+        const warehouse = window.getActWarehouseContext(logisticsRows);
+        const primaryAddress = [account?.address1_line1, account?.address1_line2, account?.address1_city, account?.address1_stateorprovince, account?.address1_postalcode].filter(Boolean).join(', ');
+        const primaryCoords = window.actCoords(account, primaryAddress);
+        const primaryMiles = warehouse ? window.actMiles(warehouse.coords, primaryCoords) : null;
         count.textContent = String(rows.length);
         const esc = value => window.escapeHTML(String(value ?? ''));
         const formatted = (row, field) => row[`${field}@OData.Community.Display.V1.FormattedValue`] || row[field] || '';
@@ -3150,14 +3184,21 @@ window.preloadTemplateImages = async function() {
             return `<div class="alt-address-field${wide ? ' wide' : ''}"><span class="alt-address-label">${esc(label)}</span><div class="alt-address-value">${safe}</div></div>`;
         };
 
+        const distanceSummary = warehouse
+            ? `<div class="alt-distance-summary"><strong><i class="fas fa-warehouse mr-1"></i>${esc(warehouse.name)}</strong><br>Primary address distance: ${primaryMiles === null ? '--' : `${primaryMiles.toFixed(1)} miles${(warehouse.coords.estimated || primaryCoords?.estimated) ? ' (estimated)' : ''}`}</div>`
+            : `<div class="alt-distance-summary"><strong><i class="fas fa-warehouse mr-1"></i>Warehouse distance unavailable</strong><br>No logistics latitude/longitude was available for this account.</div>`;
         if (!rows.length) {
-            body.innerHTML = '<div class="alt-address-state"><i class="fas fa-map-location-dot mr-1"></i>No alternate customer addresses found.</div>';
+            body.innerHTML = distanceSummary + '<div class="alt-address-state"><i class="fas fa-map-location-dot mr-1"></i>No alternate customer addresses found.</div>';
             return;
         }
 
-        body.innerHTML = rows.map(row => {
+        body.innerHTML = distanceSummary + rows.map(row => {
             const cityLine = [row.city, row.stateorprovince, row.postalcode].filter(Boolean).join(', ');
             const fullAddress = [row.line1, row.line2, row.line3, cityLine, row.country].filter(Boolean).join('\n');
+            const addressCoords = window.actCoords(row, fullAddress);
+            const miles = warehouse ? window.actMiles(warehouse.coords, addressCoords) : null;
+            const estimated = !!(warehouse && (warehouse.coords.estimated || addressCoords?.estimated));
+            const distanceText = miles === null ? '--' : `${miles.toFixed(1)} miles${estimated ? ' (estimated)' : ''}`;
             return `<article class="alt-address-card">
                 <div class="alt-address-card-head">
                     <div class="alt-address-name"><i class="fas fa-location-dot mr-1 text-status-danger"></i>${esc(row.name || 'Customer Address')}</div>
@@ -3168,6 +3209,7 @@ window.preloadTemplateImages = async function() {
                     ${field('Address Type', formatted(row, 'addresstypecode'))}
                     ${field('Mode of Delivery', formatted(row, 'mss_modeofdelivery'))}
                     ${field('AltAddressRecId', row.mss_altaddressrecid, true)}
+                    ${field('Distance from ' + (warehouse?.name || 'Warehouse'), distanceText, true)}
                 </div>
             </article>`;
         }).join('');
@@ -4904,8 +4946,12 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
             if (!d365Acct) window.clearD365AltAddresses('No matching D365 account was found.');
             if (d365Acct) {
                 currentAccountGuid = d365Acct.accountid; // Capture the hidden D365 GUID
-                const addressRows = await window.fetchD365AltAddresses(currentAccountGuid);
-                window.renderD365AltAddresses(addressRows);
+                const [addressRows, distanceLogistics] = await Promise.all([
+                    window.fetchD365AltAddresses(currentAccountGuid),
+                    currentSelectedRecord.logisticsData ? Promise.resolve(currentSelectedRecord.logisticsData) : window.fetchLogisticsForAccount(id)
+                ]);
+                currentSelectedRecord.logisticsData = distanceLogistics;
+                window.renderD365AltAddresses(addressRows, d365Acct, distanceLogistics);
                 const pc = d365Acct.primarycontactid || {};
                 const setVal = (elId, val) => { const el=document.getElementById(elId); if(el && val) el.value = val; };
                 
