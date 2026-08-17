@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LogiLeap v107.04 | Master Command</title>
+    <title>LogiLeap v107.05 | Master Command</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
@@ -12,7 +12,6 @@
     <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
     <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/toastify-js"></script>
     <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/toastify-js/src/toastify.min.css">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
@@ -747,6 +746,7 @@
                         })(),
                         coachingNotes: r.cr714_coachingfeedback || '',
                         coachingReason: r.cr714_coachingreason || 'No Reason Provided', 
+                        issueUpdates: String(r.cr714_issueupdates || ''),
                         searchString: searchValues.join(' '),
                         repEmailDate: parseEmailDate(r.cr714_repemaildatestamp),
                         whEmailDate: parseEmailDate(r.cr714_warehouseemaildatestamp),
@@ -1213,7 +1213,7 @@
 
                 // 2. Build the URL and Fetch Initial Batch
                 // Added cr714_warehouse and cr714_route to select fields
-                const selectFields = "$select=createdon,cr714_rep,cr714_disposition,cr714_logisticsowner,cr714_salesordernumber,cr714_companyordeliveryname,cr714_shippingaddress,cr714_accountnumber,cr714_warehouse,cr714_route,cr714_issue,cr714_description,cr714_receivedemailfromwarehousenotes,cr714_receivedtextfromdrivernotes,cr714_repemaildatestamp,cr714_warehouseemaildatestamp,cr714_managerappemailtimestamp,modifiedon,cr714_coachingopp,cr714_coachingfeedback,cr714_coachingresolved";
+                const selectFields = "$select=createdon,cr714_rep,cr714_disposition,cr714_logisticsowner,cr714_salesordernumber,cr714_companyordeliveryname,cr714_shippingaddress,cr714_accountnumber,cr714_warehouse,cr714_route,cr714_issue,cr714_description,cr714_receivedemailfromwarehousenotes,cr714_receivedtextfromdrivernotes,cr714_repemaildatestamp,cr714_warehouseemaildatestamp,cr714_managerappemailtimestamp,modifiedon,cr714_coachingopp,cr714_coachingfeedback,cr714_coachingresolved,cr714_issueupdates";
                 
                 const initUrl = `${DATA_API}/${ENTITY_SET}?$count=true&$top=500000${fParam}&${selectFields}&$orderby=createdon desc`;
                 
@@ -1296,6 +1296,9 @@
                     // Critical: Must check repEmailDate (cr714_repemaildatestamp)
                     // If this date exists, the 'One-Way Valve' is closed and we do nothing.
                     const isBrandNew = !t.repEmailDate || t.repEmailDate === 'Never' || t.repEmailDate === 'N/A';
+                    
+                    // Independent valve for Manager-triggered emails to prevent duplicates
+                    const isBrandNewMgr = !t.mgrEmailDate || t.mgrEmailDate === 'Never' || t.mgrEmailDate === 'N/A';
 
                     if (t.owner === "Tier 2" && t.date === todayStr && isBrandNew) {
                         try {
@@ -1306,6 +1309,11 @@
                                 body: JSON.stringify({ "cr714_logisticsowner": "Tier 2" })
                             });
                         } catch(e) { console.error("Auto-sync failed", e); }
+                    }
+                    
+                    // Auto-detect new Schools submissions and fire email
+                    if (t.issue === "Schools & Municipalities (Release Review)" && t.date === todayStr && isBrandNewMgr) {
+                        triggerSchoolsEmail(t);
                     }
                 });
 
@@ -1435,12 +1443,41 @@
         async function inlineIssueUpdate(guid, newIssue) {
             Toastify({text:`Updating Issue Type...`, style:{background:"#fbbf24"}}).showToast();
             try {
+                const t = fullData.find(x => x.guid === guid);
                 const token = await getToken(ENV_DATA);
+                
+                // Format timestamp to Standard AM/PM (MM/DD/YYYY - HH:MM AM/PM - Issue)
+                const now = new Date();
+                const d = now.toLocaleDateString('en-US');
+                let h = now.getHours();
+                const m = String(now.getMinutes()).padStart(2, '0');
+                const ampm = h >= 12 ? 'PM' : 'AM';
+                h = h % 12 || 12; // Converts 0 or 13-23 into 1-12 standard format
+                const newStamp = `${d} - ${h}:${m} ${ampm} - ${newIssue}`;
+                
+                // If this is the first change, retroactively log the original issue so it isn't lost
+                let currentHistory = t.issueUpdates || "";
+                if (!currentHistory && t.issue) {
+                    const origDate = t.date ? new Date(t.timestamp).toLocaleDateString('en-US') : d;
+                    currentHistory = `${origDate} - Original - ${t.issue}`;
+                }
+                
+                // Concatenate the new stamp separated by a semicolon
+                const updatedHistory = currentHistory ? currentHistory + "; " + newStamp : newStamp;
+
                 await fetch(`${DATA_API}/${ENTITY_SET}(${guid})`, {
                     method: 'PATCH', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ "cr714_issue": newIssue })
+                    body: JSON.stringify({ 
+                        "cr714_issue": newIssue,
+                        "cr714_issueupdates": updatedHistory
+                    })
                 });
-                Toastify({text:"Issue Updated", style:{background:"#10b981"}}).showToast(); 
+                
+                // Update local memory so we don't need a hard refresh for the next consecutive change
+                t.issue = newIssue;
+                t.issueUpdates = updatedHistory;
+                
+                Toastify({text:"Issue Updated & Logged", style:{background:"#10b981"}}).showToast(); 
                 refreshData(true); 
             } catch(e) { Toastify({text:"Issue Update Failed", style:{background:"#ef4444"}}).showToast(); }
         }
@@ -3602,6 +3639,60 @@
                 });
             } catch(e) { console.error("Furniture notification failed", e); }
         }
+
+        async function triggerSchoolsEmail(t) {
+            try {
+                const tokenResponse = await msalInstance.acquireTokenSilent({ scopes: ["Mail.Send"], account: msalAccount })
+                    .catch(async () => await msalInstance.acquireTokenPopup({ scopes: ["Mail.Send"] }));
+
+                const emailPayload = {
+                    message: {
+                        subject: `Schools Review Request: Order #${t.order} / ${t.company}`,
+                        body: { 
+                            contentType: "HTML", 
+                            content: `<div style="font-family: Arial; border-left: 4px solid #2dd4bf; padding: 15px;">
+                                <h2 style="color: #2dd4bf;">Schools & Municipalities Request</h2>
+                                <p>A new Schools & Municipalities request has been submitted for review.</p>
+                                <hr>
+                                <b>Customer:</b> ${t.company}<br>
+                                <b>Order #:</b> ${t.order}<br>
+                                <b>Route / Warehouse:</b> ${t.route} / ${t.whs}<br>
+                                <b>Description:</b> ${t.description}<br><br>
+                                <a href="https://wb-dt.github.io/daytona-utility/LogisticsLog.html" style="background:#2dd4bf; color:#000; padding:8px 12px; text-decoration:none; font-weight:bold; border-radius:4px;">Open LogiLog</a>
+                            </div>` 
+                        },
+                        toRecipients: [
+                            { emailAddress: { address: "clayton.coyne@wbmason.com" } },
+                            { emailAddress: { address: "andrew.steiner@wbmason.com" } },
+                            { emailAddress: { address: "anslee.laroche@wbmason.com" } }
+                        ]
+                    },
+                    saveToSentItems: "false"
+                };
+
+                await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${tokenResponse.accessToken}`, "Content-Type": "application/json" },
+                    body: JSON.stringify(emailPayload)
+                });
+                
+                // Patch Dataverse to assign to Schools and close the 'One-Way Valve'
+                const dToken = await getToken(ENV_DATA);
+                await fetch(`${DATA_API}/${ENTITY_SET}(${t.guid})`, {
+                    method: 'PATCH',
+                    headers: { 'Authorization': `Bearer ${dToken}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        "cr714_managerappemailtimestamp": new Date().toISOString(), 
+                        "cr714_logisticsowner": "Schools" 
+                    })
+                });
+                
+                // Update local UI
+                t.owner = "Schools";
+                t.mgrEmailDate = new Date().toLocaleDateString();
+                renderView(false);
+            } catch(e) { console.error("Schools notification failed", e); }
+        }
     </script>
     <!-- New Ticket Modal -->
     <div id="new-ticket-modal" class="fixed inset-0 bg-black/80 z-[2000] hidden items-center justify-center p-4">
@@ -3638,6 +3729,7 @@
                     <option value="Tier 2">Tier 2</option>
                     <option value="Tobbitha Bishoff">Tobbitha Bishoff</option>
                     <option value="Wayne Rendt">Wayne Rendt</option>
+                    <option value="Schools">Schools</option>
                 </select>
                 <select id="nt-issue" class="input-dark">
                     <option value="" disabled selected>Select Issue Type</option>
