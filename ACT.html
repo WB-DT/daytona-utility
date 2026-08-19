@@ -3122,7 +3122,7 @@ window.preloadTemplateImages = async function() {
             const select = [
                 'customeraddressid','_parentid_value','name','line1','line2','line3',
                 'city','stateorprovince','postalcode','country','addresstypecode',
-                'mss_modeofdelivery','mss_altaddressrecid','createdon','modifiedon'
+                'mss_modeofdelivery','mss_altaddressrecid','statecode','statuscode','createdon','modifiedon'
             ].join(',');
             const filter = `_parentid_value eq ${cleanGuid}`;
             const url = `${PRIMARY_CRM_URL}/customeraddresses?$select=${select}&$filter=${encodeURIComponent(filter)}&$orderby=name asc`;
@@ -3145,26 +3145,47 @@ window.preloadTemplateImages = async function() {
         const count = document.getElementById('alt-address-count');
         if (!section || !body || !count) return;
 
-        const rows = Array.isArray(addresses) ? addresses : [];
-        count.textContent = String(rows.length);
+        window.__d365AltAddressRows = Array.isArray(addresses) ? addresses : [];
+        const showInactive = !!document.getElementById('alt-address-show-inactive')?.checked;
         const esc = value => window.escapeHTML(String(value ?? ''));
+        const normalized = value => String(value ?? '').trim();
         const formatted = (row, field) => row[`${field}@OData.Community.Display.V1.FormattedValue`] || row[field] || '';
+        const isInactive = row => {
+            const stateLabel = normalized(formatted(row, 'statecode')).toLowerCase();
+            const statusLabel = normalized(formatted(row, 'statuscode')).toLowerCase();
+            return Number(row.statecode) === 1 || Number(row.statuscode) === 2 || stateLabel === 'inactive' || statusLabel === 'inactive';
+        };
+        const meaningfulValues = row => [
+            row.name, row.line1, row.line2, row.line3, row.city, row.stateorprovince,
+            row.postalcode, row.country, formatted(row, 'addresstypecode'),
+            formatted(row, 'mss_modeofdelivery'), row.mss_altaddressrecid
+        ].map(normalized).filter(value => value && value !== '--');
+        const nonEmptyRows = window.__d365AltAddressRows.filter(row => meaningfulValues(row).length > 0);
+        const rows = nonEmptyRows.filter(row => showInactive || !isInactive(row));
+        const inactiveCount = nonEmptyRows.filter(isInactive).length;
+        count.textContent = String(rows.length);
+        count.title = `${rows.length} shown${inactiveCount ? `; ${inactiveCount} inactive total` : ''}`;
+
         const field = (label, value, wide = false) => {
-            const safe = value === null || value === undefined || String(value).trim() === '' ? '--' : esc(value);
+            const safe = normalized(value) ? esc(value) : '--';
             return `<div class="alt-address-field${wide ? ' wide' : ''}"><span class="alt-address-label">${esc(label)}</span><div class="alt-address-value">${safe}</div></div>`;
         };
 
         if (!rows.length) {
-            body.innerHTML = '<div class="alt-address-state"><i class="fas fa-map-location-dot mr-1"></i>No alternate customer addresses found.</div>';
+            const message = nonEmptyRows.length && !showInactive
+                ? 'No active alternate addresses found. Select Show inactive to view inactive addresses.'
+                : 'No alternate customer addresses found.';
+            body.innerHTML = `<div class="alt-address-state"><i class="fas fa-map-location-dot mr-1"></i>${message}</div>`;
             return;
         }
 
         body.innerHTML = rows.map(row => {
-            const cityLine = [row.city, row.stateorprovince, row.postalcode].filter(Boolean).join(', ');
-            const fullAddress = [row.line1, row.line2, row.line3, cityLine, row.country].filter(Boolean).join('\n');
-            return `<article class="alt-address-card">
+            const inactive = isInactive(row);
+            const cityLine = [row.city, row.stateorprovince, row.postalcode].filter(value => normalized(value)).join(', ');
+            const fullAddress = [row.line1, row.line2, row.line3, cityLine, row.country].filter(value => normalized(value)).join('\n');
+            return `<article class="alt-address-card${inactive ? ' is-inactive' : ''}">
                 <div class="alt-address-card-head">
-                    <div class="alt-address-name"><i class="fas fa-location-dot mr-1 text-status-danger"></i>${esc(row.name || 'Customer Address')}</div>
+                    <div class="alt-address-name"><i class="fas fa-location-dot mr-1 text-status-danger"></i>${esc(row.name || 'Customer Address')}${inactive ? '<span class="alt-address-inactive-badge">Inactive</span>' : ''}</div>
                     <div class="alt-address-id">${esc(row.mss_altaddressrecid || '--')}</div>
                 </div>
                 <div class="alt-address-grid">
@@ -7344,6 +7365,7 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
                                 <span class="alt-address-toggle-left"><i class="fas fa-map-location-dot text-status-info"></i><span>Alternate Addresses</span><span id="alt-address-count" class="alt-address-count">0</span></span>
                                 <i class="fas fa-chevron-down alt-address-chevron"></i>
                             </button>
+                            <label class="alt-address-filter" title="Show or hide inactive alternate addresses"><input id="alt-address-show-inactive" type="checkbox"><span>Show inactive</span></label>
                             <button id="alt-address-expand" type="button" class="alt-address-expand" onclick="window.openAltAddressModal()" title="Expand alternate addresses" aria-label="Expand alternate addresses"><i class="fas fa-expand"></i></button>
                         </div>
                         <div id="alt-address-body" class="alt-address-body custom-scrollbar">
@@ -8192,12 +8214,21 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
 #alt-address-modal-body { flex:1 1 auto; min-height:0; overflow:auto; padding:.85rem; background:var(--bg-card); display:grid; grid-template-columns:repeat(auto-fit,minmax(310px,1fr)); gap:.65rem; align-content:start; }
 #alt-address-modal-body .alt-address-card { margin:0; height:max-content; }
 #alt-address-modal-body .alt-address-state { grid-column:1/-1; }
+
+.alt-address-filter { display:inline-flex; align-items:center; gap:.32rem; padding:0 .5rem; border-left:1px solid var(--border-color); color:var(--text-muted); background:var(--bg-header); font-size:.6rem; font-weight:850; white-space:nowrap; cursor:pointer; }
+.alt-address-filter:hover { color:var(--primary); background:var(--bg-input); }
+.alt-address-filter input[type="checkbox"] { width:13px; height:13px; margin:0; padding:0; accent-color:var(--primary); cursor:pointer; }
+.alt-address-modal-filter { margin-left:auto; min-height:32px; border:1px solid var(--border-color); border-radius:.5rem; padding:0 .62rem; background:var(--bg-input); }
+.alt-address-card.is-inactive { opacity:.78; border-style:dashed; }
+.alt-address-inactive-badge { display:inline-flex; margin-left:.4rem; padding:1px 6px; border-radius:999px; border:1px solid rgba(239,68,68,.35); background:rgba(239,68,68,.09); color:var(--accent-danger); font-size:.52rem; font-weight:950; text-transform:uppercase; vertical-align:middle; }
+@media(max-width:640px) { .alt-address-filter span { display:none; } .alt-address-filter { padding:0 .42rem; } .alt-address-modal-filter span { display:inline; } }
 @media(max-width:640px) { #alt-address-modal { padding:.35rem; } .alt-address-modal-window { width:100%; height:100%; max-height:none; border-radius:.55rem; } #alt-address-modal-body { grid-template-columns:1fr; padding:.55rem; } }
 </style>
 <div id="alt-address-modal" role="dialog" aria-modal="true" aria-labelledby="alt-address-modal-heading" aria-hidden="true">
   <section class="alt-address-modal-window">
     <header class="alt-address-modal-head">
       <div id="alt-address-modal-heading" class="alt-address-modal-title"><i class="fas fa-map-location-dot"></i><span>Alternate Addresses</span><span id="alt-address-modal-count">0</span></div>
+      <label class="alt-address-filter alt-address-modal-filter" title="Show or hide inactive alternate addresses"><input id="alt-address-modal-show-inactive" type="checkbox"><span>Show inactive</span></label>
       <button id="alt-address-modal-close" class="alt-address-modal-close" type="button" aria-label="Close expanded alternate addresses"><i class="fas fa-times"></i></button>
     </header>
     <div id="alt-address-modal-body" class="custom-scrollbar"><div class="alt-address-state">No alternate customer addresses loaded.</div></div>
@@ -8206,15 +8237,21 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
 <script id="alt-address-modal-script">
 (() => {
   const byId=id=>document.getElementById(id);
+  const setInactiveFilter=(checked,sourceId)=>{
+    const inline=byId('alt-address-show-inactive'),modal=byId('alt-address-modal-show-inactive');
+    if(inline&&sourceId!=='alt-address-show-inactive')inline.checked=checked;
+    if(modal&&sourceId!=='alt-address-modal-show-inactive')modal.checked=checked;
+    if(Array.isArray(window.__d365AltAddressRows))window.renderD365AltAddresses(window.__d365AltAddressRows);
+  };
   const realCustomerId=()=>String(byId('lead-account-number')?.value||currentSelectedRecord?.leadAccountNumber||currentSelectedRecord?.cr714_accountnum||currentSelectedRecord?.cr714_id||'').trim();
   const shouldShow=()=>{ const rec=currentSelectedRecord||{}; const isLead=(typeof window.isLeadRecord==='function'&&window.isLeadRecord(rec))||String(rec.cr714_action||'').toLowerCase()==='lead'; if(!isLead)return true; const converted=!!(byId('lead-converted')?.checked||rec.cr714_convertedtoaccount||rec.convertedToAccount); const id=realCustomerId(); return converted&&!!id&&!/^l(?:ead)?[-_ ]?/i.test(id); };
   const syncVisibility=()=>{ const section=byId('alt-address-section'); if(!section)return; const show=shouldShow(); section.hidden=!show; if(!show&&byId('alt-address-modal')?.classList.contains('open'))window.closeAltAddressModal(); };
-  const syncModal=()=>{ const source=byId('alt-address-body'),target=byId('alt-address-modal-body'),count=byId('alt-address-count'),modalCount=byId('alt-address-modal-count'); if(target&&source)target.innerHTML=source.innerHTML; if(modalCount)modalCount.textContent=count?.textContent||'0'; };
+  const syncModal=()=>{ const source=byId('alt-address-body'),target=byId('alt-address-modal-body'),count=byId('alt-address-count'),modalCount=byId('alt-address-modal-count'); if(target&&source)target.innerHTML=source.innerHTML; if(modalCount)modalCount.textContent=count?.textContent||'0'; const inlineFilter=byId('alt-address-show-inactive'),modalFilter=byId('alt-address-modal-show-inactive'); if(inlineFilter&&modalFilter)modalFilter.checked=inlineFilter.checked; };
   window.openAltAddressModal=()=>{ if(!shouldShow())return; syncModal(); const modal=byId('alt-address-modal'); if(!modal)return; modal.classList.add('open'); modal.setAttribute('aria-hidden','false'); setTimeout(()=>byId('alt-address-modal-close')?.focus(),0); };
   window.closeAltAddressModal=()=>{ const modal=byId('alt-address-modal'); if(!modal)return; modal.classList.remove('open'); modal.setAttribute('aria-hidden','true'); byId('alt-address-expand')?.focus(); };
   const original=window.renderD365AltAddresses;
   if(typeof original==='function') window.renderD365AltAddresses=function(addresses){ syncVisibility(); if(!shouldShow()){ const c=byId('alt-address-count'),b=byId('alt-address-body'); if(c)c.textContent='0'; if(b)b.innerHTML='<div class="alt-address-state">Alternate addresses become available after this lead is converted to a real customer ID.</div>'; syncModal(); return; } original.call(this,addresses); syncModal(); };
-  const init=()=>{ byId('alt-address-modal-close')?.addEventListener('click',window.closeAltAddressModal); byId('alt-address-modal')?.addEventListener('click',e=>{if(e.target===e.currentTarget)window.closeAltAddressModal();}); document.addEventListener('keydown',e=>{if(e.key==='Escape'&&byId('alt-address-modal')?.classList.contains('open'))window.closeAltAddressModal();}); document.addEventListener('change',e=>{if(e.target?.id==='lead-converted')syncVisibility();},true); document.addEventListener('input',e=>{if(e.target?.id==='lead-account-number')syncVisibility();},true); const source=byId('alt-address-body'); if(source)new MutationObserver(syncModal).observe(source,{childList:true,subtree:true,characterData:true}); syncVisibility(); syncModal(); };
+  const init=()=>{ byId('alt-address-show-inactive')?.addEventListener('change',e=>setInactiveFilter(e.target.checked,e.target.id)); byId('alt-address-modal-show-inactive')?.addEventListener('change',e=>setInactiveFilter(e.target.checked,e.target.id)); byId('alt-address-modal-close')?.addEventListener('click',window.closeAltAddressModal); byId('alt-address-modal')?.addEventListener('click',e=>{if(e.target===e.currentTarget)window.closeAltAddressModal();}); document.addEventListener('keydown',e=>{if(e.key==='Escape'&&byId('alt-address-modal')?.classList.contains('open'))window.closeAltAddressModal();}); document.addEventListener('change',e=>{if(e.target?.id==='lead-converted')syncVisibility();},true); document.addEventListener('input',e=>{if(e.target?.id==='lead-account-number')syncVisibility();},true); const source=byId('alt-address-body'); if(source)new MutationObserver(syncModal).observe(source,{childList:true,subtree:true,characterData:true}); syncVisibility(); syncModal(); };
   document.readyState==='loading'?document.addEventListener('DOMContentLoaded',init,{once:true}):init();
 })();
 </script>
