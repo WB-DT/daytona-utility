@@ -143,7 +143,13 @@
             <select id="datasetFilter" onchange="fetchData()"></select>
         </div>
         <div class="form-group">
-            <label>Parsed Action (From Notes)</label>
+            <label style="display: flex; justify-content: space-between; align-items: center;">
+                <span>Parsed Action (From Notes)</span>
+                <span style="text-transform: none; font-size: 10px; cursor: pointer; color: #8b949e; letter-spacing: 0;">
+                    <input type="checkbox" id="recentActionsToggle" checked onchange="updateActionDropdown()" style="width: auto; padding: 0; margin: 0 4px 0 0; vertical-align: middle;">
+                    Past Year Only
+                </span>
+            </label>
             <select id="actionFilter" onchange="processLocalMetrics()"></select>
         </div>
     </div>
@@ -199,6 +205,7 @@
     let hrData = {}; 
     let currentMetrics = {}; 
     let previousMetrics = {}; 
+    let actionLastSeenMap = new Map();
     let sortConfig = { col: 'lastUpdated', dir: 'desc' }; 
     let lastRefreshTime = new Date();
 
@@ -239,13 +246,11 @@
         return (await msalInstance.acquireTokenSilent(request)).accessToken;
     }
     
-    // String cleaner to strip invisible characters and zero-width spaces
     function cleanActionString(str) {
         if (!str) return null;
         return str.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
     }
 
-    // --- REGEX NOTE PARSER ---
     function parseNotesForActions(noteText) {
         const regex = /\[Email Sent\] \[Action:\s*([^|\]]+)/g;
         let actions = [];
@@ -283,8 +288,8 @@
 
             populateFilterValues();
 
-            // 2. Load Dataset
-            const select = `cr714_accountnum,cr714_action,${config.repCol},${config.noteCol}`;
+            // 2. Load Dataset (added modifiedon to select)
+            const select = `cr714_accountnum,cr714_action,modifiedon,${config.repCol},${config.noteCol}`;
             let url = `${DATAVERSE_URL}/${config.table}?$select=${select}&$filter=statecode eq 0`;
             let fresh = [];
             while (url) {
@@ -294,15 +299,23 @@
                 url = d['@odata.nextLink'] || null;
             }
             
-            // 3. Parse Notes and Extract Actions globally
-            let globalFoundActions = new Set();
+            // 3. Parse Notes and Map Action Dates globally
+            actionLastSeenMap.clear();
             fresh.forEach(r => {
+                const recordDate = r.modifiedon ? new Date(r.modifiedon) : new Date(0);
                 const assignedAction = cleanActionString(r.cr714_action);
-                if (assignedAction) globalFoundActions.add(assignedAction);
+                
+                if (assignedAction) {
+                    const currentMax = actionLastSeenMap.get(assignedAction) || new Date(0);
+                    if (recordDate > currentMax) actionLastSeenMap.set(assignedAction, recordDate);
+                }
 
                 const notes = r[config.noteCol] || "";
                 const sentActions = parseNotesForActions(notes);
-                sentActions.forEach(a => globalFoundActions.add(a));
+                sentActions.forEach(a => {
+                    const currentMax = actionLastSeenMap.get(a) || new Date(0);
+                    if (recordDate > currentMax) actionLastSeenMap.set(a, recordDate);
+                });
                 r._parsedSentActions = sentActions; 
             });
 
@@ -312,14 +325,39 @@
             document.getElementById('sync-status').innerText = "Live Parsing Active";
 
             // 4. Update Dynamic Action Dropdown
-            const filter = document.getElementById('actionFilter');
-            const prevAction = filter.value;
-            filter.innerHTML = '<option value="ALL">-- ALL ACTIONS --</option>';
-            Array.from(globalFoundActions).sort().forEach(a => filter.add(new Option(a, a)));
-            if (prevAction && globalFoundActions.has(prevAction)) filter.value = prevAction;
+            updateActionDropdown();
 
-            processLocalMetrics();
         } catch (e) { console.error(e); }
+    }
+
+    function updateActionDropdown() {
+        const filter = document.getElementById('actionFilter');
+        const prevAction = filter.value;
+        const onlyRecent = document.getElementById('recentActionsToggle').checked;
+        
+        const oneYearAgo = new Date();
+        oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+        
+        filter.innerHTML = '<option value="ALL">-- ALL ACTIONS --</option>';
+        
+        let availableActions = Array.from(actionLastSeenMap.keys());
+        
+        availableActions.sort().forEach(a => {
+            const lastSeen = actionLastSeenMap.get(a);
+            // Include if we're showing all OR if it was modified within the last year
+            if (!onlyRecent || lastSeen >= oneYearAgo) {
+                filter.add(new Option(a, a));
+            }
+        });
+        
+        // Try to keep what was selected before the refresh if it still exists in the filtered list
+        if (prevAction && Array.from(filter.options).some(opt => opt.value === prevAction)) {
+            filter.value = prevAction;
+        } else {
+            filter.value = "ALL";
+        }
+        
+        processLocalMetrics();
     }
 
     function populateFilterValues() {
@@ -346,22 +384,17 @@
         previousMetrics = { ...currentMetrics }; 
         currentMetrics = {};
 
-        // 1. Seed reps from HR data
         Object.keys(hrData).forEach(repName => {
             const repHR = hrData[repName];
             if (filterVal === "ALL" || repHR[filterLevel] === filterVal) {
                 currentMetrics[repName] = { 
-                    total: 0,
-                    sent: 0, 
-                    unsent: 0,
-                    pct: 0,
+                    total: 0, sent: 0, unsent: 0, pct: 0,
                     manager: repHR.cr714_managerassigned, 
                     department: repHR.cr714_department 
                 };
             }
         });
 
-        // 2. Tally Totals and Sent Emails based on parsed Notes
         allData.forEach(r => {
             const rep = (r[repCol] || "Unassigned").trim();
             const action = cleanActionString(r.cr714_action) || "None";
@@ -378,7 +411,6 @@
             }
         });
 
-        // 3. Math and Live Pulse Detection
         Object.keys(currentMetrics).forEach(k => {
             const m = currentMetrics[k];
             m.unsent = m.total - m.sent;
@@ -401,7 +433,6 @@
         updateDashboard();
     }
     
-
     function setSort(col) { 
         sortConfig.dir = (sortConfig.col === col && sortConfig.dir === 'asc') ? 'desc' : 'asc'; 
         sortConfig.col = col; 
