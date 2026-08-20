@@ -11257,8 +11257,27 @@ function splitValueRating(raw){
  return {value,rating};
 }
 function normalizeKpiLabel(raw){
- return clean(String(raw??'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean).join(' '))
+ const original=clean(String(raw??'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean).join(' '))
   .replace(/\s+([/:,;])/g,'$1').replace(/([/:])\s+/g,'$1 ');
+ const key=canonical(original);
+ // Restore complete KPI headings when PDF cell extraction clips the right-most words.
+ const repairs=[
+  [/^(?:of )?chats?$/, '# of Chats'],
+  [/^avg daily chats?$/, 'Avg Daily Chats'],
+  [/^(?:of )?calls made$/, '# Of Calls Made'],
+  [/^availability per shift/, 'Availability Per Shift Total Working Days/Days Worked/Average Hours'],
+  [/^aux accuracy$/, 'AUX Accuracy'],
+  [/^average break/, 'Average Break - 30 Minutes'],
+  [/^average lunch/, 'Average Lunch - 60 Minutes'],
+  [/^average personal/, 'Average Personal ≤ 10 Minutes']
+ ];
+ const hit=repairs.find(([re])=>re.test(key));
+ return hit?hit[1]:original;
+}
+function currentPbiAllowed(label){
+ const key=canonical(label);
+ // These first three review KPIs have no authoritative current-period PBI source.
+ return !(/^(?:of )?chats?$/.test(key)||/^avg daily chats?$/.test(key)||/^(?:of )?calls made$/.test(key));
 }
 function normalizeParsedValue(label,raw){
  let value=clean(String(raw??'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean).join(' '));
@@ -11320,10 +11339,14 @@ function render(){
  if(!rows.length){body.innerHTML='<tr class="sbs-loading-row"><td colspan="6">Loading KPI values from the previous-review flow...</td></tr>';if(source)source.textContent='The comparison table is ready and will populate automatically when the Flow finishes.';return}
  const options=value=>'<option value="">—</option>'+['EE','ME','BE'].map(v=>'<option value="'+v+'"'+(clean(value).toUpperCase()===v?' selected':'')+'>'+({EE:'↑ EE',ME:'→ ME',BE:'↓ BE'}[v])+'</option>').join('');
  body.innerHTML=rows.map(r=>{
-  const label=normalizeKpiLabel(r.label),key=canonical(label),parsed=normalizeParsedValue(label,r.prior),currentRaw=normalizeParsedValue(label,currentFor(label)||'');
-  const currentValue=valueEdits.has(key)?valueEdits.get(key):(currentRaw.value||'');
+  const label=normalizeKpiLabel(r.label),key=canonical(label),parsed=normalizeParsedValue(label,r.prior);
+  const pbiRaw=currentPbiAllowed(label)?currentFor(label):'';
+  const currentRaw=normalizeParsedValue(label,pbiRaw||'');
+  // Remove legacy auto-copies. A current value is shown only when the current PBI pass returned a real value.
+  if(!pbiRaw)valueEdits.delete(key);
+  const currentValue=pbiRaw?(currentRaw.value||''):'';
   const parsedRating=ratingEdits.has('parsed:'+key)?ratingEdits.get('parsed:'+key):parsed.rating;
-  const currentRating=ratingEdits.has('current:'+key)?ratingEdits.get('current:'+key):(currentRatingFor(label)||currentRaw.rating);
+  const currentRating=pbiRaw?(ratingEdits.has('current:'+key)?ratingEdits.get('current:'+key):(currentRatingFor(label)||currentRaw.rating)):'';
   return '<tr data-column-key="'+esc(key)+'">'+
    '<td class="sbs-kpi-label">'+esc(label)+'</td>'+
    '<td><span class="sbs-parsed-value">'+esc(parsed.value||'—')+'</span></td>'+
@@ -11335,7 +11358,7 @@ function render(){
  body.querySelectorAll('[data-value-key]').forEach(el=>el.addEventListener('input',()=>valueEdits.set(el.dataset.valueKey,el.value),{passive:true}));
  body.querySelectorAll('[data-rating-key]').forEach(el=>el.addEventListener('change',()=>ratingEdits.set(el.dataset.ratingKey,el.value),{passive:true}));
  body.querySelectorAll('[data-remove-key]').forEach(btn=>btn.addEventListener('click',()=>{window.__removedSideBySideKeys.add(btn.dataset.removeKey);render();validate()}));
- if(source)source.textContent=selected?'Loaded automatically from "'+clean(selected.heading||'This month')+'" on PDF page '+(selected.page||'—')+'. '+rows.length+' KPI rows.':'Showing '+rows.length+' KPI rows from parsed Flow data. The PDF viewer is optional.';
+ if(source)source.textContent=selected?'Parsed values loaded from "'+clean(selected.heading||'This month')+'" on PDF page '+(selected.page||'—')+'. Current values only populate when an authoritative PBI value is available. '+rows.length+' KPI rows.':'Showing '+rows.length+' parsed KPI rows. Current values only populate from authoritative PBI data.';
 }
 function install(){const original=window.extractPdfTableCells;if(typeof original!=='function'||original.__thisMonthWrapped)return;async function wrapped(pdf){const result=await original(pdf),selected=chooseThisMonthTable(result?.periods);if(selected){result.selectedThisMonthTable=selected;result.selectedBottomTable=selected;result.selectedPage=selected.page;result.cells=selected.pairs;}window.__lastCellParseResult=result;queueMicrotask(()=>{render();window.dispatchEvent(new CustomEvent('previous-review-pdf-this-month',{detail:result}))});return result}wrapped.__thisMonthWrapped=true;window.extractPdfTableCells=wrapped}
 function validate(){const rows=[...document.querySelectorAll('#page2-sbs-grid tbody tr')],keys=rows.map(x=>x.dataset.columnKey).filter(Boolean);return window.__sideBySideValidation={checkedAt:new Date().toISOString(),sectionPresent:!!$('page2-side-by-side-table'),tablePresent:!!$('page2-sbs-grid'),renderedRows:rows.length,duplicateColumnKeys:[...new Set(keys.filter((x,i)=>keys.indexOf(x)!==i))],selectedHeading:window.__lastCellParseResult?.selectedThisMonthTable?.heading||'',selectedPage:window.__lastCellParseResult?.selectedThisMonthTable?.page||null,sourceRule:'Use This month table from prior PDF as previous-month data'}}
@@ -12509,6 +12532,56 @@ window.runReportMappingPass=aggregate;
 const original=window.fetchAllPbiDataInBackground;if(typeof original==='function'&&!original.__reportPassWrapped){const wrapped=async function(){const result=await original.apply(this,arguments);aggregate();return result};wrapped.__reportPassWrapped=true;window.fetchAllPbiDataInBackground=wrapped}
 ['DOMContentLoaded','employee-selected','review-period-changed'].forEach(n=>window.addEventListener(n,()=>setTimeout(aggregate,0),{once:n==='DOMContentLoaded'}));
 window.addEventListener('beforeprint',aggregate);
+})();
+</script>
+
+<script id="pbi-truth-print-pass-v33">
+(function(){
+'use strict';
+if(window.__pbiTruthPrintPassV33)return;window.__pbiTruthPrintPassV33=true;
+const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
+const norm=v=>clean(v).toLowerCase().replace(/[^a-z0-9]+/g,'');
+const blocked=new Set(['ofchats','chats','avgdailychats','ofcallsmade','callsmade']);
+const aliases={
+ availabilitypershifttotalworkingdaysdaysworkedaveragehours:['availabilitypershifttotalworkingdaysdaysworkedaveragehours'],
+ auxaccuracy:['auxaccuracy'],
+ averagebreak30minutes:['averagebreakminutes','averagebreak30minutes'],
+ averagelunch60minutes:['averagelunchminutes','averagelunch60minutes'],
+ averagepersonal10minutes:['averagepersonal','averagepersonal10minutes']
+};
+function mappedRows(){return (window.__kpiFlowHelperRows||[]).filter(r=>r?.reportMapped===true&&clean(r.label)&&clean(r.value));}
+function mappedValue(label){
+ const key=norm(label);if(blocked.has(key))return '';
+ const choices=aliases[key]||[key];
+ const row=mappedRows().find(r=>choices.includes(norm(r.label)));
+ if(row)return clean(row.value);
+ const controls=[...document.querySelectorAll('#panel-2 [data-report-mapped="true"]')];
+ const exact=controls.find(el=>{const text=clean(el.closest('.field,.metric-item')?.querySelector('label')?.textContent);return choices.includes(norm(text))});
+ return clean(exact?.value);
+}
+function truthRows(){
+ const labels=['# of Chats','Avg Daily Chats','# Of Calls Made','Availability Per Shift Total Working Days/Days Worked/Average Hours','AUX Accuracy','Average Break - 30 Minutes','Average Lunch - 60 Minutes','Average Personal ≤ 10 Minutes'];
+ return labels.map(label=>({label,value:mappedValue(label)}));
+}
+function sanitizeLiveFields(){
+ ['m-aux-accuracy','m-lunch-adherence','m-break-adherence','m-reporting-accuracy'].forEach(id=>{
+  const el=document.getElementById(id);if(el&&el.dataset.reportMapped!=='true'&&(!clean(el.value)||Number(el.value)===0)){el.value='';el.dataset.noAuthoritativePbi='true'}
+ });
+}
+function replaceCurrentLineage(root=document){
+ root.querySelectorAll('.review-lineage').forEach(section=>{
+  const rows=[...section.querySelectorAll('tbody tr')],current=rows.find(r=>r.classList.contains('current-review')||/Current Review/i.test(r.cells?.[0]?.textContent||''));if(!current)return;
+  const headers=[...section.querySelectorAll('thead th')].slice(1).map(th=>clean(th.textContent));
+  headers.forEach((label,i)=>{const cell=current.cells[i+1];if(cell)cell.textContent=mappedValue(label)||'—'});
+ });
+}
+function enforce(){sanitizeLiveFields();replaceCurrentLineage(document);window.__currentPbiTruthRows=truthRows();window.dispatchEvent(new CustomEvent('current-pbi-truth-ready',{detail:window.__currentPbiTruthRows}))}
+window.getCurrentPbiTruthRows=truthRows;
+['report-kpi-mapping-ready','kpi-flow-data-ready','previous-review-pdf-this-month'].forEach(n=>window.addEventListener(n,()=>queueMicrotask(enforce)));
+const observer=new MutationObserver(()=>{clearTimeout(window.__pbiTruthTimer);window.__pbiTruthTimer=setTimeout(enforce,25)});
+function init(){observer.observe(document.body,{childList:true,subtree:true});enforce()}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
+window.addEventListener('beforeprint',enforce);
 })();
 </script>
 
