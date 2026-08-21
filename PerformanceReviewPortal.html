@@ -11261,11 +11261,37 @@ function chooseThisMonthTable(periods){
  return (matches.length?matches:valid).sort((a,b)=>(Number(a.page)||0)-(Number(b.page)||0)||a.__index-b.__index).at(-1)||null;
 }
 function currentCandidates(){const list=[];
- document.querySelectorAll('#month-kpi-body .exact-kpi-card[data-current-month="true"]').forEach((card,index)=>{const label=clean(card.querySelector('.exact-kpi-name,.exact-kpi-name-editor')?.value||card.querySelector('.exact-kpi-name,.exact-kpi-name-editor')?.textContent),value=clean(card.querySelector('.exact-kpi-value')?.value||card.querySelector('.exact-kpi-value')?.textContent);if(label)list.push({label,value,id:'exact-current-'+index,priority:3})});
- document.querySelectorAll('#panel-2 .review-panel.active input:not([type=hidden]),#panel-2 .review-panel.active select').forEach(el=>{if(el.closest('#page2-side-by-side-table'))return;const label=clean(el.closest('.field,.metric-item')?.querySelector('label')?.textContent).replace(/\*/g,'').trim();if(label)list.push({label,value:clean(el.value),id:el.id,priority:2})});
- const unique=new Map();list.forEach(x=>{const key=canonical(x.label),old=unique.get(key);if(key&&(!old||x.priority>=old.priority))unique.set(key,x)});return [...unique.values()];
+ // Live Page 2 / Power BI-backed fields are authoritative. Blank mirrored cards must not shadow them.
+ document.querySelectorAll('#panel-2 .review-panel.active input:not([type=hidden]),#panel-2 .review-panel.active select').forEach(el=>{if(el.closest('#page2-side-by-side-table'))return;const label=clean(el.closest('.field,.metric-item')?.querySelector('label')?.textContent).replace(/\*/g,'').trim();if(label)list.push({label,value:clean(el.value),id:el.id,priority:clean(el.value)?5:2})});
+ document.querySelectorAll('#month-kpi-body .exact-kpi-card[data-current-month="true"]').forEach((card,index)=>{const label=clean(card.querySelector('.exact-kpi-name,.exact-kpi-name-editor')?.value||card.querySelector('.exact-kpi-name,.exact-kpi-name-editor')?.textContent),value=clean(card.querySelector('.exact-kpi-value')?.value||card.querySelector('.exact-kpi-value')?.textContent);if(label&&value)list.push({label,value,id:'exact-current-'+index,priority:4})});
+ const unique=new Map();list.forEach(x=>{const key=canonical(x.label),old=unique.get(key);if(key&&(!old||x.priority>old.priority||(x.priority===old.priority&&!old.value&&x.value)))unique.set(key,x)});return [...unique.values()];
 }
-function currentFor(label){const fields=currentCandidates(),key=metricKey(label),exact=fields.find(x=>metricKey(x.label)===key);if(exact)return exact.value||'—';const words=key.split(' ').filter(x=>x.length>2);let best=null,score=0;fields.forEach(x=>{const q=metricKey(x.label),s=words.length?words.filter(w=>q.includes(w)).length/words.length:0;if(s>score){score=s;best=x}});return score>=.5?(best.value||'—'):'—'}
+function currentFor(label){
+ const key=metricKey(label);
+ const directIds={
+  'calls-made-total':['m-outbound-calls','m-inbound-calls'],
+  'aux-accuracy':['m-aux-accuracy'],
+  'break-average':['m-avg-break'],
+  'lunch-average':['m-lunch'],
+  'personal-average':['m-personal-time'],
+  'working-days-total':['working-days-total','m-working-days-total'],
+  'days-worked':['m-days-present','days-worked'],
+  'hours-average':['m-average-hours','average-hours'],
+  'chats-total':['m-chats','m-total-chats','m-primary-metric'],
+  'chats-daily-average':['m-avg-daily-chats','m-daily-chats','m-secondary-metric']
+ };
+ for(const id of directIds[key]||[]){const el=document.getElementById(id);if(el&&clean(el.value))return clean(el.value)}
+ if(key==='availability-per-shift'){
+  const values=[currentFor('Total Working Days'),currentFor('Days Worked'),currentFor('Average Hours')];
+  if(values.every(v=>v&&v!=='—'))return values.join('/');
+ }
+ const fields=currentCandidates();
+ const exact=fields.filter(x=>metricKey(x.label)===key).sort((a,b)=>(!!b.value-!!a.value)||(b.priority-a.priority))[0];
+ if(exact&&exact.value)return exact.value;
+ const words=key.split(' ').filter(x=>x.length>2);let best=null,score=0;
+ fields.filter(x=>x.value).forEach(x=>{const q=metricKey(x.label),s=words.length?words.filter(w=>q.includes(w)).length/words.length:0;if(s>score){score=s;best=x}});
+ return score>=.5&&best?.value?best.value:'—';
+}
 function splitValueRating(raw){
  const text=clean(raw),upper=text.toUpperCase();
  let rating='';
@@ -12486,5 +12512,28 @@ function snapshot(){
 document.addEventListener('input',e=>{if(e.target?.matches('.sbs-current-value,.sbs-current-rating'))e.target.dataset.userEdited='true'},true);
 window.addEventListener('beforeprint',()=>{window.__currentMonthPowerBiOnlyAudit=snapshot()});
 window.validateCurrentMonthPowerBiOnly=snapshot;
-})();</script></body>
+})();</script>
+<script id="page2-current-kpi-live-sync-v62-js">
+(()=>{'use strict';if(window.__page2CurrentKpiLiveSyncV62)return;window.__page2CurrentKpiLiveSyncV62=true;
+ const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
+ const norm=v=>clean(v).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+ const rules=[
+  [/^(?:#|number|no)?\s*of\s*calls\s*made$|^total\s*calls$/,['m-outbound-calls','m-inbound-calls']],
+  [/^aux(?:iliary)?\s*accuracy$/,['m-aux-accuracy']],
+  [/^average\s*break/,['m-avg-break']],
+  [/^average\s*lunch/,['m-lunch']],
+  [/^average\s*personal/,['m-personal-time']],
+  [/^(?:#|number|no)?\s*of\s*chats$/,['m-chats','m-total-chats','m-primary-metric']],
+  [/^avg(?:erage)?\s*daily\s*chats$/,['m-avg-daily-chats','m-daily-chats','m-secondary-metric']]
+ ];
+ function valueFor(label){const key=norm(label);for(const [rx,ids] of rules){if(!rx.test(key))continue;for(const id of ids){const el=document.getElementById(id);if(el&&clean(el.value))return clean(el.value)}}
+  if(/availability per shift/.test(key)){const total=document.getElementById('working-days-total')?.value||document.getElementById('m-working-days-total')?.value;const worked=document.getElementById('m-days-present')?.value||document.getElementById('days-worked')?.value;const hours=document.getElementById('m-average-hours')?.value||document.getElementById('average-hours')?.value;if(clean(total)&&clean(worked)&&clean(hours))return [total,worked,hours].map(clean).join('/')}
+  return '';
+ }
+ function sync(){document.querySelectorAll('#page2-sbs-grid tbody tr[data-column-key]').forEach(row=>{const input=row.querySelector('.sbs-current-value');if(!input||input.dataset.userEdited==='true')return;const value=valueFor(row.querySelector('.sbs-kpi-label')?.textContent);if(value&&input.value!==value){input.value=value;input.dataset.currentSource='power-bi-live';}})}
+ ['input','change','kpi-flow-data-ready','previous-review-pdf-this-month'].forEach(name=>window.addEventListener(name,()=>setTimeout(sync,0),true));
+ document.addEventListener('DOMContentLoaded',()=>{sync();setInterval(sync,1000)});
+})();
+</script>
+</body>
 </html>
