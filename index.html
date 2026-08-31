@@ -2073,6 +2073,8 @@
         const finalRepName = repOwnerName || currentUserRepName || (msalAccount && msalAccount.name) || "";
         const finalNotes = notesPayload || "";
         const subjectBase = `${companyName || ""}/${accountId || ""}`.replace(/^\//, "").replace(/\/$/, "");
+        const requestCorrelation = `ACT-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+        const uniqueSubject = `${subjectBase} - ${type} - ${requestCorrelation}`;
 
         const d365Token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
         const payload = {
@@ -2081,7 +2083,7 @@
             description: finalNotes,
             "ownerid_mss_salescall@odata.bind": `/systemusers(${MVGO_ISREQ_OWNER_ID})`,
             mss_salescalltrigger: type,
-            subject: `${subjectBase} - ${type}`
+            subject: uniqueSubject
         };
 
         if (regardingGuid) {
@@ -2113,18 +2115,49 @@
         // Prefer the returned representation, then fall back to the standard OData entity header.
         const entityHeader = response.headers.get("OData-EntityId") || response.headers.get("odata-entityid") || response.headers.get("Location") || "";
         const headerGuidMatch = entityHeader.match(/mss_salescalls\(([^)]+)\)/i);
-        const activityId = cleanGuid(
+        const unwrapCreatedRecord = (value) => {
+            let item = value;
+            if (typeof item === 'string') { try { item = JSON.parse(item); } catch (_) {} }
+            if (item?.body) item = item.body;
+            if (typeof item === 'string') { try { item = JSON.parse(item); } catch (_) {} }
+            if (Array.isArray(item?.value)) item = item.value[0];
+            return item || {};
+        };
+        createdRecord = unwrapCreatedRecord(createdRecord);
+        let activityId = cleanGuid(
             createdRecord?.activityid ||
             createdRecord?.mss_salescallid ||
             createdRecord?.id ||
             (headerGuidMatch ? headerGuidMatch[1] : "")
         );
 
-        // Dataverse can return sequential GUIDs whose version/variant nibbles do not
-        // satisfy the narrow RFC 4122 regex. Masonville accepts the full 8-4-4-4-12 form.
+        // The supplied ST flow returns only body('HTTP'), so Dataverse create headers are not
+        // available and Prefer:return=representation is not forwarded. Recover the GUID by
+        // querying the unique subject written in the POST payload.
         if (!activityId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activityId)) {
-            console.error("Masonville create response did not include a valid sales-call GUID.", { createdRecord, entityHeader });
-            throw new Error("Masonville created the request, but no valid activity GUID was returned.");
+            const escapedSubject = uniqueSubject.replace(/'/g, "''");
+            const query = `?$select=activityid,mss_salescallid,subject,createdon&$filter=subject eq '${escapedSubject}'&$orderby=createdon desc&$top=1`;
+            for (let attempt = 1; attempt <= 5 && !activityId; attempt++) {
+                if (attempt > 1) await new Promise(resolve => setTimeout(resolve, 900));
+                const lookupRelay = await window.callACTSTFlow({
+                    endpointUrl: `${MASONVILLE_API_BASE}/mss_salescalls${query}`,
+                    method: 'GET',
+                    token: d365Token,
+                    headers: { Accept:'application/json', 'OData-MaxVersion':'4.0', 'OData-Version':'4.0' }
+                });
+                let lookupBody = lookupRelay.body;
+                if (typeof lookupBody === 'string') { try { lookupBody = JSON.parse(lookupBody); } catch (_) {} }
+                if (lookupBody?.body) lookupBody = lookupBody.body;
+                if (typeof lookupBody === 'string') { try { lookupBody = JSON.parse(lookupBody); } catch (_) {} }
+                const row = Array.isArray(lookupBody?.value) ? lookupBody.value[0] : null;
+                activityId = cleanGuid(row?.activityid || row?.mss_salescallid || '');
+                if (row) createdRecord = row;
+            }
+        }
+
+        if (!activityId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(activityId)) {
+            console.error("Masonville create response and correlated lookup did not return a valid sales-call GUID.", { createdRecord, entityHeader, uniqueSubject });
+            throw new Error("Masonville created the request, but ACT could not retrieve the activity GUID through ST Flow.");
         }
 
         console.log("MVGO ISREQ Dataverse draft created", activityId);
