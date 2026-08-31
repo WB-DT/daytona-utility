@@ -2064,15 +2064,18 @@
         };
     };
 
-    window.createMasonvilleSalesCallDirect = async function({ accountId, accountGuid = "", notesPayload, type = "ISReq", companyName = "", repOwnerName = "" }) {
+    window.createMasonvilleSalesCallDirect = async function({ accountId, accountGuid = "", accountNumber = "", notesPayload, type = "ISReq", companyName = "", repOwnerName = "" }) {
         const MASONVILLE_API_BASE = "https://wbmasonco.crm.dynamics.com/api/data/v9.2";
         // Mirrors the existing Power Automate CreateRecord owner bind for MVGO Catalog ISREQ records.
         const MVGO_ISREQ_OWNER_ID = "a7df50fb-7d16-e811-a953-000d3a34ecdb";
         const cleanGuid = (guid) => String(guid || "").replace(/[{}]/g, "").trim();
-        const regardingGuid = cleanGuid(accountGuid || currentAccountGuid);
+        const regardingGuid = cleanGuid(accountGuid || accountId || currentAccountGuid);
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(regardingGuid)) {
+            throw new Error('MVGO requires the true Dataverse accounts.accountid GUID.');
+        }
         const finalRepName = repOwnerName || currentUserRepName || (msalAccount && msalAccount.name) || "";
         const finalNotes = notesPayload || "";
-        const subjectBase = `${companyName || ""}/${accountId || ""}`.replace(/^\//, "").replace(/\/$/, "");
+        const subjectBase = `${companyName || ""}/${accountNumber || accountId || ""}`.replace(/^\//, "").replace(/\/$/, "");
         const requestCorrelation = `ACT-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
         const uniqueSubject = `${subjectBase} - ${type} - ${requestCorrelation}`;
 
@@ -5951,15 +5954,30 @@ window.populateForm = function(rec) {
             const historyStamp = `<strong>MVGO SUBMITTED</strong><br />Action: ${escapeMasonvilleHtml(reqAction || 'None')}<br />Category Opportunity: ${escapeMasonvilleHtml(catOpp || 'None')}<br />Concern: ${escapeMasonvilleHtml(concern || 'None')}`;
 
             if (!currentRecordId) throw new Error('No current ACT account ID is available.');
-            if (!currentAccountGuid) throw new Error('No Dynamics 365 account GUID is available for this account.');
+
+            // Use the true Dataverse accounts.accountid captured during the initial record click.
+            // The ACT row ID/account number is retained separately and is never used as a GUID.
+            const selectedD365 = currentD365Account || {};
+            const trueAccountGuid = String(selectedD365.accountid || currentAccountGuid || '').replace(/[{}]/g, '').trim();
+            const selectedAccountNumber = String(
+                selectedD365.accountnumber ||
+                currentSelectedRecord?.cr714_accountnumber ||
+                currentSelectedRecord?.cr714_id ||
+                currentRecordId ||
+                ''
+            ).trim();
+            if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trueAccountGuid)) {
+                throw new Error('The selected record does not contain a valid Dataverse accounts.accountid GUID.');
+            }
+            if (!selectedAccountNumber) throw new Error('The selected record does not contain an account number.');
 
             window.showToast('Creating the Masonville request draft...', 'processing');
 
-            // Create the D365 mss_salescalls record first. Masonville's activityleadcall URL uses
-            // that same returned GUID; currentRecordId is only the ACT/account identifier.
+            // The MVGO catalog process now uses accounts.accountid as its account identifier.
             const createResult = await window.createMasonvilleSalesCallDirect({
-                accountId: currentRecordId,
-                accountGuid: currentAccountGuid,
+                accountId: trueAccountGuid,
+                accountGuid: trueAccountGuid,
+                accountNumber: selectedAccountNumber,
                 notesPayload: details,
                 type: 'ISReq',
                 companyName: currentSelectedRecord?.cr714_company || '',
@@ -5974,9 +5992,9 @@ window.populateForm = function(rec) {
                 historyStamp,
                 userNotes,
                 activityId,
-                accountId: currentRecordId,
-                accountNumber: String(currentRecordId || '').trim(),
-                accountGuid: String(currentAccountGuid || '').replace(/[{}]/g, '').trim(),
+                accountId: trueAccountGuid,
+                accountNumber: selectedAccountNumber,
+                accountGuid: trueAccountGuid,
                 assignedOwnerId: 'a7df50fb-7d16-e811-a953-000d3a34ecdb',
                 assignedOwnerName: 'Matt Rodgers',
                 selectedCategory: catOpp || '',
@@ -5985,19 +6003,10 @@ window.populateForm = function(rec) {
 
             // Reuse the account GUID and account metadata captured by the initial D365 lookup
             // when the gallery record was selected. This avoids a duplicate account lookup.
-            const selectedD365 = currentD365Account || {};
-            const selectedAccountGuid = String(selectedD365.accountid || currentAccountGuid || '').replace(/[{}]/g, '').trim();
-            const masonvilleAccountNumber = String(
-                selectedD365.accountnumber ||
-                currentSelectedRecord?.cr714_accountnumber ||
-                currentSelectedRecord?.cr714_id ||
-                currentRecordId ||
-                ''
-            ).trim();
-            if (!selectedAccountGuid) throw new Error('The selected record does not contain the cached Dynamics account GUID.');
-            if (!masonvilleAccountNumber) throw new Error('The selected record does not contain an account number.');
+            const selectedAccountGuid = trueAccountGuid;
+            const masonvilleAccountNumber = selectedAccountNumber;
 
-            window._pendingMVGOCatalog.accountGuid = selectedAccountGuid;
+            window._pendingMVGOCatalog.accountGuid = trueAccountGuid;
             window._pendingMVGOCatalog.accountNumber = masonvilleAccountNumber;
             window._pendingMVGOCatalog.accountName = String(selectedD365.name || currentSelectedRecord?.cr714_company || '').trim();
             window._pendingMVGOCatalog.accountLookupUrl = 'cached-from-record-selection';
