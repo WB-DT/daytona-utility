@@ -1754,7 +1754,7 @@
         if (!text) return '';
         
         // Step 1: Replace system-specific URL string routing
-        let decoded = text.replace(/activitysalescall/gi, 'activityleadcall');
+        let decoded = text.replace(/activityleadcall/gi, 'activityleadcall');
         
         // Step 2: Ensure basic HTML decoding if it was passed safely via Dataverse
         let tempDiv = document.createElement("textarea");
@@ -5278,8 +5278,16 @@ window.populateForm = function(rec) {
                     if (launchEmailButton) launchEmailButton.disabled = true;
                 } else { 
                     const currentMonthName = new Date().toLocaleString('en-US', { month: 'long' });
+                    // These templates are action-only. Never surface them through the
+                    // generic current-month fallback for unrelated actions.
+                    const actionOnlyTemplates = new Set([
+                        'NoAugust',
+                        'NoJulyAugust',
+                        'NoJuneJulyAugust'
+                    ]);
                     const currentMonthTemplates = allTemplates.filter(t =>
                         t.val !== 'NoJuly' &&
+                        !actionOnlyTemplates.has(t.val) &&
                         `${t.val || ''} ${t.txt || ''}`.toLowerCase().includes(currentMonthName.toLowerCase())
                     );
 
@@ -5835,7 +5843,7 @@ window.populateForm = function(rec) {
                 br,
                 escapeMasonvilleHtml(userNotes, 'No additional note provided.')
             ].join('');
-            const historyStamp = `[MVGO SUBMITTED] Action: ${reqAction || 'None'} | Opps: ${catOpp || 'None'} | Concern: ${concern || 'None'}`;
+            const historyStamp = `<strong>MVGO SUBMITTED</strong><br />Action: ${escapeMasonvilleHtml(reqAction || 'None')}<br />Category Opportunity: ${escapeMasonvilleHtml(catOpp || 'None')}<br />Concern: ${escapeMasonvilleHtml(concern || 'None')}`;
 
             if (!currentRecordId) throw new Error('No current ACT account ID is available.');
             if (!currentAccountGuid) throw new Error('No Dynamics 365 account GUID is available for this account.');
@@ -5864,7 +5872,9 @@ window.populateForm = function(rec) {
                 accountNumber: String(currentRecordId || '').trim(),
                 accountGuid: String(currentAccountGuid || '').replace(/[{}]/g, '').trim(),
                 assignedOwnerId: 'a7df50fb-7d16-e811-a953-000d3a34ecdb',
-                assignedOwnerName: 'Matt Rodgers'
+                assignedOwnerName: 'Matt Rodgers',
+                selectedCategory: catOpp || '',
+                categorySales: null
             };
 
             // Resolve the account number from the authoritative Dynamics account GUID.
@@ -5878,7 +5888,7 @@ window.populateForm = function(rec) {
 
             // The lead-call route is the read/review page. The sales-call route opens the
             // created mss_salescall activity in the editable Masonville experience.
-            const masonvilleUrl = `https://go.masonville.com/#/activitysalescall?id=${encodeURIComponent(activityId)}&accountNumber=${encodeURIComponent(masonvilleAccountNumber)}`;
+            const masonvilleUrl = `https://go.masonville.com/#/activityleadcall?id=${encodeURIComponent(activityId)}&accountNumber=${encodeURIComponent(masonvilleAccountNumber)}`;
             // Keep the exact created-activity URL with the pending request so ACT can save
             // a return link after the rep confirms the catalog was submitted in Masonville.
             window._pendingMVGOCatalog.masonvilleUrl = masonvilleUrl;
@@ -5917,6 +5927,182 @@ window.populateForm = function(rec) {
         if (frame) frame.src = 'about:blank';
     }
 
+
+    // MVGO four-month category sales capture.
+    // The report viewer is cross-origin from ACT, so this supports three safe paths:
+    // (1) a same-origin/direct fetch when the server permits it,
+    // (2) a postMessage from the existing Masonville/internal viewer, and
+    // (3) a pre-parsed Dynamics/current-record value when available.
+    const MVGO_SALES_STORAGE_KEY = 'act_mvgo_four_month_sales_v1';
+    const MVGO_SALES_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+    window._mvgoCategorySalesCache = window._mvgoCategorySalesCache || {};
+
+    window.readMVGOLocalSalesStore = function() {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(MVGO_SALES_STORAGE_KEY) || '{}');
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch (error) {
+            console.warn('MVGO local sales cache could not be read:', error);
+            return {};
+        }
+    };
+
+    window.writeMVGOLocalSalesStore = function(store) {
+        try {
+            localStorage.setItem(MVGO_SALES_STORAGE_KEY, JSON.stringify(store || {}));
+            return true;
+        } catch (error) {
+            console.warn('MVGO local sales cache could not be written:', error);
+            return false;
+        }
+    };
+
+    window.saveMVGOLocalSales = function(accountNumber, categories, source = 'captured') {
+        const acct = String(accountNumber || '').trim().toUpperCase();
+        if (!acct || !categories || !Object.keys(categories).length) return false;
+        const store = window.readMVGOLocalSalesStore();
+        store[acct] = { accountNumber: acct, categories, source, capturedAt: new Date().toISOString() };
+        window._mvgoCategorySalesCache[acct] = categories;
+        return window.writeMVGOLocalSalesStore(store);
+    };
+
+    window.getMVGOLocalSales = function(accountNumber, allowStale = false) {
+        const acct = String(accountNumber || '').trim().toUpperCase();
+        if (!acct) return null;
+        const entry = window.readMVGOLocalSalesStore()[acct];
+        if (!entry || !entry.categories) return null;
+        const age = Date.now() - new Date(entry.capturedAt || 0).getTime();
+        if (!allowStale && (!Number.isFinite(age) || age > MVGO_SALES_CACHE_TTL_MS)) return null;
+        window._mvgoCategorySalesCache[acct] = entry.categories;
+        return entry;
+    };
+
+    window.clearMVGOLocalSales = function(accountNumber = '') {
+        const acct = String(accountNumber || '').trim().toUpperCase();
+        if (!acct) {
+            localStorage.removeItem(MVGO_SALES_STORAGE_KEY);
+            window._mvgoCategorySalesCache = {};
+            return;
+        }
+        const store = window.readMVGOLocalSalesStore();
+        delete store[acct];
+        delete window._mvgoCategorySalesCache[acct];
+        window.writeMVGOLocalSalesStore(store);
+    };
+
+    // Hydrate the fast in-memory cache once from persistent browser storage.
+    Object.entries(window.readMVGOLocalSalesStore()).forEach(([acct, entry]) => {
+        if (entry && entry.categories) window._mvgoCategorySalesCache[acct] = entry.categories;
+    });
+
+    window.addEventListener('message', function(event) {
+        let hostname = '';
+        try { hostname = new URL(event.origin || location.origin).hostname; } catch (error) { return; }
+        const allowed = /(^|\.)masonville\.com$/i.test(hostname);
+        if (!allowed || !event.data || event.data.type !== 'MVGO_CATEGORY_SALES') return;
+        const acct = String(event.data.accountNumber || '').trim().toUpperCase();
+        if (acct && event.data.categories) window.saveMVGOLocalSales(acct, event.data.categories, 'masonville-message');
+    });
+
+    window.parseMVGOFourMonthSales = function(raw) {
+        const root = document.createElement('div');
+        root.innerHTML = String(raw || '');
+        const text = (root.textContent || root.innerText || String(raw || ''))
+            .replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+        const start = text.search(/4 Month Sales by Category/i);
+        if (start < 0) return {};
+        const section = text.slice(start).split(/\bTotals\b/i)[0];
+        const rowRx = /([A-Za-z][A-Za-z/& -]*?)\s+(\$-?[\d,]+\.\d{2})\s+(\$-?[\d,]+\.\d{2})\s+(\$-?[\d,]+\.\d{2})\s+(\$-?[\d,]+\.\d{2})/g;
+        const rows = {};
+        let match;
+        while ((match = rowRx.exec(section))) {
+            let label = match[1].replace(/^.*?Category\s+/i, '').trim();
+            const months = match.slice(2, 6).map(v => Number(v.replace(/[$,]/g, '')) || 0);
+            rows[label] = { months, total: months.reduce((a,b) => a+b, 0) };
+        }
+        return rows;
+    };
+
+    window.findMVGOCategorySales = function(rows, selectedCategory) {
+        const aliases = {
+            Water: ['Blizzard Water', 'Water'], Janitorial: ['Janitorial'], Hospitality: ['Hospitality'],
+            Food: ['Food Service', 'Food'], Breakroom: ['Breakroom', 'Coffee'], Shipping: ['Shipping & Packaging', 'Shipping'],
+            Furniture: ['Tran Furn', 'Furniture'], Office: ['Office Supplies', 'Office'],
+            Auto: ['Auto Dealer Supplies', 'Auto'], Print: ['Print/Promo', 'Print']
+        };
+        const wanted = aliases[selectedCategory] || [selectedCategory];
+        const found = Object.entries(rows || {}).filter(([name]) => wanted.some(a => name.toLowerCase() === a.toLowerCase()));
+        if (!found.length) return null;
+        const months = [0,0,0,0];
+        found.forEach(([,value]) => (value.months || []).forEach((n,i) => months[i] += Number(n)||0));
+        return { category: selectedCategory, matchedRows: found.map(([name]) => name), months, total: months.reduce((a,b)=>a+b,0) };
+    };
+
+    window.extractMVGOSalesFromRecord = function(record, selectedCategory) {
+        if (!record || !selectedCategory) return null;
+        const candidates = [];
+        const walk = (obj, depth=0) => {
+            if (!obj || depth > 5) return;
+            if (typeof obj === 'string' && /4 Month Sales by Category/i.test(obj)) candidates.push(obj);
+            else if (Array.isArray(obj)) obj.forEach(v => walk(v, depth+1));
+            else if (typeof obj === 'object') Object.values(obj).forEach(v => walk(v, depth+1));
+        };
+        walk(record);
+        for (const raw of candidates) {
+            const result = window.findMVGOCategorySales(window.parseMVGOFourMonthSales(raw), selectedCategory);
+            if (result) return result;
+        }
+        return null;
+    };
+
+    window.loadMVGOCategorySales = async function(accountNumber, selectedCategory) {
+        if (!accountNumber || !selectedCategory) return null;
+        const acct = String(accountNumber).trim().toUpperCase();
+        // Browser storage is the first source. A fresh entry avoids opening or rerunning the report.
+        const localEntry = window.getMVGOLocalSales(acct);
+        let result = window.findMVGOCategorySales(localEntry?.categories, selectedCategory);
+        if (result) return { ...result, cacheSource: 'localStorage', capturedAt: localEntry.capturedAt };
+
+        result = window.findMVGOCategorySales(window._mvgoCategorySalesCache[acct], selectedCategory);
+        if (result) return { ...result, cacheSource: 'memory' };
+
+        result = window.extractMVGOSalesFromRecord(currentSelectedRecord, selectedCategory);
+        if (result) {
+            const recordRows = window.parseMVGOFourMonthSales(JSON.stringify(currentSelectedRecord || {}));
+            window.saveMVGOLocalSales(acct, recordRows, 'dynamics-record');
+            return { ...result, cacheSource: 'dynamics-record' };
+        }
+        try {
+            const reportMetaUrl = `https://crmsrws.masonville.com/api/Reports?reportName=${encodeURIComponent('Four Month Sales')}&accountNumber=${encodeURIComponent(acct)}`;
+            const metaResponse = await fetch(reportMetaUrl, { credentials:'include', headers:{Accept:'application/json'} });
+            if (!metaResponse.ok) return null;
+            const meta = await metaResponse.json();
+            // Some environments return rendered/parsed report data with the metadata response.
+            const rows = window.parseMVGOFourMonthSales(JSON.stringify(meta));
+            result = window.findMVGOCategorySales(rows, selectedCategory);
+            if (result) {
+                window.saveMVGOLocalSales(acct, rows, 'report-api');
+                return { ...result, cacheSource: 'report-api', capturedAt: new Date().toISOString() };
+            }
+            // If a refresh is blocked, an older local copy is still preferable to no category sales.
+            const staleEntry = window.getMVGOLocalSales(acct, true);
+            const staleResult = window.findMVGOCategorySales(staleEntry?.categories, selectedCategory);
+            return staleResult ? { ...staleResult, cacheSource: 'localStorage-stale', capturedAt: staleEntry.capturedAt } : null;
+        } catch (error) {
+            console.info('MVGO category-sales background capture was not available:', error?.message || error);
+            const staleEntry = window.getMVGOLocalSales(acct, true);
+            const staleResult = window.findMVGOCategorySales(staleEntry?.categories, selectedCategory);
+            return staleResult ? { ...staleResult, cacheSource: 'localStorage-stale', capturedAt: staleEntry.capturedAt } : null;
+        }
+    };
+
+    window.formatMVGOCategorySalesNote = function(sales) {
+        if (!sales) return 'Category Sales (last 4 months): Unavailable';
+        const currency = new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'});
+        const monthly = sales.months.map(currency.format).join(' / ');
+        return `Category Sales (last 4 months): ${currency.format(sales.total)} | Monthly: ${monthly}`;
+    };
+
     window.completeMVGOCatalogRequest = async function() {
         if (window._isCompletingMVGO) return;
         const pending = window._pendingMVGOCatalog;
@@ -5929,23 +6115,27 @@ window.populateForm = function(rec) {
         try {
             const qbInput = document.getElementById('qb-notes-input');
             const masonvilleUrl = pending.masonvilleUrl ||
-                `https://go.masonville.com/#/activitysalescall?id=${encodeURIComponent(pending.activityId || '')}&accountNumber=${encodeURIComponent(pending.accountNumber || '')}`;
+                `https://go.masonville.com/#/activityleadcall?id=${encodeURIComponent(pending.activityId || '')}&accountNumber=${encodeURIComponent(pending.accountNumber || '')}`;
             const safeMasonvilleUrl = String(masonvilleUrl)
                 .replace(/&/g, '&amp;')
                 .replace(/"/g, '&quot;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
             const masonvilleReturnLink = `<a href="${safeMasonvilleUrl}" target="_blank" rel="noopener noreferrer"><strong>Open this Masonville catalog request</strong></a>`;
+            pending.categorySales = await window.loadMVGOCategorySales(pending.accountNumber, pending.selectedCategory);
+            const salesLine = window.formatMVGOCategorySalesNote(pending.categorySales);
+            const safeUserNote = pending.userNotes ? escapeHTML(String(pending.userNotes)).replace(/\r\n|\r|\n/g, '<br />') : '';
             const noteText = pending.historyStamp +
-                (pending.userNotes ? ` | Note: ${pending.userNotes}` : '') +
+                `<br />${escapeHTML(salesLine)}` +
+                (safeUserNote ? `<br /><br /><strong>Note</strong><br />${safeUserNote}` : '') +
                 `<br /><br />${masonvilleReturnLink}`;
             qbInput.value = noteText + (qbInput.value ? '\n\n' + qbInput.value : '');
 
             // Preserve the prior ACT activity logging and sales call note save process.
             if (window.recordActFactActivity) {
-                window.recordActFactActivity('MVGO Catalog Submitted', {
+                await window.recordActFactActivity('MVGO Catalog Submitted', {
                     noteText: noteText,
-                    details: pending.details,
+                    details: `${pending.details}<br /><br /><strong>SELECTED CATEGORY SALES</strong><br />${escapeHTML(salesLine)}`,
                     effectiveOpportunityType: 'MVGO',
                     priority: 'MVGO',
                     masonvilleActivityId: pending.activityId || ''
@@ -7662,18 +7852,18 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
                         </div>
                     </div>
                     <div class="p-4 border rounded shadow-sm flex-grow" style="background-color: var(--bg-input); border-color: var(--border-color);">
-                        <h3 class="text-xs font-bold uppercase text-muted mb-3 border-b pb-2" style="border-color: var(--border-color);">2. Category Opportunities</h3>
+                        <h3 class="text-xs font-bold uppercase text-muted mb-3 border-b pb-2" style="border-color: var(--border-color);">2. Category Opportunity - <span style="color: var(--accent-warning); font-weight: 950; text-shadow: 0 0 10px rgba(234,179,8,.28);">Select Best Opp!</span></h3>
                         <div class="grid grid-cols-2 gap-4 text-sm font-medium">
-                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="checkbox" id="mvgo-cat-water" name="mvgo_cat_water" value="Water" class="w-4 h-4 cursor-pointer"> Water</label>
-                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="checkbox" id="mvgo-cat-jan" name="mvgo_cat_jan" value="Janitorial" class="w-4 h-4 cursor-pointer"> Janitorial</label>
-                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="checkbox" id="mvgo-cat-hosp" name="mvgo_cat_hosp" value="Hospitality" class="w-4 h-4 cursor-pointer"> Hospitality</label>
-                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="checkbox" id="mvgo-cat-food" name="mvgo_cat_food" value="Food" class="w-4 h-4 cursor-pointer"> Food</label>
-                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="checkbox" id="mvgo-cat-break" name="mvgo_cat_break" value="Breakroom" class="w-4 h-4 cursor-pointer"> Breakroom</label>
-                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="checkbox" id="mvgo-cat-ship" name="mvgo_cat_ship" value="Shipping" class="w-4 h-4 cursor-pointer"> Shipping</label>
-                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="checkbox" id="mvgo-cat-furn" name="mvgo_cat_furn" value="Furniture" class="w-4 h-4 cursor-pointer"> Furniture</label>
-                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="checkbox" id="mvgo-cat-office" name="mvgo_cat_office" value="Office" class="w-4 h-4 cursor-pointer"> Office</label>
-                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="checkbox" id="mvgo-cat-auto" name="mvgo_cat_auto" value="Auto" class="w-4 h-4 cursor-pointer"> Auto</label>
-                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="checkbox" id="mvgo-cat-print" name="mvgo_cat_print" value="Print" class="w-4 h-4 cursor-pointer"> Print</label>
+                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="radio" id="mvgo-cat-water" name="mvgo_category_opportunity" value="Water" class="w-4 h-4 cursor-pointer"> Water</label>
+                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="radio" id="mvgo-cat-jan" name="mvgo_category_opportunity" value="Janitorial" class="w-4 h-4 cursor-pointer"> Janitorial</label>
+                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="radio" id="mvgo-cat-hosp" name="mvgo_category_opportunity" value="Hospitality" class="w-4 h-4 cursor-pointer"> Hospitality</label>
+                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="radio" id="mvgo-cat-food" name="mvgo_category_opportunity" value="Food" class="w-4 h-4 cursor-pointer"> Food</label>
+                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="radio" id="mvgo-cat-break" name="mvgo_category_opportunity" value="Breakroom" class="w-4 h-4 cursor-pointer"> Breakroom</label>
+                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="radio" id="mvgo-cat-ship" name="mvgo_category_opportunity" value="Shipping" class="w-4 h-4 cursor-pointer"> Shipping</label>
+                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="radio" id="mvgo-cat-furn" name="mvgo_category_opportunity" value="Furniture" class="w-4 h-4 cursor-pointer"> Furniture</label>
+                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="radio" id="mvgo-cat-office" name="mvgo_category_opportunity" value="Office" class="w-4 h-4 cursor-pointer"> Office</label>
+                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="radio" id="mvgo-cat-auto" name="mvgo_category_opportunity" value="Auto" class="w-4 h-4 cursor-pointer"> Auto</label>
+                            <label class="flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"><input type="radio" id="mvgo-cat-print" name="mvgo_category_opportunity" value="Print" class="w-4 h-4 cursor-pointer"> Print</label>
                         </div>
                     </div>
                 </div>
