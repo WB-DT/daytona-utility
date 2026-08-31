@@ -3,7 +3,7 @@
 <head><script type='text/javascript' src='https://wbmasonco-my.sharepoint.com/shUfjaerU3dJDARDTs7K8qskfsznvCOZI09c_isgotITjz-NF-JBd9i0qiXQbsH4dPDDyOdpItGz0J5JV-PTVwVdxjk37MHeKZf6UH8-Xok-v2Z6UdkVlTagA67JYDLBS6z7CAUyXjf53c3rytrItrO-m1MhDtVRwP6dlH92kruRvDn_W8nn9w6ybKjUt-roxRx1p8efoEcRgSiAKsCEygB06semJ6UeoN9ZOljHKOTxgspmmBwdGYkl_bU-Zq0GBf7wvzvjsxsBNTUf8dEkVrAJpL9GbwRkOi0vS8uGX3XYRE3s8dLKec8XIBFA3yJOQZqPyie7HANpWobMfHQ0-qpAqhZMWya1ROgnQalxLj3WPH-KrTw--wkj_RvyByq8o26LESIm_XxVkF4SCQVgZLPAHJD52DdPpRvPP_gAtrcuMbI5KSvZu6YkKd81Qb8IW38Q3456JSI1nMxnK2wvP_Qw8S9GuQxna_uslYtN1CzssDzdvaZUMu1Rjc3h3QZ4wnzgkSaJ9gFn6-2r4kJ3QPwE8FZh8eK1u4ADrIvu4fULlcEuUUhFuoeEaMqeC_gyz3HmSk0LtyneR2av4gez5XdLDuvIM9nuWGsDaU2qTqJDd1j9W86zfRm7GZdtfcoMCQ'></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. MVGO Source Tunnel Only -  v6.10.26 Action Email Template Fix - ACT Final Images + June Templates + Auto15 SyntaxFix</title>
+    <title>A.C.T. MVGO Source Report Fixed -  v6.10.26 Action Email Template Fix - ACT Final Images + June Templates + Auto15 SyntaxFix</title>
 
     
     <script src="https://cdn.tailwindcss.com"></script>
@@ -6051,30 +6051,41 @@ window.populateForm = function(rec) {
     // MVGO source-report tunnel. No Power BI, dataset-query, Mod-table, or PBI-flow path is used.
     const MVGO_SOURCE_TUNNEL_URL = 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/29/workflows/5aad6c2d680a46c1ad66ae301d9e5bdb/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=yh385aT7xv9ZdBhDNxWaea6jVEHaHbHddRrDcX1Zg0w';
 
-    window.callMVGOSourceTunnel = async function(endpointUrl, token) {
+    window.callMVGOSourceTunnel = async function(endpointUrl, token, options = {}) {
         const endpoint = new URL(endpointUrl);
-        if (endpoint.hostname.toLowerCase() !== 'crmsrws.masonville.com') {
-            throw new Error(`MVGO report tunnel blocked destination: ${endpoint.hostname}`);
-        }
+        if (endpoint.hostname.toLowerCase() !== 'crmsrws.masonville.com') throw new Error(`MVGO tunnel blocked: ${endpoint.hostname}`);
+        const method = String(options.method || 'GET').toUpperCase();
         const response = await fetch(MVGO_SOURCE_TUNNEL_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                reqMethod: 'GET',
-                endpointUrl: endpoint.toString(),
-                msalToken: token || '',
-                headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-                requestBody: null
-            })
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reqMethod: method, endpointUrl: endpoint.toString(), msalToken: token || '',
+                headers: { Accept: options.accept || 'application/json', 'Content-Type': 'application/json' },
+                requestBody: ['GET','HEAD'].includes(method) ? null : (options.body ?? null) })
         });
         const text = await response.text();
-        let parsed;
-        try { parsed = text ? JSON.parse(text) : null; } catch (_) { parsed = text; }
-        if (!response.ok) throw new Error(`ST Flow returned ${response.status}: ${text}`);
-        const status = Number(parsed?.statusCode || 200);
-        const body = parsed && Object.prototype.hasOwnProperty.call(parsed, 'body') ? parsed.body : parsed;
-        if (status < 200 || status >= 300) throw new Error(`Masonville report returned ${status}`);
+        let parsed; try { parsed = text ? JSON.parse(text) : null; } catch (_) { parsed = text; }
+        if (!response.ok) throw new Error(`ST Flow returned ${response.status}: ${text.slice(0,500)}`);
+        let status = Number(parsed?.statusCode || 200);
+        let body = parsed && Object.prototype.hasOwnProperty.call(parsed,'body') ? parsed.body : parsed;
+        if (body && typeof body === 'object' && 'statusCode' in body && 'body' in body) { status = Number(body.statusCode || status); body = body.body; }
+        if (status < 200 || status >= 300) throw new Error(`Masonville returned ${status}: ${JSON.stringify(body).slice(0,500)}`);
         return body;
+    };
+
+    window.getMVGOReportViewerToken = async function(d365Token) {
+        const raw = await window.callMVGOSourceTunnel('https://crmsrws.masonville.com/api/Auth/ReportViewerToken', d365Token,
+            { method:'POST', body:String(Date.now()), accept:'application/json' });
+        const token = String(raw?.token || raw?.value || raw || '').replace(/^"|"$/g,'').trim();
+        if (!token || !/^[0-9a-z-]{20,}$/i.test(token)) throw new Error(`Invalid report-viewer token: ${JSON.stringify(raw).slice(0,300)}`);
+        return token;
+    };
+
+    window.loadMVGORenderedReport = async function(meta, accountNumber, d365Token) {
+        if (!meta?.path) throw new Error('Report metadata did not include a path.');
+        const account = (Array.isArray(meta.parameters) ? meta.parameters : []).find(p => /accountnum/i.test(String(p?.key||'')))?.value || accountNumber;
+        const viewerToken = await window.getMVGOReportViewerToken(d365Token);
+        const url = new URL('https://crmsrws.masonville.com/ReportViewer.aspx');
+        url.searchParams.set('Path', meta.path); url.searchParams.set('Params', `AccountNum,${account}`); url.searchParams.set('Token', viewerToken);
+        return window.callMVGOSourceTunnel(url.toString(), d365Token, { method:'GET', accept:'text/html,application/xhtml+xml,*/*;q=0.8' });
     };
 
     window.loadMVGOCategorySales = async function(accountNumber, selectedCategory) {
@@ -6098,11 +6109,19 @@ window.populateForm = function(rec) {
             const reportMetaUrl = `https://crmsrws.masonville.com/api/Reports?reportName=${encodeURIComponent('Four Month Sales')}&accountNumber=${encodeURIComponent(acct)}`;
             const d365Token = await window.getToken('https://wbmasonco.crm.dynamics.com//user_impersonation', true);
             const meta = await window.callMVGOSourceTunnel(reportMetaUrl, d365Token);
-            // Some environments return rendered/parsed report data with the metadata response.
-            const rows = window.parseMVGOFourMonthSales(JSON.stringify(meta));
+            console.group('MVGO Masonville source report');
+            console.log('Account number:', acct); console.log('Report metadata:', meta);
+            let rows = window.parseMVGOFourMonthSales(typeof meta === 'string' ? meta : JSON.stringify(meta));
             result = window.findMVGOCategorySales(rows, selectedCategory);
+            if (!result && meta?.path) {
+                const rendered = await window.loadMVGORenderedReport(meta, acct, d365Token);
+                console.log('Rendered report:', rendered);
+                rows = window.parseMVGOFourMonthSales(typeof rendered === 'string' ? rendered : JSON.stringify(rendered));
+                result = window.findMVGOCategorySales(rows, selectedCategory);
+            }
+            console.log('Parsed rows:', rows); console.log('Matched sales:', result); console.groupEnd();
             if (result) {
-                window.saveMVGOLocalSales(acct, rows, 'report-api');
+                window.saveMVGOLocalSales(acct, rows, 'masonville-rendered-report');
                 return { ...result, cacheSource: 'report-api', capturedAt: new Date().toISOString() };
             }
             // If a refresh is blocked, an older local copy is still preferable to no category sales.
