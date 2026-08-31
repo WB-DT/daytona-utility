@@ -3,7 +3,7 @@
 <head><script type='text/javascript' src='https://wbmasonco-my.sharepoint.com/shUfjaerU3dJDARDTs7K8qskfsznvCOZI09c_isgotITjz-NF-JBd9i0qiXQbsH4dPDDyOdpItGz0J5JV-PTVwVdxjk37MHeKZf6UH8-Xok-v2Z6UdkVlTagA67JYDLBS6z7CAUyXjf53c3rytrItrO-m1MhDtVRwP6dlH92kruRvDn_W8nn9w6ybKjUt-roxRx1p8efoEcRgSiAKsCEygB06semJ6UeoN9ZOljHKOTxgspmmBwdGYkl_bU-Zq0GBf7wvzvjsxsBNTUf8dEkVrAJpL9GbwRkOi0vS8uGX3XYRE3s8dLKec8XIBFA3yJOQZqPyie7HANpWobMfHQ0-qpAqhZMWya1ROgnQalxLj3WPH-KrTw--wkj_RvyByq8o26LESIm_XxVkF4SCQVgZLPAHJD52DdPpRvPP_gAtrcuMbI5KSvZu6YkKd81Qb8IW38Q3456JSI1nMxnK2wvP_Qw8S9GuQxna_uslYtN1CzssDzdvaZUMu1Rjc3h3QZ4wnzgkSaJ9gFn6-2r4kJ3QPwE8FZh8eK1u4ADrIvu4fULlcEuUUhFuoeEaMqeC_gyz3HmSk0LtyneR2av4gez5XdLDuvIM9nuWGsDaU2qTqJDd1j9W86zfRm7GZdtfcoMCQ'></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>A.C.T. v6.10.26 Action Email Template Fix - ACT Final Images + June Templates + Auto15 SyntaxFix</title>
+    <title>A.C.T. ST Flow Relay -  v6.10.26 Action Email Template Fix - ACT Final Images + June Templates + Auto15 SyntaxFix</title>
 
     
     <script src="https://cdn.tailwindcss.com"></script>
@@ -1980,6 +1980,54 @@
         return res;
     }
 
+    // ST Flow CORS relay. Replace only the placeholder URL after importing/enabling ST - FLOW.
+    const ACT_ST_FLOW = Object.freeze({
+        url: 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/29/workflows/5aad6c2d680a46c1ad66ae301d9e5bdb/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=yh385aT7xv9ZdBhDNxWaea6jVEHaHbHddRrDcX1Zg0w',
+        timeoutMs: 45000,
+        allowedHosts: Object.freeze([
+            'wbmasonco.crm.dynamics.com',
+            'crmsrws.masonville.com'
+        ])
+    });
+
+    window.callACTSTFlow = async function({ endpointUrl, method='GET', token='', headers={}, body=null }) {
+        if (!ACT_ST_FLOW.url) {
+            throw new Error('The ST Flow URL placeholder has not been configured.');
+        }
+        const endpoint = new URL(endpointUrl);
+        if (!ACT_ST_FLOW.allowedHosts.includes(endpoint.hostname.toLowerCase())) {
+            throw new Error(`ST Flow blocked an unapproved destination: ${endpoint.hostname}`);
+        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), ACT_ST_FLOW.timeoutMs);
+        try {
+            const relayPayload = {
+                reqMethod: String(method || 'GET').toUpperCase(),
+                endpointUrl: endpoint.toString(),
+                msalToken: token || '',
+                headers: { ...headers, 'Content-Type': headers['Content-Type'] || 'application/json' },
+                requestBody: body
+            };
+            const relayResponse = await fetch(ACT_ST_FLOW.url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(relayPayload),
+                signal: controller.signal
+            });
+            const text = await relayResponse.text();
+            let parsed = null;
+            try { parsed = text ? JSON.parse(text) : null; } catch (error) { parsed = text; }
+            if (!relayResponse.ok) throw new Error(`ST Flow returned ${relayResponse.status}: ${text}`);
+            // Supports the attached flow's direct downstream body and a future wrapped response.
+            const downstreamStatus = Number(parsed?.statusCode || 200);
+            const downstreamBody = parsed && Object.prototype.hasOwnProperty.call(parsed,'body') ? parsed.body : parsed;
+            if (downstreamStatus < 200 || downstreamStatus >= 300) {
+                throw new Error(`Relayed endpoint returned ${downstreamStatus}: ${JSON.stringify(downstreamBody)}`);
+            }
+            return { status: downstreamStatus, body: downstreamBody, headers: parsed?.headers || {} };
+        } finally { clearTimeout(timer); }
+    };
+
     window.resolveMasonvilleAccountDirect = async function(accountGuid, existingToken = "") {
         const cleanGuid = String(accountGuid || "").replace(/[{}]/g, "").trim();
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanGuid)) {
@@ -1989,15 +2037,13 @@
         const d365Token = existingToken || await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
         const filter = `accountid eq '${cleanGuid}'`;
         const accountLookupUrl = `https://wbmasonco.crm.dynamics.com/api/data/v9.0/accounts?$filter=${encodeURIComponent(filter)}&$select=accountnumber,name`;
-        const response = await fetch(accountLookupUrl, {
-            method: "GET",
-            headers: {
-                Authorization: `Bearer ${d365Token}`,
-                Accept: "application/json",
-                "OData-MaxVersion": "4.0",
-                "OData-Version": "4.0"
-            }
+        const relay = await window.callACTSTFlow({
+            endpointUrl: accountLookupUrl,
+            method: 'GET',
+            token: d365Token,
+            headers: { Accept:'application/json', 'OData-MaxVersion':'4.0', 'OData-Version':'4.0' }
         });
+        const response = { ok: relay.status >= 200 && relay.status < 300, status: relay.status, json: async()=>relay.body, text: async()=>typeof relay.body==='string'?relay.body:JSON.stringify(relay.body) };
 
         if (!response.ok) {
             const errText = await response.text().catch(() => "");
@@ -2042,18 +2088,14 @@
             payload["regardingobjectid_account_mss_salescall@odata.bind"] = `/accounts(${regardingGuid})`;
         }
 
-        const response = await fetch(`${MASONVILLE_API_BASE}/mss_salescalls`, {
-            method: "POST",
-            headers: {
-                Authorization: `Bearer ${d365Token}`,
-                "Content-Type": "application/json",
-                Accept: "application/json",
-                "OData-MaxVersion": "4.0",
-                "OData-Version": "4.0",
-                Prefer: "return=representation"
-            },
-            body: JSON.stringify(payload)
+        const relay = await window.callACTSTFlow({
+            endpointUrl: `${MASONVILLE_API_BASE}/mss_salescalls`,
+            method: 'POST',
+            token: d365Token,
+            headers: { 'Content-Type':'application/json', Accept:'application/json', 'OData-MaxVersion':'4.0', 'OData-Version':'4.0', Prefer:'return=representation' },
+            body: payload
         });
+        const response = { ok: relay.status >= 200 && relay.status < 300, status: relay.status, json: async()=>relay.body, text: async()=>typeof relay.body==='string'?relay.body:JSON.stringify(relay.body), headers:{ get:()=>null } };
 
         if (!response.ok) {
             const errText = await response.text().catch(() => "");
@@ -5888,10 +5930,11 @@ window.populateForm = function(rec) {
 
             // The lead-call route is the read/review page. The sales-call route opens the
             // created mss_salescall activity in the editable Masonville experience.
-            const masonvilleUrl = `https://go.masonville.com/#/activityleadcall?id=${encodeURIComponent(activityId)}&accountNumber=${encodeURIComponent(masonvilleAccountNumber)}`;
+            const masonvilleUrl = `https://go.masonville.com/#/ActivitySalesCall?id=${encodeURIComponent(activityId)}&accountNumber=${encodeURIComponent(masonvilleAccountNumber)}`;
             // Keep the exact created-activity URL with the pending request so ACT can save
             // a return link after the rep confirms the catalog was submitted in Masonville.
             window._pendingMVGOCatalog.masonvilleUrl = masonvilleUrl;
+            window._pendingMVGOCatalog.historyUrl = `https://go.masonville.com/#/activityleadcall?id=${encodeURIComponent(activityId)}&accountNumber=${encodeURIComponent(masonvilleAccountNumber)}`;
             const frame = document.getElementById('mvgo-masonville-iframe');
             if (!frame) throw new Error('The Masonville modal frame is unavailable.');
             frame.dataset.url = masonvilleUrl;
@@ -6074,9 +6117,9 @@ window.populateForm = function(rec) {
         }
         try {
             const reportMetaUrl = `https://crmsrws.masonville.com/api/Reports?reportName=${encodeURIComponent('Four Month Sales')}&accountNumber=${encodeURIComponent(acct)}`;
-            const metaResponse = await fetch(reportMetaUrl, { credentials:'include', headers:{Accept:'application/json'} });
-            if (!metaResponse.ok) return null;
-            const meta = await metaResponse.json();
+            const d365Token = await window.getToken('https://wbmasonco.crm.dynamics.com//user_impersonation', true);
+            const reportRelay = await window.callACTSTFlow({ endpointUrl: reportMetaUrl, method:'GET', token:d365Token, headers:{Accept:'application/json'} });
+            const meta = reportRelay.body;
             // Some environments return rendered/parsed report data with the metadata response.
             const rows = window.parseMVGOFourMonthSales(JSON.stringify(meta));
             result = window.findMVGOCategorySales(rows, selectedCategory);
@@ -6114,28 +6157,19 @@ window.populateForm = function(rec) {
         window._isCompletingMVGO = true;
         try {
             const qbInput = document.getElementById('qb-notes-input');
-            const masonvilleUrl = pending.masonvilleUrl ||
+            const masonvilleUrl = pending.historyUrl ||
                 `https://go.masonville.com/#/activityleadcall?id=${encodeURIComponent(pending.activityId || '')}&accountNumber=${encodeURIComponent(pending.accountNumber || '')}`;
-            const safeMasonvilleUrl = String(masonvilleUrl)
-                .replace(/&/g, '&amp;')
-                .replace(/"/g, '&quot;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;');
-            const masonvilleReturnLink = `<a href="${safeMasonvilleUrl}" target="_blank" rel="noopener noreferrer"><strong>Open this Masonville catalog request</strong></a>`;
+            const masonvilleReturnLine = `Open this Masonville catalog request: ${masonvilleUrl}`;
             pending.categorySales = await window.loadMVGOCategorySales(pending.accountNumber, pending.selectedCategory);
             const salesLine = window.formatMVGOCategorySalesNote(pending.categorySales);
-            const safeUserNote = pending.userNotes ? escapeHTML(String(pending.userNotes)).replace(/\r\n|\r|\n/g, '<br />') : '';
-            const noteText = pending.historyStamp +
-                `<br />${escapeHTML(salesLine)}` +
-                (safeUserNote ? `<br /><br /><strong>Note</strong><br />${safeUserNote}` : '') +
-                `<br /><br />${masonvilleReturnLink}`;
-            qbInput.value = noteText + (qbInput.value ? '\n\n' + qbInput.value : '');
+            const noteText = [window.stripForFactTable(pending.historyStamp), salesLine, pending.userNotes ? `Note\n${window.stripForFactTable(pending.userNotes)}` : '', masonvilleReturnLine].filter(Boolean).join('\n\n');
+            qbInput.value = noteText + (qbInput.value ? '\n\n' + window.stripForFactTable(qbInput.value) : '');
 
             // Preserve the prior ACT activity logging and sales call note save process.
             if (window.recordActFactActivity) {
                 await window.recordActFactActivity('MVGO Catalog Submitted', {
                     noteText: noteText,
-                    details: `${pending.details}<br /><br /><strong>SELECTED CATEGORY SALES</strong><br />${escapeHTML(salesLine)}`,
+                    details: `${window.stripForFactTable(pending.details)}\n\nSELECTED CATEGORY SALES\n${salesLine}`,
                     effectiveOpportunityType: 'MVGO',
                     priority: 'MVGO',
                     masonvilleActivityId: pending.activityId || ''
