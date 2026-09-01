@@ -14895,5 +14895,177 @@ header .connection-pill.v124-source-status,header .v124-source-action{display:no
  document.addEventListener('DOMContentLoaded',()=>{dedupeArrows();new MutationObserver(dedupeArrows).observe(document.body,{childList:true,subtree:true})},{once:true});
 })();
 </script>
+
+<style id="historical-period-selector-v9">
+#historical-review-picker{display:none;grid-column:1/-1;order:34;margin:.2rem 0 .8rem;padding:.85rem;border:1px solid var(--border);border-radius:12px;background:var(--bg-table-alt)}
+#historical-review-picker.is-visible{display:block}
+#historical-review-picker .history-picker-grid{display:grid;grid-template-columns:minmax(240px,1fr) minmax(240px,1fr);gap:.75rem;align-items:end}
+#historical-review-picker .history-picker-title{display:flex;align-items:center;gap:.45rem;margin-bottom:.55rem;color:var(--text-brand);font-weight:900}
+#historical-review-picker .history-picker-note{margin-top:.45rem;color:var(--text-muted);font-size:.76rem;line-height:1.4}
+#historical-review-picker .history-period-summary{min-height:44px;padding:.66rem .75rem;border:1px solid var(--border);border-radius:9px;background:var(--bg-card);font-weight:800;color:var(--text-main)}
+#historical-review-picker select{width:100%!important}
+@media(max-width:760px){#historical-review-picker .history-picker-grid{grid-template-columns:1fr}}
+@media print{#historical-review-picker{display:none!important}}
+</style>
+<script id="historical-period-selector-v9">
+(function(){
+  'use strict';
+  if (window.__historyTwoStepPatchInstalled) return;
+  window.__historyTwoStepPatchInstalled = true;
+
+  const nativeFetch = window.fetch.bind(window);
+  const originalHistoryLoader = window.fetchSharePointHistory;
+  const state = window.historicalReviewState = window.historicalReviewState || {
+    files: [], selectedFileId: '', selectedFile: null, parsedPeriod: '', reportingPeriod: '', requestPeriod: ''
+  };
+
+  function value(id){ return String(document.getElementById(id)?.value || '').trim(); }
+  function normalizeMonthKey(input){
+    const raw = String(input || '').trim();
+    if (!raw) return '';
+    let m = raw.match(/\b(20\d{2})[-\/]?(0?[1-9]|1[0-2])(?:[-\/]\d{1,2})?\b/);
+    if (m) return `${m[1]}-${String(Number(m[2])).padStart(2,'0')}`;
+    const names = {jan:1,january:1,feb:2,february:2,mar:3,march:3,apr:4,april:4,may:5,jun:6,june:6,jul:7,july:7,aug:8,august:8,sep:9,sept:9,september:9,oct:10,october:10,nov:11,november:11,dec:12,december:12};
+    m = raw.toLowerCase().match(/\b(january|february|march|april|may|june|july|august|september|sept|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b[^0-9]*(20\d{2})|\b(20\d{2})\b[^a-z]*(january|february|march|april|may|june|july|august|september|sept|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\b/);
+    if (m) {
+      const year = m[2] || m[3], monthName = m[1] || m[4];
+      return `${year}-${String(names[monthName]).padStart(2,'0')}`;
+    }
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? '' : `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  }
+  function shiftMonth(key, offset){
+    const m = String(key || '').match(/^(\d{4})-(\d{2})$/); if (!m) return '';
+    const d = new Date(Number(m[1]), Number(m[2])-1+offset, 1);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  }
+  function monthLabel(key){
+    const m = String(key || '').match(/^(\d{4})-(\d{2})$/); if (!m) return 'Unknown period';
+    return new Date(Number(m[1]), Number(m[2])-1, 1).toLocaleDateString('en-US',{month:'long',year:'numeric'});
+  }
+  function fileId(file){ return String(file?.fileId || file?.['{Identifier}'] || file?.Identifier || file?.selectedFileId || ''); }
+  function fileName(file){ return String(file?.fileName || file?.['{FilenameWithExtension}'] || file?.FilenameWithExtension || file?.Name || file?.['{Name}'] || 'Review file'); }
+  function filePeriod(file){ return normalizeMonthKey(file?.reviewPeriod || file?.ReviewPeriod || file?.ReviewPeriodStart || fileName(file)); }
+  function normalizedFile(file){
+    return Object.assign({}, file, {
+      fileName: fileName(file), fileId: fileId(file), reviewPeriod: filePeriod(file),
+      fileLink: file?.fileLink || file?.['{Link}'] || file?.Link || '',
+      filePath: file?.filePath || file?.['{FullPath}'] || file?.FullPath || '',
+      driveItemId: file?.driveItemId || file?.['{DriveItemId}'] || file?.DriveItemId || '',
+      modifiedDate: file?.modifiedDate || file?.Modified || '', createdDate: file?.createdDate || file?.Created || ''
+    });
+  }
+  function desiredPriorPeriod(){ return shiftMonth(normalizeMonthKey(value('review-period') || value('review-date')), -1); }
+  function score(file, target){
+    let points = 0;
+    if (file.reviewPeriod === target) points += 1000;
+    if (String(file.isFinal).toLowerCase() === 'true') points += 80;
+    if (/final|approved/i.test(String(file.reviewStatus || ''))) points += 50;
+    const t = Date.parse(file.modifiedDate || file.createdDate || 0); if (Number.isFinite(t)) points += t / 1e13;
+    return points;
+  }
+  function chooseFile(files){
+    const preferred = state.selectedFileId;
+    if (preferred) { const exact = files.find(f => fileId(f) === preferred); if (exact) return exact; }
+    const target = desiredPriorPeriod();
+    return files.slice().sort((a,b) => score(b,target)-score(a,target))[0] || null;
+  }
+  function ensurePicker(){
+    let box = document.getElementById('historical-review-picker');
+    if (box) return box;
+    box = document.createElement('section'); box.id = 'historical-review-picker';
+    box.innerHTML = `<div class="history-picker-title"><i class="fas fa-history"></i> Historical review comparison</div><div class="history-picker-grid"><div class="field"><label for="historical-review-select">Historical review</label><select id="historical-review-select"><option value="">No historical reviews found</option></select></div><div class="field"><label>Comparison period</label><div id="historical-period-summary" class="history-period-summary">Select a historical review.</div></div></div><div id="historical-picker-note" class="history-picker-note">The selected document supplies the parsed row. Its following calendar month supplies the reporting-data row.</div>`;
+    const anchor = document.getElementById('sp-history-summary');
+    if (anchor?.parentNode) anchor.insertAdjacentElement('afterend', box); else document.querySelector('#panel-1 .form-grid')?.appendChild(box);
+    box.querySelector('select').addEventListener('change', async e => {
+      state.selectedFileId = e.target.value;
+      const selected = state.files.find(f => fileId(f) === state.selectedFileId) || null;
+      if (!selected) return;
+      state.selectedFile = selected; updatePeriodState(selected); renderPicker(); clearHistoricalSnapshot();
+      await originalHistoryLoader?.(value('employee-name'));
+    });
+    return box;
+  }
+  function clearHistoricalSnapshot(){
+    window.previousReviewSnapshot = null;
+    window.__parsedKpiRows = [];
+    window.__parsedKpiLabels = [];
+    window.dispatchEvent(new CustomEvent('historical-review-selection-changing'));
+  }
+  function updatePeriodState(file){
+    state.parsedPeriod = filePeriod(file);
+    state.reportingPeriod = shiftMonth(state.parsedPeriod, 1);
+    state.requestPeriod = normalizeMonthKey(value('review-period') || value('review-date'));
+    window.selectedHistoricalReviewPeriod = state.parsedPeriod;
+    window.selectedReportingComparisonPeriod = state.reportingPeriod;
+  }
+  function renderPicker(){
+    const box = ensurePicker(), select = box.querySelector('select'), target = desiredPriorPeriod();
+    if (!state.files.length) { box.classList.remove('is-visible'); return; }
+    box.classList.add('is-visible');
+    select.innerHTML = state.files.map(f => {
+      const id = fileId(f), period = filePeriod(f), status = f.reviewStatus || (String(f.isFinal).toLowerCase()==='true'?'Final':'');
+      const suffix = [monthLabel(period), f.reviewType || '', status].filter(Boolean).join(' | ');
+      return `<option value="${id.replace(/"/g,'&quot;')}" ${id===state.selectedFileId?'selected':''}>${fileName(f).replace(/</g,'&lt;')} (${suffix || 'Period not identified'})</option>`;
+    }).join('');
+    const summary = box.querySelector('#historical-period-summary');
+    summary.textContent = state.selectedFile ? `${monthLabel(state.parsedPeriod)} parsed review  →  ${monthLabel(state.reportingPeriod)} reporting data` : `Default target: ${monthLabel(target)}`;
+    box.querySelector('#historical-picker-note').textContent = state.selectedFile && state.parsedPeriod !== target
+      ? `Manual override selected. Reporting context is now ${monthLabel(state.reportingPeriod)}, the month immediately after the selected review.`
+      : `Automatically matched the review immediately before ${monthLabel(normalizeMonthKey(value('review-period') || value('review-date')))}.`;
+  }
+  async function readJsonResponse(response){
+    const txt = await response.text();
+    try { return txt ? JSON.parse(txt) : {}; } catch (_) { throw new Error('Historical review Flow returned invalid JSON.'); }
+  }
+  async function twoStepHistoryResponse(url, init, request){
+    const listResponse = await nativeFetch(url, Object.assign({}, init, {body: JSON.stringify(Object.assign({}, request, {
+      action:'ListReviewFiles', employeeId:value('employee-id'), reviewPeriod:value('review-period') || normalizeMonthKey(value('review-date'))
+    }))}));
+    if (!listResponse.ok) return listResponse;
+    const listPayload = await readJsonResponse(listResponse);
+    const rawFiles = Array.isArray(listPayload.files) ? listPayload.files : (Array.isArray(listPayload.value) ? listPayload.value : []);
+    state.files = rawFiles.map(normalizedFile).filter(f => fileId(f));
+    const selected = chooseFile(state.files);
+    if (!selected) {
+      state.selectedFile = null; state.selectedFileId = ''; renderPicker();
+      return new Response(JSON.stringify({success:false,renderMode:'none',value:[],message:'No matching review file found.'}),{status:200,headers:{'Content-Type':'application/json'}});
+    }
+    state.selectedFile = selected; state.selectedFileId = fileId(selected); updatePeriodState(selected); renderPicker();
+    const contentResponse = await nativeFetch(url, Object.assign({}, init, {body:JSON.stringify({
+      action:'GetReviewFile', selectedFileId:fileId(selected), selectedFileName:fileName(selected), selectedFilePath:selected.filePath || ''
+    })}));
+    if (!contentResponse.ok) return contentResponse;
+    const content = await readJsonResponse(contentResponse);
+    const legacy = Object.assign({}, content, {
+      success:true, value:state.files.map(f => Object.assign({}, f, {
+        '{FilenameWithExtension}':f.fileName,'{Identifier}':f.fileId,'{Link}':f.fileLink,'{FullPath}':f.filePath,'{DriveItemId}':f.driveItemId,Created:f.createdDate,Modified:f.modifiedDate
+      })),
+      selectedFileName:fileName(selected), selectedFileId:fileId(selected), selectedFileLink:selected.fileLink || '', selectedFilePath:selected.filePath || '', selectedFileDriveItemId:selected.driveItemId || '',
+      selectedReviewPeriod:state.parsedPeriod, reportingComparisonPeriod:state.reportingPeriod
+    });
+    window.dispatchEvent(new CustomEvent('historical-review-period-changed',{detail:{file:selected,parsedPeriod:state.parsedPeriod,reportingPeriod:state.reportingPeriod}}));
+    return new Response(JSON.stringify(legacy),{status:200,headers:{'Content-Type':'application/json'}});
+  }
+  window.fetch = function(input, init){
+    try {
+      const url = typeof input === 'string' ? input : input?.url || '';
+      const request = init?.body && typeof init.body === 'string' ? JSON.parse(init.body) : null;
+      const isHistoryLegacyCall = request && !request.action && request.empName && url.includes('/workflows/1b60c5c63a74421cb18b90201ef097bc/');
+      if (isHistoryLegacyCall) return twoStepHistoryResponse(input, init, request);
+    } catch (err) { console.warn('Historical review request interception fallback:', err); }
+    return nativeFetch(input, init);
+  };
+  document.addEventListener('DOMContentLoaded', () => {
+    ensurePicker();
+    const period = document.getElementById('review-period');
+    period?.addEventListener('change', () => {
+      state.selectedFileId = ''; state.selectedFile = null; clearHistoricalSnapshot();
+      const employee = value('employee-name'); if (employee) originalHistoryLoader?.(employee);
+    });
+  });
+})();
+</script>
+
 </body>
 </html>
