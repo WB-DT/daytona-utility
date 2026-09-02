@@ -16116,5 +16116,51 @@ window.syncPage3VisibleKpis=syncPage3;
 })();
 </script>
 
+
+<!-- Fixed 27: KPI population once-per-context guard and runtime audit -->
+<script id="fixed27-kpi-once-guard-js">
+(function(){
+ 'use strict';
+ if(window.__fixed27KpiOnceGuard)return;window.__fixed27KpiOnceGuard=true;
+ const audit=window.__kpiPopulationAudit={context:'',eventsAccepted:0,eventsBlocked:0,mutationBatches:0,duplicateRowsRemoved:0,lastAcceptedEvent:'',lastRowCount:0,stable:false};
+ const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
+ const context=()=>[document.getElementById('employee-name')?.value,document.getElementById('review-period')?.value,document.getElementById('review-type')?.value].map(clean).join('|');
+ const seen=new Map();let settleTimer=0,observerPaused=false;
+ function signature(event){
+   let detail='';try{detail=JSON.stringify(event.detail||{},(k,v)=>k==='raw'||k==='rows'?undefined:v).slice(0,3500)}catch(_e){detail=String(event.detail||'')}
+   return `${context()}|${event.type}|${detail}`;
+ }
+ function gate(event){
+   const ctx=context();if(ctx!==audit.context){audit.context=ctx;seen.clear();audit.stable=false}
+   const sig=signature(event);
+   if(seen.has(sig)){audit.eventsBlocked++;event.stopImmediatePropagation();event.preventDefault?.();console.info('[KPI once guard] duplicate event blocked',event.type);return}
+   seen.set(sig,Date.now());audit.eventsAccepted++;audit.lastAcceptedEvent=event.type;
+ }
+ /* Capture duplicate population signals before normal bubble listeners can rebuild KPI rows. */
+ window.addEventListener('kpi-flow-data-ready',gate,true);
+ window.addEventListener('pbi-flow-data-loaded',gate,true);
+ function key(row,index){
+   const id=row.dataset.safeCustomId||row.dataset.kpiId||row.dataset.parsedKpiKey;
+   const name=row.querySelector('.exact-kpi-name-editor,.exact-kpi-name')?.value||row.querySelector('.exact-kpi-name-editor,.exact-kpi-name')?.textContent;
+   return clean(id||name||`row-${index}`).toLowerCase();
+ }
+ function dedupeAndAudit(){
+   settleTimer=0;const body=document.getElementById('month-kpi-body');if(!body)return;
+   const rows=[...body.querySelectorAll(':scope>.exact-kpi-row:not(.v59-duplicate-row)')],keys=new Set();observerPaused=true;
+   rows.forEach((row,i)=>{const k=key(row,i);if(keys.has(k)){row.remove();audit.duplicateRowsRemoved++}else keys.add(k)});
+   observerPaused=false;audit.lastRowCount=keys.size;audit.stable=true;
+   body.dataset.populateState='stable';body.dataset.populateCount=String(audit.eventsAccepted);
+   window.dispatchEvent(new CustomEvent('kpi-rows-stable',{detail:{rowCount:audit.lastRowCount,audit:{...audit}}}));
+ }
+ function scheduleAudit(){if(observerPaused)return;audit.mutationBatches++;clearTimeout(settleTimer);settleTimer=setTimeout(dedupeAndAudit,60)}
+ function start(){
+   audit.context=context();const body=document.getElementById('month-kpi-body');if(body){new MutationObserver(m=>{if(m.some(x=>x.addedNodes.length||x.removedNodes.length))scheduleAudit()}).observe(body,{childList:true});scheduleAudit()}
+   ['employee-name','review-period','review-type'].forEach(id=>document.getElementById(id)?.addEventListener('change',()=>{audit.context=context();seen.clear();audit.stable=false},{passive:true}));
+ }
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();
+ window.verifyKpiRowsPopulateOnce=()=>({pass:audit.eventsBlocked>=0&&audit.duplicateRowsRemoved===0&&audit.stable,rowCount:audit.lastRowCount,...audit});
+})();
+</script>
+
 </body>
 </html>
