@@ -15326,5 +15326,92 @@ window.addEventListener('pbi-flow-data-loaded',e=>{const d=e.detail||{},r=d.data
 window.applyAttendanceRowsV18=apply;
 })();
 </script>
+<!-- v19 authoritative attendance table + current-month attendance averages -->
+<style id="attendance-v19-print-greyscale">
+@media print {
+  #eom-template-print-root tr.row-good > td,
+  #eom-template-print-root tr.row-watch > td,
+  #eom-template-print-root tr.row-bad > td,
+  #submitted-print-root tr.row-good > td,
+  #submitted-print-root tr.row-watch > td,
+  #submitted-print-root tr.row-bad > td {
+    color:#111 !important; border-color:#777 !important;
+  }
+  #eom-template-print-root tr.row-good > td,
+  #submitted-print-root tr.row-good > td { background:#f5f5f5 !important; }
+  #eom-template-print-root tr.row-watch > td,
+  #submitted-print-root tr.row-watch > td { background:#dfdfdf !important; }
+  #eom-template-print-root tr.row-bad > td,
+  #submitted-print-root tr.row-bad > td { background:#c8c8c8 !important; }
+  #eom-template-print-root .legend-good { background:#f5f5f5 !important; }
+  #eom-template-print-root .legend-watch { background:#dfdfdf !important; }
+  #eom-template-print-root .legend-bad { background:#c8c8c8 !important; }
+  #eom-template-print-root .status-good,
+  #eom-template-print-root .status-watch,
+  #eom-template-print-root .status-bad,
+  #submitted-print-root .status-good,
+  #submitted-print-root .status-watch,
+  #submitted-print-root .status-bad { color:#111 !important; border-color:#777 !important; }
+  #eom-template-print-root .status-good,#submitted-print-root .status-good { background:#f5f5f5 !important; }
+  #eom-template-print-root .status-watch,#submitted-print-root .status-watch { background:#dfdfdf !important; }
+  #eom-template-print-root .status-bad,#submitted-print-root .status-bad { background:#c8c8c8 !important; }
+}
+</style>
+<script id="attendance-v19-authoritative-mapping">
+(function(){
+'use strict';
+if(window.__attendanceV19AuthoritativeMapping)return;window.__attendanceV19AuthoritativeMapping=true;
+const key=v=>String(v??'').replace(/^\[|\]$/g,'').replace(/[^a-z0-9]/gi,'').toLowerCase();
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function rows(v){if(Array.isArray(v))return v;if(typeof v==='string')try{const x=JSON.parse(v);return Array.isArray(x)?x:[]}catch(e){}return []}
+function get(r,names){const wanted=names.map(key);for(const [k,v] of Object.entries(r||{}))if(wanted.includes(key(k))&&v!==null&&v!==undefined&&v!=='')return v;return ''}
+function seconds(v,clock){
+ if(v===null||v===undefined||v==='')return null;const raw=String(v).trim();
+ let m=raw.match(/^(\d{1,3}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
+ if(m){let h=+m[1],min=+m[2],s=+(m[3]||0),ap=(m[4]||'').toUpperCase();if(ap){h%=12;if(ap==='PM')h+=12}return h*3600+min*60+s}
+ const n=Number(raw);if(!Number.isFinite(n))return null;return n<1?Math.round(n*86400):Math.round(n);
+}
+function clockText(sec){if(sec==null)return '—';sec=((Math.round(sec)%86400)+86400)%86400;let h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=sec%60,ap=h>=12?'PM':'AM';return `${h%12||12}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')} ${ap}`}
+function durationText(sec){if(sec==null)return '—';sec=Math.max(0,Math.round(sec));return `${String(Math.floor(sec/3600)).padStart(2,'0')}:${String(Math.floor(sec%3600/60)).padStart(2,'0')}:${String(sec%60).padStart(2,'0')}`}
+function dateText(v){if(!v)return '—';const raw=String(v),d=new Date(raw);return Number.isNaN(d.getTime())?esc(raw):d.toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'numeric',timeZone:/T00:00:00/.test(raw)?'UTC':undefined})}
+function attendanceTable(value){
+ const data=rows(value).slice().sort((a,b)=>String(get(a,['Row Date','Logout Date','WorkDate'])).localeCompare(String(get(b,['Row Date','Logout Date','WorkDate']))));
+ if(!data.length)return '<div class="report-data-note">No Login / Logout rows returned by the Flow.</div>';
+ const body=data.map(r=>`<tr><td>${dateText(get(r,['Row Date','Logout Date','WorkDate']))}</td><td>${esc(get(r,['Agent Name','AgentName'])||'—')}</td><td>${esc(get(r,['Short/Ext Shift','Short/EXT Shift'])||'—')}</td><td>${clockText(seconds(get(r,['Login Time','LoginTime']),true))}</td><td>${clockText(seconds(get(r,['Logout Time','LogoutTime']),true))}</td><td>${durationText(seconds(get(r,['Worked Hours26','Hours Worked','WorkedHours26']),false))}</td></tr>`).join('');
+ return `<table class="report-table login-report-table flow-mapped-report login-logout-table"><thead><tr><th>Date</th><th>Agent</th><th>Short/EXT Shift</th><th>Login Time</th><th>Logout Time</th><th>Hours Worked</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+const previousFormatted=window.generateFormattedHTMLTable;
+window.generateLoginLogoutTable=attendanceTable;
+window.generateFormattedHTMLTable=function(data,isSummary,type){return type==='login'?attendanceTable(data):(typeof previousFormatted==='function'?previousFormatted.call(this,data,isSummary,type):'')};
+function averages(value){
+ const data=rows(value),avg=name=>{const a=data.map(r=>seconds(get(r,name),true)).filter(Number.isFinite);return a.length?a.reduce((x,y)=>x+y,0)/a.length:null};
+ return {login:avg(['Login Time','LoginTime']),logout:avg(['Logout Time','LogoutTime']),hours:avg(['Worked Hours26','Hours Worked','WorkedHours26'])};
+}
+function setControl(el,value){if(!el||value==='—')return;el.value=value;el.setAttribute('value',value);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}))}
+function hydrateCurrentMonth(value){
+ const data=rows(value),a=averages(data),values={login:clockText(a.login),logout:clockText(a.logout),hours:durationText(a.hours)};
+ window.currentMonthMetrics=window.currentMonthMetrics||{};Object.assign(window.currentMonthMetrics,{averageLoginTime:values.login,averageLogoutTime:values.logout,averageHoursWorked:values.hours,avgLoginTime:values.login,avgLogoutTime:values.logout,avgHoursWorked:values.hours});
+ document.querySelectorAll('#month-kpi-workspace .exact-kpi-row').forEach(row=>{
+  const label=String(row.querySelector('.exact-kpi-name,.exact-kpi-name-editor,input[data-kpi-name]')?.value||row.querySelector('.exact-kpi-name,.exact-kpi-name-editor,label')?.textContent||'').toLowerCase();
+  const current=row.querySelector('.exact-kpi-card[data-current-month="true"] .exact-kpi-value,.exact-kpi-card[data-current-month="true"] input,.exact-kpi-card[data-current-month="true"] textarea');
+  if(/(average|avg).*login|login.*(average|avg)/.test(label))setControl(current,values.login);
+  else if(/(average|avg).*logout|logout.*(average|avg)/.test(label))setControl(current,values.logout);
+  else if(/(average|avg).*(hours worked|worked hours)|hours worked.*(average|avg)/.test(label))setControl(current,values.hours);
+ });
+ window.dispatchEvent(new CustomEvent('attendance-averages-ready',{detail:values}));
+ return values;
+}
+function refreshVisible(){
+ const data=rows(window.pbiCache?.loginData);if(!data.length)return;
+ const c=document.getElementById('login-logout-container');if(c&&c.style.display!=='none')window.renderCachedReport?.('login');
+ window.buildSummaryPreview?.();window.rebuildPage3StablePreview?.();window.syncPage3Preview?.();
+}
+function apply(value){const data=rows(value);window.pbiCache=window.pbiCache||{};window.pbiCache.loginData=data;hydrateCurrentMonth(data);setTimeout(refreshVisible,0);return data}
+window.addEventListener('pbi-flow-data-loaded',e=>{const d=e.detail||{},r=d.data||d.response||d;apply(r.attendanceRows??r.body?.attendanceRows??d.loginRows??d.attendanceRows)});
+window.hydrateAttendanceCurrentMonth=hydrateCurrentMonth;
+window.refreshAttendancePresentation=refreshVisible;
+if(rows(window.pbiCache?.loginData).length)apply(window.pbiCache.loginData);
+})();
+</script>
 </body>
 </html>
