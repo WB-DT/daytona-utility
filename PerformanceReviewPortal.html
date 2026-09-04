@@ -11885,7 +11885,7 @@ restoreAll();render();
    const text=await response.text();let raw=null;try{raw=text?JSON.parse(text):{}}catch{}const data=parsePayload(raw);
    if(!response.ok){const detail=data?.message||data?.error?.message||text.slice(0,240)||`HTTP ${response.status}`;throw new Error(`Flow returned HTTP ${response.status}: ${detail}`)}
    if(!data)throw new Error('Flow returned an empty or non-JSON response.');if(data.success===false)throw new Error(data.message||data.errorCode||'Flow reported an unsuccessful result.');
-   const metrics=data.metrics||data.body?.metrics;if(!metrics||typeof metrics!=='object')throw new Error('Flow response did not include a metrics object.');
+   const metrics=data.metrics||data.body?.metrics;if(!metrics||typeof metrics!=='object')throw new Error('Flow response did not include a metrics object.');window.currentMonthMetrics=metrics;window.__latestPbiMetrics=metrics;
    const avayaRows=Array.isArray(data.avayaRows)?data.avayaRows:(Array.isArray(data.dailyRows)?data.dailyRows:[]);
    const loginRows=Array.isArray(data.attendanceRows)?data.attendanceRows:(Array.isArray(data.loginRows)?data.loginRows:[]);
    setMetric('m-outbound-calls',metrics.outboundCalls);setMetric('m-inbound-calls',metrics.inboundCalls);setMetric('m-talk-time',metrics.averageTalkTimeMinutes);setMetric('m-handle-time',metrics.averageHandleTimeMinutes);
@@ -12485,7 +12485,7 @@ const metricKey=v=>{
  const rules=[
   [/\baverage daily chats?\b/,'chats-daily-average'],
   [/\b(?:number )?chats?\b/,'chats-total'],
-  [/\b(?:number )?calls? made\b|\btotal calls?\b/,'calls-made-total'],
+  [/\boutbound calls?\b|\b(?:number )?calls? made\b|\btotal calls?\b/,'calls-made-total'],
   [/\bavailability per shift\b/,'availability-per-shift'],
   [/\btotal working days\b/,'working-days-total'],
   [/\bdays worked\b/,'days-worked'],
@@ -12512,10 +12512,48 @@ function currentCandidates(){const list=[];
  document.querySelectorAll('#month-kpi-body .exact-kpi-card[data-current-month="true"]').forEach((card,index)=>{const label=clean(card.querySelector('.exact-kpi-name,.exact-kpi-name-editor')?.value||card.querySelector('.exact-kpi-name,.exact-kpi-name-editor')?.textContent),value=clean(card.querySelector('.exact-kpi-value')?.value||card.querySelector('.exact-kpi-value')?.textContent);if(label&&value)list.push({label,value,id:'exact-current-'+index,priority:4})});
  const unique=new Map();list.forEach(x=>{const key=canonical(x.label),old=unique.get(key);if(key&&(!old||x.priority>old.priority||(x.priority===old.priority&&!old.value&&x.value)))unique.set(key,x)});return [...unique.values()];
 }
+function pbiMetricValueForPage2(label){
+ const raw=clean(label),key=metricKey(raw),m=window.__latestPbiMetrics||window.currentMonthMetrics||{};
+ const aliases={
+  'outbound calls':['outboundCalls','totalOutboundCalls','callsMade','totalCalls'],
+  'average talk time':['averageTalkTimeMinutes','avgTalkTimeMinutes','averageTalkTime'],
+  '% call notes':['callNotesPercent','percentCallNotes','callNotesPercentage','callNotesPct'],
+  'call notes invoices':['callNotesInvoices','callNoteInvoices','invoicesWithCallNotes','callNotesInvoiceCount'],
+  'aux-accuracy':['auxAccuracyPercent','auxiliaryAccuracy','auxAccuracy','productivityPercent'],
+  'break-average':['averageBreakMinutes','avgBreakMinutes','averageBreak'],
+  'lunch-average':['averageLunchMinutes','avgLunchMinutes','averageLunch'],
+  'personal-average':['averagePersonalMinutes','avgPersonalMinutes','averagePersonal']
+ };
+ let names=aliases[key]||aliases[raw.toLowerCase()]||[];
+ for(const n of names){const v=m?.[n];if(v!==null&&v!==undefined&&clean(v)!=='')return clean(v)}
+ // Power BI-backed Page 2 controls are populated by the Flow before or after this table renders.
+ const ids={
+  'outbound calls':['m-outbound-calls'],
+  'average talk time':['m-talk-time','m-avg-talk-time'],
+  '% call notes':['m-call-notes-percent','m-percent-call-notes','m-primary-metric'],
+  'call notes invoices':['m-call-notes-invoices','m-invoices','m-secondary-metric'],
+  'aux-accuracy':['m-aux-accuracy'],
+  'break-average':['m-avg-break'],
+  'lunch-average':['m-lunch'],
+  'personal-average':['m-personal-time']
+ };
+ for(const id of ids[key]||ids[raw.toLowerCase()]||[]){const el=document.getElementById(id),v=clean(el?.value);if(v&&v!=='—')return v}
+ // Finally inspect current-month KPI cards, which may contain role-specific PBI values.
+ let best='';document.querySelectorAll('#month-kpi-body .exact-kpi-card[data-current-month="true"]').forEach(card=>{
+  const name=clean(card.querySelector('.exact-kpi-name,.exact-kpi-name-editor')?.value||card.querySelector('.exact-kpi-name,.exact-kpi-name-editor')?.textContent);
+  const value=clean(card.querySelector('.exact-kpi-value')?.value||card.querySelector('.exact-kpi-value')?.textContent);
+  if(value&&value!=='—'&&(metricKey(name)===key||canonical(name)===canonical(raw)))best=value;
+ });
+ return best;
+}
 function currentFor(label){
- const key=metricKey(label);
+ const key=metricKey(label),pbiValue=pbiMetricValueForPage2(label);
+ if(pbiValue)return pbiValue;
  const directIds={
   'calls-made-total':['m-outbound-calls','m-inbound-calls'],
+  'average talk time':['m-talk-time','m-avg-talk-time'],
+  '% call notes':['m-call-notes-percent','m-percent-call-notes','m-primary-metric'],
+  'call notes invoices':['m-call-notes-invoices','m-invoices','m-secondary-metric'],
   'aux-accuracy':['m-aux-accuracy'],
   'break-average':['m-avg-break'],
   'lunch-average':['m-lunch'],
@@ -12616,6 +12654,7 @@ function liveAvailabilityValue(){
  return `${total} / ${days||'—'} / ${avg}`;
 }
 function currentValueForPage2(label){
+ const directPbi=pbiMetricValueForPage2(label);if(directPbi)return directPbi;
  const name=normalizeKpiLabel(label).toLowerCase();
  if(name.includes('availability per shift')||(name.includes('total working days')&&name.includes('average hours'))){
   // Page 3's shared snapshot is authoritative because it already has the correct
@@ -12726,7 +12765,7 @@ function renderAvailabilityFromSharedSnapshot(){
  if(availabilityRenderPending)return;availabilityRenderPending=true;
  requestAnimationFrame(()=>{availabilityRenderPending=false;lastRenderedSignature='';render(true);validate()});
 }
-['pbi-flow-data-loaded','attendance-averages-ready','availability-kpi-ready'].forEach(n=>window.addEventListener(n,renderAvailabilityFromSharedSnapshot));const table=$('page2-sbs-grid');if(table)table.hidden=false;render();validate()}
+['pbi-flow-data-loaded','attendance-averages-ready','availability-kpi-ready'].forEach(n=>window.addEventListener(n,event=>{if(n==='pbi-flow-data-loaded'&&event.detail?.metrics){window.currentMonthMetrics=event.detail.metrics;window.__latestPbiMetrics=event.detail.metrics;}renderAvailabilityFromSharedSnapshot()}));const table=$('page2-sbs-grid');if(table)table.hidden=false;render();validate()}
 document.addEventListener('input',event=>{
  const el=event.target;if(!el?.matches?.('#page2-sbs-grid .sbs-current-value'))return;
  const value=clean(el.value);if(value&&value!=='—')window.__sideBySideValueEdits?.set(el.dataset.valueKey,value);
@@ -17939,7 +17978,7 @@ function value(el){if(!el)return null;if(el.type==='checkbox'||el.type==='radio'
 function formState(){return Array.from(document.querySelectorAll('input,select,textarea')).map(function(el){return{id:el.id||'',name:el.name||'',type:el.type||el.tagName.toLowerCase(),value:redact(el.id||el.name||'',value(el)),disabled:el.disabled,readOnly:el.readOnly,hidden:el.hidden,display:getComputedStyle(el).display,closestPanel:(el.closest('[id^="panel-"]')||{}).id||'',classes:text(el.className)}})}
 function rowState(tr){function q(sel){var e=tr.querySelector(sel);return e?value(e):''}return{key:tr.dataset.columnKey||'',fallback:tr.dataset.fallbackRow||'',extra:tr.dataset.extraKpi||'',className:tr.className,label:q('.sbs-kpi-label-input')||clean((tr.querySelector('.sbs-kpi-label')||{}).textContent),parsedValue:q('.sbs-parsed-value-input')||clean((tr.querySelector('.sbs-parsed-value')||{}).textContent),parsedRating:q('.sbs-parsed-rating'),currentValue:q('.sbs-current-value'),currentRating:q('.sbs-current-rating'),html:tr.outerHTML.slice(0,8000)}}
 function elementState(id){var e=document.getElementById(id);return{id:id,exists:!!e,hidden:e?e.hidden:null,display:e?getComputedStyle(e).display:null,visibility:e?getComputedStyle(e).visibility:null,ariaHidden:e?e.getAttribute('aria-hidden'):null,className:e?text(e.className):'',html:e?e.outerHTML.slice(0,20000):''}}
-function globals(){var names=['pbiCache','previousReviewSnapshot','__lastCellParseResult','__kpiFlowHelperRows','__sideBySideValueEdits','__sideBySideRatingEdits','__removedSideBySideKeys','__manualPage2KpiRows','latestKpiPrintVerificationV70','latestSbsKpiPrintVerificationV78','latestKpiPrintDiagnosticV79','latestKpiPlacementV84','adminDemoEnabled','currentUser','currentUserProfile','selectedEmployee','reviewData'];var out={};var seen=new WeakSet();names.forEach(function(k){try{out[k]=safe(window[k],0,seen)}catch(e){out[k]='[Error: '+e.message+']'}});return out}
+function globals(){var names=['pbiCache','currentMonthMetrics','__latestPbiMetrics','pbiFlowDiagnostics','previousReviewSnapshot','__lastCellParseResult','__kpiFlowHelperRows','__sideBySideValueEdits','__sideBySideRatingEdits','__removedSideBySideKeys','__manualPage2KpiRows','latestKpiPrintVerificationV70','latestSbsKpiPrintVerificationV78','latestKpiPrintDiagnosticV79','latestKpiPlacementV84','adminDemoEnabled','currentUser','currentUserProfile','selectedEmployee','reviewData'];var out={};var seen=new WeakSet();names.forEach(function(k){try{out[k]=safe(window[k],0,seen)}catch(e){out[k]='[Error: '+e.message+']'}});return out}
 function funcs(){var names=['goToPanel1','goToPanel2','goToPanel3','renderSideBySideComparison','validateSideBySideSection','buildSummaryPreview','prepareEomTemplatePrint','buildStandaloneEomPrint','synchronizePrintRootKpisV79','getAvailabilitySnapshot','toggleAdminDemo'];var o={};names.forEach(function(k){o[k]=typeof window[k]});return o}
 function resources(){try{return performance.getEntriesByType('resource').slice(-150).map(function(r){return{name:r.name.replace(/[?&](access_token|token|code)=[^&]*/gi,'$1=[REDACTED]'),initiatorType:r.initiatorType,duration:Math.round(r.duration),transferSize:r.transferSize,responseEnd:Math.round(r.responseEnd)}})}catch(e){return[]}}
 function diagnostic(){var grid=document.getElementById('page2-sbs-grid'),seen=new WeakSet();return{
