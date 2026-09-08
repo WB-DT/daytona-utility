@@ -18515,5 +18515,31 @@ window.createOutlookReviewDraft=verifiedDraft;window.notifyReviewManagers=verifi
 })();
 </script>
 
+<script id="outlook-explicit-attachment-v16-js">
+(function(){
+'use strict';if(window.__outlookExplicitAttachmentV16)return;window.__outlookExplicitAttachmentV16=true;
+let pending=null,last=null,lastAt=0;
+const q=(s,r=document)=>r.querySelector(s);
+function status(text,kind='info'){const card=q('#manager-delivery-card');if(!card)return;let el=q('.outlook-draft-status',card);if(!el){el=document.createElement('div');el.className='outlook-draft-status';card.appendChild(el)}el.dataset.kind=kind;el.textContent=text}
+function recipients(pkg){return [...new Set([pkg.managerEmail,pkg.seniorManagerEmail].filter(Boolean))].map(address=>({emailAddress:{address}}))}
+async function request(url,token,options={}){const r=await fetch(url,{...options,headers:{Authorization:`Bearer ${token}`,...(options.body?{'Content-Type':'application/json'}:{}),...(options.headers||{})}});if(!r.ok)throw new Error(`Outlook API ${r.status}: ${await r.text()}`);return r.status===204?null:r.json()}
+async function createDraftWithAttachment(){
+ if(pending)return pending;if(last&&Date.now()-lastAt<12000){window.open(last.webLink||'https://outlook.office.com/mail/drafts','_blank','noopener');return last}
+ pending=(async()=>{status('Creating the Outlook draft, then attaching and verifying the completed review...');const pkg=await window.buildManagerDeliveryPackage();const route=typeof window.recipientData==='function'?window.recipientData():{};pkg.managerEmail=route.managerEmail||window.selectedEmployee?.managerEmail||pkg.managerEmail||'';pkg.seniorManagerEmail=route.seniorEmail||window.selectedEmployee?.srManagerEmail||pkg.seniorManagerEmail||'';
+ const raw=atob(pkg.attachmentContentBase64||'');if(!raw.length)throw new Error('Generated attachment is empty.');if(raw.length>=3*1024*1024)throw new Error('Generated review exceeds the simple Outlook attachment limit.');
+ const popup=window.open('about:blank','review-email-draft');if(popup)popup.document.write('<title>Preparing Outlook draft...</title><p style="font-family:Segoe UI;padding:24px">Creating the draft and attaching the review file.</p>');
+ try{const token=await window.getToken('Mail.ReadWrite');
+  const draft=await request('https://graph.microsoft.com/v1.0/me/messages',token,{method:'POST',body:JSON.stringify({subject:pkg.emailSubject,body:{contentType:'HTML',content:pkg.emailHtml},toRecipients:recipients(pkg)})});if(!draft?.id)throw new Error('Outlook did not return a draft ID.');
+  const attachmentPayload={'@odata.type':'#microsoft.graph.fileAttachment',name:pkg.attachmentName,contentType:pkg.attachmentContentType,isInline:false,contentBytes:pkg.attachmentContentBase64};
+  const attached=await request(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draft.id)}/attachments`,token,{method:'POST',body:JSON.stringify(attachmentPayload)});if(!attached?.id)throw new Error('Outlook did not return an attachment ID.');
+  const verified=await request(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draft.id)}?$select=id,isDraft,subject,body,webLink,hasAttachments&$expand=attachments($select=id,name,contentType,size,isInline)`,token);
+  const found=verified.attachments?.find(a=>a.id===attached.id||a.name===pkg.attachmentName);const failures=[];if(verified.isDraft!==true)failures.push('message is not a draft');if(!verified.hasAttachments)failures.push('hasAttachments is false');if(!found)failures.push('attachment is missing');if(found&&found.size<=0)failures.push('attachment is empty');if(found&&found.isInline)failures.push('attachment was marked inline');if(verified.body?.contentType?.toLowerCase()!=='html')failures.push('body is not HTML');if(!verified.body?.content?.includes(pkg.folderUrl))failures.push('folder link is missing');if(failures.length)throw new Error('Draft verification failed: '+failures.join(', '));
+  last=verified;lastAt=Date.now();window.__lastVerifiedOutlookDraft={id:verified.id,attachmentId:found.id,attachmentName:found.name,attachmentSize:found.size,isInline:found.isInline,bodyType:verified.body.contentType,webLink:verified.webLink,verifiedAt:new Date().toISOString()};status(`Verified: ${found.name} is attached to the Outlook draft (${found.size.toLocaleString()} bytes). Review the draft, then select Send.`,'ok');const target=verified.webLink||draft.webLink||'https://outlook.office.com/mail/drafts';if(popup)popup.location.replace(target);else window.open(target,'_blank','noopener');return verified
+ }catch(err){popup?.close();status('The Outlook draft attachment could not be verified: '+err.message,'error');throw err}finally{pending=null}})();return pending
+}
+window.createOutlookReviewDraft=createDraftWithAttachment;window.notifyReviewManagers=createDraftWithAttachment;window.sendManagerReviewNotification=createDraftWithAttachment;
+})();
+</script>
+
 </body>
 </html>
