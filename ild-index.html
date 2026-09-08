@@ -3682,7 +3682,7 @@ allRaw.forEach(r => {
     document.querySelectorAll(".empty-field-warning").forEach((el) => el.classList.remove("empty-field-warning"));
 
     // Refreshing display is non-critical and must not roll back/report a completed Dataverse save.
-    try { await window.updateNotesPreview(); } catch (previewError) { console.warn("History refresh failed after save:", previewError); }
+    try { window.dispatchEvent(new CustomEvent("act-note-saved")); await window.updateNotesPreview(); } catch (previewError) { console.warn("History refresh failed after save:", previewError); }
     try { window.filterAndSortGallery(true); } catch (galleryError) { console.warn("Gallery refresh failed after save:", galleryError); }
     try { window.updateMiniCounter(); } catch (counterError) { console.warn("Counter refresh failed after save:", counterError); }
 
@@ -8401,188 +8401,32 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
 
 <!-- ACT FACT HISTORY FLOW ADDITION: preserves current history behavior and merges fast fact-table results. -->
 <script id="act-fact-history-flow-integration">
-(function () {
-    'use strict';
-    if (window.__ACT_FACT_HISTORY_FLOW__) return;
-    window.__ACT_FACT_HISTORY_FLOW__ = true;
-
-    // POWER AUTOMATE PLACEHOLDER: replace this value after the HTTP-triggered flow is saved.
-    const ACT_FACT_HISTORY_FLOW_URL = 'https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/24/workflows/d1dfdc8355164c51ba5cf5d222e5bb88/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=qCgpJGre-5lA5RJBDzQezlmu8M0moAm_-oV8ifkouhg';
-    const ACT_FACT_HISTORY_DEDUPE_MINUTES = 5;
-    const ACT_FACT_HISTORY_CACHE_MS = 60000;
-    const factHistoryCache = new Map();
-
-    const getSelectedCustomerNumber = () => String(
-        window.currentSelectedRecord?.cr714_id ||
-        window.currentSelectedRecord?.cr714_accountnumber ||
-        window.currentSelectedRecord?.accountnumber ||
-        (typeof currentSelectedRecord !== 'undefined' ? currentSelectedRecord?.cr714_id : '') ||
-        window.currentRecordId ||
-        (typeof currentRecordId !== 'undefined' ? currentRecordId : '') ||
-        ''
-    ).trim();
-
-    const getLoggedInRepName = () => String(
-        window.currentUserRepName ||
-        (typeof currentUserRepName !== 'undefined' ? currentUserRepName : '') ||
-        window.currentUserProfile?.cr714_employeename ||
-        window.currentUserProfile?.displayName ||
-        window.currentUserProfile?.name ||
-        ''
-    ).trim();
-
-    const normalize = value => String(value || '')
-        .replace(/<[^>]*>/g, ' ')
-        .replace(/&nbsp;/gi, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .toLowerCase();
-
-    const toMs = value => {
-        const ms = Date.parse(String(value || ''));
-        return Number.isFinite(ms) ? ms : 0;
-    };
-
-    const escapeHtml = value => window.escapeHTML
-        ? window.escapeHTML(String(value == null ? '' : value))
-        : String(value == null ? '' : value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-
-    async function requestFactHistory(customerNumber, loggedInRepName, forceRefresh) {
-        if (!customerNumber || !ACT_FACT_HISTORY_FLOW_URL || ACT_FACT_HISTORY_FLOW_URL.includes('PASTE_POWER_AUTOMATE')) return [];
-        const cacheKey = `${customerNumber}|${loggedInRepName}`;
-        const cached = factHistoryCache.get(cacheKey);
-        if (!forceRefresh && cached && (Date.now() - cached.savedAt) < ACT_FACT_HISTORY_CACHE_MS) return cached.notes;
-
-        const response = await fetch(ACT_FACT_HISTORY_FLOW_URL, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                customerNumber,
-                loggedInRepName,
-                requestedAtUtc: new Date().toISOString(),
-                requestSource: 'ACT Note History Panel'
-            })
-        });
-        if (!response.ok) throw new Error(`Fact history flow returned HTTP ${response.status}`);
-        const payload = await response.json();
-        const notes = Array.isArray(payload) ? payload : (Array.isArray(payload.notes) ? payload.notes : []);
-        factHistoryCache.set(cacheKey, {savedAt: Date.now(), notes});
-        return notes;
-    }
-
-    function mapFactNote(row) {
-        const savedAt = row.noteSaveTime || row.noteSavedAt || row.noteDate || row.savedAt || row.createdOn || row.createdon || '';
-        return {
-            noteId: row.noteId || row.id || '',
-            customerNumber: row.customerNumber || row.accountNumber || '',
-            text: row.noteText || row.notes || row.text || row.noteTextRaw || '',
-            savedAt,
-            savedAtMs: toMs(savedAt),
-            author: row.author || row.repName || row.accountRep || 'Unknown',
-            sourceType: row.sourceType || row.list || row.source || 'Fact',
-            activityType: row.activityType || row.activity || '',
-            action: row.action || '',
-            isLogistics: Boolean(row.isLogistics)
-        };
-    }
-
-    function buildFactCard(note) {
-        const source = note.isLogistics ? 'Logistics' : (note.sourceType || 'Fact');
-        const dateText = note.savedAtMs ? new Date(note.savedAtMs).toLocaleString() : (note.savedAt || 'Unknown Date');
-        const body = window.formatHistoryNote
-            ? window.formatHistoryNote(note.text, note)
-            : `<div class="history-note-copy">${escapeHtml(note.text)}</div>`;
-        const safeAuthor = escapeHtml(note.author || 'Unknown');
-        const safeSource = escapeHtml(source);
-        const logisticsClass = note.isLogistics ? ' is-logistics' : '';
-        return `<div class="note-card history-note-card act-fact-history-note${logisticsClass}" data-source="${safeSource}" data-history-time="${note.savedAtMs || 0}" data-history-normalized="${escapeHtml(normalize(note.text))}" data-history-origin="fact-flow"><div class="note-card-header"><div class="history-date-line"><span class="history-emphasis">${safeSource}</span><span class="history-date-text">${escapeHtml(dateText)}</span></div><span class="history-author-pill" title="${safeAuthor}"><i class="fas fa-user-clock"></i>${safeAuthor}</span></div><div class="note-card-body">${body}</div></div>`;
-    }
-
-    function stampExistingCards(feed) {
-        feed.querySelectorAll('.history-note-card:not([data-history-time])').forEach(card => {
-            const dateText = card.querySelector('.history-date-text')?.textContent || '';
-            const bodyText = card.querySelector('.note-card-body')?.innerText || '';
-            card.dataset.historyTime = String(toMs(dateText));
-            card.dataset.historyNormalized = normalize(bodyText);
-            card.dataset.historyOrigin = 'existing';
-        });
-    }
-
-    function dedupeAndSortHistory(feed) {
-        stampExistingCards(feed);
-        const threshold = ACT_FACT_HISTORY_DEDUPE_MINUTES * 60 * 1000;
-        const cards = Array.from(feed.querySelectorAll('.history-note-card'));
-        cards.sort((a, b) => Number(b.dataset.historyTime || 0) - Number(a.dataset.historyTime || 0));
-        const kept = [];
-        for (const card of cards) {
-            const textKey = normalize(card.dataset.historyNormalized || card.querySelector('.note-card-body')?.innerText || '');
-            const time = Number(card.dataset.historyTime || 0);
-            const duplicate = textKey && kept.some(existing => {
-                if (existing.textKey !== textKey) return false;
-                if (!time || !existing.time) return false;
-                return Math.abs(existing.time - time) <= threshold;
-            });
-            if (duplicate) card.remove();
-            else kept.push({textKey, time, card});
-        }
-        kept.forEach(item => feed.appendChild(item.card));
-        return kept.length;
-    }
-
-    function applyCurrentHistoryFilters(feed) {
-        const query = String(document.getElementById('history-search')?.value || '').trim().toLowerCase();
-        const source = document.getElementById('history-source-filter')?.value || 'all';
-        feed.querySelectorAll('.history-note-card').forEach(card => {
-            const sourceMatch = source === 'all' || card.dataset.source === source || (source === 'Logistics' && card.classList.contains('is-logistics'));
-            const queryMatch = !query || String(card.textContent || '').toLowerCase().includes(query);
-            card.style.display = sourceMatch && queryMatch ? '' : 'none';
-        });
-        const visible = Array.from(feed.querySelectorAll('.history-note-card')).filter(card => card.style.display !== 'none').length;
-        const total = feed.querySelectorAll('.history-note-card').length;
-        const countPill = document.getElementById('history-count-pill');
-        const subtitle = document.getElementById('history-subtitle');
-        if (countPill) countPill.textContent = String(visible);
-        if (subtitle) subtitle.textContent = visible === total ? `Newest first • ${total} item${total === 1 ? '' : 's'}` : `Showing ${visible} of ${total} items`;
-    }
-
-    async function mergeFactHistory(forceRefresh) {
-        const feed = document.getElementById('qb-notes-preview');
-        const customerNumber = getSelectedCustomerNumber();
-        if (!feed || !customerNumber) return;
-        const requestCustomer = customerNumber;
-        try {
-            const notes = (await requestFactHistory(customerNumber, getLoggedInRepName(), forceRefresh))
-                .map(mapFactNote)
-                .filter(note => normalize(note.text));
-            if (getSelectedCustomerNumber() !== requestCustomer) return;
-            feed.querySelectorAll('[data-history-origin="fact-flow"]').forEach(card => card.remove());
-            if (notes.length) feed.insertAdjacentHTML('beforeend', notes.map(buildFactCard).join(''));
-            dedupeAndSortHistory(feed);
-            applyCurrentHistoryFilters(feed);
-        } catch (error) {
-            console.warn('ACT fact history flow could not be loaded. Existing history remains available.', error);
-        }
-    }
-
-    function installWrapper() {
-        if (typeof window.updateNotesPreview !== 'function' || window.updateNotesPreview.__factFlowWrapped) return false;
-        const original = window.updateNotesPreview;
-        const wrapped = async function () {
-            const result = await original.apply(this, arguments);
-            await mergeFactHistory(false);
-            return result;
-        };
-        wrapped.__factFlowWrapped = true;
-        wrapped.__original = original;
-        window.updateNotesPreview = wrapped;
-        return true;
-    }
-
-    if (!installWrapper()) {
-        const timer = setInterval(() => { if (installWrapper()) clearInterval(timer); }, 250);
-        setTimeout(() => clearInterval(timer), 15000);
-    }
-    window.refreshActFactHistory = () => mergeFactHistory(true);
+(function(){
+'use strict';
+if(window.__ACT_FACT_HISTORY_FLOW_V2__)return; window.__ACT_FACT_HISTORY_FLOW_V2__=true;
+const ACT_FACT_HISTORY_FLOW_URL='https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/24/workflows/d1dfdc8355164c51ba5cf5d222e5bb88/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=qCgpJGre-5lA5RJBDzQezlmu8M0moAm_-oV8ifkouhg';
+const CACHE_MS=5*60*1000, DEDUPE_MS=5*60*1000;
+const cache=new Map(), inFlight=new Map();
+const esc=v=>window.escapeHTML?window.escapeHTML(String(v??'')):String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function decodeHtml(v){let s=String(v??'').replace(/\\r\\n|\\n|\r\n/g,'\n');for(let i=0;i<2;i++){const d=document.createElement('textarea');d.innerHTML=s;const n=d.value;if(n===s)break;s=n;}return s.replace(/<\s*br\s*\/?\s*>/gi,'\n').replace(/<\s*\/\s*(p|div|li|tr|h[1-6])\s*>/gi,'\n').replace(/<[^>]+>/g,' ').replace(/&nbsp;/gi,' ').replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();}
+const norm=v=>decodeHtml(v).replace(/\s+/g,' ').trim().toLowerCase();
+const ms=v=>{const n=Date.parse(String(v||''));return Number.isFinite(n)?n:0};
+function selected(){return String(window.currentSelectedRecord?.cr714_id||window.currentSelectedRecord?.cr714_accountnumber||window.currentSelectedRecord?.accountnumber||window.currentRecordId||(typeof currentRecordId!=='undefined'?currentRecordId:'')||'').trim()}
+function rep(){return String(window.currentUserRepName||(typeof currentUserRepName!=='undefined'?currentUserRepName:'')||window.currentUserProfile?.cr714_employeename||window.currentUserProfile?.displayName||'').trim()}
+function unwrap(payload){let p=payload;if(p&&typeof p==='object'&&'body'in p)p=p.body;if(typeof p==='string'){try{p=JSON.parse(p)}catch{return[]}}let n=Array.isArray(p)?p:(p?.notes??p?.Notes??[]);if(typeof n==='string'){try{n=JSON.parse(n)}catch{n=[]}}return Array.isArray(n)?n:[]}
+async function request(customer,force=false){const key=customer+'|'+rep();const hit=cache.get(key);if(!force&&hit&&Date.now()-hit.at<CACHE_MS)return hit.rows;if(inFlight.has(key))return inFlight.get(key);const job=(async()=>{const r=await fetch(ACT_FACT_HISTORY_FLOW_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({customerNumber:customer,loggedInRepName:rep()})});if(!r.ok)throw new Error(`Fact history HTTP ${r.status}`);const rows=unwrap(await r.json());cache.set(key,{at:Date.now(),rows});return rows})().finally(()=>inFlight.delete(key));inFlight.set(key,job);return job}
+function mapRow(r,i,customer){const text=decodeHtml(r.noteText??r.NoteText??r.notetext??r.cr714_notetext??r.noteTextRaw??'');const when=r.noteSaveTime??r.NoteSaveTime??r.cr714_notedate??r.cr714_activitydate??'';return{id:r.noteId??r.NoteId??r.cr714_dt_act_fctblid??`${customer}-fact-${i}`,text,when,time:ms(when),author:(r.author??r.Author??r.cr714_accountrep??rep()??'ACT'),source:r.sourceType??r.SourceType??r.cr714_sourcetype??'Fact Table',activity:r.activityType??r.ActivityType??r.cr714_activitytype??'',action:r.action??r.Action??r.cr714_effectiveaction??r.cr714_action??'',logistics:Boolean(r.isLogistics??r.IsLogistics)||/logistics/i.test(String(r.sourceType??r.cr714_sourcetype??''))}}
+function card(n){const date=n.time?new Date(n.time).toLocaleString():(n.when||'Date unavailable');const meta=[n.activity&&`<span><b>Type:</b> ${esc(n.activity)}</span>`,n.action&&`<span><b>Action:</b> ${esc(n.action)}</span>`].filter(Boolean).join('');return `<div class="note-card history-note-card act-fact-history-note${n.logistics?' is-logistics':''}" data-source="Fact Table" data-history-time="${n.time}" data-history-normalized="${esc(norm(n.text))}" data-history-origin="fact-flow" data-note-id="${esc(n.id)}"><div class="note-card-header"><div class="history-date-line"><span class="history-emphasis"><i class="fas fa-database mr-1"></i>Fact Table</span><span class="history-date-text">${esc(date)}</span></div><span class="history-author-pill" title="${esc(n.author)}"><i class="fas fa-user-clock"></i>${esc(n.author)}</span></div><div class="note-card-body">${meta?`<div class="history-meta-strip">${meta}</div>`:''}<div class="history-note-copy"><span class="history-note-copy-label"><i class="fas fa-message mr-1"></i>History detail</span>${esc(n.text).replace(/\n/g,'<br>')}</div></div></div>`}
+function cleanExisting(feed){feed.querySelectorAll('.history-note-copy').forEach(el=>{if(el.dataset.tagsCleaned)return;const label=el.querySelector('.history-note-copy-label');const clone=el.cloneNode(true);clone.querySelector('.history-note-copy-label')?.remove();const cleaned=decodeHtml(clone.textContent||'');if(label){el.replaceChildren(label,document.createTextNode(cleaned))}else el.textContent=cleaned;el.dataset.tagsCleaned='1'});feed.querySelectorAll('.history-note-card').forEach(c=>{if(c.dataset.historyOrigin!=='fact-flow'){const copy=c.querySelector('.history-note-copy');if(copy)c.dataset.historyNormalized=norm(copy.textContent)}})}
+function finish(feed){const cards=[...feed.querySelectorAll('.history-note-card')].sort((a,b)=>(+b.dataset.historyTime||0)-(+a.dataset.historyTime||0));const kept=[];for(const c of cards){const k=c.dataset.historyNormalized||norm(c.textContent),t=+c.dataset.historyTime||0,id=c.dataset.noteId||'';const dup=kept.some(x=>(id&&x.id===id)||(k&&x.k===k&&t&&x.t&&Math.abs(t-x.t)<=DEDUPE_MS));if(dup)c.remove();else kept.push({k,t,id,c})}kept.forEach(x=>feed.appendChild(x.c));if(typeof window.applyHistoryClientFilters==='function')window.applyHistoryClientFilters();else{const q=String(document.getElementById('history-search')?.value||'').toLowerCase(),s=document.getElementById('history-source-filter')?.value||'all';kept.forEach(x=>x.c.style.display=(!q||x.c.textContent.toLowerCase().includes(q))&&(s==='all'||x.c.dataset.source===s)?'':'none')}const visible=kept.filter(x=>x.c.style.display!=='none').length;document.getElementById('history-count-pill')&&(document.getElementById('history-count-pill').textContent=visible);}
+async function merge(customer=selected(),force=false,paint=true){if(!customer)return;const rows=(await request(customer,force)).map((r,i)=>mapRow(r,i,customer)).filter(n=>n.text);if(!paint||selected()!==customer)return rows;const feed=document.getElementById('qb-notes-preview');if(!feed)return rows;cleanExisting(feed);feed.querySelectorAll('[data-history-origin="fact-flow"]').forEach(x=>x.remove());feed.insertAdjacentHTML('beforeend',rows.map(card).join(''));finish(feed);prefetchNext(customer);return rows}
+function nextNumbers(customer){const list=window.currentFilteredList||[];let i=list.findIndex(r=>String(r.cr714_id??r.cr714_accountnumber??'')===customer);if(i<0)return[];return list.slice(i+1,i+3).map(r=>String(r.cr714_id??r.cr714_accountnumber??'').trim()).filter(Boolean)}
+function prefetchNext(customer){const run=()=>nextNumbers(customer).forEach(n=>request(n,false).catch(e=>console.debug('Fact history prefetch skipped',n,e)));if('requestIdleCallback'in window)requestIdleCallback(run,{timeout:1200});else setTimeout(run,250)}
+let lastWrapCall=0;
+function install(){if(typeof window.updateNotesPreview!=='function'||window.updateNotesPreview.__factV2)return false;const original=window.updateNotesPreview;const wrapped=async function(){const now=Date.now(),customer=selected();const result=await original.apply(this,arguments);const feed=document.getElementById('qb-notes-preview');if(feed)cleanExisting(feed);if(now-lastWrapCall>75){lastWrapCall=now;merge(customer,false,true).catch(e=>console.warn('Fact history load failed; existing history retained.',e))}return result};wrapped.__factV2=true;wrapped.__original=original;window.updateNotesPreview=wrapped;return true}
+if(!install()){const t=setInterval(()=>{if(install())clearInterval(t)},200);setTimeout(()=>clearInterval(t),15000)}
+window.refreshActFactHistory=()=>merge(selected(),true,true);
+window.addEventListener('act-note-saved',()=>{const c=selected();cache.delete(c+'|'+rep());window.updateNotesPreview?.();merge(c,true,true).catch(console.warn)});
 })();
 </script>
 
