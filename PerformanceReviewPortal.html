@@ -18541,5 +18541,37 @@ window.createOutlookReviewDraft=createDraftWithAttachment;window.notifyReviewMan
 })();
 </script>
 
+<style id="outlook-doc-fix-v17-css">
+#manager-delivery-card .delivery-file::after{content:" Word-compatible attachment used for Outlook and SharePoint compatibility.";display:block;margin-top:.25rem;color:var(--text-muted);font-weight:700}
+</style>
+<script id="outlook-doc-fix-v17-js">
+(function(){
+'use strict';if(window.__outlookDocFixV17)return;window.__outlookDocFixV17=true;
+let pending=null,last=null,lastAt=0;
+const q=(s,r=document)=>r.querySelector(s),enc=new TextEncoder();
+function status(text,kind='info'){const card=q('#manager-delivery-card');if(!card)return;let el=q('.outlook-draft-status',card);if(!el){el=document.createElement('div');el.className='outlook-draft-status';card.appendChild(el)}el.dataset.kind=kind;el.textContent=text}
+function b64ToBytes(b64){const raw=atob(b64||'');const bytes=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);return bytes}
+function bytesToB64(bytes){let out='';const chunk=0x8000;for(let i=0;i<bytes.length;i+=chunk)out+=String.fromCharCode(...bytes.subarray(i,i+chunk));return btoa(out)}
+function asWordAttachment(pkg){
+ const html=new TextDecoder('utf-8').decode(b64ToBytes(pkg.attachmentContentBase64));
+ const bodyMatch=html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);const body=bodyMatch?bodyMatch[1]:html;
+ const word=`<!DOCTYPE html><html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><meta name="ProgId" content="Word.Document"><meta name="Generator" content="Performance Review Portal"><style>@page{size:8.5in 11in;margin:.45in}body{font-family:Arial,sans-serif;color:#111}table{width:100%;border-collapse:collapse}th,td{border:1px solid #777;padding:5px;vertical-align:top}th{background:#e5e7eb}.review-print-section{margin-bottom:16px}</style></head><body>${body}</body></html>`;
+ const bytes=enc.encode(word);pkg.originalAttachmentName=pkg.attachmentName;pkg.attachmentName=(pkg.attachmentName||'Performance Review.html').replace(/\.html?$/i,'.doc');pkg.fileName=pkg.attachmentName;pkg.attachmentContentType='application/msword';pkg.attachmentContentBase64=bytesToB64(bytes);pkg.attachmentByteLength=bytes.length;pkg.blob=new Blob([bytes],{type:'application/msword'});return pkg
+}
+function recipients(pkg){return [...new Set([pkg.managerEmail,pkg.seniorManagerEmail].filter(Boolean))].map(address=>({emailAddress:{address}}))}
+async function api(url,token,options={}){const r=await fetch(url,{...options,headers:{Authorization:`Bearer ${token}`,...(options.body?{'Content-Type':'application/json'}:{}),...(options.headers||{})}});if(!r.ok)throw new Error(`Outlook API ${r.status}: ${await r.text()}`);return r.status===204?null:r.json()}
+async function openDraft(){
+ if(pending)return pending;if(last&&Date.now()-lastAt<12000){window.open(last.webLink||'https://outlook.office.com/mail/drafts','_blank','noopener');return last}
+ pending=(async()=>{status('Creating a Word-compatible review file and attaching it to the Outlook draft...');let pkg=await window.buildManagerDeliveryPackage();pkg=asWordAttachment(pkg);const route=typeof window.recipientData==='function'?window.recipientData():{};pkg.managerEmail=route.managerEmail||window.selectedEmployee?.managerEmail||pkg.managerEmail||'';pkg.seniorManagerEmail=route.seniorEmail||window.selectedEmployee?.srManagerEmail||pkg.seniorManagerEmail||'';if(!pkg.attachmentByteLength)throw new Error('Generated Word attachment is empty.');if(pkg.attachmentByteLength>=3*1024*1024)throw new Error('Generated Word attachment is 3 MB or larger.');
+ const popup=window.open('about:blank','review-email-draft');if(popup)popup.document.write('<title>Preparing Outlook draft...</title><p style="font-family:Segoe UI;padding:24px">Creating the formatted draft and adding the Word review attachment.</p>');
+ try{const token=await window.getToken('Mail.ReadWrite');const draft=await api('https://graph.microsoft.com/v1.0/me/messages',token,{method:'POST',body:JSON.stringify({subject:pkg.emailSubject,body:{contentType:'HTML',content:pkg.emailHtml},toRecipients:recipients(pkg)})});if(!draft?.id)throw new Error('Outlook did not return a draft ID.');const attachment=await api(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draft.id)}/attachments`,token,{method:'POST',body:JSON.stringify({'@odata.type':'#microsoft.graph.fileAttachment',name:pkg.attachmentName,contentType:'application/msword',isInline:false,contentBytes:pkg.attachmentContentBase64})});if(!attachment?.id)throw new Error('Outlook did not return an attachment ID.');
+ const verify=await api(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(draft.id)}?$select=id,isDraft,subject,body,webLink,hasAttachments&$expand=attachments($select=id,name,contentType,size,isInline)`,token);const found=verify.attachments?.find(a=>a.id===attachment.id);if(!verify.hasAttachments||!found||found.size<=0||found.isInline)throw new Error('Outlook did not retain the visible Word attachment.');if(found.name!==pkg.attachmentName)throw new Error('Outlook returned a different attachment name.');
+ last=verify;lastAt=Date.now();window.__lastVerifiedOutlookDraft={id:verify.id,attachmentId:found.id,attachmentName:found.name,attachmentSize:found.size,contentType:found.contentType,isInline:found.isInline,webLink:verify.webLink,verifiedAt:new Date().toISOString()};status(`Attachment confirmed in Outlook: ${found.name} (${found.size.toLocaleString()} bytes). Review the draft, then select Send.`,'ok');const target=verify.webLink||draft.webLink||'https://outlook.office.com/mail/drafts';if(popup)popup.location.replace(target);else window.open(target,'_blank','noopener');return verify
+ }catch(err){popup?.close();status('Outlook attachment failed: '+err.message,'error');if(pkg?.blob){const a=document.createElement('a');a.href=URL.createObjectURL(pkg.blob);a.download=pkg.attachmentName;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000)}throw err}finally{pending=null}})();return pending
+}
+window.createOutlookReviewDraft=openDraft;window.notifyReviewManagers=openDraft;window.sendManagerReviewNotification=openDraft;
+})();
+</script>
+
 </body>
 </html>
