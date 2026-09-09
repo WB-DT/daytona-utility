@@ -5943,10 +5943,8 @@ window.populateForm = function(rec) {
                 .replace(/"/g, '&quot;')
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
-            const masonvilleReturnLink = `<a href="${safeMasonvilleUrl}" target="_blank" rel="noopener noreferrer"><strong>Open this Masonville catalog request</strong></a>`;
             const noteText = pending.historyStamp +
-                (pending.userNotes ? ` | Note: ${pending.userNotes}` : '') +
-                `<br /><br />${masonvilleReturnLink}`;
+                (pending.userNotes ? ` | Note: ${pending.userNotes}` : '');
             qbInput.value = noteText + (qbInput.value ? '\n\n' + qbInput.value : '');
 
             // Preserve the prior ACT activity logging and sales call note save process.
@@ -8444,7 +8442,46 @@ function map(r,i,customer){const when=r.cr714_notedate||r.cr714_notedatetext||r.
 async function token(){return window.getToken(`${DATAVERSE_URL.replace('/api/data/v9.2','')}/user_impersonation`,true)}
 async function directRequest(customer,force=false){if(!customer||directDisabled)return[];const hit=cache.get(customer);if(!force&&hit&&Date.now()-hit.at<CACHE_MS)return hit.rows;if(inFlight.has(customer))return inFlight.get(customer);const job=(async()=>{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),REQUEST_TIMEOUT_MS);try{const access=await token();const safe=customer.replace(/'/g,"''");const q=`${DATAVERSE_URL}/${ENTITY_SET}?$select=${SELECT}&$filter=cr714_accountnumber eq '${safe}'&$orderby=cr714_notesequence desc&$top=${TOP}`;const response=await fetch(q,{headers:{Authorization:`Bearer ${access}`,Accept:'application/json','OData-MaxVersion':'4.0','OData-Version':'4.0'},signal:controller.signal});if(response.status===401||response.status===403){directDisabled=true;throw new Error(`Direct Fact history access denied (${response.status})`)}if(!response.ok)throw new Error(`Direct Fact history HTTP ${response.status}`);const payload=await response.json(),rows=Array.isArray(payload.value)?payload.value:[];cache.set(customer,{at:Date.now(),rows});return rows}finally{clearTimeout(timer)}})().finally(()=>inFlight.delete(customer));inFlight.set(customer,job);return job}
 function badge(s){const cls=s==='AM'?'badge-am':s==='Cadence'?'badge-cad':s==='Prospecting'?'badge-psp':s==='LB'?'badge-lb':'badge-action';return `<span class="px-1.5 py-0.5 rounded text-[8px] border font-bold ${cls} mr-1">${esc(s)}</span>`}
-function card(n){const date=n.time?new Date(n.time).toLocaleString():(n.when||'Date unavailable');const meta=[n.activity&&`<span><b>Activity:</b> ${esc(n.activity)}</span>`,n.action&&!/^(none|no action)$/i.test(n.action)&&`<span><b>Action:</b> ${esc(n.action)}</span>`,n.touch&&`<span><b>Touch:</b> ${esc(n.touch)}</span>`].filter(Boolean).join('');return `<div class="note-card history-note-card act-fact-history-note" data-source="${esc(n.source)}" data-history-time="${n.time}" data-history-normalized="${esc(canonical(n.text))}" data-history-origin="fact-direct" data-note-id="${esc(n.id)}"><div class="note-card-header"><div class="history-date-line"><span>${badge(n.source)}<span class="history-emphasis" title="Direct Fact Table"><i class="fas fa-database mr-1"></i>Fact</span></span><span class="history-date-text">${esc(date)}</span></div><span class="history-author-pill" title="${esc(n.author)}"><i class="fas fa-user-clock"></i>${esc(n.author)}</span></div><div class="note-card-body">${meta?`<div class="history-meta-strip">${meta}</div>`:''}<div class="history-note-copy"><span class="history-note-copy-label"><i class="fas fa-message mr-1"></i>Note Details</span>${esc(n.text).replace(/^Note:\s*/i,'').replace(/\n/g,'<br>')}</div></div></div>`}
+function plainHistoryText(value){
+ const box=document.createElement('textarea');
+ box.innerHTML=String(value||'').replace(/<br\s*\/?\s*>/gi,'\n');
+ return box.value
+   .replace(/<\/?(?:a|strong|b|span)[^>]*>/gi,'')
+   .replace(/\/?>(?=\s|$)/g,'')
+   .replace(/\s*\|\s*/g,'\n')
+   .replace(/[ \t]+\n/g,'\n')
+   .replace(/\n{3,}/g,'\n\n')
+   .trim();
+}
+function masonvilleDetails(n){
+ const combined=plainHistoryText([n.text,n.action].filter(Boolean).join('\n'));
+ if(!/\b(?:MVGO|Masonville Catalog)\b/i.test([n.activity,n.action,combined].join(' ')))return null;
+ const lineValue=(label)=>{const m=combined.match(new RegExp('(?:^|\\n)'+label+'\\s*:\\s*([^\\n]+)','i'));return m?m[1].trim():''};
+ const fields=[
+  ['Action',lineValue('Action')],
+  ['Category Opportunity',lineValue('Category Opportunity')],
+  ['Concern',lineValue('Concern')],
+  ['Category Sales',lineValue('Category Sales(?: \\(Masonville source, last 4 months\\))?')]
+ ].filter(x=>x[1]&&!/^(?:none|unavailable)$/i.test(x[1]));
+ const note=(lineValue('Note')||'').replace(/Open this Masonville catalog request/ig,'').trim();
+ return {fields,note};
+}
+function card(n){
+ const date=n.time?new Date(n.time).toLocaleString():(n.when||'Date unavailable');
+ const mv=masonvilleDetails(n);
+ let content='';
+ if(mv){
+  const title=esc(n.activity||'MVGO Catalog Submitted');
+  const fields=mv.fields.map(([k,v])=>`<div class="history-field"><span class="history-field-label">${esc(k)}</span><span class="history-field-value">${esc(v)}</span></div>`).join('');
+  content=`<div class="history-summary-banner conversion"><i class="fas fa-book-open"></i>${title}</div>${fields?`<div class="history-field-grid">${fields}</div>`:''}${mv.note?`<div class="history-note-copy"><span class="history-note-copy-label"><i class="fas fa-message mr-1"></i>Rep Note</span>${esc(mv.note)}</div>`:''}`;
+ }else{
+  const cleanAction=plainHistoryText(n.action);
+  const meta=[n.activity&&`<span><b>Activity:</b> ${esc(n.activity)}</span>`,cleanAction&&!/^(none|no action)$/i.test(cleanAction)&&`<span><b>Action:</b> ${esc(cleanAction)}</span>`,n.touch&&`<span><b>Touch:</b> ${esc(n.touch)}</span>`].filter(Boolean).join('');
+  const cleanNote=plainHistoryText(n.text).replace(/^Note:\s*/i,'');
+  content=`${meta?`<div class="history-meta-strip">${meta}</div>`:''}<div class="history-note-copy"><span class="history-note-copy-label"><i class="fas fa-message mr-1"></i>Note Details</span>${esc(cleanNote).replace(/\n/g,'<br>')}</div>`;
+ }
+ return `<div class="note-card history-note-card act-fact-history-note${mv?' is-masonville':''}" data-source="${esc(n.source)}" data-history-time="${n.time}" data-history-normalized="${esc(canonical(n.text))}" data-history-origin="fact-direct" data-note-id="${esc(n.id)}"><div class="note-card-header"><div class="history-date-line"><span>${badge(n.source)}<span class="history-emphasis" title="Direct Fact Table"><i class="fas fa-database mr-1"></i>Fact</span></span><span class="history-date-text">${esc(date)}</span></div><span class="history-author-pill" title="${esc(n.author)}"><i class="fas fa-user-clock"></i>${esc(n.author)}</span></div><div class="note-card-body">${content}</div></div>`;
+}
 function filter(feed){const q=String(document.getElementById('history-search')?.value||'').toLowerCase(),s=document.getElementById('history-source-filter')?.value||'all';const cards=[...feed.querySelectorAll('.history-note-card')];cards.forEach(c=>c.style.display=(!q||c.textContent.toLowerCase().includes(q))&&(s==='all'||c.dataset.source===s)?'':'none');const visible=cards.filter(c=>c.style.display!=='none').length;const pill=document.getElementById('history-count-pill'),sub=document.getElementById('history-subtitle');if(pill)pill.textContent=visible;if(sub)sub.textContent=`Newest first • ${visible} item${visible===1?'':'s'}`}
 function render(customer,raw){if(selected()!==customer)return;const feed=document.getElementById('qb-notes-preview');if(!feed)return;const seen=new Set(),rows=raw.map((r,i)=>map(r,i,customer)).filter(n=>dateAllowed(n.time)).filter(n=>meaningful(n.text)).filter(n=>{const k=n.id||`${canonical(n.text)}|${n.time}`;if(seen.has(k))return false;seen.add(k);return true}).sort((a,b)=>b.time-a.time);feed.replaceChildren();feed.insertAdjacentHTML('beforeend',rows.map(card).join(''));feed.dataset.historyMode='fact-direct';filter(feed)}
 async function load(customer=selected(),force=false,paint=true){const rows=await directRequest(customer,force);if(paint&&rows.length)render(customer,rows);return rows}
