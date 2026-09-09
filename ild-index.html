@@ -1634,6 +1634,15 @@
 @media(max-width:1100px){#left-workspace-panel,#right-workspace-panel{padding:.58rem!important;gap:.55rem!important;}#left-workspace-panel button,#right-workspace-panel button{padding:.42rem .5rem!important;}}
 @media(max-width:760px){.col-middle .card.workspace>div.flex.flex-row{flex-direction:column!important;overflow-y:auto!important;}#left-workspace-panel,#right-workspace-panel{width:100%!important;overflow:visible!important;}#left-workspace-panel{border-right:0!important;border-bottom:1px solid var(--border-color)!important;}}
 
+
+/* Let the primary note editor consume the remaining left-panel workspace. */
+#left-workspace-panel{overflow:hidden!important;}
+#note-editor-shell{flex:1 1 0!important;min-height:220px!important;height:auto!important;margin-bottom:0!important;overflow:hidden!important;}
+#note-editor-shell #qb-notes-input{flex:1 1 auto!important;width:100%!important;height:100%!important;min-height:220px!important;max-height:none!important;resize:none!important;padding:.75rem 5.5rem .75rem .75rem!important;line-height:1.5!important;box-sizing:border-box!important;}
+#note-editor-shell+div{margin-top:0!important;}
+@media(max-height:760px){#note-editor-shell{min-height:170px!important;}#note-editor-shell #qb-notes-input{min-height:170px!important;}}
+@media(max-width:760px){#left-workspace-panel{overflow:visible!important;}#note-editor-shell{flex:0 0 auto!important;min-height:260px!important;}#note-editor-shell #qb-notes-input{height:260px!important;min-height:260px!important;}}
+
 </style>
 
 <script>
@@ -2999,7 +3008,12 @@ window.preloadTemplateImages = async function() {
         document.getElementById('login-container').style.display = 'none';
         document.getElementById('main-app-container').style.display = 'flex';
         
-        await window.refreshSessionTokens();
+        if (await window.ensureDailyFreshLogin()) return;
+        const sessionReady = await window.refreshSessionTokens();
+        if (!sessionReady && msalInstance?.getAllAccounts?.().length) {
+            await window.forceActFreshLogin('partial');
+            return;
+        }
         window.preloadTemplateImages();
         
         const lastRunDate = localStorage.getItem('daytona_last_run_date');
@@ -4502,28 +4516,67 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
     
     
 
+    const ACT_AUTH_DAY_COOKIE = 'act_auth_refresh_day';
+    const ACT_REAUTH_GUARD_COOKIE = 'act_reauth_guard';
+    const actLocalDay = () => new Date().toLocaleDateString('en-CA');
+    const readActCookie = name => document.cookie.split(';').map(v => v.trim()).find(v => v.startsWith(name + '='))?.slice(name.length + 1) || '';
+    const writeActCookie = (name, value, maxAge) => { document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=${maxAge}; SameSite=Lax; Secure`; };
+
+    window.clearActBrowserStorage = async function() {
+        try { localStorage.clear(); } catch(e) { console.warn('localStorage clear failed', e); }
+        try { sessionStorage.clear(); } catch(e) { console.warn('sessionStorage clear failed', e); }
+        try {
+            if (window.caches && caches.keys) {
+                const cacheNames = await caches.keys();
+                await Promise.all(cacheNames.map(name => caches.delete(name)));
+            }
+        } catch(e) { console.warn('Cache API clear failed', e); }
+        try {
+            if (window.indexedDB && indexedDB.databases) {
+                const dbs = await indexedDB.databases();
+                await Promise.all((dbs || []).filter(db => db && db.name).map(db => new Promise(resolve => {
+                    const req = indexedDB.deleteDatabase(db.name);
+                    req.onsuccess = req.onerror = req.onblocked = () => resolve();
+                })));
+            }
+        } catch(e) { console.warn('IndexedDB clear failed', e); }
+    };
+
+    window.forceActFreshLogin = async function(reason = 'session') {
+        if (readActCookie(ACT_REAUTH_GUARD_COOKIE) === '1') return true;
+        writeActCookie(ACT_REAUTH_GUARD_COOKIE, '1', 600);
+        writeActCookie(ACT_AUTH_DAY_COOKIE, actLocalDay(), 60 * 60 * 24 * 8);
+        window.setConnectionStatus?.('refreshing', reason === 'daily' ? 'Daily sign-in refresh...' : 'Refreshing incomplete session...');
+        window.showToast?.(reason === 'daily' ? 'Starting daily fresh sign-in...' : 'Incomplete connection detected. Refreshing sign-in...', 'processing');
+        const account = (typeof msalAccount !== 'undefined' && msalAccount) ? msalAccount : (msalInstance?.getAllAccounts?.()[0] || null);
+        await window.clearActBrowserStorage();
+        try {
+            if (account && msalInstance?.logoutRedirect) {
+                await msalInstance.logoutRedirect({ account, postLogoutRedirectUri: window.location.href });
+                return true;
+            }
+        } catch(e) { console.warn('Automatic logout redirect failed; reloading for login.', e); }
+        window.location.reload();
+        return true;
+    };
+
+    window.ensureDailyFreshLogin = async function() {
+        const account = (typeof msalAccount !== 'undefined' && msalAccount) ? msalAccount : (msalInstance?.getAllAccounts?.()[0] || null);
+        if (!account) {
+            writeActCookie(ACT_REAUTH_GUARD_COOKIE, '', 0);
+            return false;
+        }
+        if (readActCookie(ACT_AUTH_DAY_COOKIE) === actLocalDay()) {
+            writeActCookie(ACT_REAUTH_GUARD_COOKIE, '', 0);
+            return false;
+        }
+        return window.forceActFreshLogin('daily');
+    };
+
     window.clearActCacheAndLogin = async function() {
         const msg = "This will clear ACT local cache, saved login tokens, session data, cached files, and then reload the app. You may need to sign in again. Continue?";
         if (!confirm(msg)) return;
-        const clearBrowserStorage = async () => {
-            try { localStorage.clear(); } catch(e) { console.warn('localStorage clear failed', e); }
-            try { sessionStorage.clear(); } catch(e) { console.warn('sessionStorage clear failed', e); }
-            try {
-                if (window.caches && caches.keys) {
-                    const cacheNames = await caches.keys();
-                    await Promise.all(cacheNames.map(name => caches.delete(name)));
-                }
-            } catch(e) { console.warn('Cache API clear failed', e); }
-            try {
-                if (window.indexedDB && indexedDB.databases) {
-                    const dbs = await indexedDB.databases();
-                    await Promise.all((dbs || []).filter(db => db && db.name).map(db => new Promise(resolve => {
-                        const req = indexedDB.deleteDatabase(db.name);
-                        req.onsuccess = req.onerror = req.onblocked = () => resolve();
-                    })));
-                }
-            } catch(e) { console.warn('IndexedDB clear failed', e); }
-        };
+        const clearBrowserStorage = window.clearActBrowserStorage;
         try {
             window.showToast && window.showToast('Clearing ACT cache...', 'processing');
             const account = (typeof msalAccount !== 'undefined' && msalAccount) ? msalAccount : (msalInstance?.getAllAccounts?.()[0] || null);
@@ -7447,7 +7500,7 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
                                 </div>
                             </div>
 
-                            <div class="relative flex flex-col min-h-[200px] mb-2 flex-grow flex-shrink-0">
+                            <div id="note-editor-shell" class="relative flex flex-col min-h-[200px] mb-2 flex-grow">
                                 <button onclick="window.insertTemplate()" class="absolute top-2 right-2 z-10 text-[9px] font-bold text-status-info border px-2 py-1 rounded transition-all shadow-sm" style="background-color: var(--bg-card); border-color: var(--border-color);">
                                     <i class="fas fa-paste mr-1"></i>Template
                                 </button>
