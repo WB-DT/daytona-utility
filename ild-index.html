@@ -8412,7 +8412,20 @@ const cache=new Map(),inFlight=new Map();let directDisabled=false;
 const ACT_FACT_HISTORY_FLOW_URL='https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/24/workflows/d1dfdc8355164c51ba5cf5d222e5bb88/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=qCgpJGre-5lA5RJBDzQezlmu8M0moAm_-oV8ifkouhg';
 */
 const esc=v=>window.escapeHTML?window.escapeHTML(String(v??'')):String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function decode(v){let x=String(v??'').replace(/\\u003c/gi,'<').replace(/\\u003e/gi,'>').replace(/\\r\\n|\\n|\r\n|\r/g,'\n');for(let i=0;i<3;i++){const t=document.createElement('textarea');t.innerHTML=x;const decoded=t.value;if(decoded===x)break;x=decoded}return x.replace(/<\s*\/?\s*br\s*\/?\s*>/gi,'\n').replace(/(?:&lt;|&#0*60;|&#x0*3c;)\s*\/?\s*br\s*\/?\s*(?:&gt;|&#0*62;|&#x0*3e;)/gi,'\n').replace(/<[^>]+>/g,' ').replace(/&nbsp;|&#160;/gi,' ').replace(/[ \t]+\n/g,'\n').replace(/\n[ \t]+/g,'\n').replace(/\n{3,}/g,'\n\n').trim()}
+function decode(v){
+ let x=String(v??'').replace(/\\u003c/gi,'<').replace(/\\u003e/gi,'>').replace(/\\r\\n|\\n|\r\n|\r/g,'\n').replace(/[\u200B-\u200D\uFEFF]/g,'');
+ for(let i=0;i<4;i++){const t=document.createElement('textarea');t.innerHTML=x;const decoded=t.value;if(decoded===x)break;x=decoded}
+ x=x.replace(/<\s*\/?\s*br\s*\/?\s*>/gi,'\n')
+    .replace(/<\s*li(?:\s[^>]*)?>/gi,'• ').replace(/<\s*\/\s*li\s*>/gi,'\n')
+    .replace(/<\s*\/\s*(?:p|div|section|article|header|footer|h[1-6]|tr|blockquote|ul|ol)\s*>/gi,'\n')
+    .replace(/<\s*(?:p|div|section|article|header|footer|h[1-6]|tr|blockquote|ul|ol)(?:\s[^>]*)?>/gi,'')
+    .replace(/<\s*td(?:\s[^>]*)?>/gi,'').replace(/<\s*\/\s*td\s*>/gi,' | ')
+    .replace(/<[^>]+>/g,' ')
+    .replace(/&nbsp;|&#0*160;|&#x0*a0;/gi,' ')
+    .replace(/[ \t]+\|[ \t]+/g,' | ').replace(/[ \t]+\n/g,'\n').replace(/\n[ \t]+/g,'\n')
+    .replace(/[ \t]{2,}/g,' ').replace(/(?:\n[ \t]*){3,}/g,'\n\n');
+ return x.split('\n').map(line=>line.replace(/[ \t]+$/,'')).join('\n').trim();
+}
 const canonical=v=>decode(v).replace(/^(?:note(?: details)?|history detail)\s*:\s*/i,'').replace(/^note\s+/i,'').replace(/[()\[\]{}:;,.'"`]/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
 const meaningful=v=>{const x=canonical(v);return x.length>2&&!/^(?:note|none|null|undefined|n\/?a|test)$/.test(x)};
 const parseMs=v=>{const x=Date.parse(String(v||''));return Number.isFinite(x)?x:0};
@@ -8430,12 +8443,34 @@ async function load(customer=selected(),force=false,paint=true){const rows=await
 async function fallback(original,args){const result=await original.apply(window,args);const feed=document.getElementById('qb-notes-preview');if(feed)feed.dataset.historyMode='dataset-fallback';return result}
 function startupAccounts(){const list=window.currentFilteredList?.length?window.currentFilteredList:window.allRecords||((typeof allRecords!=='undefined'&&allRecords)||[]);return [...new Set(list.map(accountOf).filter(Boolean))].slice(0,STARTUP_ACCOUNTS)}
 async function preloadStartup(){const ids=startupAccounts();if(!ids.length)return;const stage=document.querySelector('.ma-loader-stage'),term=document.querySelector('.ma-loader-terminal');if(stage)stage.textContent=`Preloading history for ${ids.length} accounts`;if(term)term.textContent='Direct Fact Table query';await Promise.allSettled(ids.map(id=>directRequest(id,false)));const first=ids[0],hit=cache.get(first);if(first&&hit&&selected()===first)render(first,hit.rows)}
-window.preloadInitialFactHistory=preloadStartup;
-function install(){if(typeof window.updateNotesPreview!=='function'||window.updateNotesPreview.__directFact)return false;const original=window.updateNotesPreview;const wrapped=async function(){const c=selected();try{const rows=await load(c,false,true);if(rows.length)return rows}catch(e){console.warn('Direct Fact history failed; using dataset fallback.',e)}return fallback(original,arguments)};wrapped.__directFact=true;wrapped.__original=original;window.updateNotesPreview=wrapped;return true}
+let backgroundRunning=false,backgroundTimer=0;
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function allGalleryAccounts(){const list=window.currentFilteredList?.length?window.currentFilteredList:window.allRecords||((typeof allRecords!=='undefined'&&allRecords)||[]);return [...new Set(list.map(accountOf).filter(Boolean))]}
+function idleTurn(){return new Promise(resolve=>{if('requestIdleCallback' in window)requestIdleCallback(()=>resolve(),{timeout:2500});else setTimeout(resolve,650)})}
+async function runBackgroundPreload(){
+ if(backgroundRunning||directDisabled)return;backgroundRunning=true;
+ try{
+  const selectedAccount=selected();
+  for(const id of allGalleryAccounts()){
+   if(directDisabled)break;
+   const hit=cache.get(id);if(id===selectedAccount||(hit&&Date.now()-hit.at<CACHE_MS))continue;
+   while(document.hidden)await sleep(1500);
+   await idleTurn();
+   try{await directRequest(id,false)}catch(e){console.debug('Light history preload skipped',id,e?.message||e);if(directDisabled)break}
+   await sleep(1100);
+  }
+ }finally{backgroundRunning=false;backgroundTimer=setTimeout(runBackgroundPreload,30000)}
+}
+function scheduleBackgroundPreload(delay=1800){clearTimeout(backgroundTimer);backgroundTimer=setTimeout(runBackgroundPreload,delay)}
+
+window.preloadInitialFactHistory=async function(){await preloadStartup();scheduleBackgroundPreload(1200)};
+function install(){if(typeof window.updateNotesPreview!=='function'||window.updateNotesPreview.__directFact)return false;const original=window.updateNotesPreview;const wrapped=async function(){const c=selected();try{const rows=await load(c,false,true);if(rows.length){scheduleBackgroundPreload(900);return rows}}catch(e){console.warn('Direct Fact history failed; using dataset fallback.',e)}return fallback(original,arguments)};wrapped.__directFact=true;wrapped.__original=original;window.updateNotesPreview=wrapped;return true}
 function wrapLoad(){if(typeof window.loadRecords!=='function'||window.loadRecords.__historyPreload)return false;const original=window.loadRecords;const wrapped=async function(){const loader=document.getElementById('global-loader');if(loader){loader.style.display='flex';loader.style.opacity='1'}const result=await original.apply(this,arguments);try{await preloadStartup()}catch(e){console.warn('Startup history preload skipped.',e)}return result};wrapped.__historyPreload=true;window.loadRecords=wrapped;return true}
 if(!install()){const t=setInterval(()=>{if(install())clearInterval(t)},150);setTimeout(()=>clearInterval(t),15000)}
 if(!wrapLoad()){const t2=setInterval(()=>{if(wrapLoad())clearInterval(t2)},150);setTimeout(()=>clearInterval(t2),15000)}
 window.refreshActFactHistory=()=>load(selected(),true,true);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)scheduleBackgroundPreload(1000)});
+window.addEventListener('focus',()=>scheduleBackgroundPreload(1400));
 window.addEventListener('act-note-saved',async()=>{const c=selected();cache.delete(c);try{for(const delay of [0,1000,2500]){if(delay)await new Promise(r=>setTimeout(r,delay));const rows=await load(c,true,true);if(rows.length)return}}catch(e){console.warn('Direct post-save refresh failed.',e)}window.updateNotesPreview?.()});
 })();
 </script>
