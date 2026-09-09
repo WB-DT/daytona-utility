@@ -8901,5 +8901,138 @@ window.addEventListener('act-note-saved',async()=>{const c=selected();cache.dele
 })();
 </script>
 
+
+<style id="act-logistics-request-filter-style">
+#filter-logistics-requests-wrap{
+  border-color:rgba(245,158,11,.48)!important;
+  background:rgba(245,158,11,.10)!important;
+}
+#filter-logistics-requests-wrap span{color:#d97706!important}
+#filter-logistics-requests-wrap.is-working{opacity:.68;cursor:progress}
+#filter-logistics-requests-wrap.is-working i{animation:spin 1s linear infinite}
+[data-theme="midnight"] #filter-logistics-requests-wrap span,
+[data-theme="oled"] #filter-logistics-requests-wrap span,
+[data-theme="matt"] #filter-logistics-requests-wrap span,
+[data-theme="gatsby"] #filter-logistics-requests-wrap span,
+[data-theme="ocean"] #filter-logistics-requests-wrap span,
+[data-theme="forest"] #filter-logistics-requests-wrap span,
+[data-theme="sunset"] #filter-logistics-requests-wrap span{color:var(--accent-warning)!important}
+</style>
+
+<script id="act-logistics-request-account-filter">
+(function(){
+'use strict';
+if(window.__ACT_LOGISTICS_REQUEST_ACCOUNT_FILTER__)return;
+window.__ACT_LOGISTICS_REQUEST_ACCOUNT_FILTER__=true;
+const FILTER_ID='filter-logistics-requests';
+const WRAP_ID='filter-logistics-requests-wrap';
+const ENTITY_SET='cr714_logisticslog_2s';
+const ACCOUNT_COLUMN='cr714_accountnumber';
+const CACHE_MS=5*60*1000;
+let accountSet=null,loadedAt=0,loading=null,installedFilter=null,installedClear=null;
+const $=id=>document.getElementById(id);
+const norm=value=>String(value??'').trim().toUpperCase();
+function listAccount(record){
+ return norm(record?.cr714_accountnum??record?.cr714_accountnumber??record?.accountnumber??record?.accountNumber??record?.AccountNumber??record?.cr714_id);
+}
+function addFilterBox(){
+ if($(FILTER_ID))return true;
+ const pills=document.querySelector('#filter-bar-container > div.flex.flex-wrap.items-center');
+ if(!pills)return false;
+ const label=document.createElement('label');
+ label.id=WRAP_ID;
+ label.className='filter-pill';
+ label.title='Only show ACT accounts whose Account Number exists in the Logistics Requests table.';
+ label.innerHTML='<input type="checkbox" id="'+FILTER_ID+'" class="cursor-pointer mt-0.5"><span><i class="fas fa-truck-ramp-box mr-1"></i> Logistics Requests</span>';
+ pills.appendChild(label);
+ $(FILTER_ID).addEventListener('change',async function(){
+   if(this.checked)await loadAccountNumbers(false);
+   window.filterAndSortGallery?.();
+ });
+ return true;
+}
+async function loadAccountNumbers(force){
+ if(!force&&accountSet&&Date.now()-loadedAt<CACHE_MS)return accountSet;
+ if(loading)return loading;
+ loading=(async()=>{
+   const pill=$(WRAP_ID);pill?.classList.add('is-working');
+   try{
+     const token=await window.getToken(`${DATAVERSE_URL.replace('/api/data/v9.2','')}/user_impersonation`,true);
+     const headers={Authorization:`Bearer ${token}`,Accept:'application/json','OData-MaxVersion':'4.0','OData-Version':'4.0'};
+     let url=`${DATAVERSE_URL}/${ENTITY_SET}?$select=${ACCOUNT_COLUMN}&$filter=${ACCOUNT_COLUMN} ne null&$top=5000`;
+     const next=new Set(),visited=new Set();
+     while(url&&!visited.has(url)){
+       visited.add(url);
+       const response=await fetch(url,{headers});
+       if(!response.ok)throw new Error(`Logistics Requests HTTP ${response.status}`);
+       const payload=await response.json();
+       (Array.isArray(payload.value)?payload.value:[]).forEach(row=>{const id=norm(row[ACCOUNT_COLUMN]);if(id)next.add(id)});
+       url=payload['@odata.nextLink']||'';
+     }
+     accountSet=next;loadedAt=Date.now();
+     const text=$('filter-legend-text');
+     if(text&&$(FILTER_ID)?.checked)text.textContent=`Logistics Requests: ${accountSet.size} matching account number(s).`;
+     return accountSet;
+   }catch(error){
+     accountSet=new Set();loadedAt=Date.now();
+     console.error('Logistics Requests account filter failed',error);
+     window.showToast?.(`Could not load Logistics Requests. ${error.message||error}`,'error');
+     return accountSet;
+   }finally{pill?.classList.remove('is-working');loading=null}
+ })();
+ return loading;
+}
+function installFilterWrapper(){
+ const current=window.filterAndSortGallery;
+ if(typeof current!=='function'||current===installedFilter||current.__logisticsRequestsAccountFilter)return false;
+ const previous=current;
+ const wrapped=function(){
+   const checkbox=$(FILTER_ID);
+   if(!checkbox?.checked)return previous.apply(this,arguments);
+   if(!accountSet){loadAccountNumbers(false).then(()=>window.filterAndSortGallery?.());return;}
+   const source=window.allRecords||((typeof allRecords!=='undefined'&&allRecords)||[]);
+   const filtered=(source||[]).filter(record=>{const id=listAccount(record);return id&&accountSet.has(id)});
+   let savedWindow=window.allRecords;
+   let savedLexical;
+   try{
+     if(typeof allRecords!=='undefined'){savedLexical=allRecords;allRecords=filtered;}
+     window.allRecords=filtered;
+     checkbox.checked=false;
+     return previous.apply(this,arguments);
+   }finally{
+     checkbox.checked=true;
+     window.allRecords=savedWindow;
+     if(typeof allRecords!=='undefined')allRecords=savedLexical;
+   }
+ };
+ wrapped.__logisticsRequestsAccountFilter=true;
+ wrapped.__previous=previous;
+ installedFilter=wrapped;
+ window.filterAndSortGallery=wrapped;
+ return true;
+}
+function installClearWrapper(){
+ const current=window.clearAllFilters;
+ if(typeof current!=='function'||current===installedClear||current.__logisticsRequestsClear)return false;
+ const previous=current;
+ const wrapped=function(){
+   const checkbox=$(FILTER_ID);if(checkbox)checkbox.checked=false;
+   return previous.apply(this,arguments);
+ };
+ wrapped.__logisticsRequestsClear=true;
+ installedClear=wrapped;
+ window.clearAllFilters=wrapped;
+ return true;
+}
+function install(){addFilterBox();installFilterWrapper();installClearWrapper()}
+function initialize(){install();setInterval(install,700)}
+document.readyState==='loading'?document.addEventListener('DOMContentLoaded',initialize,{once:true}):initialize();
+window.ACTLogisticsRequestsFilter={
+ reload:async()=>{accountSet=null;loadedAt=0;await loadAccountNumbers(true);window.filterAndSortGallery?.()},
+ count:()=>accountSet?.size??null,
+ accounts:()=>accountSet?Array.from(accountSet):[]
+};
+})();
+</script>
 </body>
 </html>
