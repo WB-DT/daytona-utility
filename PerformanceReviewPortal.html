@@ -20703,4 +20703,150 @@ document.addEventListener('DOMContentLoaded',function(){setTimeout(function(){wi
   window.refreshSelectedPrintReportsV219=function(){queueRebuild();return true;};
 })();
 </script>
+
+<!-- Authoritative Print Manager v220: one guarded pipeline, one native print call. -->
+<script id="authoritative-print-manager-v220">
+(function () {
+  'use strict';
+  if (window.__authoritativePrintManagerV220) return;
+
+  const nativePrint = window.__browserNativePrintV97 || window.print.bind(window);
+  const templatePrinter = typeof window.prepareEomTemplatePrint === 'function'
+    ? window.prepareEomTemplatePrint.bind(window)
+    : null;
+  const state = { phase: 'idle', promise: null, lastStart: 0 };
+  const PRINT_CLASSES = [
+    'page3-printing', 'template-print-active', 'standalone-eom-print-active',
+    'exact-preview-print-active', 'submitted-print-active'
+  ];
+
+  function safeCall(name) {
+    try {
+      const fn = window[name];
+      return typeof fn === 'function' ? fn() : undefined;
+    } catch (error) {
+      console.warn('[Print Manager] ' + name + ' skipped:', error);
+      return undefined;
+    }
+  }
+
+  function normalizeState(activeClass) {
+    PRINT_CLASSES.forEach(function (name) {
+      document.body.classList.toggle(name, name === activeClass);
+    });
+    document.body.classList.remove('comparison-open', 'comparison-expanded');
+    const modal = document.getElementById('comparison-modal');
+    if (modal) {
+      modal.classList.remove('open', 'expanded');
+      modal.dataset.open = 'false';
+    }
+  }
+
+  function synchronize() {
+    [
+      'syncCurrentValuesToPrint',
+      'syncAuthoritativePrintMonthComparison',
+      'syncSbsPrintMirrorV101',
+      'synchronizePrintRootKpisV102',
+      'applySupportingTableScalingV86',
+      'stripSupportingReportBarsV89',
+      'syncUploadedPrintAttachmentV212',
+      'verifyPage3PrintBreaks'
+    ].forEach(safeCall);
+    safeCall('refreshSelectedPrintReportsV219');
+  }
+
+  function callNativePrint() {
+    if (state.phase === 'printing') return false;
+    state.phase = 'printing';
+    state.lastStart = Date.now();
+    synchronize();
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        try {
+          nativePrint();
+        } catch (error) {
+          state.phase = 'idle';
+          state.promise = null;
+          console.error('[Print Manager] Native print failed:', error);
+          if (typeof window.showError === 'function') {
+            window.showError('The browser print dialog could not be opened. Please try again.');
+          }
+        }
+      });
+    });
+    return true;
+  }
+
+  // Replace the long chain of historical window.print wrappers with one guarded call.
+  window.print = callNativePrint;
+
+  window.preparePrintPreview = function (confirmation) {
+    if (state.promise || state.phase !== 'idle') return state.promise || Promise.resolve(false);
+    const conf = confirmation || 'DRAFT';
+    state.phase = 'preparing';
+    normalizeState('template-print-active');
+
+    state.promise = Promise.resolve()
+      .then(function () {
+        if (templatePrinter) return templatePrinter(conf);
+        safeCall('buildPrintSummary');
+        safeCall('buildSummaryPreview');
+        return callNativePrint();
+      })
+      .catch(function (error) {
+        console.error('[Print Manager] Preparation failed:', error);
+        normalizeState(null);
+        if (typeof window.showError === 'function') {
+          window.showError('Unable to prepare the print document: ' + (error.message || error));
+        }
+        return false;
+      })
+      .finally(function () {
+        // The actual reset is completed by afterprint. This fallback handles blocked dialogs.
+        setTimeout(function () {
+          if (state.phase === 'preparing') {
+            state.phase = 'idle';
+            state.promise = null;
+            normalizeState(null);
+          }
+        }, 1500);
+      });
+    return state.promise;
+  };
+  try { preparePrintPreview = window.preparePrintPreview; } catch (_) {}
+
+  // Capture print-button clicks so legacy inline handlers cannot launch a second pipeline.
+  document.addEventListener('click', function (event) {
+    const button = event.target && event.target.closest
+      ? event.target.closest('#btn-print-preview,#btn-print-preview-top,#success-screen .btn-print')
+      : null;
+    if (!button) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const isFinal = !!button.closest('#success-screen');
+    window.preparePrintPreview(isFinal ? 'AUTO' : 'DRAFT');
+  }, true);
+
+  window.addEventListener('beforeprint', function () {
+    synchronize();
+    document.documentElement.dataset.printManager = 'printing';
+  });
+
+  window.addEventListener('afterprint', function () {
+    state.phase = 'idle';
+    state.promise = null;
+    normalizeState(null);
+    document.documentElement.dataset.printManager = 'idle';
+  });
+
+  window.__authoritativePrintManagerV220 = {
+    print: window.preparePrintPreview,
+    synchronize: synchronize,
+    nativePrint: nativePrint,
+    state: state
+  };
+  document.documentElement.dataset.printManager = 'ready';
+})();
+</script>
 </body></html>
