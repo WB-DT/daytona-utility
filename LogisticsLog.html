@@ -103,6 +103,8 @@
         [data-theme='midnight'] .outlook-editor, [data-theme='midnight'] .outlook-editor * { color: var(--text-main) !important; }
         .progress-container { width: 180px; height: 10px; background: rgba(0,0,0,0.1); border-radius: 20px; border: 1px solid var(--border); overflow: hidden; position: relative; }
         .progress-fill { height: 100%; width: 0%; transition: all 0.6s cubic-bezier(0.4, 0, 0.2, 1); }
+        #ticket-list { overflow-anchor: none; contain: layout paint; }
+        .record-card { contain: layout paint; }
         ::-webkit-scrollbar { width: 6px; height: 6px; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
         .gal-dropdown { position: absolute; top: 100%; left: 0; right: 0; background: var(--bg-surface); border: 1px solid var(--border); border-radius: 6px; max-height: 200px; overflow-y: auto; z-index: 9999; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5); display: none; }
@@ -433,6 +435,13 @@
         const D365_API = `${ENV_D365}/api/data/v9.2`;
         
         let db = []; let orderCounts = {}; let currentMode = 'active'; let currentTicketId = null;
+        const recordIndex = new Map();
+        const dirtyFields = new Set();
+        let renderFrame = 0;
+        let lastListSignature = '';
+        const CACHE_DB_NAME = 'logilog-cache-v1';
+        const CACHE_STORE = 'snapshots';
+        const CACHE_KEY = 'records';
         let currentUser = { name: "User", email: "", id: null };
         let currentUserProfileData = null;
         let renderLimit = 100;
@@ -442,7 +451,7 @@
 
         const NAME_MAP = { "Kari": "Kari Westervelt", "Holly": "Holly Evans", "Courtney": "Courtney Youngblood", "Jewel": "Jewel Jenkins", "Noah": "Noah Comans", "Wayne": "Wayne Rendt", "Tobbitha": "Tobbitha Bishoff", "Paula": "Paula Bowen", "Furniture": "Furniture", "Tier 2": "Tier 2", "Ebony": "Ebony Thomas", "Schools": "Schools" };
 
-        window.onload = () => { 
+        window.onload = async () => { 
             if(localStorage.getItem('theme')) setTheme(localStorage.getItem('theme'));
             setMode('active');
             setupRepView();
@@ -467,6 +476,64 @@
             }).catch(e => { document.getElementById('login-container').style.display = 'flex'; });
         };
 
+        function recordKey(t) { return t.guid || t.id; }
+        function rebuildRecordIndex() {
+            recordIndex.clear();
+            db.forEach((t, i) => recordIndex.set(recordKey(t), i));
+        }
+        function getRecordById(id) {
+            const direct = recordIndex.get(id);
+            if (direct !== undefined) return db[direct];
+            return db.find(x => x.id === id);
+        }
+        function bindDraftProtection() {
+            ['d-warehouse-input', 'd-driver-input', 'd-disposition'].forEach(id => {
+                const el = document.getElementById(id);
+                if (!el) return;
+                el.addEventListener('input', () => dirtyFields.add(id));
+                el.addEventListener('change', () => dirtyFields.add(id));
+            });
+        }
+        function openCacheDb() {
+            return new Promise((resolve, reject) => {
+                const req = indexedDB.open(CACHE_DB_NAME, 1);
+                req.onupgradeneeded = () => req.result.createObjectStore(CACHE_STORE);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+        }
+        async function saveCache() {
+            try {
+                const cacheDb = await openCacheDb();
+                const tx = cacheDb.transaction(CACHE_STORE, 'readwrite');
+                tx.objectStore(CACHE_STORE).put({ savedAt: Date.now(), records: db }, CACHE_KEY);
+                await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); });
+                cacheDb.close();
+            } catch (e) { console.warn('Cache write skipped', e); }
+        }
+        async function hydrateFromCache() {
+            try {
+                const cacheDb = await openCacheDb();
+                const tx = cacheDb.transaction(CACHE_STORE, 'readonly');
+                const req = tx.objectStore(CACHE_STORE).get(CACHE_KEY);
+                const snapshot = await new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
+                cacheDb.close();
+                if (!snapshot?.records?.length) return;
+                db = snapshot.records;
+                rebuildRecordIndex();
+                recalculateIndexes();
+                setupRepView();
+                scheduleRender(false);
+                document.getElementById('loading-status').innerText = `Loaded ${db.length} cached records. Checking for updates...`;
+            } catch (e) { console.warn('Cache hydration skipped', e); }
+        }
+        function recalculateIndexes() {
+            orderCounts = db.reduce((acc, t) => { if(t.order !== 'N/A') acc[t.order] = (acc[t.order] || 0) + 1; return acc; }, {});
+        }
+        function scheduleRender(resetScroll = false) {
+            cancelAnimationFrame(renderFrame);
+            renderFrame = requestAnimationFrame(() => render(resetScroll));
+        }
         async function getToken(envUrl) {
             const request = { scopes: [`${envUrl}/user_impersonation`], account: msalAccount };
             try { 
@@ -607,7 +674,7 @@
                 r.cr714_coachingopp : (r.cr714_coachingopportunity !== undefined ? r.cr714_coachingopportunity : false);
                 const fvCoach = fv('cr714_coachingopp') || fv('cr714_coachingopportunity');
                 return {
-                    id: String(r.cr714_ticket || r.cr714_id || Math.random().toString(36).substr(2,6)), 
+                    id: String(r.cr714_ticket || r.cr714_id || r.cr714_logisticslog_2id || `${r.cr714_salesordernumber || 'record'}-${rawDate || 'unknown'}`), 
                     guid: String(r.cr714_logisticslog_2id || '').trim().replace(/[{}]/g, ''), 
                     order: String(r.cr714_salesordernumber || 'N/A').trim(), 
                     company: String(r.cr714_companyordeliveryname || 'Unknown Company'), 
@@ -646,30 +713,32 @@ completionTime: r.cr714_completiontime ? `${new Date(r.cr714_completiontime).toL
             });
 
             if (isMerge) {
-                const newItems = [];
                 parsed.forEach(p => {
-                    const idx = db.findIndex(g => g.guid === p.guid);
-                    if(idx > -1) db[idx] = p; else newItems.push(p);
+                    const key = recordKey(p);
+                    const idx = recordIndex.get(key);
+                    if (idx !== undefined) db[idx] = p;
+                    else { recordIndex.set(key, db.length); db.push(p); }
                 });
-                db = [...newItems, ...db].sort((a,b) => b.timestamp - a.timestamp);
+                db.sort((a,b) => b.timestamp - a.timestamp);
             } else {
                 db = parsed.sort((a,b) => b.timestamp - a.timestamp);
             }
-
-            orderCounts = db.reduce((acc, t) => { if(t.order !== 'N/A') acc[t.order] = (acc[t.order] || 0) + 1; return acc; }, {});
+            rebuildRecordIndex();
+            recalculateIndexes();
+            saveCache();
             if(!isMerge && document.getElementById('rep-view-filter').options.length <= 1) setupRepView();
             if(!isMerge) document.getElementById('loading-screen').style.display = 'none';
 
-            render(!isMerge);
+            scheduleRender(!isMerge);
             if (currentTicketId) {
-                const t = db.find(x => x.id === currentTicketId);
+                const t = getRecordById(currentTicketId);
                 if (t) {
                     const dInput = document.getElementById('d-disposition');
-                    if(document.activeElement?.id !== 'd-disposition') dInput.value = t.status;
+                    if(!dirtyFields.has('d-disposition') && document.activeElement?.id !== 'd-disposition') dInput.value = t.status;
                     let wInput = document.getElementById('d-warehouse-input');
                     let drInput = document.getElementById('d-driver-input');
-                    if (document.activeElement?.id !== 'd-warehouse-input' && (wInput.value.trim() === "" || wInput.value.trim() === (t.warehouseNotes || "").trim())) wInput.value = t.warehouseNotes;
-                    if (document.activeElement?.id !== 'd-driver-input' && (drInput.value.trim() === "" || drInput.value.trim() === (t.driverNotes || "").trim())) drInput.value = t.driverNotes;
+                    if (!dirtyFields.has('d-warehouse-input') && document.activeElement?.id !== 'd-warehouse-input') wInput.value = t.warehouseNotes;
+                    if (!dirtyFields.has('d-driver-input') && document.activeElement?.id !== 'd-driver-input') drInput.value = t.driverNotes;
                     document.getElementById('d-warehouse-stamp').innerText = t.warehouseEmailSent;
                     document.getElementById('d-rep-stamp').innerText = t.repEmailSent;
                     document.getElementById('d-email-count').innerText = t.emailCount + ' Sent';
@@ -692,7 +761,7 @@ completionTime: r.cr714_completiontime ? `${new Date(r.cr714_completiontime).toL
             const isOrderDup = t.order !== 'N/A' && orderCounts[t.order] > 1;
             const isASAP = t.issue && t.issue.toLowerCase().includes('asap');
             
-            return `<div class="record-card ${currentTicketId === t.id ? 'active-card' : ''} ${isASAP ? 'asap-card' : ''}" onclick="loadTicket('${t.id}')">
+            return `<div data-record-key="${recordKey(t)}" class="record-card ${currentTicketId === t.id ? 'active-card' : ''} ${isASAP ? 'asap-card' : ''}" onclick="loadTicket('${t.id}')">
                 <div class="flex justify-between items-center mb-1">
                     <span class="id-badge-ghost">#${t.id}</span>
                     <div class="flex gap-2 items-center"><span class="time-label-gallery">${t.fullStamp}</span><span class="wh-label">${t.warehouse}</span></div>
@@ -739,7 +808,21 @@ completionTime: r.cr714_completiontime ? `${new Date(r.cr714_completiontime).toL
                 if (sortVal === 'order') return String(a.order).localeCompare(String(b.order));
                 return a.timestamp - b.timestamp;
             });
-            list.innerHTML = filtered.slice(0, renderLimit).map(t => createCardHTML(t)).join('') || `<div class="p-10 text-center opacity-30 text-[10px] uppercase font-black tracking-widest">No matching records</div>`; 
+            const visible = filtered.slice(0, renderLimit);
+            const signature = visible.map(t => `${recordKey(t)}:${t.status}:${t.isCoaching}:${orderCounts[t.order] || 0}`).join('|');
+            if (signature !== lastListSignature) {
+                const listRect = list.getBoundingClientRect();
+                const anchor = Array.from(list.querySelectorAll('.record-card')).find(card => card.getBoundingClientRect().bottom > listRect.top);
+                const anchorKey = anchor?.dataset.recordKey;
+                const anchorOffset = anchor ? anchor.getBoundingClientRect().top - listRect.top : 0;
+                const oldScrollTop = list.scrollTop;
+                list.innerHTML = visible.map(t => createCardHTML(t)).join('') || `<div class="p-10 text-center opacity-30 text-[10px] uppercase font-black tracking-widest">No matching records</div>`;
+                lastListSignature = signature;
+                if (!resetScroll) {
+                    const replacement = anchorKey ? Array.from(list.querySelectorAll('.record-card')).find(card => card.dataset.recordKey === anchorKey) : null;
+                    list.scrollTop = replacement ? oldScrollTop + (replacement.getBoundingClientRect().top - listRect.top - anchorOffset) : oldScrollTop;
+                }
+            }
             
             document.getElementById('count-display').innerText = filtered.length;
             updateProgressBar(); 
@@ -756,7 +839,7 @@ completionTime: r.cr714_completiontime ? `${new Date(r.cr714_completiontime).toL
             const dispoInput = document.getElementById('d-disposition');
             // Clicking away validation logic
             if (currentTicketId) {
-                const currentT = db.find(x => x.id === currentTicketId);
+                const currentT = getRecordById(currentTicketId);
                 const isAdmin = document.getElementById('admin-bypass-toggle')?.checked || false; 
                 const isAssigned = currentT && currentT.logisticsOwner !== 'Unassigned';
                 if (!isAdmin && isAssigned && !dispoInput.value) { 
@@ -766,8 +849,9 @@ completionTime: r.cr714_completiontime ? `${new Date(r.cr714_completiontime).toL
                 }
             }
             dispoInput.classList.remove('input-error-highlight');
+            dirtyFields.clear();
             currentTicketId = id;
-            const t = db.find(x => x.id === id); if(!t) return; render(false);
+            const t = getRecordById(id); if(!t) return; scheduleRender(false);
             
             document.getElementById('empty-state').classList.add('hidden'); document.getElementById('detail-content').classList.remove('hidden');
             document.getElementById('d-company').innerText = t.company;
@@ -882,7 +966,7 @@ if (["Completed", "Sent Back", "Escalated - Completed"].includes(t.status) && t.
             if (matches.length > 1) { rail.classList.add('is-visible'); content.innerHTML = matches.map(m => createCardHTML(m)).join(''); } else { rail.classList.remove('is-visible');
             } }
         function handleCoachingToggle() { 
-            const t = db.find(x => x.id === currentTicketId);
+            const t = getRecordById(currentTicketId);
             if (document.getElementById('d-coaching-toggle').checked) { 
                 document.getElementById('coaching-feedback-input').value = t ? (t.coachingNotes || "") : "";
                 
@@ -901,12 +985,12 @@ if (["Completed", "Sent Back", "Escalated - Completed"].includes(t.status) && t.
         function closeCoachingModal() { 
             document.getElementById('coaching-modal-overlay').style.display = 'none';
             // If they cancel out, reset the toggle back to its actual saved state
-            const t = db.find(x => x.id === currentTicketId);
+            const t = getRecordById(currentTicketId);
             document.getElementById('d-coaching-toggle').checked = t ? t.isCoaching : false; 
         }
         
         async function saveCoachingFeedback(isTrue = true) { 
-            const t = db.find(x => x.id === currentTicketId);
+            const t = getRecordById(currentTicketId);
             const notesInput = document.getElementById('coaching-feedback-input');
             const notes = notesInput.value; 
             
@@ -1092,7 +1176,7 @@ if (["Completed", "Sent Back", "Escalated - Completed"].includes(t.status) && t.
         }
 
         async function autoSaveDisposition() { 
-            const t = db.find(x => x.id === currentTicketId);
+            const t = getRecordById(currentTicketId);
             const input = document.getElementById('d-disposition'); 
             const newDispo = input.value; if(!newDispo) return;
             input.classList.remove('input-error-highlight'); 
@@ -1128,6 +1212,8 @@ if (["Completed", "Sent Back", "Escalated - Completed"].includes(t.status) && t.
                         "cr714_completiontime": completionTime
                     }) 
                 });
+                dirtyFields.delete('d-disposition');
+                saveCache();
                 showToast(`Status updated: ${newDispo}`); 
                 
                 // Trigger Background Email
@@ -1144,7 +1230,7 @@ if (["Completed", "Sent Back", "Escalated - Completed"].includes(t.status) && t.
 
         async function saveRecord() {
             const btn = document.getElementById('save-btn');
-            const t = db.find(x => x.id === currentTicketId); 
+            const t = getRecordById(currentTicketId); 
             const dispoVal = document.getElementById('d-disposition').value;
             if (!(document.getElementById('admin-bypass-toggle')?.checked) && t.logisticsOwner !== 'Unassigned' && !dispoVal) { showToast("Select a Disposition.", "error"); document.getElementById('d-disposition').classList.add('input-error-highlight'); return;
             }
@@ -1198,6 +1284,10 @@ if (["Completed", "Sent Back", "Escalated - Completed"].includes(t.status) && t.
                         "cr714_completiontime": completionTime
                     }) 
                 });
+                dirtyFields.delete('d-warehouse-input');
+                dirtyFields.delete('d-driver-input');
+                dirtyFields.delete('d-disposition');
+                saveCache();
                 showToast("Saved successfully"); 
             } catch (e) { showToast("Save error", "error"); } finally { setTimeout(() => { btn.innerText = "Save Logistics Update"; btn.disabled = false; render(false); }, 1500);
             }
@@ -1241,7 +1331,7 @@ if (["Completed", "Sent Back", "Escalated - Completed"].includes(t.status) && t.
             input.value = parts.join(',').trim() + ', '; document.getElementById(dropdownId).style.display = 'none'; input.focus();
         };
         function openDraftModal() { 
-            const t = db.find(x => x.id === currentTicketId);
+            const t = getRecordById(currentTicketId);
             if(!t) return; activeEmailType = 'rep'; 
             let p = "(508) 436 - XXXX";
             let ext = currentUserProfileData?.businessPhones?.length > 0 ? currentUserProfileData.businessPhones[0].slice(-4) : localStorage.getItem('logilog_ext');
@@ -1270,7 +1360,7 @@ if (["Completed", "Sent Back", "Escalated - Completed"].includes(t.status) && t.
         }
 
         function openWarehouseEmail() { 
-            const t = db.find(x => x.id === currentTicketId);
+            const t = getRecordById(currentTicketId);
             if(!t) return; activeEmailType = 'warehouse';
             let p = "(508) 436 - XXXX";
             let ext = currentUserProfileData?.businessPhones?.length > 0 ? currentUserProfileData.businessPhones[0].slice(-4) : localStorage.getItem('logilog_ext');
@@ -1290,7 +1380,7 @@ if (["Completed", "Sent Back", "Escalated - Completed"].includes(t.status) && t.
         async function sendViaGraph() {
             const btn = document.getElementById('confirm-send-btn');
             const toField = document.getElementById('m-to-address').value; 
-            const t = db.find(x => x.id === currentTicketId);
+            const t = getRecordById(currentTicketId);
             
             if(!toField) { showToast("Recipient required", "error"); return; }
             
