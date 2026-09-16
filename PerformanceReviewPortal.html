@@ -15434,7 +15434,7 @@ header .connection-pill.v124-source-status,header .v124-source-action{display:no
  function workbook(p,plan,form){return `<?xml version="1.0"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">${xlsSheet('Dataverse Payload',p)}${xlsSheet('Employee Info Patch',plan)}${xlsSheet('Form Snapshot',form)}${xlsSheet('Process',{'Mode':'ADMIN AUDIT ONLY','Dataverse write':'Blocked','Employee patch':'Blocked','Approval launch':'Blocked','Normal recipients':'Redirected to signed-in administrator'})}</Workbook>`}
  function b64(t){const a=new TextEncoder().encode(t);let b='';for(let i=0;i<a.length;i+=32768)b+=String.fromCharCode(...a.subarray(i,i+32768));return btoa(b)}
  function managerBody(to,p){return `<div style="font-family:Segoe UI,Arial;color:#172033"><div style="padding:16px;background:#173f70;color:#fff;font-size:20px;font-weight:700">Performance Review Ready</div><div style="padding:20px;border:1px solid #c7d0dc"><p><strong>ADMIN PREVIEW:</strong> Normal recipients were replaced with ${esc(to)}.</p><p>Hello ${esc(val('manager-name')||'Manager')},</p><p>The performance review for <strong>${esc(val('employee-name')||'Employee')}</strong> is ready for review and signature processing.</p><table style="border-collapse:collapse;width:100%"><tr><td style="border:1px solid #ccc;padding:8px"><b>Review type</b></td><td style="border:1px solid #ccc;padding:8px">${esc(p.cr714_reviewtype)}</td></tr><tr><td style="border:1px solid #ccc;padding:8px"><b>Review period</b></td><td style="border:1px solid #ccc;padding:8px">${esc(p.cr714_reviewperiodstart)}</td></tr><tr><td style="border:1px solid #ccc;padding:8px"><b>Reviewer</b></td><td style="border:1px solid #ccc;padding:8px">${esc(p.cr714_reviewername)}</td></tr><tr><td style="border:1px solid #ccc;padding:8px"><b>Status</b></td><td style="border:1px solid #ccc;padding:8px">${esc(p.cr714_approvalstatus)}</td></tr></table><p>Please complete the normal review and signature steps.</p><p style="font-size:12px;color:#526075">Original routing: Manager ${esc(val('manager-name'))}; Senior Manager ${esc(val('sr-manager-name'))}; Representative ${esc(repEmail()||val('employee-name'))}.</p></div></div>`}
- async function send(to,subject,body,attachments=[]){const token=await window.getToken('Mail.Send');const message={subject,body:{contentType:'HTML',content:body},toRecipients:[{emailAddress:{address:to}}],attachments:attachments.map(a=>({'@odata.type':'#microsoft.graph.fileAttachment',...a}))};const r=await fetch('https://graph.microsoft.com/v1.0/me/sendMail',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({message,saveToSentItems:true})});if(!r.ok)throw new Error(`Email failed (${r.status}): ${await r.text()}`)}
+ async function send(to,subject,body,attachments=[]){const token=await window.getToken('Mail.Send');const completed=window.__reviewDocxAttachment;const merged=attachments.slice();if(completed&&!merged.some(a=>a&&a.name===completed.name))merged.push(completed);const message={subject,body:{contentType:'HTML',content:body},toRecipients:[{emailAddress:{address:to}}],attachments:merged.map(a=>({'@odata.type':'#microsoft.graph.fileAttachment',...a}))};const r=await fetch('https://graph.microsoft.com/v1.0/me/sendMail',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({message,saveToSentItems:true})});if(!r.ok)throw new Error(`Email failed (${r.status}): ${await r.text()}`)}
  function dedupeArrows(root=document){const queryRoot=root&&typeof root.querySelectorAll==='function'?root:document;queryRoot.querySelectorAll('button,a.btn').forEach(el=>{const arrows=[...el.querySelectorAll('i.fa-arrow-right,i.fa-chevron-right,i.fa-long-arrow-alt-right,i.fa-arrow-left,i.fa-chevron-left,i.fa-long-arrow-alt-left')];arrows.slice(1).forEach(icon=>icon.remove())})}
  window.runAdminDemoSubmission=async function(){window.adminDemoEnabled=true;const to=adminEmail(),p=payload(),plan=patchPlan(),form=snapshot();if(!to){showError?.('Signed-in administrator email could not be determined.');return false}const btn=document.getElementById('btn-submit-final'),old=btn?.innerHTML;if(btn){btn.disabled=true;btn.innerHTML='<div class="spinner"></div> Emailing admin previews...'}try{const content=b64(workbook(p,plan,form));await send(to,`ADMIN AUDIT - Dataset submission preview - ${p.cr714_employeename||'Review'}`,`<div style="font-family:Segoe UI,Arial"><h2>Admin submission audit</h2><p>No production write, approval, or manager email was performed.</p><p>The attached Excel workbook shows the Dataverse payload, Employee Information patch, form snapshot, and process controls.</p></div>`,[{name:`Admin_Submission_Audit_${new Date().toISOString().replace(/[:.]/g,'-')}.xls`,contentType:'application/vnd.ms-excel',contentBytes:content}]);await send(to,`ADMIN PREVIEW - Manager review email - ${p.cr714_employeename||'Review'}`,managerBody(to,p));showSuccess?.(`Admin previews sent to ${to}. No production writes or normal-recipient emails were performed.`);window.refreshAdminDemoPlan?.();return {demo:true,writesPerformed:0,previewRecipient:to,payload:p,plannedPatch:plan}}catch(e){console.error(e);showError?.('Admin preview email failed: '+(e.message||e));return false}finally{if(btn){btn.disabled=false;btn.innerHTML=old||'<i class="fas fa-cloud-upload-alt"></i> Submit to Dataverse'}dedupeArrows()}};
  document.addEventListener('DOMContentLoaded',()=>dedupeArrows(document),{once:true});
@@ -21105,76 +21105,43 @@ async function imageSection(bytes,name,w,h){var x=window.docx,maxW=680,maxH=900,
 async function pdfPages(file){if(!(window.pdfjsLib&&window.pdfjsLib.getDocument)){if(window.ensureDocumentLibraries)await window.ensureDocumentLibraries('pdf');}if(!(window.pdfjsLib&&window.pdfjsLib.getDocument))throw new Error('PDF renderer is unavailable');var pdf=await window.pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise,out=[];for(var n=1;n<=pdf.numPages;n++){var p=await pdf.getPage(n),vp=p.getViewport({scale:1.7}),c=document.createElement('canvas');c.width=vp.width;c.height=vp.height;await p.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;var blob=await new Promise(function(res){c.toBlob(res,'image/png',1)});out.push({bytes:await blob.arrayBuffer(),name:file.name+' - Page '+n,w:c.width,h:c.height})}return out}
 async function customSections(){syncFiles();var out=[];for(var i=0;i<customFiles.length;i++){var f=customFiles[i],type=(f.type||'').toLowerCase();if(type==='application/pdf'||/\.pdf$/i.test(f.name)){var pages=await pdfPages(f);for(var j=0;j<pages.length;j++)out.push(await imageSection(pages[j].bytes,pages[j].name,pages[j].w,pages[j].h))}else if(type.indexOf('image/')===0||/\.(png|jpe?g|gif|webp)$/i.test(f.name)){var sz=await imageSize(f);out.push(await imageSection(await f.arrayBuffer(),f.name,sz.w,sz.h))}}return out}
 function addDeliveryUi(){var panel=el('confirmation-reports-section')||el('page3-report-controls');if(!panel)return;if(!el('docx-delivery-panel')){var d=document.createElement('div');d.id='docx-delivery-panel';d.className='docx-delivery-panel';d.innerHTML='<h3>Word delivery package</h3><p>The export creates a true DOCX. The completed form comes first, selected reports follow beneath it, and custom PDFs are converted page-for-page to images so their appearance is preserved.</p><button class="btn btn-success" id="btn-export-true-docx" type="button"><i class="fas fa-file-word"></i> Export Completed Review to Word</button><div class="docx-attachment-list" id="docx-custom-list"></div>';panel.appendChild(d)}var old=el('btn-print-preview');if(old){old.innerHTML='<i class="fas fa-print"></i> Print Quick Copy';old.title='Fallback browser print. Use Word export for the authoritative file.'}}
-async function exportDocx(){var btn=el('btn-export-true-docx'),panel=el('docx-delivery-panel');try{if(btn){btn.disabled=true;btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> Building DOCX...'}if(panel)panel.classList.add('docx-export-busy');var x=await ensureDocx(),sections=[reviewSection()];if(el('include-login-report')&&el('include-login-report').checked)sections.push(tableSection('login','LOGIN / LOGOUT REPORT'));if(el('include-avaya-report')&&el('include-avaya-report').checked)sections.push(tableSection('avaya','AVAYA REPORT'));sections=sections.concat(await customSections());var doc=new x.Document({creator:'Performance Review Submission Portal',title:'Completed Performance Review',description:'Generated DOCX with optional supporting reports and attachments.',sections:sections});var blob=await x.Packer.toBlob(doc),name=(val('employee-name')||'Employee').replace(/[^a-z0-9 _-]/gi,'').trim()+' - '+(val('review-period')||'Performance Review').replace(/[^a-z0-9 _-]/gi,'').trim()+'.docx';var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},2000);if(window.showSuccess)window.showSuccess('Word document generated successfully.')}catch(e){console.error('DOCX export failed',e);if(window.showError)window.showError('Unable to create the Word document: '+(e.message||e));else alert('Unable to create the Word document: '+(e.message||e))}finally{if(panel)panel.classList.remove('docx-export-busy');if(btn){btn.disabled=false;btn.innerHTML='<i class="fas fa-file-word"></i> Export Completed Review to Word'}}}
+async function exportDocx(){var btn=el('btn-export-true-docx'),panel=el('docx-delivery-panel');try{if(btn){btn.disabled=true;btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> Building DOCX...'}if(panel)panel.classList.add('docx-export-busy');var x=await ensureDocx(),sections=[reviewSection()];if(el('include-login-report')&&el('include-login-report').checked)sections.push(tableSection('login','LOGIN / LOGOUT REPORT'));if(el('include-avaya-report')&&el('include-avaya-report').checked)sections.push(tableSection('avaya','AVAYA REPORT'));sections=sections.concat(await customSections());var doc=new x.Document({creator:'Performance Review Submission Portal',title:'Completed Performance Review',description:'Generated DOCX with optional supporting reports and attachments.',sections:sections});var blob=await x.Packer.toBlob(doc),name=(val('employee-name')||'Employee').replace(/[^a-z0-9 _-]/gi,'').trim()+' - '+(val('review-period')||'Performance Review').replace(/[^a-z0-9 _-]/gi,'').trim()+'.docx';var bytes=new Uint8Array(await blob.arrayBuffer()),binary='',chunk=32768;for(var bi=0;bi<bytes.length;bi+=chunk)binary+=String.fromCharCode.apply(null,bytes.subarray(bi,bi+chunk));window.__reviewDocxBlob=blob;window.__reviewDocxName=name;window.__reviewDocxAttachment={name:name,contentType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',contentBytes:btoa(binary)};window.dispatchEvent(new CustomEvent('review-docx-ready',{detail:{name:name,size:blob.size}}));var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},2000);if(window.showSuccess)window.showSuccess('Word document generated successfully. Review fields are now locked.');return {blob:blob,name:name,attachment:window.__reviewDocxAttachment}}catch(e){console.error('DOCX export failed',e);if(window.showError)window.showError('Unable to create the Word document: '+(e.message||e));else alert('Unable to create the Word document: '+(e.message||e))}finally{if(panel)panel.classList.remove('docx-export-busy');if(btn){btn.disabled=false;btn.innerHTML='<i class="fas fa-file-word"></i> Export Completed Review to Word'}}}
 function init(){addDeliveryUi();updatePreview();syncFiles();var b=el('btn-export-true-docx');if(b&&!b.dataset.bound){b.dataset.bound='1';b.addEventListener('click',exportDocx)}var fi=fileInput();if(fi&&!fi.dataset.docxBound){fi.dataset.docxBound='1';fi.accept='application/pdf,image/png,image/jpeg,image/webp,image/gif';fi.multiple=true;fi.addEventListener('change',syncFiles)} }
 var oldGo=window.goToPanel3;window.goToPanel3=function(){var r=oldGo&&oldGo.apply(this,arguments);setTimeout(function(){init();updatePreview()},80);return r};document.addEventListener('input',function(e){if(e.target.closest&&e.target.closest('#panel-1,#panel-2'))setTimeout(updatePreview,40)},true);document.addEventListener('change',function(e){if(e.target.closest&&e.target.closest('#panel-1,#panel-2,#confirmation-report-options'))setTimeout(updatePreview,40)},true);window.exportCompletedReviewDocx=exportDocx;window.refreshDocxPage3Preview=updatePreview;if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();setTimeout(init,600);
 })();
 </script>
 
-<script id="page3-autorefresh-safeprint-v13">
+<style id="page3-docx-lock-v14-style">
+#main-app.review-docx-locked input:not(#ack-checkbox),#main-app.review-docx-locked textarea,#main-app.review-docx-locked select{pointer-events:none!important;user-select:none!important;opacity:.78!important;background:var(--bg-input-readonly)!important}
+#main-app.review-docx-locked #btn-back-to-panel2{display:none!important}.docx-lock-note{display:block;margin-top:.45rem;color:var(--text-success);font-size:.76rem;font-weight:850}
+</style>
+<script id="page3-docx-lock-v14">
 (function(){
-  'use strict';
-  if(window.__page3AutoRefreshSafePrintV13)return;
-  window.__page3AutoRefreshSafePrintV13=true;
-  var switching=false, printing=false, lastEnter=0;
-  function panel3Visible(){var p=document.getElementById('panel-3');return !!p&&getComputedStyle(p).display!=='none';}
-  function selectedText(sel){var o=sel.options&&sel.options[sel.selectedIndex];return (o?o.textContent:sel.value||'').trim()||'—';}
-  function cleanRatingArrows(root){
-    if(!root)return;
-    root.querySelectorAll('select').forEach(function(sel){
-      var span=document.createElement('span');
-      span.className='print-selected-value';
-      span.textContent=selectedText(sel).replace(/\s*[▲▶▼]\s*$/,'');
-      sel.replaceWith(span);
-    });
-    root.querySelectorAll('.summary-row .val,.familiar-review-form td,.old-eom-feedback-value').forEach(function(el){
-      var t=el.textContent||'';
-      if(/—\s*Select\s*—[\s\S]*Exceeds Expectations[\s\S]*Meets Expectations[\s\S]*Below Expectations/i.test(t)){
-        var match=t.match(/(?:Exceeds Expectations|Meets Expectations|Below Expectations)/i);
-        el.textContent=match?match[0]:'—';
-      }
-    });
-  }
-  function refreshOnce(){
-    var btn=document.getElementById('btn-refresh-page3-preview');
-    if(btn&&!btn.disabled){btn.click();}
-    else if(typeof window.buildSummaryPreview==='function'){window.buildSummaryPreview();}
-    setTimeout(function(){cleanRatingArrows(document.getElementById('summary-preview'));},80);
-  }
-  document.addEventListener('click',function(e){
-    var next=e.target&&e.target.closest?e.target.closest('#btn-next-panel2'):null;
-    if(!next||switching)return;
-    e.preventDefault();e.stopImmediatePropagation();switching=true;
-    ['panel-1','panel-2'].forEach(function(id){var p=document.getElementById(id);if(p)p.style.display='none';});
-    var p3=document.getElementById('panel-3');if(p3)p3.style.display='block';
-    [1,2,3].forEach(function(n){var st=document.getElementById('step-'+n);if(st){st.classList.toggle('active',n===3);st.classList.toggle('done',n<3);}});
-    window.scrollTo(0,0);lastEnter=Date.now();
-    setTimeout(function(){try{refreshOnce();}finally{switching=false;}},180);
-  },true);
-  function safePrint(){
-    if(printing)return;printing=true;
-    try{
-      var preview=document.getElementById('summary-preview');
-      if(!preview)throw new Error('The Page 3 preview is not available.');
-      var clone=preview.cloneNode(true);cleanRatingArrows(clone);
-      clone.querySelectorAll('button,.btn-row,.page3-stable-toolbar,.report-view-toolbar,.report-card-format-controls,.excel-toolbar').forEach(function(x){x.remove();});
-      var css=Array.from(document.querySelectorAll('style')).map(function(x){return x.textContent;}).join('\n');
-      var w=window.open('','_blank','noopener,noreferrer');
-      if(!w)throw new Error('The print window was blocked by the browser.');
-      w.document.open();
-      w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Performance Review Hard Copy</title><style>'+css+'\nbody{background:#fff!important;color:#000!important;margin:.25in!important}.print-selected-value{display:block;white-space:normal;color:#000!important}#summary-preview{display:block!important;overflow:visible!important;border:0!important;background:#fff!important;padding:0!important}</style></head><body>'+clone.outerHTML+'</body></html>');
-      w.document.close();
-      w.focus();
-      setTimeout(function(){w.print();setTimeout(function(){try{w.close();}catch(_){}},500);},250);
-    }catch(err){console.error('Safe print failed',err);alert(err.message||'Unable to open the print view.');}
-    finally{setTimeout(function(){printing=false;},1000);}
-  }
-  document.addEventListener('click',function(e){
-    var b=e.target&&e.target.closest?e.target.closest('#btn-print-preview,#btn-print-preview-top,[onclick*="preparePrintPreview"]'):null;
-    if(!b)return;
-    e.preventDefault();e.stopImmediatePropagation();safePrint();
-  },true);
-  window.addEventListener('pageshow',function(){if(panel3Visible()&&Date.now()-lastEnter>1000)setTimeout(refreshOnce,120);},{once:true});
+ 'use strict';
+ if(window.__page3DocxLockV14)return;window.__page3DocxLockV14=true;
+ var busy=false,switching=false,lastEnter=0;
+ function lockReview(name){
+   var app=document.getElementById('main-app');if(app)app.classList.add('review-docx-locked');
+   document.querySelectorAll('#panel-1 input,#panel-1 textarea,#panel-1 select,#panel-2 input,#panel-2 textarea,#panel-2 select,#panel-3 input:not(#ack-checkbox),#panel-3 textarea,#panel-3 select').forEach(function(c){c.disabled=true;c.setAttribute('aria-readonly','true')});
+   var b=document.getElementById('btn-print-preview');if(b){b.innerHTML='<i class="fas fa-file-word"></i> Re-download Locked Word Document';b.title='Download the exact locked Word document again.'}
+   var status=document.getElementById('page3-completion-status');if(status){var note=status.querySelector('.docx-lock-note')||document.createElement('small');note.className='docx-lock-note';note.textContent='Locked DOCX ready: '+name+'. This exact file will be attached to the completion email.';status.appendChild(note)}
+   window.__page3Printed=true;window.syncPage3Completion&&window.syncPage3Completion();
+ }
+ async function exportLocked(){
+   if(busy)return;busy=true;var b=document.getElementById('btn-print-preview'),old=b&&b.innerHTML;
+   try{
+     if(window.__reviewDocxBlob&&window.__reviewDocxName){var a=document.createElement('a');a.href=URL.createObjectURL(window.__reviewDocxBlob);a.download=window.__reviewDocxName;document.body.appendChild(a);a.click();setTimeout(function(){URL.revokeObjectURL(a.href);a.remove()},1500);lockReview(window.__reviewDocxName);return}
+     var exporter=document.getElementById('btn-export-true-docx');if(!exporter)throw new Error('The Word export component is unavailable.');
+     if(b){b.disabled=true;b.innerHTML='<i class="fas fa-spinner fa-spin"></i> Building Locked Word Document...'}
+     exporter.click();
+     await new Promise(function(resolve,reject){var t=setTimeout(function(){reject(new Error('Word export timed out.'))},45000);function ready(e){clearTimeout(t);window.removeEventListener('review-docx-ready',ready);resolve(e.detail)}window.addEventListener('review-docx-ready',ready,{once:true})});
+     lockReview(window.__reviewDocxName||'Completed Review.docx');
+   }catch(e){console.error('Locked DOCX export failed',e);window.showError?window.showError('Unable to create the locked Word document: '+(e.message||e)):alert(e.message||e)}
+   finally{busy=false;if(b){b.disabled=false;if(!window.__reviewDocxBlob)b.innerHTML=old||'<i class="fas fa-file-word"></i> Export Locked Word Document'}}
+ }
+ document.addEventListener('click',function(e){var b=e.target&&e.target.closest?e.target.closest('#btn-print-preview,#btn-print-preview-top,[onclick*="preparePrintPreview"]'):null;if(!b)return;e.preventDefault();e.stopImmediatePropagation();exportLocked()},true);
+ document.addEventListener('click',function(e){var next=e.target&&e.target.closest?e.target.closest('#btn-next-panel2'):null;if(!next||switching)return;e.preventDefault();e.stopImmediatePropagation();switching=true;['panel-1','panel-2'].forEach(function(id){var p=document.getElementById(id);if(p)p.style.display='none'});var p3=document.getElementById('panel-3');if(p3)p3.style.display='block';window.scrollTo(0,0);lastEnter=Date.now();setTimeout(function(){var r=document.getElementById('btn-refresh-page3-preview');if(r&&!r.disabled)r.click();else if(window.buildSummaryPreview)window.buildSummaryPreview();switching=false},180)},true);
+ document.addEventListener('DOMContentLoaded',function(){var b=document.getElementById('btn-print-preview');if(b){b.innerHTML='<i class="fas fa-file-word"></i> Export Locked Word Document';b.title='Create the final locked DOCX required for submission.'}var copy=document.querySelector('#page3-actions-card .page3-completion-copy p');if(copy)copy.textContent='Export the locked Word document first. The exact generated file will be attached to the completion email, then confirm accuracy and submit.'});
 })();
 </script>
 </body></html>
