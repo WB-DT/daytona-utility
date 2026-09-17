@@ -133,7 +133,8 @@ canvas{max-height:280px}
 "use strict";
 
 const DATAVERSE_URL = "https://org23279050.crm.dynamics.com";
-const TABLE_NAME = "cr714_timeoff_2s";
+const TABLE_TIMEOFF = "cr714_timeoff_2s";
+const TABLE_EMPLOYEES = "cr714_employeeinformation1s";
 
 const msalConfig = {
   auth: { 
@@ -249,34 +250,79 @@ async function pullFromDataverse(silent = false) {
       "OData-Version": "4.0"
     };
 
-    const res = await fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_NAME}?$orderby=createdon desc`, { headers });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    const [empRes, toRes] = await Promise.all([
+      fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_EMPLOYEES}`, { headers }),
+      fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}?$orderby=createdon desc`, { headers })
+    ]);
 
-    const data = await res.json();
-    const rows = data.value || [];
+    if (!empRes.ok) throw new Error(`Employees Table HTTP ${empRes.status}: ${empRes.statusText}`);
+    if (!toRes.ok) throw new Error(`Time Off Table HTTP ${toRes.status}: ${toRes.statusText}`);
 
-    const empMap = new Map();
+    const empData = await empRes.json();
+    const toData = await toRes.json();
+
+    const activeEmps = (empData.value || []).filter(e => {
+      const status = (e.cr714_statusname || "").toLowerCase().trim();
+      return status !== "terminated" && status !== "inactive" && status !== "resigned";
+    });
+
+    const empMapByEmail = new Map();
+    const empMapByName = new Map();
+
+    S.employees = activeEmps.map(e => {
+      const email = (e.cr714_emailaddress || "").trim().toLowerCase();
+      const name = (e.cr714_employeename || "").trim();
+      const id = email || `EMP-${name.replace(/\s+/g, '')}`;
+      const record = {
+        id,
+        name,
+        email,
+        dept: e.cr714_departmentname || "General",
+        repName: name,
+        title: e.cr714_titlename || e.cr714_jobtitle || "Representative",
+        supervisor: e.cr714_managerassigned || "Supervisor",
+        manager: e.cr714_managerassigned || "Manager",
+        srManager: "Senior Leadership",
+        location: e.cr714_locationname || "HQ",
+        status: e.cr714_statusname || "Active",
+        loopNumber: e.cr714_loopnumber || "",
+        shift: e.cr714_shiftselectionname || "",
+        breakTime: e.cr714_breakselectionname || "",
+        startDate: e.cr714_startdate || ""
+      };
+
+      if (email) empMapByEmail.set(email, record);
+      if (name) empMapByName.set(name.toLowerCase(), record);
+      return record;
+    });
+
     const newRecords = [];
     const newMakeups = [];
 
-    rows.forEach(r => {
+    (toData.value || []).forEach(r => {
       const email = (r.cr714_email || "").trim().toLowerCase();
-      const name = (r.cr714_name || "Unknown").trim();
-      const id = email || `EMP-${name.replace(/\s+/g, '')}`;
+      const name = (r.cr714_name || "").trim();
 
-      if (!empMap.has(id)) {
-        empMap.set(id, {
-          id,
-          name,
+      let matchedEmp = empMapByEmail.get(email) || empMapByName.get(name.toLowerCase());
+
+      if (!matchedEmp) {
+        const fallbackId = email || `EMP-${name.replace(/\s+/g, '')}`;
+        matchedEmp = {
+          id: fallbackId,
+          name: name || "Unknown",
+          email,
           dept: r.cr714_department || "General",
-          team: r.cr714_department || "General",
+          repName: name || "Unknown",
           title: "Representative",
           supervisor: r.cr714_headofdepartment || "Supervisor",
           manager: r.cr714_headofdepartment || "Manager",
           srManager: "Senior Leadership",
-          location: "South Daytona",
+          location: "HQ",
           status: "Active"
-        });
+        };
+        S.employees.push(matchedEmp);
+        if (email) empMapByEmail.set(email, matchedEmp);
+        if (name) empMapByName.set(name.toLowerCase(), matchedEmp);
       }
 
       const dates = parseDatesToIso(r.cr714_requestdates, r.createdon);
@@ -294,7 +340,7 @@ async function pullFromDataverse(silent = false) {
         newRecords.push({
           rid: `${baseRid}-${idx}`,
           date: d,
-          empId: id,
+          empId: matchedEmp.id,
           type: mappedType,
           hours,
           notes,
@@ -309,7 +355,7 @@ async function pullFromDataverse(silent = false) {
       if (r.cr714_makeuptime || (r.cr714_leavetype && r.cr714_leavetype.toLowerCase().includes("make up"))) {
         newMakeups.push({
           mid: baseRid,
-          empId: id,
+          empId: matchedEmp.id,
           rid: `${baseRid}-0`,
           dateMissed: dates[0] || today(),
           hoursOwed: hours,
@@ -322,14 +368,13 @@ async function pullFromDataverse(silent = false) {
       }
     });
 
-    S.employees = Array.from(empMap.values());
     S.records = newRecords;
     S.makeups = newMakeups;
     S.settings.lastSync = new Date().toLocaleString();
 
     save();
     render();
-    if (!silent) toast(`Synced ${newRecords.length} records across ${S.employees.length} employees`);
+    if (!silent) toast(`Synced ${S.employees.length} active employees & ${newRecords.length} records`);
   } catch (err) {
     console.error(err);
     if (!silent) toast("Dataverse sync failed: " + err.message);
@@ -353,19 +398,19 @@ const TYPE_NAMES = Object.keys(TYPES);
 const LADDER = [[6,"Termination Eligible","bad"],[5,"Final","bad"],[4,"Written","warn"],[3,"Verbal","warn"]];
 const OSS_LIMIT = 2;
 const OCC_WINDOW_DAYS = 90;
-const ORG_FIELDS = [["dept","Department"],["team","Team"],["supervisor","Supervisor"],["manager","Manager"],["srManager","Senior Manager"]];
+const ORG_FIELDS = [["dept","Department"],["repName","Reps"],["supervisor","Supervisor"],["manager","Manager"]];
 const MU_STATUS = ["Pending","Approved","Completed","Missed"];
 
 const TABS = [["dashboard","Dashboard"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
 
 let S = load() || { employees: [], records: [], makeups: [], settings: {} };
 let UI = { tab:"dashboard", preset:"month", anchor:today(), from:null, to:null,
-           dept:"", team:"", title:"", supervisor:"", manager:"", srManager:"", q:"", type:"",
+           dept:"", repName:"", title:"", supervisor:"", manager:"", q:"", type:"",
            sortKey:"date", sortDir:-1, muFilter:"" };
 let charts = [];
 
-function load(){ try{ const s=JSON.parse(localStorage.getItem("wf.state.cr714")); return s&&s.employees?s:null; }catch(e){ return null; } }
-function save(){ try{ localStorage.setItem("wf.state.cr714", JSON.stringify(S)); }catch(e){ toast("Storage limit exceeded"); } }
+function load(){ try{ const s=JSON.parse(localStorage.getItem("wf.state.cr714_v2")); return s&&s.employees?s:null; }catch(e){ return null; } }
+function save(){ try{ localStorage.setItem("wf.state.cr714_v2", JSON.stringify(S)); }catch(e){ toast("Storage limit exceeded"); } }
 
 const $ = s=>document.querySelector(s);
 const esc = s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -456,9 +501,11 @@ function filteredEmployees(){
   if (!S.employees) return [];
   const q = UI.q.trim().toLowerCase();
   return S.employees.filter(e =>
-    (!UI.dept||e.dept===UI.dept) && (!UI.team||e.team===UI.team) && (!UI.title||e.title===UI.title) &&
-    (!UI.supervisor||e.supervisor===UI.supervisor) && (!UI.manager||e.manager===UI.manager) &&
-    (!UI.srManager||e.srManager===UI.srManager) &&
+    (!UI.dept||e.dept===UI.dept) && 
+    (!UI.repName||e.name===UI.repName) && 
+    (!UI.title||e.title===UI.title) &&
+    (!UI.supervisor||e.supervisor===UI.supervisor) && 
+    (!UI.manager||e.manager===UI.manager) &&
     (!q || e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q))
   );
 }
@@ -510,8 +557,12 @@ function opts(list,cur){ return `<option value="">All</option>`+list.map(v=>`<op
 
 function renderFilters(){
   const bar=$("#filterBar");
-  const vals=f=>[...new Set((S.employees||[]).map(e=>e[f]).filter(Boolean))].sort();
+  const depts = [...new Set((S.employees||[]).map(e=>e.dept).filter(Boolean))].sort();
+  const reps = [...new Set((S.employees||[]).map(e=>e.name).filter(Boolean))].sort();
+  const sups = [...new Set((S.employees||[]).map(e=>e.supervisor).filter(Boolean))].sort();
+  const mgrs = [...new Set((S.employees||[]).map(e=>e.manager).filter(Boolean))].sort();
   const [f,t]=range();
+
   bar.innerHTML=`
     <div class="fgroup"><label>Period</label>
       <select id="fPreset">${["day","week","month","quarter","annual","adjusted"].map(p=>`<option ${UI.preset===p?"selected":""} value="${p}">${p==="adjusted"?"Adjusted (custom)":p[0].toUpperCase()+p.slice(1)}</option>`).join("")}</select></div>
@@ -519,7 +570,10 @@ function renderFilters(){
       ? `<div class="fgroup"><label>From</label><input type="date" id="fFrom" value="${UI.from||f}"></div>
          <div class="fgroup"><label>To</label><input type="date" id="fTo" value="${UI.to||t}"></div>`
       : `<div class="fgroup"><label>Anchor date</label><input type="date" id="fAnchor" value="${UI.anchor}"></div>`}
-    ${ORG_FIELDS.map(([k,l])=>{ const v=vals(k); return v.length?`<div class="fgroup"><label>${l}</label><select data-f="${k}" class="ffield">${opts(v,UI[k])}</select></div>`:""; }).join("")}
+    <div class="fgroup"><label>Department</label><select data-f="dept" class="ffield">${opts(depts,UI.dept)}</select></div>
+    <div class="fgroup"><label>Reps</label><select data-f="repName" class="ffield">${opts(reps,UI.repName)}</select></div>
+    <div class="fgroup"><label>Supervisor</label><select data-f="supervisor" class="ffield">${opts(sups,UI.supervisor)}</select></div>
+    <div class="fgroup"><label>Manager</label><select data-f="manager" class="ffield">${opts(mgrs,UI.manager)}</select></div>
     <div class="fgroup"><label>Type</label><select data-f="type" class="ffield">${opts(TYPE_NAMES,UI.type)}</select></div>
     <div class="fgroup"><label>Search</label><input id="fQ" placeholder="Name or ID…" value="${esc(UI.q)}"></div>
     <button class="chip-clear" id="fClear">Reset</button>
@@ -543,9 +597,9 @@ function kpiModal(cat, title) {
     if(m.perfect.length === 0) {
       rows = `<tr class="norow"><td colspan="3" class="empty">No perfect attendance in this period.</td></tr>`;
     } else {
-      rows = m.perfect.map(e => `<tr data-emp="${esc(e.id)}" style="cursor:pointer"><td><b>${esc(e.name)}</b></td><td>${esc(e.team)}</td><td>${esc(e.supervisor)}</td></tr>`).join("");
+      rows = m.perfect.map(e => `<tr data-emp="${esc(e.id)}" style="cursor:pointer"><td><b>${esc(e.name)}</b></td><td>${esc(e.dept)}</td><td>${esc(e.supervisor)}</td></tr>`).join("");
     }
-    html += `<div class="tbl-wrap"><table><thead><tr><th>Employee</th><th>Team</th><th>Supervisor</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    html += `<div class="tbl-wrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Supervisor</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   } else if (cat === "Make-Ups Pending" || cat === "Make-Up Completion") {
     const status = cat === "Make-Ups Pending" ? "Pending" : "Completed";
     const mus = m.mus.filter(x => x.status === status);
@@ -607,13 +661,13 @@ function renderDashboard(){
   </div>
   <div class="grid two mt">
     <div class="card"><h3>Corrective action watch <span class="small muted">(rolling ${OCC_WINDOW_DAYS} days as of ${fmt(m.to)})</span></h3>
-      ${ladder.length? `<div class="tbl-wrap"><table><thead><tr><th>Employee</th><th>Team</th><th>Occurrences</th><th>Level</th></tr></thead><tbody>
-        ${ladder.map(({e,n})=>{const lv=level(n);return `<tr data-emp="${esc(e.id)}"><td><b>${esc(e.name)}</b></td><td>${esc(e.team)}</td><td>${n}</td><td><span class="badge ${lv.cls}">${lv.name}</span></td></tr>`;}).join("")}
+      ${ladder.length? `<div class="tbl-wrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Occurrences</th><th>Level</th></tr></thead><tbody>
+        ${ladder.map(({e,n})=>{const lv=level(n);return `<tr data-emp="${esc(e.id)}"><td><b>${esc(e.name)}</b></td><td>${esc(e.dept)}</td><td>${n}</td><td><span class="badge ${lv.cls}">${lv.name}</span></td></tr>`;}).join("")}
       </tbody></table></div>` : `<div class="empty">No one at Verbal level or above. 🎉</div>`}
     </div>
     <div class="card"><h3>Perfect attendance (${m.perfect.length})</h3>
-      ${m.perfect.length? `<div class="tbl-wrap"><table><thead><tr><th>Employee</th><th>Team</th><th>Supervisor</th></tr></thead><tbody>
-        ${m.perfect.map(e=>`<tr data-emp="${esc(e.id)}"><td><b>${esc(e.name)}</b></td><td>${esc(e.team)}</td><td>${esc(e.supervisor)}</td></tr>`).join("")}
+      ${m.perfect.length? `<div class="tbl-wrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Supervisor</th></tr></thead><tbody>
+        ${m.perfect.map(e=>`<tr data-emp="${esc(e.id)}"><td><b>${esc(e.name)}</b></td><td>${esc(e.dept)}</td><td>${esc(e.supervisor)}</td></tr>`).join("")}
       </tbody></table></div>` : `<div class="empty">No perfect attendance in this period.</div>`}
     </div>
   </div>`;
@@ -656,12 +710,12 @@ function renderTeam(){
   
   const teamHtml = `<div class="section-title"><h2>Team Summary (${teamRows.length})</h2><span class="small muted">Stats for ${fmt(m.from)} → ${fmt(m.to)} · tap a row for details</span></div>
   <div class="card tbl-wrap mb"><table><thead><tr>
-    <th>Employee</th><th>Title</th><th>Team</th><th>Supervisor</th><th>Manager</th>
+    <th>Employee</th><th>Title</th><th>Department</th><th>Supervisor</th><th>Manager</th>
     <th>Records</th><th>Occurrences</th><th>OSS used</th><th>Status</th>
   </tr></thead><tbody>
   ${teamRows.map(({e,rs,occ,lv,perfect,oss})=>`<tr data-emp="${esc(e.id)}">
     <td><b>${esc(e.name)}</b><div class="small muted">${esc(e.id)}</div></td>
-    <td>${esc(e.title)}</td><td>${esc(e.team)}</td><td>${esc(e.supervisor)}</td><td>${esc(e.manager)}</td>
+    <td>${esc(e.title)}</td><td>${esc(e.dept)}</td><td>${esc(e.supervisor)}</td><td>${esc(e.manager)}</td>
     <td>${rs.length}</td><td>${occ}</td>
     <td>${oss}/${OSS_LIMIT}</td>
     <td>${perfect?`<span class="badge ok">Perfect ✓</span>`:esc(e.status)}</td>
@@ -990,8 +1044,8 @@ function empModal(id){
   const mus=(S.makeups||[]).filter(m=>m.empId===id).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
   const n90=occCount(id,t), lv=level(n90);
   openModal(`<h2>${esc(e.name)} <span class="small muted">${esc(e.id)}</span></h2>
-    <p class="small">${esc(e.title)} · ${esc(e.dept)} / ${esc(e.team)} · ${esc(e.location)}<br>
-    Supervisor: <b>${esc(e.supervisor)}</b> · Manager: <b>${esc(e.manager)}</b> · Sr. Manager: <b>${esc(e.srManager)}</b></p>
+    <p class="small">${esc(e.title)} · ${esc(e.dept)} · ${esc(e.location)}<br>
+    Supervisor: <b>${esc(e.supervisor)}</b> · Manager: <b>${esc(e.manager)}</b></p>
     <p class="row small">
       <span class="badge ${lv?lv.cls:"ok"}">${lv?lv.name:"Clear"} — ${n90} occ. / 90d</span>
       <span class="badge">OSS ${ossUsed(id,t)}/${OSS_LIMIT}</span>
@@ -1053,7 +1107,7 @@ function bindView(){
   v.querySelectorAll("[data-mu-act]").forEach(b=>b.onclick=e=>{e.stopPropagation();
     const act=b.dataset.muAct, id=b.dataset.id;
     if(act==="edit") makeupModal(id);
-    else setMuStatus(id, act==="approve"?"Approved":act==="complete"?"Completed":"Missed");});
+    else setMuStatus(id, act==="approve" ? "Approved" : act==="complete" ? "Completed" : "Missed");});
   v.querySelectorAll("tr[data-mu]").forEach(tr=>tr.onclick=()=>{ makeupModal(tr.dataset.mu); });
   v.querySelectorAll("th[data-sort]").forEach(th=>th.onclick=()=>{
     const k=th.dataset.sort; UI.sortDir=UI.sortKey===k?-UI.sortDir:-1; UI.sortKey=k; render();});
@@ -1079,7 +1133,7 @@ $("#filterBar").addEventListener("change",e=>{
 $("#filterBar").addEventListener("input",e=>{ if(e.target.id==="fQ"){ UI.q=e.target.value;
   clearTimeout(window._qh); window._qh=setTimeout(render,250); }});
 $("#filterBar").addEventListener("click",e=>{ if(e.target.id==="fClear"){
-  Object.assign(UI,{preset:"month",anchor:today(),from:null,to:null,dept:"",team:"",title:"",supervisor:"",manager:"",srManager:"",q:"",type:""}); render(); }});
+  Object.assign(UI,{preset:"month",anchor:today(),from:null,to:null,dept:"",repName:"",title:"",supervisor:"",manager:"",q:"",type:""}); render(); }});
 
 $("#syncBtn").onclick=()=>pullFromDataverse(false);
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
