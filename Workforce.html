@@ -178,6 +178,25 @@ async function getDataverseToken() {
   }
 }
 
+function format12Hour(timeStr) {
+  if (!timeStr) return "";
+  const match = timeStr.trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?$/i);
+  if (!match) return timeStr;
+  let hour = parseInt(match[1], 10);
+  const min = match[2];
+  let ampm = match[3] ? match[3].toUpperCase() : null;
+  if (!ampm) {
+    ampm = hour >= 12 ? 'PM' : 'AM';
+    hour = hour % 12 || 12;
+  }
+  return `${hour}:${min} ${ampm}`;
+}
+
+function normalizeTimeRange(str) {
+  if (!str) return "";
+  return str.replace(/(\d{1,2}:\d{2}(?::\d{2})?)/g, match => format12Hour(match));
+}
+
 function parseDatesToIso(dateStr, createdOn) {
   if (!dateStr && createdOn) return [isoDate(new Date(createdOn))];
   if (!dateStr) return [today()];
@@ -237,6 +256,28 @@ function parseHours(r) {
   return 8;
 }
 
+function parseMakeUpHours(r) {
+  if (r.cr714_makeuptime) {
+    let total = 0;
+    const parts = r.cr714_makeuptime.split(',');
+    for (const part of parts) {
+      const segments = part.split('-');
+      if (segments.length >= 3) {
+        const hStr = segments[segments.length - 1].trim();
+        if (hStr.includes(':')) {
+          const [hh, mm] = hStr.split(':').map(Number);
+          total += (hh || 0) + ((mm || 0) / 60);
+        } else if (!isNaN(parseFloat(hStr))) {
+          total += parseFloat(hStr);
+        }
+      }
+    }
+    if (total > 0) return Math.round(total * 100) / 100;
+  }
+  const regularHours = parseHours(r);
+  return regularHours > 0 ? regularHours : 1;
+}
+
 async function pullFromDataverse(silent = false) {
   setSync("Syncing with Dataverse...");
   try {
@@ -263,7 +304,10 @@ async function pullFromDataverse(silent = false) {
 
     const activeEmps = (empData.value || []).filter(e => {
       const status = (e.cr714_statusname || "").toLowerCase().trim();
-      return status !== "terminated" && status !== "inactive" && status !== "resigned";
+      const isActive = status !== "terminated" && status !== "inactive" && status !== "resigned";
+      const loc = (e.cr714_locationname || "").toLowerCase().trim();
+      const isTargetLocation = loc.includes("daytona") || loc.includes("jacksonville");
+      return isActive && isTargetLocation;
     });
 
     const empMapByEmail = new Map();
@@ -283,7 +327,7 @@ async function pullFromDataverse(silent = false) {
         supervisor: e.cr714_managerassigned || "Supervisor",
         manager: e.cr714_managerassigned || "Manager",
         srManager: "Senior Leadership",
-        location: e.cr714_locationname || "HQ",
+        location: e.cr714_locationname || "Daytona",
         status: e.cr714_statusname || "Active",
         loopNumber: e.cr714_loopnumber || "",
         shift: e.cr714_shiftselectionname || "",
@@ -306,28 +350,14 @@ async function pullFromDataverse(silent = false) {
       let matchedEmp = empMapByEmail.get(email) || empMapByName.get(name.toLowerCase());
 
       if (!matchedEmp) {
-        const fallbackId = email || `EMP-${name.replace(/\s+/g, '')}`;
-        matchedEmp = {
-          id: fallbackId,
-          name: name || "Unknown",
-          email,
-          dept: r.cr714_department || "General",
-          repName: name || "Unknown",
-          title: "Representative",
-          supervisor: r.cr714_headofdepartment || "Supervisor",
-          manager: r.cr714_headofdepartment || "Manager",
-          srManager: "Senior Leadership",
-          location: "HQ",
-          status: "Active"
-        };
-        S.employees.push(matchedEmp);
-        if (email) empMapByEmail.set(email, matchedEmp);
-        if (name) empMapByName.set(name.toLowerCase(), matchedEmp);
+        return;
       }
 
       const dates = parseDatesToIso(r.cr714_requestdates, r.createdon);
       const mappedType = mapLeaveType(r.cr714_leavetype);
       const hours = parseHours(r);
+      const muHours = parseMakeUpHours(r);
+
       const notes = [
         r.cr714_requestnotes,
         r.cr714_lunch ? `Lunch: ${r.cr714_lunch}` : null,
@@ -343,7 +373,7 @@ async function pullFromDataverse(silent = false) {
           empId: matchedEmp.id,
           type: mappedType,
           hours,
-          notes,
+          notes: normalizeTimeRange(notes),
           fmla: false,
           voicemail: false,
           occurrence: parseInt(r.cr714_occurrence, 10) || 0,
@@ -358,12 +388,12 @@ async function pullFromDataverse(silent = false) {
           empId: matchedEmp.id,
           rid: `${baseRid}-0`,
           dateMissed: dates[0] || today(),
-          hoursOwed: hours,
+          hoursOwed: muHours,
           dueDate: addDays(dates[0] || today(), 7),
           status: r.cr714_completed ? "Completed" : "Pending",
           oss: true,
           completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
-          notes: r.cr714_makeuptime || notes
+          notes: normalizeTimeRange(r.cr714_makeuptime || notes)
         });
       }
     });
@@ -374,7 +404,7 @@ async function pullFromDataverse(silent = false) {
 
     save();
     render();
-    if (!silent) toast(`Synced ${S.employees.length} active employees & ${newRecords.length} records`);
+    if (!silent) toast(`Synced ${S.employees.length} active FL employees & ${newRecords.length} records`);
   } catch (err) {
     console.error(err);
     if (!silent) toast("Dataverse sync failed: " + err.message);
@@ -409,8 +439,8 @@ let UI = { tab:"dashboard", preset:"month", anchor:today(), from:null, to:null,
            sortKey:"date", sortDir:-1, muFilter:"" };
 let charts = [];
 
-function load(){ try{ const s=JSON.parse(localStorage.getItem("wf.state.cr714_v2")); return s&&s.employees?s:null; }catch(e){ return null; } }
-function save(){ try{ localStorage.setItem("wf.state.cr714_v2", JSON.stringify(S)); }catch(e){ toast("Storage limit exceeded"); } }
+function load(){ try{ const s=JSON.parse(localStorage.getItem("wf.state.cr714_v3")); return s&&s.employees?s:null; }catch(e){ return null; } }
+function save(){ try{ localStorage.setItem("wf.state.cr714_v3", JSON.stringify(S)); }catch(e){ toast("Storage limit exceeded"); } }
 
 const $ = s=>document.querySelector(s);
 const esc = s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
