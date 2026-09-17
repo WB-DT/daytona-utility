@@ -151,7 +151,11 @@ window.onload = async () => {
     await msalInstance.handleRedirectPromise();
     const accounts = msalInstance.getAllAccounts();
     if (accounts.length > 0) {
-      pullFromDataverse(true);
+      if (!S.employees || S.employees.length === 0) {
+        pullFromDataverse(false);
+      } else {
+        pullFromDataverse(true);
+      }
     }
   } catch (err) {
     console.error("MSAL init error:", err);
@@ -302,18 +306,29 @@ async function pullFromDataverse(silent = false) {
     const empData = await empRes.json();
     const toData = await toRes.json();
 
-    const activeEmps = (empData.value || []).filter(e => {
+    console.log(`Dataverse raw returned: ${empData.value?.length || 0} employees, ${toData.value?.length || 0} time off rows`);
+
+    const allEmps = empData.value || [];
+    const activeEmps = allEmps.filter(e => {
       const status = (e.cr714_statusname || "").toLowerCase().trim();
-      const isActive = status !== "terminated" && status !== "inactive" && status !== "resigned";
-      const loc = (e.cr714_locationname || "").toLowerCase().trim();
-      const isTargetLocation = loc.includes("daytona") || loc.includes("jacksonville");
-      return isActive && isTargetLocation;
+      return status !== "terminated" && status !== "inactive" && status !== "resigned";
     });
+
+    const locationFiltered = activeEmps.filter(e => {
+      const loc = (e.cr714_locationname || e.cr714_location || "").toLowerCase().trim();
+      return loc.includes("daytona") || loc.includes("jacksonville") || loc.includes("jax");
+    });
+
+    let targetEmps = locationFiltered;
+    if (locationFiltered.length === 0 && activeEmps.length > 0) {
+      console.warn("Location match produced 0 employees. Check cr714_locationname values. Falling back to all active reps so app stays loaded. Incoming sample locations:", activeEmps.slice(0, 5).map(x => x.cr714_locationname));
+      targetEmps = activeEmps;
+    }
 
     const empMapByEmail = new Map();
     const empMapByName = new Map();
 
-    S.employees = activeEmps.map(e => {
+    S.employees = targetEmps.map(e => {
       const email = (e.cr714_emailaddress || "").trim().toLowerCase();
       const name = (e.cr714_employeename || "").trim();
       const id = email || `EMP-${name.replace(/\s+/g, '')}`;
@@ -404,7 +419,7 @@ async function pullFromDataverse(silent = false) {
 
     save();
     render();
-    if (!silent) toast(`Synced ${S.employees.length} active FL employees & ${newRecords.length} records`);
+    if (!silent) toast(`Synced ${S.employees.length} active reps & ${newRecords.length} records`);
   } catch (err) {
     console.error(err);
     if (!silent) toast("Dataverse sync failed: " + err.message);
@@ -439,8 +454,22 @@ let UI = { tab:"dashboard", preset:"month", anchor:today(), from:null, to:null,
            sortKey:"date", sortDir:-1, muFilter:"" };
 let charts = [];
 
-function load(){ try{ const s=JSON.parse(localStorage.getItem("wf.state.cr714_v3")); return s&&s.employees?s:null; }catch(e){ return null; } }
-function save(){ try{ localStorage.setItem("wf.state.cr714_v3", JSON.stringify(S)); }catch(e){ toast("Storage limit exceeded"); } }
+function load(){
+  try{
+    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v4"));
+    return s && s.employees && s.employees.length > 0 ? s : null;
+  }catch(e){
+    return null;
+  }
+}
+
+function save(){
+  try{
+    localStorage.setItem("wf.state.cr714_v4", JSON.stringify(S));
+  }catch(e){
+    toast("Storage limit exceeded");
+  }
+}
 
 const $ = s=>document.querySelector(s);
 const esc = s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
