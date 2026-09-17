@@ -2579,7 +2579,7 @@
 
 
 /* Special Focus Dataset display labels and NoCoffee account-level information */
-/* Dataverse mapping: schema/logical name = cr714_prospectingdatasets; display name = Special Focus Dataset. */
+/* Dataverse mapping: schema/logical name = cr714_prospectingdataset; display name = Special Focus Dataset. */
 .coffee-important-account-info{max-height:180px!important;min-width:min(100%,420px);border-left-color:#d97706!important;background:color-mix(in srgb,#f59e0b 9%,var(--bg-card))!important;color:var(--text-main)!important}
 .coffee-important-account-info .alert-label{color:#b45309!important}
 .coffee-account-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.34rem}
@@ -4226,7 +4226,7 @@ window.preloadTemplateImages = async function() {
             const requests = await Promise.all([
                 fetch(`${DATAVERSE_URL}/cr714_accountmanagementdatasets?$filter=cr714_rep eq '${targetRep}' and cr714_accountnum ne null and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
                 fetch(`${DATAVERSE_URL}/cr714_cadencedatasets?$filter=cr714_retentionrep eq '${targetRep}' and cr714_accountnum ne null and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
-                fetch(`${DATAVERSE_URL}/cr714_prospectingdatasets?$filter=cr714_repassigned eq '${targetRep}' and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
+                fetch(`${DATAVERSE_URL}/cr714_prospectingdataset?$filter=cr714_repassigned eq '${targetRep}' and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
                 fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$filter=cr714_employeename eq '${targetRep}'`, reqOptions).catch(() => ({ ok: false })),
                 fetch(`${DATAVERSE_URL}/cr714_louisebrowndatasets?$filter=cr714_assignedrep eq '${targetRep}' and statecode eq 0`, reqOptions).catch(() => ({ ok: false })),
                 fetch(`${DATAVERSE_URL}/cr714_employeeinformation1s?$select=cr714_employeename,cr714_employeename,cr714_managerassigned&$filter=${encodeURIComponent("cr714_managerassigned eq 'Ashley Bathrick' or cr714_managerassigned eq 'Tabatha Hanks'")}`, reqOptions).catch(() => ({ ok: false })),
@@ -4265,8 +4265,11 @@ allRaw.forEach(r => {
                 if(!id) return;
 
                 let qbNotes = type === 'AM' ? r.cr714_accountmanagementnotes : (type === 'Cadence' ? r.cr714_qbnotes : (type === 'LB' ? r.cr714_notesfr : (type === 'Lead' ? r.cr714_leadnotes : r.cr714_prospectingnotes)));
-                let sTable = type === 'AM' ? 'cr714_accountmanagementdatasets' : (type === 'Cadence' ? 'cr714_cadencedatasets' : (type === 'LB' ? 'cr714_louisebrowndatasets' : (type === 'Lead' ? 'cr714_leads_2s' : 'cr714_prospectingdatasets')));
-                let sId = r.cr714_accountmanagementdatasetid || r.cr714_cadencedatasetid || r.cr714_prospectingdatasetsid || r.cr714_louisebrowndatasetid || r.cr714_leads_2id;
+                let sTable = type === 'AM' ? 'cr714_accountmanagementdatasets' : (type === 'Cadence' ? 'cr714_cadencedatasets' : (type === 'LB' ? 'cr714_louisebrowndatasets' : (type === 'Lead' ? 'cr714_leads_2s' : 'cr714_prospectingdataset')));
+                // Resolve renamed/custom Dataverse primary-key columns defensively.
+                const knownSourceId = r.cr714_accountmanagementdatasetid || r.cr714_cadencedatasetid || r.cr714_prospectingdatasetid || r.cr714_prospectingdataset1id || r.cr714_louisebrowndatasetid || r.cr714_leads_2id;
+                const discoveredSourceId = Object.entries(r).find(([key, value]) => /id$/i.test(key) && key !== 'cr714_accountnum' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || '').replace(/[{}]/g, '').trim()))?.[1];
+                let sId = knownSourceId || discoveredSourceId || '';
 
                 let displayAction = (r.cr714_action && String(r.cr714_action).trim() !== '') ? String(r.cr714_action).trim() : "No Action";
                 
@@ -4361,45 +4364,45 @@ allRaw.forEach(r => {
     window.patchDataverseSource = async function(src, payload, headers) {
       const rawTable = String(src?.table || '').trim();
       const rawId = String(src?.id || '').trim();
-      const cleanId = rawId.replace(/^.*\(/, '').replace(/\).*$/, '').replace(/[{}]/g, '').trim();
-
+      const guidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const normalizeGuid = value => String(value || '').replace(/^.*\(/, '').replace(/\).*$/, '').replace(/[{}]/g, '').trim();
       if (!rawTable) throw new Error('Save source is missing its Dataverse entity set name.');
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanId)) {
-        throw new Error(`Save source ${rawTable} has an invalid Dataverse row ID: ${rawId || '(blank)'}`);
-      }
-
-      // Older ACT builds used both forms of the Special Focus entity-set name.
-      // Try the source value first, then its known alias only when Dataverse rejects the URI.
       const tableCandidates = [rawTable];
-      if (rawTable === 'cr714_prospectingdatasets') tableCandidates.push('cr714_prospectingdatasetss');
-      if (rawTable === 'cr714_prospectingdatasetss') tableCandidates.push('cr714_prospectingdatasets');
+      if (rawTable === 'cr714_prospectingdataset') tableCandidates.push('cr714_prospectingdatasets');
+      if (rawTable === 'cr714_prospectingdatasets') tableCandidates.push('cr714_prospectingdataset');
+      let cleanId = normalizeGuid(rawId);
+
+      // Self-heal blank IDs by finding the unique Dataverse row for the ACT account.
+      if (!guidPattern.test(cleanId)) {
+        const accountNumber = String(src?.leadAccountNumber || currentSelectedRecord?.cr714_id || '').trim();
+        if (!accountNumber) throw new Error(`Save source ${rawTable} is missing both its Dataverse row ID and account number.`);
+        const escapedAccount = accountNumber.replace(/'/g, "''");
+        let lookupMessage = 'No matching row was returned.';
+        for (const table of tableCandidates) {
+          const lookupUrl = `${DATAVERSE_URL}/${table}?$filter=${encodeURIComponent(`cr714_accountnum eq '${escapedAccount}'`)}&$top=2`;
+          const lookup = await fetch(lookupUrl, { method: 'GET', headers });
+          if (!lookup.ok) { lookupMessage = await window.getDataverseErrorMessage(lookup); continue; }
+          const data = await lookup.json();
+          const rows = Array.isArray(data?.value) ? data.value : [];
+          if (rows.length !== 1) { lookupMessage = rows.length ? `Multiple rows matched account ${accountNumber}.` : `No row matched account ${accountNumber}.`; continue; }
+          const idEntry = Object.entries(rows[0]).find(([key, value]) => /id$/i.test(key) && key !== 'cr714_accountnum' && guidPattern.test(normalizeGuid(value)));
+          cleanId = normalizeGuid(idEntry?.[1]);
+          if (guidPattern.test(cleanId)) { src.id = cleanId; src.table = table; break; }
+          lookupMessage = `Matching row did not expose a valid primary key. Returned fields: ${Object.keys(rows[0]).join(', ')}`;
+        }
+        if (!guidPattern.test(cleanId)) throw new Error(`Could not resolve the Dataverse row ID for ${rawTable}, account ${accountNumber}. ${lookupMessage}`);
+      }
 
       let lastMessage = 'Bad Request';
       for (let attempt = 0; attempt < tableCandidates.length; attempt++) {
         const table = tableCandidates[attempt];
-        const response = await fetch(`${DATAVERSE_URL}/${table}(${cleanId})`, {
-          method: 'PATCH',
-          headers,
-          body: JSON.stringify(payload)
-        });
-        if (response.ok) {
-          src.table = table;
-          src.id = cleanId;
-          return;
-        }
-
-        const rawError = await response.text();
-        let errorData = null;
-        try { errorData = rawError ? JSON.parse(rawError) : null; } catch (e) {}
-        lastMessage = errorData?.error?.message || rawError || response.statusText || `HTTP ${response.status}`;
-        console.error(`Dataverse Error on ${table}:`, errorData || rawError || response.statusText);
-
-        const canRetryAlias = attempt < tableCandidates.length - 1 &&
-          (response.status === 400 || response.status === 404) &&
-          /query syntax|resource not found|segment|entity set|could not find/i.test(lastMessage);
-        if (!canRetryAlias) break;
+        const response = await fetch(`${DATAVERSE_URL}/${table}(${cleanId})`, { method: 'PATCH', headers, body: JSON.stringify(payload) });
+        if (response.ok) { src.table = table; src.id = cleanId; return; }
+        lastMessage = await window.getDataverseErrorMessage(response);
+        const uriMismatch = response.status === 404 || /resource not found|segment|entity set|odata/i.test(lastMessage);
+        if (!uriMismatch || attempt === tableCandidates.length - 1) throw new Error(`Dataverse save failed for ${table}(${cleanId}): ${lastMessage}`);
       }
-      throw new Error(`Dataverse rejected the save for ${rawTable}: ${lastMessage}`);
+      throw new Error(`Dataverse save failed for ${rawTable}(${cleanId}): ${lastMessage}`);
     };
 
     window.handleCustomSave = async function (autoNote = null, quiet = false) {
@@ -4555,7 +4558,7 @@ allRaw.forEach(r => {
           payload.cr714_phone = phone;
           payload.cr714_emailmost = emailMost;
           payload.cr714_notesfr = fullNote;
-        } else if ((src.table === "cr714_prospectingdatasets" || src.table === "cr714_prospectingdatasetss")) {
+        } else if ((src.table === "cr714_prospectingdataset" || src.table === "cr714_prospectingdatasets")) {
           payload.cr714_namelatest = nameMost;
           payload.cr714_phone = phone;
           payload.cr714_email_latest = emailMost;
@@ -4580,7 +4583,7 @@ allRaw.forEach(r => {
           payload.cr714_namemost = nameMost;
           payload.cr714_phone = phone;
           payload.cr714_emailmost = emailMost;
-        } else if ((src.table === "cr714_prospectingdatasets" || src.table === "cr714_prospectingdatasetss")) {
+        } else if ((src.table === "cr714_prospectingdataset" || src.table === "cr714_prospectingdatasets")) {
           payload.cr714_namelatest = nameMost;
           payload.cr714_phone = phone;
           payload.cr714_email_latest = emailMost;
