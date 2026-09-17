@@ -69,7 +69,7 @@ tbody tr.norow:hover{background:none;cursor:default}
 .btn{border:none;background:var(--brand);color:var(--brand-ink);border-radius:8px;padding:8px 14px;font-weight:600;cursor:pointer;font-size:13.5px}
 .btn:hover{filter:brightness(1.08)}
 .btn.ghost{background:var(--soft);color:var(--brand)}
-.btn.danger{background:var(--red)}
+.btn.danger{background:var(--red);color:#fff}
 .btn.sm{padding:4px 10px;font-size:12.5px}
 .btn:disabled{opacity:.5;cursor:not-allowed}
 
@@ -308,9 +308,6 @@ async function pullFromDataverse(silent = false) {
     const toData = await toRes.json();
 
     const allEmps = empData.value || [];
-    if (allEmps.length > 0) {
-      console.log("Sample Employee Dataverse Row:", allEmps[0]);
-    }
 
     const activeEmps = allEmps.filter(e => {
       if (e.statecode === 1) return false;
@@ -342,7 +339,6 @@ async function pullFromDataverse(silent = false) {
 
     let targetEmps = locationFiltered;
     if (locationFiltered.length === 0 && activeEmps.length > 0) {
-      console.warn("Location filter returned 0 matches. Showing all active employees. Raw sample locations:", activeEmps.slice(0, 10).map(x => x.cr714_locationname || x.cr714_location));
       targetEmps = activeEmps;
     }
 
@@ -384,10 +380,7 @@ async function pullFromDataverse(silent = false) {
       const name = String(r.cr714_name || "").trim();
 
       let matchedEmp = empMapByEmail.get(email) || empMapByName.get(name.toLowerCase());
-
-      if (!matchedEmp) {
-        return;
-      }
+      if (!matchedEmp) return;
 
       const dates = parseDatesToIso(r.cr714_requestdates, r.createdon);
       const mappedType = mapLeaveType(r.cr714_leavetype);
@@ -401,10 +394,12 @@ async function pullFromDataverse(silent = false) {
       ].filter(Boolean).join(" | ");
 
       const baseRid = r.cr714_autoid || r.cr714_timeoff_2id || uid("r");
+      const dvId = r.cr714_timeoff_2id || "";
 
       dates.forEach((d, idx) => {
         newRecords.push({
           rid: `${baseRid}-${idx}`,
+          dvId: dvId,
           date: d,
           empId: matchedEmp.id,
           type: mappedType,
@@ -421,6 +416,7 @@ async function pullFromDataverse(silent = false) {
       if (r.cr714_makeuptime || (r.cr714_leavetype && String(r.cr714_leavetype).toLowerCase().includes("make up"))) {
         newMakeups.push({
           mid: baseRid,
+          dvId: dvId,
           empId: matchedEmp.id,
           rid: `${baseRid}-0`,
           dateMissed: dates[0] || today(),
@@ -447,6 +443,51 @@ async function pullFromDataverse(silent = false) {
     setSync("Sync failed");
   }
   setSync("");
+}
+
+async function deleteRecordFromDataverse(rid) {
+  const target = S.records.find(r => r.rid === rid);
+  if (!target) return;
+
+  if (!confirm("Are you sure you want to permanently delete this record from Dataverse?")) return;
+
+  if (target.dvId) {
+    setSync("Deleting from Dataverse...");
+    try {
+      const token = await getDataverseToken();
+      if (!token) throw new Error("Authentication missing");
+
+      const res = await fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}(${target.dvId})`, {
+        method: "DELETE",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Accept": "application/json",
+          "OData-MaxVersion": "4.0",
+          "OData-Version": "4.0"
+        }
+      });
+
+      if (!res.ok && res.status !== 204 && res.status !== 404) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+    } catch (err) {
+      console.error("Delete failed:", err);
+      toast("Failed to delete from Dataverse: " + err.message);
+      setSync("");
+      return;
+    }
+  }
+
+  // Remove matching records sharing this submission ID from local memory
+  const basePrefix = rid.includes('-') ? rid.split('-')[0] : rid;
+  S.records = S.records.filter(r => !r.rid.startsWith(basePrefix));
+  S.makeups = S.makeups.filter(m => m.mid !== basePrefix && m.dvId !== target.dvId);
+
+  save();
+  closeModal();
+  render();
+  setSync("");
+  toast("Record deleted from Dataverse permanently");
 }
 
 const TYPES = {
@@ -477,7 +518,7 @@ let charts = [];
 
 function load(){
   try{
-    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v7"));
+    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v8"));
     return s && s.employees && s.employees.length > 0 ? s : null;
   }catch(e){
     return null;
@@ -486,7 +527,7 @@ function load(){
 
 function save(){
   try{
-    localStorage.setItem("wf.state.cr714_v7", JSON.stringify(S));
+    localStorage.setItem("wf.state.cr714_v8", JSON.stringify(S));
   }catch(e){
     toast("Storage limit exceeded");
   }
@@ -568,7 +609,7 @@ function renderCalendar(){
         <div class="row"><div class="d">${day}</div><div class="right muted" style="font-size:10.5px; font-weight:600;">${presentCount}/${totalEmps}</div></div>
         <div class="cal-mini">${Object.entries(agg).map(([ty,n])=> {
           const tObj = TYPES[ty] || { color: "var(--muted)", abbr: ty.slice(0,2).toUpperCase() };
-          return `<span class="dot" title="${esc(ty)}: ${n}" style="background:${tObj.color}">${n>1?n:tObj.abbr}</span>`;
+          return `<span class="dot" title="${esc(ty)}:${n}" style="background:${tObj.color}">${n>1?n:tObj.abbr}</span>`;
         }).join("")}</div>
       </div>`;
     }
@@ -901,7 +942,7 @@ function renderMakeup(){
         <div class="cal-mini" style="flex-direction:column; gap:2px;">
           ${dayMus.slice(0,3).map(m=>{
             const e = emp(m.empId) || {name: m.empId};
-            return `<div class="mu-chip ${m.status}" title="${esc(e.name)}: ${m.hoursOwed}h (${m.status})" data-mu-id="${m.mid}">${esc(e.name.split(' ')[0])} ${m.hoursOwed}h</div>`;
+            return `<div class="mu-chip ${m.status}" title="${esc(e.name)}:${m.hoursOwed}h (${m.status})" data-mu-id="${m.mid}">${esc(e.name.split(' ')[0])}${m.hoursOwed}h</div>`;
           }).join("")}
           ${dayMus.length > 3 ? `<div class="small muted">+${dayMus.length - 3} more</div>` : ""}
         </div>
@@ -995,9 +1036,13 @@ function recordModal(rid,presetDate){
     
     <div><label>Notes</label><textarea id="mNotes" rows="2">${esc(r.notes)}</textarea></div>
     <div class="mfoot">
-      ${rid?"":`<span class="small muted right" style="margin-right:auto">Tip: for an occurrence type you can create a make-up agreement after saving.</span>`}
+      ${rid?`<button class="btn danger" id="mDel" style="margin-right:auto">Delete from Dataverse</button>`:`<span class="small muted right" style="margin-right:auto">Tip: for an occurrence type you can create a make-up agreement after saving.</span>`}
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
       <button class="btn" id="mSave">Save</button></div>`);
+
+  if (rid) {
+    $("#mDel").onclick = () => deleteRecordFromDataverse(rid);
+  }
 
   $("#occMinus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = Math.max(0, parseInt(inp.value||0) - 1); };
   $("#occPlus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = parseInt(inp.value||0) + 1; };
@@ -1032,6 +1077,7 @@ function recordModal(rid,presetDate){
       while(current <= end) {
         S.records.push({ 
           rid: uid("r"), 
+          dvId: "",
           date: isoDate(current), 
           empId, 
           type, 
@@ -1066,14 +1112,27 @@ function makeupModal(mid,fromRec){
     <div><label>Counts as OSS</label><select id="uOss"><option value="1" ${m.oss?"selected":""}>Yes — use an OSS</option><option value="0" ${m.oss?"":"selected"}>No</option></select>
     <div class="small muted" id="uOssNote">This employee has used ${used}/${OSS_LIMIT} OSS in the last 12 months.</div></div></div>
     <div><label>Notes</label><textarea id="uNotes" rows="2">${esc(m.notes)}</textarea></div>
-    <div class="mfoot">${mid?`<button class="btn danger" id="uDel" style="margin-right:auto">Delete</button>`:""}
+    <div class="mfoot">${mid?`<button class="btn danger" id="uDel" style="margin-right:auto">Delete from Dataverse</button>`:""}
       <button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn" id="uSave">Save</button></div>`);
-  if(mid) $("#uDel").onclick=()=>{ S.makeups=S.makeups.filter(x=>x.mid!==mid); save(); closeModal(); render(); toast("Agreement deleted"); };
+  if(mid) {
+    $("#uDel").onclick = () => {
+      const parentRecord = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId);
+      if (parentRecord) {
+        deleteRecordFromDataverse(parentRecord.rid);
+      } else {
+        S.makeups = S.makeups.filter(x => x.mid !== mid);
+        save();
+        closeModal();
+        render();
+        toast("Agreement deleted");
+      }
+    };
+  }
   $("#uSave").onclick=()=>{
     const oss=$("#uOss").value==="1", empId=$("#uEmp").value;
     if(oss && !mid && ossUsed(empId)>=OSS_LIMIT) return toast(`OSS limit reached (${OSS_LIMIT}/12 mo) for this employee`);
     const v={mid:mid||uid("m"),empId,rid:m.rid||"",dateMissed:$("#uMissed").value,hoursOwed:parseFloat($("#uHours").value)||0,
-      dueDate:$("#uDue").value,status:$("#uStatus").value,oss,completedDate:m.completedDate||"",notes:$("#uNotes").value.trim()};
+      dueDate:$("#uDue").value,status:$("#uStatus").value,oss,completedDate:m.completedDate\vert{}\vert{}"",notes:$("#uNotes").value.trim()};
     if(mid) Object.assign(S.makeups.find(x=>x.mid===mid),v); else S.makeups.push(v);
     if(v.status==="Completed") setMuStatus(v.mid,"Completed"); else { save(); render(); }
     closeModal(); toast("Agreement saved");
@@ -1152,8 +1211,10 @@ function render(){
   
 function bindRecordButtons(root){
   root.querySelectorAll("[data-rec-edit]").forEach(b=>b.onclick=e=>{e.stopPropagation();recordModal(b.dataset.recEdit);});
-  root.querySelectorAll("[data-rec-del]").forEach(b=>b.onclick=e=>{e.stopPropagation();
-    if(confirm("Delete this record?")){ S.records=S.records.filter(r=>r.rid!==b.dataset.recDel); save(); closeModal(); render(); toast("Record deleted"); }});
+  root.querySelectorAll("[data-rec-del]").forEach(b=>b.onclick=e=>{
+    e.stopPropagation();
+    deleteRecordFromDataverse(b.dataset.recDel);
+  });
 }
 
 function bindView(){
