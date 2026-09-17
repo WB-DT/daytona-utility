@@ -86,6 +86,12 @@ tbody tr.norow:hover{background:none;cursor:default}
 @media(max-width:640px){.cal-cell{min-height:56px;padding:4px}.cal-mini .dot{min-width:14px;height:14px;font-size:9px}}
 .cal-list .day-block{margin-bottom:14px}
 
+.mu-chip{display:block;background:var(--purple);color:#fff;font-size:11px;font-weight:600;padding:2px 6px;border-radius:4px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mu-chip.Pending{background:#d97706}
+.mu-chip.Approved{background:var(--purple)}
+.mu-chip.Completed{background:var(--green)}
+.mu-chip.Missed{background:var(--red)}
+
 .overlay{position:fixed;inset:0;background:rgba(10,15,30,.5);z-index:90;display:grid;place-items:center;padding:16px}
 .modal{background:var(--card);border-radius:16px;max-width:640px;width:100%;max-height:88vh;overflow-y:auto;padding:20px;box-shadow:0 20px 50px rgba(0,0,0,.3)}
 .modal h2{font-size:17px;margin-bottom:12px}
@@ -130,27 +136,45 @@ const DATAVERSE_URL = "https://org23279050.crm.dynamics.com";
 const TABLE_NAME = "cr714_timeoff_2s";
 
 const msalConfig = {
-  auth: { clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", redirectUri: window.location.href },
+  auth: { 
+    clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
+    authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", 
+    redirectUri: window.location.origin + window.location.pathname 
+  },
   cache: { cacheLocation: "localStorage", storeAuthStateInCookie: true }
 };
 const msalInstance = new msal.PublicClientApplication(msalConfig);
 
-window.onload = () => {
-  msalInstance.handleRedirectPromise().then(resp => {
-    if (!msalInstance.getAllAccounts().length) {
-      msalInstance.loginRedirect({ scopes: [`${DATAVERSE_URL}/user_impersonation`] });
-    } else {
+window.onload = async () => {
+  try {
+    await msalInstance.handleRedirectPromise();
+    const accounts = msalInstance.getAllAccounts();
+    if (accounts.length > 0) {
       pullFromDataverse(true);
     }
-  }).catch(console.error);
+  } catch (err) {
+    console.error("MSAL init error:", err);
+  }
 };
 
 async function getDataverseToken() {
-  const account = msalInstance.getAllAccounts()[0];
-  if (!account) { toast("Please sign in to sync Dataverse."); return null; }
-  const request = { scopes: [`${DATAVERSE_URL}/user_impersonation`], account };
-  try { return (await msalInstance.acquireTokenSilent(request)).accessToken; }
-  catch (e) { return (await msalInstance.acquireTokenPopup(request)).accessToken; }
+  const scope = `${DATAVERSE_URL}/.default`;
+  let account = msalInstance.getAllAccounts()[0];
+
+  if (!account) {
+    const loginResp = await msalInstance.loginPopup({ scopes: ["User.Read", scope] });
+    account = loginResp.account;
+  }
+
+  const tokenRequest = { scopes: [scope], account };
+
+  try {
+    const resp = await msalInstance.acquireTokenSilent(tokenRequest);
+    return resp.accessToken;
+  } catch (silentErr) {
+    const popupResp = await msalInstance.acquireTokenPopup(tokenRequest);
+    return popupResp.accessToken;
+  }
 }
 
 function parseDatesToIso(dateStr, createdOn) {
@@ -676,24 +700,87 @@ function muActions(m){
   b+=`<button class="btn ghost sm" data-mu-act="edit" data-id="${m.mid}">Edit</button>`;
   return `<div class="row" style="gap:4px">${b}</div>`;
 }
-  
+
 function renderMakeup(){
-  const ids=new Set(filteredEmployees().map(e=>e.id));
-  const list=(S.makeups||[]).filter(m=>ids.has(m.empId)&&(!UI.muFilter||m.status===UI.muFilter))
-    .sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
-  const counts=MU_STATUS.map(s=>(S.makeups||[]).filter(m=>ids.has(m.empId)&&m.status===s).length);
-  return `<div class="section-title"><h2>Make-Up Time</h2>
+  const [f,t] = range();
+  const ids = new Set(filteredEmployees().map(e=>e.id));
+  const mus = (S.makeups||[]).filter(m => ids.has(m.empId) && (!UI.muFilter || m.status === UI.muFilter));
+  
+  const byDate = {};
+  mus.forEach(m => {
+    const d = m.dateMissed;
+    if (d) (byDate[d] = byDate[d] || []).push(m);
+  });
+
+  const counts = MU_STATUS.map(s => (S.makeups||[]).filter(m => ids.has(m.empId) && m.status === s).length);
+
+  const head = `<div class="section-title">
+    <h2>Make-Up Time Calendar</h2>
     <select id="muFilter">${["",...MU_STATUS].map(s=>`<option ${UI.muFilter===s?"selected":""} value="${s}">${s||"All statuses"}</option>`).join("")}</select>
     <button class="btn sm" id="muNew">+ New agreement</button>
-    <span class="small muted right">Pending ${counts[0]} · Approved ${counts[1]} · Completed ${counts[2]} · Missed ${counts[3]}</span></div>
+    <span class="small muted right">Pending ${counts[0]} · Approved ${counts[1]} · Completed ${counts[2]} · Missed ${counts[3]}</span>
+  </div>
   <div class="card small mb" style="border-left:4px solid var(--purple)">
     An <b>OSS</b> (Out / Short-Shift) lets an agent make up missed time instead of taking an occurrence or losing pay —
     up to <b>${OSS_LIMIT} per rolling 12 months</b>. Completing the agreed make-up time <b>waives the linked occurrence</b>;
     missing it means the occurrence stands.
   </div>
-  <div class="card tbl-wrap"><table><thead><tr>
-    <th>Employee</th><th>Date missed</th><th>Hours owed</th><th>Due</th><th>Status</th><th>OSS</th><th>Notes</th><th></th>
-  </tr></thead><tbody>${list.map(muRow).join("")||`<tr class="norow"><td colspan="8" class="empty">No make-up agreements — create one with “+ New agreement”.</td></tr>`}</tbody></table></div>`;
+  <div class="cal-head">
+    <button class="btn ghost sm" id="calPrev">&#8249;</button>
+    <button class="btn ghost sm" id="calToday">Today</button>
+    <button class="btn ghost sm" id="calNext">&#8250;</button>
+    <h2>${fmt(f)}${f!==t?" – "+fmt(t):""}</h2>
+  </div>`;
+
+  if(UI.preset==="day"||UI.preset==="week"||UI.preset==="adjusted"&&addDays(f,10)>t){
+    let days=[]; for(let d=f; d<=t; d=addDays(d,1)) days.push(d);
+    return head + `<div class="cal-list">${days.map(d=>{
+      const dayMus = byDate[d] || [];
+      return `<div class="day-block card">
+        <div class="row">
+          <b>${fmtShort(d)}</b>
+          <span class="small muted">${dayMus.length} make-up shift${dayMus.length===1?"":"s"}</span>
+          <button class="btn ghost sm right" data-mu-add-day="${d}">+ Add</button>
+        </div>
+        ${dayMus.length ? `<div class="tbl-wrap mt"><table><tbody>${dayMus.map(muRow).join("")}</tbody></table></div>` : `<div class="small muted mt">No make-up shifts scheduled.</div>`}
+      </div>`;
+    }).join("")}</div>`;
+  }
+
+  const months=[]; let d=parseISO(f); d.setDate(1);
+  while(isoDate(d)<=t){ months.push(new Date(d)); d.setMonth(d.getMonth()+1); }
+  const dows=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+  return head + months.map(m0=>{
+    const y=m0.getFullYear(), mo=m0.getMonth();
+    const first=new Date(y,mo,1), last=new Date(y,mo+1,0);
+    const lead=first.getDay();
+    let cells="";
+    for(let i=0;i<lead;i++) cells+=`<div></div>`;
+
+    for(let day=1;day<=last.getDate();day++){
+      const ds=isoDate(new Date(y,mo,day)), dayMus=byDate[ds]||[];
+      const dim=ds<f||ds>t, isToday=ds===today();
+
+      cells+=`<div class="cal-cell ${dim?"dim":""} ${isToday?"today":""}" data-mu-day="${ds}">
+        <div class="row"><div class="d">${day}</div><div class="right muted" style="font-size:10.5px; font-weight:600;">${dayMus.length?dayMus.length:""}</div></div>
+        <div class="cal-mini" style="flex-direction:column; gap:2px;">
+          ${dayMus.slice(0,3).map(m=>{
+            const e = emp(m.empId) || {name: m.empId};
+            return `<div class="mu-chip ${m.status}" title="${esc(e.name)}: ${m.hoursOwed}h (${m.status})" data-mu-id="${m.mid}">${esc(e.name.split(' ')[0])} ${m.hoursOwed}h</div>`;
+          }).join("")}
+          ${dayMus.length > 3 ? `<div class="small muted">+${dayMus.length - 3} more</div>` : ""}
+        </div>
+      </div>`;
+    }
+    return `<div class="mb"><h3 class="mt" style="font-size:15px">${m0.toLocaleDateString(undefined,{month:"long",year:"numeric"})}</h3>
+      <div class="cal-grid mt">${dows.map(w=>`<div class="cal-dow">${w}</div>`).join("")}${cells}</div></div>`;
+  }).join("") + `<div class="card mt"><div class="row small">
+    <span class="row" style="gap:4px"><span class="badge warn">Pending</span> Pending</span>
+    <span class="row" style="gap:4px"><span class="badge" style="background:var(--purple);color:#fff">Approved</span> Approved</span>
+    <span class="row" style="gap:4px"><span class="badge ok">Completed</span> Completed</span>
+    <span class="row" style="gap:4px"><span class="badge bad">Missed</span> Missed</span>
+  </div></div>`;
 }
   
 function setMuStatus(mid,status){
@@ -871,6 +958,30 @@ function dayModal(ds){
   $("#dAdd").onclick=()=>recordModal(null,ds);
   bindRecordButtons($("#modalHost"));
 }
+
+function muDayModal(ds){
+  const ids = new Set(filteredEmployees().map(e=>e.id));
+  const dayMus = (S.makeups||[]).filter(m => ids.has(m.empId) && m.dateMissed === ds && (!UI.muFilter || m.status === UI.muFilter));
+  
+  openModal(`<h2>Make-Up Shifts: ${fmtShort(ds)}</h2>
+    ${dayMus.length ? `<div class="tbl-wrap"><table><tbody>${dayMus.map(muRow).join("")}</tbody></table></div>` : `<div class="empty">No make-up shifts scheduled for this day.</div>`}
+    <div class="mfoot">
+      <button class="btn" id="muDayAdd">+ New agreement</button>
+      <button class="btn ghost" onclick="closeModal()">Close</button>
+    </div>`);
+    
+  $("#muDayAdd").onclick = () => makeupModal(null, { date: ds });
+  
+  const mh = $("#modalHost");
+  mh.querySelectorAll("[data-mu-act]").forEach(b=>{
+    b.onclick = e => {
+      e.stopPropagation();
+      const act = b.dataset.muAct, id = b.dataset.id;
+      if(act === "edit") { closeModal(); makeupModal(id); }
+      else { setMuStatus(id, act === "approve" ? "Approved" : act === "complete" ? "Completed" : "Missed"); closeModal(); }
+    };
+  });
+}
   
 function empModal(id){
   const e=emp(id); if(!e) return;
@@ -917,6 +1028,19 @@ function bindView(){
   v.querySelectorAll(".cal-cell[data-day]").forEach(c=>c.onclick=()=>dayModal(c.dataset.day));
   v.querySelectorAll("[data-add-day]").forEach(b=>b.onclick=e=>{e.stopPropagation();recordModal(null,b.dataset.addDay);});
   
+  v.querySelectorAll(".cal-cell[data-mu-day]").forEach(c=>{
+    c.onclick = (e) => {
+      if(!e.target.closest(".mu-chip")) muDayModal(c.dataset.muDay);
+    };
+  });
+  v.querySelectorAll(".mu-chip[data-mu-id]").forEach(chip=>{
+    chip.onclick = (e) => {
+      e.stopPropagation();
+      makeupModal(chip.dataset.muId);
+    };
+  });
+  v.querySelectorAll("[data-mu-add-day]").forEach(b=>b.onclick=e=>{e.stopPropagation();makeupModal(null,{date:b.dataset.muAddDay});});
+
   v.querySelectorAll("tr[data-rec]").forEach(tr=> {
      tr.onclick = (e) => {
          if(!e.target.closest("button")) { 
