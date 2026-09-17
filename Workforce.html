@@ -182,18 +182,51 @@ async function getDataverseToken() {
   }
 }
 
-function format12Hour(timeStr) {
+function to12Hour(timeStr) {
   if (!timeStr) return "";
-  const match = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?$/i);
-  if (!match) return timeStr;
-  let hour = parseInt(match[1], 10);
-  const min = match[2];
-  let ampm = match[3] ? match[3].toUpperCase() : null;
-  if (!ampm) {
-    ampm = hour >= 12 ? 'PM' : 'AM';
-    hour = hour % 12 || 12;
+  let s = String(timeStr).trim();
+  // Already has AM/PM? Just normalize spacing
+  if (/AM|PM/i.test(s)) {
+    return s.replace(/\s*(AM|PM)/i, " $1").toUpperCase();
   }
-  return `${hour}:${min} ${ampm}`;
+  const match = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return s;
+  let h = parseInt(match[1], 10), m = match[2];
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return `${h}:${m} ${ampm}`;
+}
+
+function formatDuration(hStr) {
+  if (!hStr) return "";
+  let totalMinutes = 0;
+  const match = String(hStr).trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (match) {
+    totalMinutes = parseInt(match[1], 10) * 60 + parseInt(match[2], 10);
+  } else if (!isNaN(parseFloat(hStr))) {
+    totalMinutes = Math.round(parseFloat(hStr) * 60);
+  } else {
+    return hStr;
+  }
+  const hrs = Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
+  if (hrs > 0 && mins > 0) return `${hrs}h ${mins}m`;
+  if (hrs > 0) return `${hrs} hr${hrs > 1 ? 's' : ''}`;
+  return `${mins} mins`;
+}
+
+function cleanMakeUpString(str) {
+  if (!str) return "";
+  return String(str).split(',').map(entry => {
+    const parts = entry.split(' - ').map(p => p.trim());
+    if (parts.length >= 3) {
+      const datePart = parts[0];
+      const timeRange = parts[1].split('-').map(t => to12Hour(t.trim())).join(' – ');
+      const dur = formatDuration(parts[2]);
+      return `${datePart}: ${timeRange} (${dur})`;
+    }
+    return entry;
+  }).join('; ');
 }
 
 function normalizeTimeRange(str) {
@@ -349,11 +382,19 @@ async function pullFromDataverse(silent = false) {
       const email = String(e.cr714_emailaddress || "").trim().toLowerCase();
       const name = String(e.cr714_employeename || "").trim();
       const id = email || `EMP-${name.replace(/\s+/g, '')}`;
+      const dept = String(
+        e["cr714_departmentname@OData.Community.Display.V1.FormattedValue"] ||
+        e.cr714_departmentname ||
+        e["cr714_department@OData.Community.Display.V1.FormattedValue"] ||
+        e.cr714_department ||
+        ""
+      ).trim();
+
       const record = {
         id,
         name,
         email,
-        dept: String(e["cr714_departmentname@OData.Community.Display.V1.FormattedValue"] || e.cr714_departmentname || "General"),
+        dept: dept || "General",
         repName: name,
         title: String(e.cr714_titlename || e.cr714_jobtitle || "Representative"),
         supervisor: String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Supervisor"),
@@ -382,16 +423,25 @@ async function pullFromDataverse(silent = false) {
       let matchedEmp = empMapByEmail.get(email) || empMapByName.get(name.toLowerCase());
       if (!matchedEmp) return;
 
+      // Backfill department from time-off record if employee table had it blank
+      const formDept = String(r["cr714_department@OData.Community.Display.V1.FormattedValue"] || r.cr714_department || "").trim();
+      if (formDept && matchedEmp.dept === "General") {
+        matchedEmp.dept = formDept;
+      }
+
       const dates = parseDatesToIso(r.cr714_requestdates, r.createdon);
       const mappedType = mapLeaveType(r.cr714_leavetype);
       const hours = parseHours(r);
       const muHours = parseMakeUpHours(r);
 
-      const notes = [
-        r.cr714_requestnotes,
+      // Rep's actual comments
+      const repNotes = (r.cr714_requestnotes || "").trim();
+      const notesParts = [
+        repNotes,
         r.cr714_lunch ? `Lunch: ${r.cr714_lunch}` : null,
         r.cr714_wfnotes ? `WF: ${r.cr714_wfnotes}` : null
-      ].filter(Boolean).join(" | ");
+      ].filter(Boolean);
+      const fullNotes = notesParts.join(" | ");
 
       const baseRid = r.cr714_autoid || r.cr714_timeoff_2id || uid("r");
       const dvId = r.cr714_timeoff_2id || "";
@@ -404,7 +454,7 @@ async function pullFromDataverse(silent = false) {
           empId: matchedEmp.id,
           type: mappedType,
           hours,
-          notes: normalizeTimeRange(notes),
+          notes: fullNotes,
           fmla: false,
           voicemail: false,
           occurrence: parseInt(r.cr714_occurrence, 10) || 0,
@@ -414,6 +464,12 @@ async function pullFromDataverse(silent = false) {
       });
 
       if (r.cr714_makeuptime || (r.cr714_leavetype && String(r.cr714_leavetype).toLowerCase().includes("make up"))) {
+        const scheduleFormatted = cleanMakeUpString(r.cr714_makeuptime);
+        const combinedMuNotes = [
+          scheduleFormatted ? `Schedule: ${scheduleFormatted}` : null,
+          repNotes ? `Rep Notes: ${repNotes}` : null
+        ].filter(Boolean).join(" \n");
+
         newMakeups.push({
           mid: baseRid,
           dvId: dvId,
@@ -425,7 +481,7 @@ async function pullFromDataverse(silent = false) {
           status: r.cr714_completed ? "Completed" : "Pending",
           oss: true,
           completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
-          notes: normalizeTimeRange(r.cr714_makeuptime || notes)
+          notes: combinedMuNotes || fullNotes
         });
       }
     });
