@@ -1438,15 +1438,100 @@ if (["Completed", "Sent Back", "Escalated - Completed"].includes(t.status) && t.
                     
                     try {
                         const dToken = await getToken(ENV_D365);
-                        const parties = []; if(currentUser.id) parties.push({ "participationtypemask": 1, "partyid_systemuser@odata.bind": `/systemusers(${currentUser.id})` });
-                        parse(toField).forEach(p => parties.push({ "participationtypemask": 2, "addressused": p.emailAddress.address }));
-                        const logPayload = { subject: document.getElementById('m-subject').value, description: finalEmailHtml, directioncode: true, email_activity_parties: parties };
-                        const accRes = await fetch(`${D365_API}/accounts?$filter=accountnumber eq '${String(t.account).replace(/'/g, "''")}'&$select=accountid`, { headers: { 'Authorization': `Bearer ${dToken}` } });
+                        const parties = [];
+
+                        if (currentUser.id) {
+                            parties.push({
+                                "participationtypemask": 1,
+                                "partyid_systemuser@odata.bind": `/systemusers(${currentUser.id})`
+                            });
+                        }
+
+                        parse(toField).forEach(p => parties.push({
+                            "participationtypemask": 2,
+                            "addressused": p.emailAddress.address
+                        }));
+
+                        parse(document.getElementById('m-cc-address').value).forEach(p => parties.push({
+                            "participationtypemask": 3,
+                            "addressused": p.emailAddress.address
+                        }));
+
+                        const logPayload = {
+                            subject: document.getElementById('m-subject').value,
+                            description: finalEmailHtml,
+                            directioncode: true,
+                            email_activity_parties: parties
+                        };
+
+                        const escapedAccount = String(t.account).replace(/'/g, "''");
+                        const accRes = await fetch(
+                            `${D365_API}/accounts?$filter=accountnumber eq '${escapedAccount}'&$select=accountid`,
+                            {
+                                headers: {
+                                    'Authorization': `Bearer ${dToken}`,
+                                    'Accept': 'application/json'
+                                }
+                            }
+                        );
+
+                        if (!accRes.ok) {
+                            throw new Error(`D365 account lookup failed: ${accRes.status} ${await accRes.text()}`);
+                        }
+
                         const accData = await accRes.json();
-                        if(accData.value?.length > 0) logPayload[`regardingobjectid_account@odata.bind`] = `/accounts(${accData.value[0].accountid})`;
-                        await fetch(`${D365_API}/emails`, { method: 'POST', headers: { 'Authorization': `Bearer ${dToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(logPayload) });
-                        showToast("Logged to D365!");
-                    } catch(e) {}
+                        if (accData.value?.length > 0) {
+                            logPayload["regardingobjectid_account@odata.bind"] = `/accounts(${accData.value[0].accountid})`;
+                        }
+
+                        const createEmailResponse = await fetch(`${D365_API}/emails`, {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${dToken}`,
+                                'Content-Type': 'application/json',
+                                'Accept': 'application/json',
+                                'Prefer': 'return=representation'
+                            },
+                            body: JSON.stringify(logPayload)
+                        });
+
+                        if (!createEmailResponse.ok) {
+                            throw new Error(`D365 email creation failed: ${createEmailResponse.status} ${await createEmailResponse.text()}`);
+                        }
+
+                        const createdEmail = await createEmailResponse.json();
+                        const emailActivityId = createdEmail.activityid;
+                        if (!emailActivityId) {
+                            throw new Error("D365 did not return the created email activity ID.");
+                        }
+
+                        // Graph already delivered the message. Mark the D365 activity as sent
+                        // without issuing a second delivery.
+                        const markSentResponse = await fetch(
+                            `${D365_API}/emails(${emailActivityId})/Microsoft.Dynamics.CRM.SendEmail`,
+                            {
+                                method: 'POST',
+                                headers: {
+                                    'Authorization': `Bearer ${dToken}`,
+                                    'Content-Type': 'application/json',
+                                    'Accept': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    IssueSend: false,
+                                    TrackingToken: ""
+                                })
+                            }
+                        );
+
+                        if (!markSentResponse.ok) {
+                            throw new Error(`D365 email mark-as-sent failed: ${markSentResponse.status} ${await markSentResponse.text()}`);
+                        }
+
+                        showToast("Email sent and logged to D365!");
+                    } catch(e) {
+                        console.error("D365 email logging error:", e);
+                        showToast("Email was sent, but the D365 activity could not be completed.", "error");
+                    }
                     setTimeout(() => { closeDraftModal(); btn.innerHTML = `<i class="fas fa-paper-plane"></i> Send Email & Log to D365`; btn.disabled = false; fetchData(true); }, 1000);
                 }
             } catch (e) { 
