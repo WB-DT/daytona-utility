@@ -269,12 +269,14 @@ function getRelevantMakeUpNotes(notes, currentDate) {
   if (!notes || !currentDate) return notes;
   const lines = notes.split('\n');
   const [cY, cM, cD] = currentDate.split('-');
-  const formattedDateTarget = `${cM}/${cD}/${cY}`; // matches MM/DD/YYYY format from form
+  const targetUS = `${cM}/${cD}/${cY}`; // e.g. "09/22/2026"
 
   const filteredLines = lines.filter(line => {
-    // If it's a schedule line, only keep it if it matches the current calendar date
-    if (line.includes("Schedule:") || /\d{2}\/\d{2}\/\d{4}/.test(line)) {
-      return line.includes(formattedDateTarget);
+    // Check if line contains a date pattern like MM/DD/YYYY
+    const dateMatch = line.match(/(\d{2}\/\d{2}\/\d{4})/);
+    if (dateMatch) {
+      // Keep the line ONLY if it matches the current calendar date being viewed
+      return line.includes(targetUS);
     }
     // Keep general metadata like Rep Notes, Total Hours, etc.
     return true;
@@ -1422,20 +1424,69 @@ function renderMakeup(){
     <h2>${fmt(f)}${f!==t?" – "+fmt(t):""}</h2>
   </div>`;
 
-  if(UI.preset==="day"||UI.preset==="week"||UI.preset==="adjusted"&&addDays(f,10)>t){
-    let days=[]; for(let d=f; d<=t; d=addDays(d,1)) days.push(d);
-    return head + `<div class="cal-list">${days.map(d=>{
-      const dayMus = byDate[d] || [];
-      return `<div class="day-block card">
-        <div class="row">
-          <b>${fmtShort(d)}</b>
-          <span class="small muted">${dayMus.length} make-up shift${dayMus.length===1?"":"s"}</span>
-          <button class="btn ghost sm right" data-mu-add-day="${esc(d)}">+ Add</button>
-        </div>
-        ${dayMus.length ? `<div class="tbl-wrap mt"><table><tbody>${dayMus.map(muRow).join("")}</tbody></table></div>` : `<div class="small muted mt">No make-up shifts scheduled.</div>`}
-      </div>`;
-    }).join("")}</div>`;
+  if(UI.preset==="week" || (UI.preset==="adjusted" && addDays(f,10)>t && addDays(f,1)<=t)){
+    let days=[]; 
+    for(let i=0; i<7; i++) days.push(addDays(f, i));
+
+    if (!UI.selectedMuWeekDay || !days.includes(UI.selectedMuWeekDay)) {
+      UI.selectedMuWeekDay = days.includes(today()) ? today() : days[0];
+    }
+
+    const dows=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+    const selDay = UI.selectedMuWeekDay;
+    const dayMus = byDate[selDay] || [];
+
+    const weekGridHtml = `<div class="cal-grid mt" style="margin-bottom: 20px;">
+      ${days.map(ds => {
+        const dObj = parseISO(ds);
+        const dowName = dows[dObj.getDay()];
+        const dMus = byDate[ds]||[];
+        const isSelected = ds === selDay;
+
+        return `<div class="cal-cell ${isSelected ? "today" : ""}" data-select-mu-day="${ds}" style="min-height: 80px; cursor: pointer; ${isSelected ? 'border-width: 2px; border-color: var(--brand); background: var(--soft);' : ''}">
+          <div class="row"><div class="small muted" style="text-transform: uppercase;">${dowName}</div><div class="d">${dObj.getDate()}</div></div>
+          <div class="cal-mini" style="flex-direction:column; gap:2px;">
+            ${dMus.slice(0,2).map(m=>{
+              const e = emp(m.empId) || {name: m.empId};
+              const firstName = esc(e.name.split(' ')[0]);
+              const timeStr = formatChipTime(m.notes) || hoursToHHMM(m.hoursOwed);
+              return `<div class="mu-chip ${esc(m.status)}" title="${esc(e.name)}: ${timeStr}" style="font-size:9px; padding:1px 4px;">${firstName}</div>`;
+            }).join("")}
+            ${dMus.length > 2 ? `<div class="small muted" style="font-size:9px;">+${dMus.length - 2} more</div>` : ""}
+          </div>
+        </div>`;
+      }).join("")}
+    </div>`;
+
+    const selectedDateObj = parseISO(selDay);
+    const formattedSelectedTitle = selectedDateObj.toLocaleDateString(undefined, {weekday:"long", month:"short", day:"numeric", year:"numeric"});
+
+    const daySectionHtml = `<div class="day-block card">
+      <div class="row">
+        <b>${formattedSelectedTitle}</b>
+        <span class="small muted">${dayMus.length} make-up shift${dayMus.length===1?"":"s"}</span>
+        <button class="btn ghost sm right" data-mu-add-day="${selDay}">+ Add</button>
+      </div>
+      ${dayMus.length ? `<div class="mt" style="display:flex; flex-direction:column; gap:10px;">${dayMus.map(muRow).join("")}</div>` : `<div class="small muted mt">No make-up shifts scheduled for this day.</div>`}
+    </div>`;
+
+    return head + weekGridHtml + daySectionHtml;
   }
+
+  // Fallback for month/other views
+  let days=[]; for(let d=f; d<=t; d=addDays(d,1)) days.push(d);
+  return head + `<div class="cal-list">${days.map(d=>{
+    const dayMus = byDate[d] || [];
+    return `<div class="day-block card">
+      <div class="row">
+        <b>${fmtShort(d)}</b>
+        <span class="small muted">${dayMus.length} make-up shift${dayMus.length===1?"":"s"}</span>
+        <button class="btn ghost sm right" data-mu-add-day="${esc(d)}">+ Add</button>
+      </div>
+      ${dayMus.length ? `<div class="mt" style="display:flex; flex-direction:column; gap:10px;">${dayMus.map(muRow).join("")}</div>` : `<div class="small muted mt">No make-up shifts scheduled.</div>`}
+    </div>`;
+  }).join("")}</div>`;
+}
 
   const months=[]; let d=parseISO(f); d.setDate(1);
   while(isoDate(d)<=t){ months.push(new Date(d)); d.setMonth(d.getMonth()+1); }
@@ -1807,9 +1858,9 @@ function bindView(){
   v.querySelectorAll(".cal-cell[data-day]").forEach(c=>c.onclick=()=>dayModal(c.dataset.day));
   
   // Weekly calendar day selection handler
-  v.querySelectorAll(".cal-cell[data-select-day]").forEach(c=>{
+  v.querySelectorAll(".cal-cell[data-select-mu-day]").forEach(c=>{
     c.onclick = () => {
-      UI.selectedWeekDay = c.dataset.selectDay;
+      UI.selectedMuWeekDay = c.dataset.selectMuDay;
       render();
     };
   });
