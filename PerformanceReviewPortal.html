@@ -10332,6 +10332,21 @@ function buildSummaryPreview() { queueMicrotask(()=>removeDuplicateKpiSections(d
     btnSubmit.innerHTML = '<div class="spinner" style="border-top-color:#fff; border-right-color:#fff; margin-right:6px;"></div> Submitting...';
 
     try {
+        /* v92: Build and download the exact DOCX first. The same Blob is then
+           reused for Dataverse storage and the completion email attachment. */
+        btnSubmit.innerHTML = '<div class="spinner" style="border-top-color:#fff; border-right-color:#fff; margin-right:6px;"></div> Building final Word document...';
+        if (!(window.__reviewDocxBlob instanceof Blob) || !window.__reviewDocxBlob.size) {
+          if (typeof window.exportCompletedReviewDocx !== 'function') {
+            throw new Error('The Word document builder is not available. Refresh the portal and try again.');
+          }
+          await Promise.resolve(window.exportCompletedReviewDocx());
+        }
+        if (!(window.__reviewDocxBlob instanceof Blob) || !window.__reviewDocxBlob.size) {
+          throw new Error('The final Word document could not be created. No review was submitted.');
+        }
+        window.__completionDocxBlobV92 = window.__reviewDocxBlob;
+        window.__completionDocxAttachmentV92 = window.__reviewDocxAttachment || null;
+
         const withTimeout = (promise, ms, label) => Promise.race([
           Promise.resolve(promise),
           new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)} seconds.`)), ms))
@@ -10507,7 +10522,7 @@ function buildSummaryPreview() { queueMicrotask(()=>removeDuplicateKpiSections(d
         throw error;
     } finally {
         btnSubmit.disabled = false;
-        btnSubmit.innerHTML = 'Submit to Dataverse';
+        btnSubmit.innerHTML = '<i class="fas fa-check-circle" aria-hidden="true"></i> Complete &amp; Submit Review';
     }
   }
 
@@ -13495,18 +13510,9 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
         focusProblemField(bad, 'Submission is not ready. Complete the highlighted field first.');
         return;
       }
-      if (state.submitting) { event.preventDefault(); event.stopImmediatePropagation(); return; }
-      state.submitting = true;
-      button.classList.add('behavior-busy');
-      button.disabled = true;
-      button.setAttribute('aria-disabled', 'true');
-      window.setTimeout(() => {
-        if (!$('success-screen') || getComputedStyle($('success-screen')).display === 'none') {
-          state.submitting = false;
-          button.classList.remove('behavior-busy');
-          syncSubmitSafety();
-        }
-      }, 30000);
+      /* v92: The completion controller owns the busy state after the click
+         reaches its handler. Disabling here during capture prevented the
+         Complete & Submit handler from receiving the click. */
     }
 
     if (/comparison|history|preview/i.test(`${button.id} ${button.getAttribute('aria-controls') || ''}`)) {
@@ -22091,4 +22097,65 @@ document.addEventListener('input',function(e){if(source(e.target))schedule('inpu
 
 </script>
 
+
+<!-- v90: verify generated DOCX KPI values against live edited rows -->
+<script id="v90-docx-kpi-value-verification">
+(function(){
+ 'use strict';
+ if(window.__docxKpiVerificationV90)return;window.__docxKpiVerificationV90=true;
+ var lastEditAt=0,lastEditReason='',wrapping=false;
+ function clean(v){return String(v==null?'':v).replace(/\s+/g,' ').trim()}
+ function rating(v){var t=clean(v).toUpperCase();if(/(^|\b)(EE|EXCEEDS?|GREEN|GOOD|UP)(\b|$)|↑|▲/.test(t))return'EE';if(/(^|\b)(ME|MEETS?|YELLOW|WATCH|FLAT)(\b|$)|→|▶/.test(t))return'ME';if(/(^|\b)(BE|BELOW|RED|BAD|DOWN)(\b|$)|↓|▼/.test(t))return'BE';return''}
+ function read(n){if(!n)return'';return clean(n.tagName==='SELECT'?n.value:('value'in n?n.value:n.textContent))}
+ function rows(){return Array.from(document.querySelectorAll('#page2-sbs-grid tbody>tr')).filter(function(r){return !r.hidden&&r.getAttribute('aria-hidden')!=='true'&&!r.dataset.removedBy&&!r.classList.contains('v59-duplicate-row')}).map(function(r,i){var label=read(r.querySelector('.sbs-kpi-label-input,.sbs-kpi-label,[data-kpi-label]'))||('KPI '+(i+1));var current=read(r.querySelector('.sbs-current-value,input[data-comparison-role="current"]'))||'—';var currentRating=rating(read(r.querySelector('.sbs-current-rating,select[data-comparison-role="current"]')));var previous=read(r.querySelector('.sbs-parsed-value-input,.sbs-parsed-value,.sbs-previous-value,[data-comparison-role="prior"]'))||'—';var previousRating=rating(read(r.querySelector('.sbs-parsed-rating,select[data-comparison-role="prior"]')));return{id:r.dataset.kpiSyncId||r.dataset.columnKey||String(i),label:label,current:current,currentRating:currentRating,previous:previous,previousRating:previousRating}})}
+ function normalizeText(v){return clean(v).toLowerCase().replace(/[↑▲]/g,' ee ').replace(/[→▶]/g,' me ').replace(/[↓▼]/g,' be ').replace(/[^a-z0-9:.%/#()\-]+/g,' ').replace(/\s+/g,' ').trim()}
+ function decodeBase64(s){var raw=atob(s),out=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)out[i]=raw.charCodeAt(i);return out.buffer}
+ function blobFromState(){if(window.__reviewDocxBlob instanceof Blob)return window.__reviewDocxBlob;var a=window.__reviewDocxAttachment||{};if(a.contentBytes)return new Blob([decodeBase64(a.contentBytes)],{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});return null}
+ async function xmlText(blob){if(!blob)throw new Error('No generated DOCX blob is available.');if(typeof window.JSZip==='undefined'){if(typeof window.ensureDocumentLibraries==='function')await window.ensureDocumentLibraries('docx');}if(typeof window.JSZip==='undefined')throw new Error('JSZip is unavailable for DOCX verification.');var zip=await window.JSZip.loadAsync(await blob.arrayBuffer());var names=Object.keys(zip.files).filter(function(n){return /^word\/(document|header\d*|footer\d*|footnotes|endnotes)\.xml$/i.test(n)});var xml=await Promise.all(names.map(function(n){return zip.files[n].async('string')}));var joined=xml.join(' ');var doc=new DOMParser().parseFromString(joined,'application/xml');var parsed=Array.from(doc.getElementsByTagNameNS('*','t')).map(function(n){return n.textContent}).join(' ');if(!parsed)parsed=joined.replace(/<[^>]+>/g,' ');return normalizeText(parsed)}
+ async function verify(blob,options){options=options||{};if(typeof window.syncPage2Page3KpisV89==='function')window.syncPage2Page3KpisV89();if(typeof window.updateAuthoritativeKpiState==='function')window.updateAuthoritativeKpiState('docx-value-verification');var source=rows(),text=await xmlText(blob||blobFromState()),checks=source.map(function(r){var expected=[r.label,r.previous,r.previousRating,r.current,r.currentRating].filter(Boolean);var missing=expected.filter(function(v){return !text.includes(normalizeText(v))});return Object.assign({},r,{expected:expected,missing:missing,pass:missing.length===0})});var report={version:'v90',checkedAt:new Date().toISOString(),editAt:lastEditAt?new Date(lastEditAt).toISOString():'',editReason:lastEditReason,rowCount:source.length,pass:checks.length>0&&checks.every(function(x){return x.pass}),checks:checks,missing:checks.flatMap(function(x){return x.missing.map(function(v){return{row:x.label,value:v}})}),docxBytes:(blob||blobFromState())?.size||0};window.__latestDocxKpiVerificationV90=report;window.dispatchEvent(new CustomEvent('review-docx-kpi-verified',{detail:report}));if(options.throwOnFailure&& !report.pass)throw new Error('DOCX KPI verification failed: '+report.missing.map(function(x){return x.row+' = '+x.value}).join('; '));return report}
+ function mark(reason){lastEditAt=Date.now();lastEditReason=reason;window.__latestDocxKpiVerificationV90=null;if(window.__reviewDocxBlob||window.__reviewDocxAttachment){window.__reviewDocxBlob=null;window.__reviewDocxAttachment=null;window.__reviewDocxName='';window.__page3Downloaded=false;try{sessionStorage.removeItem('page3-review-docx-downloaded')}catch(_e){}}}
+ document.addEventListener('input',function(e){if(e.target&&e.target.closest&&e.target.closest('#page2-sbs-grid,#unified-kpi-table'))mark('kpi-input')},true);
+ document.addEventListener('change',function(e){if(e.target&&e.target.closest&&e.target.closest('#page2-sbs-grid,#unified-kpi-table'))mark('kpi-change')},true);
+ function wrap(){if(wrapping)return;var original=window.exportCompletedReviewDocx;if(typeof original!=='function'||original.__v90Wrapped)return;wrapping=true;async function wrapped(){if(typeof window.syncPage2Page3KpisV89==='function')window.syncPage2Page3KpisV89();if(typeof window.updateAuthoritativeKpiState==='function')window.updateAuthoritativeKpiState('before-docx-export-v90');var result=await original.apply(this,arguments);var blob=blobFromState();if(blob)await verify(blob,{throwOnFailure:true});return result}wrapped.__v90Wrapped=true;wrapped.__v90Original=original;window.exportCompletedReviewDocx=wrapped;wrapping=false}
+ window.verifyDocxKpiValuesAfterEditsV90=verify;window.getLatestDocxKpiVerificationV90=function(){return window.__latestDocxKpiVerificationV90||null};
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){wrap();setTimeout(wrap,500);setTimeout(wrap,1800)},{once:true});else{wrap();setTimeout(wrap,500);setTimeout(wrap,1800)}
+}());
+
+</script>
+
+<!-- v91: explicit KPI source ownership -->
+<script id="v91-kpi-source-ownership">
+(function(){
+ 'use strict';
+ if(window.__kpiSourceOwnershipV91)return;window.__kpiSourceOwnershipV91=true;
+ var busy=false,timer=0,observer=null;
+ function clean(v){return String(v==null?'':v).replace(/\s+/g,' ').trim()}
+ function key(v){return clean(v).normalize('NFKC').toLowerCase().replace(/[#№]/g,' number ').replace(/&/g,' and ').replace(/\b(last|previous|prior|current|this|most recent)\s+(month|review|period)\b/g,' ').replace(/\b(monthly|kpi|metric|measure)\b/g,' ').replace(/\bavg\b/g,' average ').replace(/\baux\b/g,' auxiliary ').replace(/[^a-z0-9%$]+/g,' ').replace(/\s+/g,' ').trim()}
+ function read(n){return !n?'':clean(n.tagName==='SELECT'?n.value:('value'in n?n.value:n.textContent))}
+ function rating(v){var t=clean(v).toUpperCase();if(/(^|\b)(EE|EXCEEDS?|EXCEEDING|GREEN|GOOD|UP)(\b|$)|↑|▲/.test(t))return'EE';if(/(^|\b)(ME|MEETS?|MEETING|YELLOW|WATCH|FLAT)(\b|$)|→|▶/.test(t))return'ME';if(/(^|\b)(BE|BELOW|RED|BAD|DOWN)(\b|$)|↓|▼/.test(t))return'BE';return''}
+ function setNode(n,v){if(!n)return false;var before=read(n),next=n.tagName==='SELECT'?rating(v):clean(v);if(n.tagName==='SELECT'){var o=Array.from(n.options||[]).find(function(x){return rating(x.value||x.textContent)===next});n.value=o?o.value:''}else if('value'in n)n.value=next;else n.textContent=next||'—';if(before!==read(n)){n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));return true}return false}
+ function parsedPairs(){var r=window.__lastCellParseResult||{};var source=(r.selectedThisMonthTable&&r.selectedThisMonthTable.pairs)||r.currentReviewPairs||r.cells||[];var map=new Map();source.forEach(function(p){var label=clean(p&&p.label),value=clean(p&&(p.value!=null?p.value:p.currentValue));if(label&&value&&!map.has(key(label)))map.set(key(label),{label:label,value:value,rating:rating(p.rating||p.status||p.parsedRating||'')})});return map}
+ function thisMonthRating(label){var wanted=key(label),answer='';document.querySelectorAll('#month-kpi-body .exact-kpi-row').forEach(function(row){var card=Array.from(row.querySelectorAll('.exact-kpi-card')).find(function(c){return c.dataset.currentMonth==='true'})||row.querySelector('.exact-kpi-card:last-child');if(!card)return;var name=read(card.querySelector('.exact-kpi-name-editor,.exact-kpi-name,[data-kpi-label]'));if(key(name)!==wanted)return;answer=rating(read(card.querySelector('.exact-kpi-rating,select[id$="-arrow"],select[id$="-rating"],select')))});return answer}
+ function updateHeaders(){var cells=document.querySelectorAll('#page2-sbs-grid thead th');if(cells.length>=5){cells[1].textContent='Parsed Value (This Month Form)';cells[2].textContent='Parsed Rating (This Month Form)';cells[3].textContent='Power BI Value';cells[4].textContent='Power BI Rating'}var source=document.getElementById('page2-sbs-source');if(source)source.dataset.sourceOwnership='parsed=this-month-form;comparison=power-bi'}
+ function apply(reason){clearTimeout(timer);if(busy)return null;var grid=document.getElementById('page2-sbs-grid');if(!grid)return null;busy=true;try{updateHeaders();var pairs=parsedPairs(),changes=0,missing=[];Array.from(grid.querySelectorAll('tbody>tr')).filter(function(row){return !row.hidden&&row.getAttribute('aria-hidden')!=='true'&&!row.dataset.removedBy}).forEach(function(row){var label=read(row.querySelector('.sbs-kpi-label-input,.sbs-kpi-label,[data-kpi-label]'));var pair=pairs.get(key(label));var parsedValue=row.querySelector('.sbs-parsed-value-input,.sbs-parsed-value,[data-source-role="parsed-value"]');var parsedRating=row.querySelector('.sbs-parsed-rating,select[data-source-role="parsed-rating"]');var pbiValue=row.querySelector('.sbs-current-value,input[data-comparison-role="current"]');var pbiRating=row.querySelector('.sbs-current-rating,select[data-comparison-role="current"]');if(parsedValue)parsedValue.dataset.kpiSource='previous-review-this-month-form';if(parsedRating)parsedRating.dataset.kpiSource='previous-review-this-month-form';if(pbiValue)pbiValue.dataset.kpiSource='power-bi-results';if(pbiRating)pbiRating.dataset.kpiSource='power-bi-results';if(pair){changes+=setNode(parsedValue,pair.value)?1:0;var rr=thisMonthRating(label)||pair.rating;if(rr)changes+=setNode(parsedRating,rr)?1:0}else missing.push(label)});if(typeof window.updateAuthoritativeKpiState==='function')window.updateAuthoritativeKpiState('v91-source-ownership-'+reason);if(typeof window.syncPage2Page3KpisV89==='function')window.syncPage2Page3KpisV89();var audit={version:'v91',reason:reason,checkedAt:new Date().toISOString(),parsedSource:'Previous review form: This Month section',comparisonSource:'Power BI results',parsedPairCount:pairs.size,changedFields:changes,unmatchedRows:missing};window.__kpiSourceOwnershipAuditV91=audit;return audit}finally{busy=false}}
+ function schedule(reason,delay){clearTimeout(timer);timer=setTimeout(function(){apply(reason)},delay==null?40:delay)}
+ ['previous-review-pdf-this-month','previous-review-parsed','previous-review-file-processed','kpi-flow-data-ready'].forEach(function(name){window.addEventListener(name,function(){schedule(name,60)})});
+ document.addEventListener('click',function(e){if(e.target.closest&&e.target.closest('#sbs-refresh,#btn-next-panel2,[data-panel="3"]'))schedule('navigation-or-refresh',80)},true);
+ function start(){updateHeaders();apply('startup');var root=document.getElementById('panel-2')||document.body;observer=new MutationObserver(function(ms){if(busy)return;var relevant=ms.some(function(m){var t=m.target&&m.target.nodeType===1?m.target:m.target&&m.target.parentElement;return t&&t.closest&&t.closest('#page2-sbs-grid,#month-kpi-body')});if(relevant)schedule('structure',70)});observer.observe(root,{childList:true,subtree:true});setTimeout(function(){apply('settled')},350)}
+ window.applyKpiSourceOwnershipV91=function(){return apply('manual')};window.getKpiSourceOwnershipAuditV91=function(){return window.__kpiSourceOwnershipAuditV91||apply('audit')};
+ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();
+}());
+
+</script>
+
+<script id="v92-completion-process-marker">
+(function(){
+  'use strict';
+  document.documentElement.dataset.completionProcess='v92-click-reaches-handler-docx-first';
+  window.getCompletionProcessStatusV92=function(){
+    var button=document.getElementById('btn-submit-final');
+    return {version:'v92',buttonPresent:!!button,acknowledged:!!document.getElementById('ack-checkbox')?.checked,submitAvailable:typeof window.submitReview==='function',docxBuilderAvailable:typeof window.exportCompletedReviewDocx==='function',docxReady:window.__reviewDocxBlob instanceof Blob&&window.__reviewDocxBlob.size>0,busy:button?.dataset.v46Busy==='true'||button?.disabled===true};
+  };
+}());
+</script>
 </body></html>
