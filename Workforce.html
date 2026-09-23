@@ -536,6 +536,10 @@ async function pullFromDataverse(silent = false) {
       return record;
     });
 
+    // Snapshot any currently cancelled records so a sync/refresh doesn't lose them
+    const cancelledDvIds = new Set((S.records || []).filter(r => r.cancelled).map(r => r.dvId).filter(Boolean));
+    const cancelledRids = new Set((S.records || []).filter(r => r.cancelled).map(r => r.rid));
+
     const newRecords = [];
     const newMakeups = [];
 
@@ -672,6 +676,12 @@ async function pullFromDataverse(silent = false) {
       }
     });
 
+    newRecords.forEach(r => {
+      if (cancelledDvIds.has(r.dvId) || cancelledRids.has(r.rid)) {
+        r.cancelled = true;
+      }
+    });
+
     S.employees.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     S.records = newRecords;
     S.makeups = newMakeups;
@@ -703,6 +713,28 @@ async function pullFromDataverse(silent = false) {
   closeModal();
   render();
   toast("Request cancelled");
+}
+
+  async function toggleCancelRecord(rid) {
+  const target = S.records.find(r => r.rid === rid);
+  if (!target) return;
+
+  const newCancelledState = !target.cancelled;
+  target.cancelled = newCancelledState;
+
+  if (target.dvId) {
+    S.records.filter(r => r.dvId === target.dvId).forEach(r => r.cancelled = newCancelledState);
+    S.makeups.filter(m => m.dvId === target.dvId).forEach(m => m.status = newCancelledState ? "Cancelled" : "Pending");
+  } else {
+    const basePrefix = rid.includes('-') ? rid.split('-')[0] : rid;
+    S.records.filter(r => r.rid === rid || r.rid.startsWith(basePrefix + '-')).forEach(r => r.cancelled = newCancelledState);
+    S.makeups.filter(m => m.mid === basePrefix || m.rid.startsWith(basePrefix)).forEach(m => m.status = newCancelledState ? "Cancelled" : "Pending");
+  }
+
+  save();
+  closeModal();
+  render();
+  toast(newCancelledState ? "Request cancelled" : "Request restored");
 }
   
 async function deleteRecordFromDataverse(rid) {
@@ -1615,9 +1647,11 @@ function recordModal(rid,presetDate){
       <button class="btn" id="mSave">Save</button></div>`);
 
   if (rid) {
-    $("#mDel").textContent = "Cancel request";
+    const targetRec = S.records.find(x => x.rid === rid);
+    const isCancelled = targetRec?.cancelled;
+    $("#mDel").textContent = isCancelled ? "Restore request" : "Cancel request";
     $("#mDel").className = "btn ghost";
-    $("#mDel").onclick = () => cancelRecordRequest(rid);
+    $("#mDel").onclick = () => toggleCancelRecord(rid);
   }
 
   $("#occMinus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = Math.max(0, parseInt(inp.value||0) - 1); };
@@ -1713,18 +1747,19 @@ function makeupModal(mid,fromRec){
     </div>`);
 
   if(mid) {
-    $("#uDel").textContent = "Cancel request";
+    const isCancelled = m.status === "Cancelled";
+    $("#uDel").textContent = isCancelled ? "Restore request" : "Cancel request";
     $("#uDel").className = "btn ghost";
     $("#uDel").onclick = () => {
       const parentRecord = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId);
       if (parentRecord) {
-        cancelRecordRequest(parentRecord.rid);
+        toggleCancelRecord(parentRecord.rid);
       } else {
-        m.status = "Cancelled";
+        m.status = isCancelled ? "Pending" : "Cancelled";
         save();
         closeModal();
         render();
-        toast("Agreement cancelled");
+        toast(isCancelled ? "Agreement restored" : "Agreement cancelled");
       }
     };
   }
