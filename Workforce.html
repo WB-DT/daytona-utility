@@ -571,6 +571,8 @@ async function pullFromDataverse(silent = false) {
       const baseRid = r.cr714_autoid || r.cr714_timeoff_2id || uid("r");
       const dvId = r.cr714_timeoff_2id || "";
 
+      const isCancelled = r.cr714_cancelledrequest === 1 || r.cr714_cancelledrequest === true || String(r.cr714_cancelledrequest) === "true";
+
       dates.forEach((d, idx) => {
         const recordHours = (mappedType === "Make-Up") ? (muHours || parseMakeUpHours(r)) : hours;
         newRecords.push({
@@ -586,6 +588,7 @@ async function pullFromDataverse(silent = false) {
           voicemail: r.cr714_voicemail === 1 || r.cr714_voicemail === true || String(r.cr714_voicemail) === "true",
           occurrence: parseInt(r.cr714_occurrence, 10) || 0,
           waived: !!r.cr714_completed,
+          cancelled: isCancelled,
           source: "dataverse"
         });
       });
@@ -731,11 +734,20 @@ async function pullFromDataverse(silent = false) {
   if (target.dvId) {
     S.records.filter(r => r.dvId === target.dvId).forEach(r => r.cancelled = newCancelledState);
     S.makeups.filter(m => m.dvId === target.dvId).forEach(m => m.status = newCancelledState ? "Cancelled" : "Pending");
+    
+    // Sync change back to Dataverse
+    await patchDataverseRecord(target.dvId, { cr714_cancelledrequest: newCancelledState });
   } else {
     const basePrefix = rid.includes('-') ? rid.split('-')[0] : rid;
     S.records.filter(r => r.rid === rid || r.rid.startsWith(basePrefix + '-')).forEach(r => r.cancelled = newCancelledState);
     S.makeups.filter(m => m.mid === basePrefix || m.rid.startsWith(basePrefix)).forEach(m => m.status = newCancelledState ? "Cancelled" : "Pending");
   }
+
+  save();
+  closeModal();
+  render();
+  toast(newCancelledState ? "Request cancelled" : "Request restored");
+}
 
   save();
   closeModal();
@@ -801,6 +813,9 @@ async function patchDataverseRecord(dvId, fields) {
     }
     if (fields.cr714_occurrence !== undefined) {
       payload.cr714_occurrence = String(parseInt(fields.cr714_occurrence, 10) || 0);
+    }
+    if (fields.cr714_cancelledrequest !== undefined) {
+      payload.cr714_cancelledrequest = fields.cr714_cancelledrequest ? "true" : "false";
     }
 
     const res = await fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}(${dvId})`, {
