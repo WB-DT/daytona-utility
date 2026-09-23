@@ -920,15 +920,32 @@ function ossUsed(empId, asOf){
 function metrics(){
   const [f,t]=range(), emps=filteredEmployees(), recs=filteredRecords();
   const c = {}; TYPE_NAMES.forEach(n=>c[n]=0);
-  let occ=0; recs.forEach(r=>{ c[r.type]=(c[r.type]||0)+1; if(isOcc(r)) occ++; });
+  let occ=0; 
+  
+  recs.forEach(r=>{ 
+    c[r.type]=(c[r.type]||0)+1; 
+    if(isOcc(r)) occ++; 
+  });
+
+  // Calculate default Present count for days without explicit records
+  let days=[]; for(let d=f; d<=t && days.length<370; d=addDays(d,1)) days.push(d);
+  let totalPossibleWorkDays = days.length * emps.length;
+  let loggedNonPresent = recs.filter(r => r.type !== "Present").length;
+  let explicitPresent = recs.filter(r => r.type === "Present").length;
+  
+  // Default remaining unlogged days/reps as Present
+  c["Present"] = explicitPresent + Math.max(0, totalPossibleWorkDays - (explicitPresent + loggedNonPresent));
+
   const withRec = new Set(recs.map(r=>r.empId));
   const offenders = new Set(recs.filter(isOcc).map(r=>r.empId));
-  const perfect = emps.filter(e=>withRec.has(e.id) && !offenders.has(e.id));
+  const perfect = emps.filter(e=>!offenders.has(e.id));
   const empIds = new Set(emps.map(e=>e.id));
   const mus = (S.makeups||[]).filter(m=>empIds.has(m.empId) && m.dateMissed>=f && m.dateMissed<=t);
   const muDone = mus.filter(m=>m.status==="Completed").length;
-  const denom = c["Present"]+c["Absent"]+c["Tardy"]+c["Short Shift"]+c["PTO Unapproved"];
-  const rate = denom? Math.round(100*c["Present"]/denom) : null;
+  
+  const denom = c["Present"] + Object.keys(c).filter(k => k !== "Present" && k !== "Make up Time").reduce((acc, k) => acc + c[k], 0);
+  const rate = denom ? Math.round(100 * c["Present"] / denom) : null;
+  
   return {c, occ, perfect, rate, mus, muDone, muPending:mus.filter(m=>m.status==="Pending").length, emps, recs, from:f, to:t};
 }
 
@@ -1070,14 +1087,13 @@ function drawCharts(){
   const m=metrics(), days=[]; 
   for(let d=m.from; d<=m.to && days.length<31; d=addDays(d,1)) days.push(d);
 
-  // Helper to group daily totals for Present vs Total Absences/Leave
-  const byDayType = (isAbsence) => days.map(d => {
+  const byDayType = (isAbsence, targetDate) => {
     return m.recs.filter(r => {
-      if (r.date !== d) return false;
+      if (r.date !== targetDate) return false;
       const isAb = r.type !== "Present" && r.type !== "Make up Time";
       return isAbsence ? isAb : !isAb;
     }).length;
-  });
+  };
 
   const tr=$("#chTrend"); 
   if(tr) {
@@ -1088,13 +1104,13 @@ function drawCharts(){
         datasets: [
           {
             label: "Present",
-            data: byDayType(false),
+            data: days.map(d => byDayType(false, d)),
             backgroundColor: "#16a34a",
             borderRadius: 4
           },
           {
             label: "Absences / Leave",
-            data: byDayType(true),
+            data: days.map(d => byDayType(true, d)),
             backgroundColor: "#dc2626",
             borderRadius: 4
           }
@@ -1107,6 +1123,26 @@ function drawCharts(){
         scales: { 
           x: { stacked: true, grid: { display: false } },
           y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } } 
+        },
+        onClick: (event, elements) => {
+          if (elements.length > 0) {
+            const index = elements[0].index;
+            const clickedDate = days[index];
+            const datasetIndex = elements[0].datasetIndex;
+            const isAbsenceClick = datasetIndex === 1;
+
+            const dayRecs = m.recs.filter(r => {
+              if (r.date !== clickedDate) return false;
+              const isAb = r.type !== "Present" && r.type !== "Make up Time";
+              return isAbsenceClick ? isAb : !isAb;
+            });
+
+            let rows = dayRecs.length ? dayRecs.map(r => rowRecord(r)).join("") : `<tr class="norow"><td colspan="6" class="empty">No records for this category on ${fmt(clickedDate)}.</td></tr>`;
+            openModal(`<h2>${isAbsenceClick ? "Absences / Leave" : "Present"} — ${fmt(clickedDate)}</h2>
+              <div class="tbl-wrap"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type</th><th style="text-align:left">Hours</th><th style="text-align:left">Notes</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+              <div class="mfoot mt"><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
+            bindRecordButtons($("#modalHost"));
+          }
         }
       }
     }));
@@ -1142,7 +1178,14 @@ function drawCharts(){
       options: { 
         responsive: true, 
         maintainAspectRatio: false, 
-        plugins: { legend: { position: "bottom" } } 
+        plugins: { legend: { position: "bottom" } },
+        onClick: (event, elements) => {
+          if (elements.length > 0) {
+            const index = elements[0].index;
+            const clickedType = names[index];
+            kpiModal(clickedType, `Records: ${clickedType}`);
+          }
+        }
       }
     })); 
   }
