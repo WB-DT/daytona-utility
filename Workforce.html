@@ -833,17 +833,74 @@ function renderCalendar(){
     <button class="btn sm right" id="calAdd">+ Add record</button>
   </div>`;
 
-  if(UI.preset==="day"||UI.preset==="week"||UI.preset==="adjusted"&&addDays(f,10)>t){
-    let days=[]; for(let d=f; d<=t; d=addDays(d,1)) days.push(d);
-    return head+`<div class="cal-list">${days.map(d=>{
-      const allRs = byDate[d]||[];
-      const presentCount = allRs.filter(r => r.type === "Present").length;
-      const rs=allRs.filter(r => r.type !== "Present").sort((a,b)=>(a.type||"").localeCompare(b.type||""));
-      
-      return `<div class="day-block card"><div class="row"><b>${fmtShort(d)}</b><span class="small muted">${presentCount}/${totalEmps} present · ${rs.length} occurrence record${rs.length===1?"":"s"}</span>
-        <button class="btn ghost sm right" data-add-day="${d}">+ Add</button></div>
-        ${rs.length? `<div class="card mt" style="padding:4px 0;">${rs.map(r=>rowRecord(r,true)).join("")}</div>`:`<div class="small muted mt">No records.</div>`}
-      </div>`;}).join("")}</div>`;
+  if(UI.preset==="week" || (UI.preset==="adjusted" && addDays(f,10)>t && addDays(f,1)<=t)){
+    // Build array of the 7 days in the current week
+    let days=[]; 
+    let startD = UI.preset==="week" ? parseISO(f) : parseISO(UI.anchor || today());
+    if (UI.preset==="week") {
+      for(let i=0; i<7; i++) days.push(addDays(f, i));
+    } else {
+      for(let i=0; i<7; i++) days.push(addDays(f, i));
+    }
+
+    // Ensure selected day exists in the current week, otherwise default to the first day of the week or today
+    if (!UI.selectedWeekDay || !days.includes(UI.selectedWeekDay)) {
+      UI.selectedWeekDay = days.includes(today()) ? today() : days[0];
+    }
+
+    const dows=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+    const selDay = UI.selectedWeekDay;
+    const allRs = byDate[selDay]||[];
+    const presentCount = allRs.filter(r => r.type === "Present").length;
+    const occurrenceRs = allRs.filter(r => r.type !== "Present").sort((a,b)=>(a.type||"").localeCompare(b.type||""));
+
+    const weekGridHtml = `<div class="cal-grid mt" style="margin-bottom: 20px;">
+      ${days.map(ds => {
+        const dObj = parseISO(ds);
+        const dowName = dows[dObj.getDay()];
+        const rs = byDate[ds]||[];
+        const isSelected = ds === selDay;
+        const isToday = ds === today();
+        const agg={}; 
+        rs.forEach(r=>{ 
+          const ty = r.type || "Absent";
+          if(ty !== "Present") agg[ty]=(agg[ty]||0)+1; 
+        });
+
+        return `<div class="cal-cell ${isSelected ? "today" : ""}" data-select-day="${ds}" style="min-height: 80px; cursor: pointer; ${isSelected ? 'border-width: 2px; border-color: var(--brand); background: var(--soft);' : ''}">
+          <div class="row"><div class="small muted" style="text-transform: uppercase;">${dowName}</div><div class="d">${dObj.getDate()}</div></div>
+          <div class="cal-mini">${Object.entries(agg).map(([ty,n])=> {
+            const tObj = TYPES[ty] || { color: "var(--muted)", abbr: ty.slice(0,2).toUpperCase() };
+            return `<span class="dot" title="${esc(ty)}:${n}" style="background:${tObj.color}">${n>1?n:tObj.abbr}</span>`;
+          }).join("")}</div>
+        </div>`;
+      }).join("")}
+    </div>`;
+
+    const selectedDateObj = parseISO(selDay);
+    const formattedSelectedTitle = selectedDateObj.toLocaleDateString(undefined, {weekday:"long", month:"short", day:"numeric", year:"numeric"});
+
+    const daySectionHtml = `<div class="day-block card">
+      <div class="row">
+        <b>${formattedSelectedTitle}</b>
+        <span class="small muted">${presentCount}/${totalEmps} present · ${occurrenceRs.length} record${occurrenceRs.length===1?"":"s"}</span>
+        <button class="btn ghost sm right" data-add-day="${selDay}">+ Add</button>
+      </div>
+      ${occurrenceRs.length ? `<div class="mt" style="display:flex; flex-direction:column; gap:8px;">${occurrenceRs.map(r => rowRecord(r, true)).join("")}</div>` : `<div class="small muted mt">No exception records for this day.</div>`}
+    </div>`;
+
+    return head + weekGridHtml + daySectionHtml;
+  }
+
+  if(UI.preset==="day"){
+    let d = f;
+    const allRs = byDate[d]||[];
+    const presentCount = allRs.filter(r => r.type === "Present").length;
+    const rs=allRs.filter(r => r.type !== "Present").sort((a,b)=>(a.type||"").localeCompare(b.type||""));
+    return head+`<div class="day-block card"><div class="row"><b>${fmtShort(d)}</b><span class="small muted">${presentCount}/${totalEmps} present · ${rs.length} record${rs.length===1?"":"s"}</span>
+      <button class="btn ghost sm right" data-add-day="${d}">+ Add</button></div>
+      ${rs.length? `<div class="mt" style="display:flex; flex-direction:column; gap:8px;">${rs.map(r=>rowRecord(r,true)).join("")}</div>`:`<div class="small muted mt">No records.</div>`}
+    </div>`;
   }
 
   const months=[]; let d=parseISO(f); d.setDate(1);
@@ -1717,6 +1774,15 @@ function bindView(){
   const v=$("#view");
   v.querySelectorAll("tr[data-emp]").forEach(tr=>tr.onclick=()=>empModal(tr.dataset.emp));
   v.querySelectorAll(".cal-cell[data-day]").forEach(c=>c.onclick=()=>dayModal(c.dataset.day));
+  
+  // Weekly calendar day selection handler
+  v.querySelectorAll(".cal-cell[data-select-day]").forEach(c=>{
+    c.onclick = () => {
+      UI.selectedWeekDay = c.dataset.selectDay;
+      render();
+    };
+  });
+
   v.querySelectorAll("[data-add-day]").forEach(b=>b.onclick=e=>{e.stopPropagation();recordModal(null,b.dataset.addDay);});
   
   v.querySelectorAll(".cal-cell[data-mu-day]").forEach(c=>{
@@ -1749,8 +1815,8 @@ function bindView(){
     const k=th.dataset.sort; UI.sortDir=UI.sortKey===k?-UI.sortDir:-1; UI.sortKey=k; render();});
   const on=(id,ev,fn)=>{ const el=$(id); if(el) el[ev]=fn; };
   on("#calPrev","onclick",()=>calShift(-1)); on("#calNext","onclick",()=>calShift(1));
-  on("#calToday","onclick",()=>{UI.anchor=today();render();});
-  on("#calAdd","onclick",()=>recordModal(null,UI.anchor));
+  on("#calToday","onclick",()=>{UI.anchor=today(); UI.selectedWeekDay=today(); render();});
+  on("#calAdd","onclick",()=>recordModal(null, UI.selectedWeekDay || UI.anchor));
   on("#recNew","onclick",()=>recordModal());
   on("#muNew","onclick",()=>makeupModal());
   on("#muFilter","onchange",()=>{UI.muFilter=$("#muFilter").value;render();});
