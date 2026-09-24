@@ -498,7 +498,7 @@ function dateOnly(v,anchor){
   const m=t.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);if(m)return validDateParts(m[1],m[2],m[3],a.getFullYear());
   const x=new Date(t);return isNaN(x)?null:new Date(x.getFullYear(),x.getMonth(),x.getDate());
 }
-function mergeDateKey(d){return d&&!isNaN(d)?`${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}`:null;}
+function mergeDateKey(d){return d&&!isNaN(d)?`${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${d.getFullYear()}`:null;}
 function requestDateRange(raw,anchorValue){
   const anchor=dateOnly(anchorValue)||new Date();
   const anchorYear=anchor.getFullYear();
@@ -563,11 +563,13 @@ function parseFirstJsonValue(rawText){
 }
 function unwrapAttendanceFlowPayload(payload){
   let current=payload;
-  for(let i=0;i<4;i++){
-    if(current&&typeof current==="object"&&!Array.isArray(current)&&current.attendanceFileBase64)return current;
-    if(current&&typeof current==="object"&&!Array.isArray(current)&&current.body!==undefined){
-      current=typeof current.body==="string"?parseFirstJsonValue(current.body):current.body;
-      continue;
+  for(let i=0;i<6;i++){
+    if(current&&typeof current==="object"&&!Array.isArray(current)){
+      const base64=current.attendanceFileBase64||current.fileBase64||current.fileContent||current.contentBytes||current.$content;
+      if(base64)return {...current,attendanceFileBase64:String(base64).replace(/^data:.*?;base64,/,"")};
+      if(current.body!==undefined){current=typeof current.body==="string"?parseFirstJsonValue(current.body):current.body;continue;}
+      if(current.data!==undefined){current=current.data;continue;}
+      if(current.result!==undefined){current=current.result;continue;}
     }
     if(typeof current==="string"){current=parseFirstJsonValue(current);continue;}
     break;
@@ -601,7 +603,7 @@ async function downloadAttendanceTracker(force=false){
         if(!previous||(Number.isFinite(id)&&(!Number.isFinite(previousId)||id>previousId)))lookup.set(key,r);
       }
       attendanceLookup=lookup;
-      attendanceLoadStats={rows:rows.length,keys:lookup.size,loaded:true,headers:Object.keys(rows[0]||{}),sampleAttendanceKeys:[...lookup.keys()].slice(0,5)};
+      attendanceLoadStats={rows:rows.length,keys:lookup.size,loaded:true,dateFormat:"MM/dd/yyyy",headers:Object.keys(rows[0]||{}),sampleAttendanceKeys:[...lookup.keys()].slice(0,5)};
       console.info("Attendance M-logic lookup",attendanceLoadStats);
       return lookup;
     }finally{clearTimeout(timer);}
@@ -625,7 +627,7 @@ function mergeAttendanceIntoDataverse(rows){
       cr714_occurrence:existingOccurrence&&hit?hit.Occurrence:r.cr714_occurrence,
       cr714_requestnotes:existingNotes&&hit?hit.Notes:r.cr714_requestnotes,
       __attendanceMatched:!!hit,__attendanceOccurrenceFilled:!!(hit&&existingOccurrence&&!blank(hit.Occurrence)),__attendanceId:hit?.ID??null,
-      __parsedStart:range.start?isoDate(range.start):null,__parsedEnd:range.end?isoDate(range.end):null,__mergeKey:key,__parseStatus:range.status};
+      __parsedStart:range.start?isoDate(range.start):null,__parsedEnd:range.end?isoDate(range.end):null,__mergeStart:range.start?mergeDateKey(range.start):null,__mergeEnd:range.end?mergeDateKey(range.end):null,__mergeKey:key,__parseStatus:range.status};
   });
   window.attendanceKeyDiagnostics={sampleTimeOffKeys,sampleAttendanceKeys:attendanceLoadStats.sampleAttendanceKeys||[],sampleMatchedKeys};
   console.info("Attendance exact-key diagnostics",window.attendanceKeyDiagnostics);
@@ -771,6 +773,8 @@ async function pullFromDataverse(silent = false) {
 
       const isCancelled = r.cr714_cancelledrequest === 1 || r.cr714_cancelledrequest === true || String(r.cr714_cancelledrequest) === "true";
 
+      const parsedOccurrence=blank(r.cr714_occurrence)?null:Number(r.cr714_occurrence);
+      const occurrenceExplicit=parsedOccurrence!==null&&Number.isFinite(parsedOccurrence);
       dates.forEach((d, idx) => {
         const recordHours = (mappedType === "Make-Up") ? (muHours || parseMakeUpHours(r)) : hours;
         newRecords.push({
@@ -785,7 +789,12 @@ async function pullFromDataverse(silent = false) {
           partialShift: r.cr714_hoursofpartialshift || "",
           fmla: r.cr714_fmla === 1 || r.cr714_fmla === true || String(r.cr714_fmla) === "true",
           voicemail: r.cr714_voicemail === 1 || r.cr714_voicemail === true || String(r.cr714_voicemail) === "true",
-          occurrence: parseFloat(r.cr714_occurrence) || 0,
+          occurrence: idx===0&&occurrenceExplicit?parsedOccurrence:(idx===0?null:0),
+          occurrenceExplicit: idx===0?occurrenceExplicit:true,
+          occurrencePrimary: idx===0,
+          mergeStart:r.__mergeStart||null,
+          mergeEnd:r.__mergeEnd||null,
+          mergeKey:r.__mergeKey||null,
           attendanceMatched: !!r.__attendanceMatched,
           attendanceId: r.__attendanceId || null,
           attendanceOccurrenceFilled: !!r.__attendanceOccurrenceFilled,
@@ -1069,7 +1078,7 @@ const OCC_WINDOW_DAYS = 90;
 const ORG_FIELDS = [["dept","Department"],["repName","Reps"],["supervisor","Supervisor"],["manager","Manager"]];
 const MU_STATUS = ["Pending","Approved","Completed","Missed"];
 
-const TABS = [["dashboard","Dashboard"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
+const TABS = [["dashboard","Dashboard"],["calendar","Calendar"],["team","Team & Records"],["audit","Occurrence Audit"],["makeup","Make-Up Time"]];
 
 const EMPTY_STATE = () => ({ employees: [], records: [], makeups: [], settings: {} });
 const STATE_DB_NAME = "wf.attendance.cache";
@@ -1079,7 +1088,8 @@ const STATE_KEY = "wf.state.cr714_v10";
 let S = EMPTY_STATE();
 let UI = { tab:"dashboard", preset:"week", anchor:today(), from:null, to:null,
            dept:"", repName:"", title:"", supervisor:"", manager:"", q:"", type:"",
-           sortKey:"date", sortDir:-1, muFilter:"", teamSortKey:"name", teamSortDir:1 };
+           sortKey:"date", sortDir:-1, muFilter:"", teamSortKey:"name", teamSortDir:1,
+           auditStatus:"", auditSource:"", auditOnlyIssues:false };
 let charts = [];
 let stateDbPromise = null;
 let saveTimer = null;
@@ -1201,6 +1211,7 @@ function renderCalendar(){
     const selDay = UI.selectedWeekDay;
     const allRs = byDate[selDay]||[];
     const presentCount = allRs.filter(r => r.type === "Present").length;
+    const selectedDayOccurrences=occurrenceTotal(allRs);
     const occurrenceRs = allRs.filter(r => r.type !== "Present").sort((a,b)=>(a.type||"").localeCompare(b.type||""));
 
     const weekGridHtml = `<div class="cal-grid mt" style="margin-bottom: 20px;">
@@ -1242,7 +1253,7 @@ function renderCalendar(){
     const daySectionHtml = `<div class="day-block card">
       <div class="row">
         <b>${formattedSelectedTitle}</b>
-        <span class="small muted">${presentCount}/${totalEmps} present · ${uniqueOccurrenceRs.length} record${uniqueOccurrenceRs.length===1?"":"s"}</span>
+        <span class="small muted">${presentCount}/${totalEmps} present · ${uniqueOccurrenceRs.length} record${uniqueOccurrenceRs.length===1?"":"s"} · ${selectedDayOccurrences} occurrence${selectedDayOccurrences===1?"":"s"}</span>
         <button class="btn ghost sm right" data-add-day="${selDay}">+ Add</button>
       </div>
       ${uniqueOccurrenceRs.length ? `<div class="mt" style="display:flex; flex-direction: column; gap:8px;">${uniqueOccurrenceRs.map(r => rowRecord(r, true)).join("")}</div>` : `<div class="small muted mt">No exception records for this day.</div>`}
@@ -1255,8 +1266,9 @@ function renderCalendar(){
     let d = f;
     const allRs = byDate[d]||[];
     const presentCount = allRs.filter(r => r.type === "Present").length;
+    const dayOccurrences=occurrenceTotal(allRs);
     const rs=allRs.filter(r => r.type !== "Present").sort((a,b)=>(a.type||"").localeCompare(b.type||""));
-    return head+`<div class="day-block card"><div class="row"><b>${fmtShort(d)}</b><span class="small muted">${presentCount}/${totalEmps} present · ${rs.length} record${rs.length===1?"":"s"}</span>
+    return head+`<div class="day-block card"><div class="row"><b>${fmtShort(d)}</b><span class="small muted">${presentCount}/${totalEmps} present · ${rs.length} record${rs.length===1?"":"s"} · ${dayOccurrences} occurrence${dayOccurrences===1?"":"s"}</span>
       <button class="btn ghost sm right" data-add-day="${d}">+ Add</button></div>
       ${rs.length? `<div class="mt" style="display:flex; flex-direction:column; gap:8px;">${rs.map(r=>rowRecord(r,true)).join("")}</div>`:`<div class="small muted mt">No records.</div>`}
     </div>`;
@@ -1322,17 +1334,22 @@ function reportingRecords(from,to){
 }
 function emp(id){ return S.employees?.find(e=>e.id===id); }
 function occurrenceValue(r){
-  if (!r || r.waived || r.cancelled) return 0;
-  const mergedValue = Number(r.occurrence);
-  if (Number.isFinite(mergedValue) && mergedValue > 0) return mergedValue;
-  return Number(TYPES[r.type]?.occ) || 0;
+  if(!r||r.waived||r.cancelled)return 0;
+  const explicit=r.occurrenceExplicit===true||(r.occurrenceExplicit!==false&&r.occurrence!==null&&r.occurrence!==undefined&&r.occurrence!=="");
+  const value=Number(r.occurrence);
+  if(explicit&&Number.isFinite(value))return value;
+  return Number(TYPES[r.type]?.occ)||0;
 }
-function isOcc(r){ return occurrenceValue(r) > 0; }
-
-function occCount(empId, asOf){
-  if (!S.records) return 0;
-  const from = addDays(asOf, -OCC_WINDOW_DAYS);
-  return S.records.filter(r=>r.empId===empId && r.date>from && r.date<=asOf).reduce((n,r)=>n+occurrenceValue(r),0);
+function occurrenceIdentity(r){return r.dvId||r.attendanceId||r.mergeKey||r.rid;}
+function occurrenceTotal(rows){
+  const seen=new Set();
+  return (rows||[]).reduce((sum,r)=>{const v=occurrenceValue(r),k=occurrenceIdentity(r);if(v<=0||seen.has(k))return sum;seen.add(k);return sum+v;},0);
+}
+function isOcc(r){return occurrenceValue(r)>0;}
+function occCount(empId,asOf){
+  if(!S.records)return 0;
+  const from=addDays(asOf,-OCC_WINDOW_DAYS);
+  return occurrenceTotal(S.records.filter(r=>r.empId===empId&&r.date>from&&r.date<=asOf));
 }
 
 function level(n){ for(const [k,name,cls] of LADDER) if(n>=k) return {name,cls}; return null; }
@@ -1346,12 +1363,8 @@ function ossUsed(empId, asOf){
 function metrics(){
   const [f,t]=range(), emps=filteredEmployees(), recs=reportingRecords();
   const c = {}; TYPE_NAMES.forEach(n=>c[n]=0);
-  let occ=0; 
-  
-  recs.forEach(r=>{ 
-    c[r.type]=(c[r.type]||0)+1; 
-    occ += occurrenceValue(r); 
-  });
+  recs.forEach(r=>{c[r.type]=(c[r.type]||0)+1;});
+  const occ=occurrenceTotal(recs);
 
   // Calculate default Present count for days without explicit records
   let days=[]; for(let d=f; d<=t && days.length<370; d=addDays(d,1)) days.push(d);
@@ -1644,7 +1657,7 @@ function renderTeam(){
   const reportRows=reportingRecords();
   const teamRows=m.emps.map(e=>{
     const rs=reportRows.filter(r=>r.empId===e.id);
-    const occ=rs.reduce((n,r)=>n+occurrenceValue(r),0), n90=occCount(e.id,m.to), lv=level(n90);
+    const occ=occurrenceTotal(rs), n90=occCount(e.id,m.to), lv=level(n90);
     const perfect=rs.length&&!occ;
     return {
       e, 
@@ -1703,8 +1716,69 @@ function renderTeam(){
   return teamHtml + recordsHtml;
 }
 
+
+function occurrenceSource(r){
+  if(r.cancelled)return "Cancelled";
+  if(r.waived)return "Waived";
+  if(r.attendanceOccurrenceFilled)return "Attendance Tracker";
+  if(r.occurrenceExplicit===true)return r.source==="local"?"Manual":"Dataverse";
+  return "Type Default";
+}
+function occurrenceAuditStatus(r){
+  if(r.cancelled)return {label:"Cancelled",cls:"bad",issue:false};
+  if(r.waived)return {label:"Waived",cls:"ok",issue:false};
+  if(!r.attendanceMatched)return {label:"Unmatched",cls:"warn",issue:true};
+  if(r.attendanceMatched&&!r.attendanceOccurrenceFilled&&!(r.occurrenceExplicit===true))return {label:"Matched / no occurrence",cls:"warn",issue:true};
+  if(!r.mergeStart||!r.mergeEnd)return {label:"Missing merge date",cls:"bad",issue:true};
+  return {label:"Verified",cls:"ok",issue:false};
+}
+function renderOccurrenceAudit(){
+  const [f,t]=range();
+  const ids=new Set(filteredEmployees().map(e=>e.id));
+  let rows=(S.records||[]).filter(r=>ids.has(r.empId)&&r.date>=f&&r.date<=t&&(!UI.type||r.type===UI.type));
+  const auditRows=rows.map(r=>({r,e:emp(r.empId)||{name:r.empId},status:occurrenceAuditStatus(r),source:occurrenceSource(r)}));
+  let shown=auditRows.filter(x=>(!UI.auditStatus||x.status.label===UI.auditStatus)&&(!UI.auditSource||x.source===UI.auditSource)&&(!UI.auditOnlyIssues||x.status.issue));
+  const matched=auditRows.filter(x=>x.r.attendanceMatched).length;
+  const filled=auditRows.filter(x=>x.r.attendanceOccurrenceFilled).length;
+  const issues=auditRows.filter(x=>x.status.issue).length;
+  const total=occurrenceTotal(auditRows.map(x=>x.r));
+  const statuses=[...new Set(auditRows.map(x=>x.status.label))].sort();
+  const sources=[...new Set(auditRows.map(x=>x.source))].sort();
+  shown.sort((a,b)=>(b.status.issue-a.status.issue)||b.r.date.localeCompare(a.r.date)||(a.e.name||"").localeCompare(b.e.name||""));
+  return `<div class="section-title"><h2>Occurrence Audit</h2><span class="small muted">Merge contract: normalized employee name + MM/dd/yyyy start + MM/dd/yyyy end</span></div>
+  <div class="grid kpis mb">
+    ${kpi(auditRows.length,"Records Reviewed","var(--blue)","")}
+    ${kpi(matched,"Attendance Matches","var(--teal)","")}
+    ${kpi(filled,"Mapped Occurrences","var(--green)","")}
+    ${kpi(total,"Occurrence Total","var(--red)","")}
+    ${kpi(issues,"Needs Review",issues?"var(--amber)":"var(--green)","")}
+  </div>
+  <div class="card mb"><div class="row">
+    <div class="fgroup"><label>Status</label><select id="auditStatus"><option value="">All statuses</option>${statuses.map(v=>`<option ${UI.auditStatus===v?"selected":""}>${esc(v)}</option>`).join("")}</select></div>
+    <div class="fgroup"><label>Occurrence source</label><select id="auditSource"><option value="">All sources</option>${sources.map(v=>`<option ${UI.auditSource===v?"selected":""}>${esc(v)}</option>`).join("")}</select></div>
+    <label class="row small" style="margin-top:16px;cursor:pointer"><input type="checkbox" id="auditIssues" ${UI.auditOnlyIssues?"checked":""}> Needs review only</label>
+    <span class="small muted right">Showing ${shown.length} of ${auditRows.length}</span>
+  </div></div>
+  <div class="card tbl-wrap"><table><thead><tr>
+    <th>Employee</th><th>Record Date</th><th>Request Range</th><th>Type</th><th>Occurrence</th><th>Source</th><th>Match</th><th>Attendance ID</th><th>Merge Key</th><th>Status</th>
+  </tr></thead><tbody>${shown.map(({r,e,status,source})=>`<tr data-rec="${esc(r.rid)}" title="Click to inspect record">
+    <td><b>${esc(e.name)}</b><div class="small muted">${esc(e.dept||"")}</div></td>
+    <td>${fmt(r.date)}</td>
+    <td><span class="small">${esc(r.mergeStart||exportDateMMDDYYYY(r.date))} → ${esc(r.mergeEnd||exportDateMMDDYYYY(r.date))}</span></td>
+    <td>${pill(r.type)}</td>
+    <td><span class="badge ${occurrenceValue(r)>0?"warn":""}">${occurrenceValue(r)}</span></td>
+    <td>${esc(source)}</td>
+    <td>${r.attendanceMatched?`<span class="badge ok">Matched</span>`:`<span class="badge warn">No match</span>`}</td>
+    <td>${esc(r.attendanceId||"")}</td>
+    <td class="small" style="max-width:280px;word-break:break-all">${esc(r.mergeKey||"")}</td>
+    <td><span class="badge ${status.cls}">${esc(status.label)}</span></td>
+  </tr>`).join("")||`<tr class="norow"><td colspan="10" class="empty">No occurrence audit rows match the current filters.</td></tr>`}</tbody></table></div>`;
+}
+
 function muRow(m){
   const e=emp(m.empId)||{name:m.empId};
+  const linkedRecord=(S.records||[]).find(r=>r.rid===m.rid)||(S.records||[]).find(r=>m.dvId&&r.dvId===m.dvId);
+  const linkedOccurrence=linkedRecord?occurrenceValue(linkedRecord):0;
   const isCancelled = m.status === "Cancelled";
   const stCls={Pending:"warn",Approved:"",Completed:"ok",Missed:"bad",Cancelled:"muted"}[m.status];
   const overdue=!isCancelled&&m.status!=="Completed"&&m.status!=="Missed"&&m.dueDate<today();
@@ -1722,6 +1796,7 @@ function muRow(m){
             <span class="badge ${stCls}">${esc(m.status)}</span>
             ${overdue?`<span class="badge bad">overdue</span>`:""}
             ${m.oss?`<span class="badge">OSS</span>`:""}
+            <span class="badge ${linkedOccurrence>0?"warn":"ok"}">Occurrence ${linkedOccurrence}</span>
           </span>
         </div>
       </div>
@@ -1911,7 +1986,7 @@ function empSelect(id,cur){ return `<select id="${id}">${filteredEmployees().len
 
 function recordModal(rid,presetDate){
   const r=rid? S.records.find(x=>x.rid===rid) : {date:presetDate||today(),empId:S.employees[0]?.id,type:"Present",hours:8,notes:"",wfNotes:"",fmla:false,voicemail:false,partialShift:""};
-  const currentOcc = r.occurrence !== undefined ? r.occurrence : occCount(r.empId, today());
+  const currentOcc = r.occurrence!==undefined&&r.occurrence!==null?r.occurrence:(Number(TYPES[r.type]?.occ)||0);
 
   openModal(`<h2>${rid?"Edit":"Add"} record</h2>
     <div class="mrow">
@@ -1964,9 +2039,7 @@ function recordModal(rid,presetDate){
   $("#occPlus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = parseInt(inp.value||0) + 1; };
 
   if (!rid) {
-    $("#mEmp").onchange = (e) => {
-      $("#mOcc").value = occCount(e.target.value, today());
-    };
+    $("#mType").onchange=e=>{$("#mOcc").value=Number(TYPES[e.target.value]?.occ)||0;};
   }
       
   $("#mSave").onclick=()=>{
@@ -1990,7 +2063,7 @@ function recordModal(rid,presetDate){
     if (rid) {
       const targetRec = S.records.find(x => x.rid === rid);
       if (targetRec) {
-        Object.assign(targetRec, { date: dFrom, empId, type, hours, notes, wfNotes, partialShift, fmla, voicemail, occurrence });
+        Object.assign(targetRec,{date:dFrom,empId,type,hours,notes,wfNotes,partialShift,fmla,voicemail,occurrence,occurrenceExplicit:true,occurrencePrimary:true});
         if (targetRec.dvId) {
           patchDataverseRecord(targetRec.dvId, {
             cr714_fmla: fmla,
@@ -2018,7 +2091,9 @@ function recordModal(rid,presetDate){
           waived: false, 
           fmla,
           voicemail,
-          occurrence
+          occurrence,
+          occurrenceExplicit:true,
+          occurrencePrimary:true
         });
         current.setDate(current.getDate() + 1);
       }
@@ -2147,7 +2222,7 @@ function empModal(id){
   const [f,t]=range();
   const rs=(S.records||[]).filter(r=>r.empId===id&&r.date>=f&&r.date<=t).sort((a,b)=>b.date.localeCompare(a.date));
   const mus=(S.makeups||[]).filter(m=>m.empId===id).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
-  const periodOcc=rs.reduce((n,r)=>n+occurrenceValue(r),0);
+  const periodOcc=occurrenceTotal(rs);
   const n90=occCount(id,t), lv=level(n90);
   openModal(`<h2>${esc(e.name)} <span class="small muted">${esc(e.id)}</span></h2>
     <p class="small">${esc(e.title)} · ${esc(e.dept)} · ${esc(e.location)}<br>
@@ -2166,6 +2241,7 @@ function empModal(id){
 }
 
 
+function exportDateMMDDYYYY(value){if(!value)return "";const d=typeof value==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(value)?parseISO(value):dateOnly(value);return d?mergeDateKey(d):String(value);}
 function fitWorksheetColumns(ws, rows, minWidth=10, maxWidth=48){
   const keys = rows.length ? Object.keys(rows[0]) : [];
   ws["!cols"] = keys.map(key => {
@@ -2191,8 +2267,11 @@ function exportWorkforceReport(){
         "Department": e.dept || "",
         "Supervisor": e.supervisor || "",
         "Manager": e.manager || "",
-        "Date": r.date || "",
-        "Type": r.type || "",
+        "Date": exportDateMMDDYYYY(r.date),
+        "Merge Start": r.mergeStart||exportDateMMDDYYYY(r.date),
+        "Merge End": r.mergeEnd||exportDateMMDDYYYY(r.date),
+        "Merge Key": r.mergeKey||"",
+        "Type": r.type||"",
         "Occurrence": occurrenceValue(r),
         "Hours": Number(r.hours) || 0,
         "Waived": r.waived ? "Yes" : "No",
@@ -2210,7 +2289,7 @@ function exportWorkforceReport(){
 
     const teamRows = employees.map(e => {
       const periodRecords = reportRows.filter(r => r.empId === e.id);
-      const periodOccurrences = periodRecords.reduce((n,r) => n + occurrenceValue(r), 0);
+      const periodOccurrences = occurrenceTotal(periodRecords);
       const occurrences90 = occCount(e.id, toDate);
       const action = level(occurrences90);
       return {
@@ -2228,14 +2307,14 @@ function exportWorkforceReport(){
       };
     });
 
-    const totalOccurrences = reportRows.reduce((n,r) => n + occurrenceValue(r), 0);
+    const totalOccurrences = occurrenceTotal(reportRows);
     const matchedRows = reportRows.filter(r => r.attendanceMatched).length;
     const mappedRows = reportRows.filter(r => r.attendanceOccurrenceFilled).length;
     const repsWithOccurrences = new Set(reportRows.filter(r => occurrenceValue(r) > 0).map(r => r.empId)).size;
     const metricsNow = metrics();
     const summaryRows = [
-      { "Metric": "Report From", "Value": fromDate },
-      { "Metric": "Report To", "Value": toDate },
+      { "Metric": "Report From", "Value": exportDateMMDDYYYY(fromDate) },
+      { "Metric": "Report To", "Value": exportDateMMDDYYYY(toDate) },
       { "Metric": "Exported At", "Value": new Date().toLocaleString() },
       { "Metric": "Employees", "Value": employees.length },
       { "Metric": "Records", "Value": reportRows.length },
@@ -2254,12 +2333,12 @@ function exportWorkforceReport(){
       return {
         "Employee": e.name || m.empId || "",
         "Employee ID": m.empId || "",
-        "Date Missed": m.dateMissed || "",
+        "Date Missed": exportDateMMDDYYYY(m.dateMissed),
         "Hours Owed": Number(m.hoursOwed) || 0,
-        "Due Date": m.dueDate || "",
+        "Due Date": exportDateMMDDYYYY(m.dueDate),
         "Status": m.status || "",
         "OSS": m.oss ? "Yes" : "No",
-        "Completed Date": m.completedDate || "",
+        "Completed Date": exportDateMMDDYYYY(m.completedDate),
         "Notes": m.notes || ""
       };
     });
@@ -2292,6 +2371,7 @@ function render(){
     case "dashboard": v.innerHTML=renderDashboard(); drawCharts(); break;
     case "calendar":  v.innerHTML=renderCalendar(); break;
     case "team":      v.innerHTML=renderTeam(); break;
+    case "audit":     v.innerHTML=renderOccurrenceAudit(); break;
     case "makeup":    v.innerHTML=renderMakeup(); break;
   }
   bindView();
@@ -2303,6 +2383,7 @@ function bindRecordButtons(root){
 
 function bindView(){
   const v=$("#view");
+  const on=(id,ev,fn)=>{const el=$(id);if(el)el[ev]=fn;};
   v.querySelectorAll("tr[data-emp]").forEach(tr=>tr.onclick=()=>empModal(tr.dataset.emp));
   v.querySelectorAll(".cal-cell[data-day]").forEach(c=>c.onclick=()=>dayModal(c.dataset.day));
   
@@ -2344,6 +2425,10 @@ function bindView(){
   });
 
   bindRecordButtons(v);
+  v.querySelectorAll("tr[data-rec]").forEach(tr=>tr.onclick=e=>{if(!e.target.closest("button"))recordModal(tr.dataset.rec);});
+  on("#auditStatus","onchange",()=>{UI.auditStatus=$("#auditStatus").value;render();});
+  on("#auditSource","onchange",()=>{UI.auditSource=$("#auditSource").value;render();});
+  on("#auditIssues","onchange",()=>{UI.auditOnlyIssues=$("#auditIssues").checked;render();});
   v.querySelectorAll("[data-mu-act]").forEach(b=>b.onclick=e=>{e.stopPropagation();
     const act=b.dataset.muAct, id=b.dataset.id;
     if(act==="edit") makeupModal(id);
@@ -2351,7 +2436,6 @@ function bindView(){
   v.querySelectorAll("tr[data-mu]").forEach(tr=>tr.onclick=()=>{ makeupModal(tr.dataset.mu); });
   v.querySelectorAll("th[data-sort]").forEach(th=>th.onclick=()=>{
     const k=th.dataset.sort; UI.sortDir=UI.sortKey===k?-UI.sortDir:-1; UI.sortKey=k; render();});
-  const on=(id,ev,fn)=>{ const el=$(id); if(el) el[ev]=fn; };
   on("#calPrev","onclick",()=>calShift(-1)); on("#calNext","onclick",()=>calShift(1));
   on("#calToday","onclick",()=>{UI.anchor=today(); UI.selectedWeekDay=today(); UI.selectedMuWeekDay=today(); render();});
   on("#calAdd","onclick",()=>recordModal(null, UI.selectedWeekDay || UI.anchor));
