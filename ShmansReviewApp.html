@@ -570,64 +570,38 @@ function unwrapAttendanceFlowPayload(payload){
   }
   return current;
 }
-function normalizeFlowRow(r){
-  return {
-    employeeName:r.employeeName??r["Employee Name"]??null,
-    startDate:r.startDate??r["Start Date"]??null,
-    endDate:r.endDate??r["End Date"]??null,
-    leaveType:r.leaveType??r["Type of Leave"]??null,
-    occurrence:r.occurrence??r.Occurrence??null,
-    notes:r.notes??r.Notes??null,
-    id:r.id??r.ID??null,
-    mergeKey:r.mergeKey??null
-  };
-}
-function buildAttendanceLookupFromRows(sourceRows){
-  const lookup=new Map();let validRows=0;
-  for(const raw of sourceRows){
-    const r=normalizeFlowRow(raw);
-    const key=r.mergeKey||compositeKey(r.employeeName,dateOnly(r.startDate),dateOnly(r.endDate));
-    if(!key)continue;validRows++;
-    const previous=lookup.get(key),id=Number(r.id),previousId=previous?Number(previous.id):NaN;
-    if(!previous||(Number.isFinite(id)&&(!Number.isFinite(previousId)||id>previousId)))lookup.set(key,r);
-  }
-  return {lookup,validRows};
-}
 async function downloadAttendanceTracker(force=false){
   if(attendanceLoadPromise&&!force)return attendanceLoadPromise;
   attendanceLoadPromise=(async()=>{
-    updateLoad("Downloading normalized Attendance rows...",24,"Requesting LeaveTracker JSON from Power Automate.");
+    updateLoad("Downloading Attendance Tracker...",24,"Retrieving the latest SharePoint workbook through Power Automate.");
     const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),180000);
     try{
-      const res=await fetch(ATTENDANCE_FLOW_URL,{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({action:"getAttendanceRows",responseVersion:2,requestedAtUtc:new Date().toISOString()}),signal:ctl.signal});
-      if(!res.ok)throw new Error(`Attendance flow HTTP ${res.status}: ${(await res.text()).slice(0,500)}`);
+      const res=await fetch(ATTENDANCE_FLOW_URL,{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({action:"downloadAttendanceTracker",requestedAtUtc:new Date().toISOString()}),signal:ctl.signal});
+      if(!res.ok)throw new Error(`Attendance flow HTTP ${res.status}: ${(await res.text()).slice(0,250)}`);
       const responseText=await res.text();
       const payload=unwrapAttendanceFlowPayload(parseFirstJsonValue(responseText));
-      if(payload&&typeof payload.rows==="string"){
-        try{payload.rows=parseFirstJsonValue(payload.rows);}
-        catch(err){throw new Error(`Attendance flow rows was returned as a string but could not be parsed: ${err.message}`);}
+      if(!payload||!payload.attendanceFileBase64){
+        const keys=payload&&typeof payload==="object"?Object.keys(payload).join(", "):typeof payload;
+        throw new Error(`The flow response did not contain attendanceFileBase64. Returned fields: ${keys||"none"}.`);
       }
-      if(!payload||!Array.isArray(payload.rows)){
-        const fields=payload&&typeof payload==="object"?Object.keys(payload).join(", "):typeof payload;
-        throw new Error(`Attendance flow must return rows as a JSON array (responseVersion 2). Returned fields: ${fields||"none"}.`);
+      updateLoad("Parsing Attendance Tracker...",44,"Building the occurrence lookup in the browser.");
+      const wb=XLSX.read(payload.attendanceFileBase64,{type:"base64",cellDates:true});
+      const sheetName=wb.SheetNames.find(n=>n.toLowerCase()==="leavetracker")||wb.SheetNames.find(n=>n.toLowerCase()==="attendance tracker")||wb.SheetNames[0];
+      if(!sheetName)throw new Error("Attendance workbook contains no readable worksheet.");
+      const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{defval:null,raw:true}).filter(r=>Object.values(r).some(v=>!blank(v)));
+      const lookup=new Map();
+      for(const r of rows){
+        const name=normalizeMergeName(r["Employee Name"]),start=dateOnly(r["Start Date"]),end=dateOnly(r["End Date"]);
+        const key=compositeKey(name,start,end);if(!key)continue;
+        const previous=lookup.get(key),id=Number(r.ID),previousId=previous?Number(previous.ID):NaN;
+        if(!previous||(Number.isFinite(id)&&(!Number.isFinite(previousId)||id>previousId)))lookup.set(key,r);
       }
-      const cutoff=new Date();cutoff.setHours(0,0,0,0);cutoff.setMonth(cutoff.getMonth()-24);
-      const cutoffKey=mergeDateKey(cutoff);
-      const filteredRows=payload.rows.filter(raw=>{
-        const r=normalizeFlowRow(raw),end=dateOnly(r.endDate)||dateOnly(r.startDate);
-        return end&&mergeDateKey(end)>=cutoffKey;
-      });
-      updateLoad("Indexing Attendance rows...",44,`Received ${payload.rows.length.toLocaleString()} rows; retained ${filteredRows.length.toLocaleString()} from the last 24 months.`);
-      const built=buildAttendanceLookupFromRows(filteredRows);
-      attendanceLookup=built.lookup;
-      attendanceLoadStats={rows:filteredRows.length,receivedRows:payload.rows.length,filteredOut:payload.rows.length-filteredRows.length,cutoffDate:isoDate(cutoff),keys:attendanceLookup.size,validRows:built.validRows,loaded:true,source:payload.source||"LeaveTracker",responseVersion:payload.responseVersion||2,sampleAttendanceKeys:[...attendanceLookup.keys()].slice(0,5)};
-      window.attendanceFlowDiagnostics={success:payload.success,rowCount:payload.rowCount,returnedRows:payload.rows.length,...attendanceLoadStats};
-      console.info("Attendance JSON flow response",window.attendanceFlowDiagnostics);
-      if(payload.rowCount!=null&&Number(payload.rowCount)!==payload.rows.length)console.warn("Attendance flow rowCount does not equal returned rows length",{rowCount:payload.rowCount,returned:payload.rows.length});
-      return attendanceLookup;
+      attendanceLookup=lookup;
+      attendanceLoadStats={rows:rows.length,keys:lookup.size,loaded:true,headers:Object.keys(rows[0]||{}),sampleAttendanceKeys:[...lookup.keys()].slice(0,5)};
+      console.info("Attendance M-logic lookup",attendanceLoadStats);
+      return lookup;
     }finally{clearTimeout(timer);}
-  })();
-  return attendanceLoadPromise;
+  })();return attendanceLoadPromise;
 }
 function mergeAttendanceIntoDataverse(rows){
   let matched=0,unparsed=0,occurrenceFilled=0;
@@ -641,12 +615,12 @@ function mergeAttendanceIntoDataverse(rows){
     const key=compositeKey(r.cr714_name,range.start,range.end);if(key&&sampleTimeOffKeys.length<5)sampleTimeOffKeys.push(key);
     const hit=key?attendanceLookup.get(key):null;if(hit){matched++;if(sampleMatchedKeys.length<5)sampleMatchedKeys.push(key);}
     const existingLeave=blank(r.cr714_leavetype),existingOccurrence=blank(r.cr714_occurrence),existingNotes=blank(r.cr714_requestnotes);
-    if(hit&&existingOccurrence&&!blank(hit.occurrence))occurrenceFilled++;
+    if(hit&&existingOccurrence&&!blank(hit.Occurrence))occurrenceFilled++;
     return {...r,
-      cr714_leavetype:existingLeave&&hit?hit.leaveType:r.cr714_leavetype,
-      cr714_occurrence:existingOccurrence&&hit?hit.occurrence:r.cr714_occurrence,
-      cr714_requestnotes:existingNotes&&hit?hit.notes:r.cr714_requestnotes,
-      __attendanceMatched:!!hit,__attendanceOccurrenceFilled:!!(hit&&existingOccurrence&&!blank(hit.occurrence)),__attendanceId:hit?.id??null,
+      cr714_leavetype:existingLeave&&hit?hit["Type of Leave"]:r.cr714_leavetype,
+      cr714_occurrence:existingOccurrence&&hit?hit.Occurrence:r.cr714_occurrence,
+      cr714_requestnotes:existingNotes&&hit?hit.Notes:r.cr714_requestnotes,
+      __attendanceMatched:!!hit,__attendanceOccurrenceFilled:!!(hit&&existingOccurrence&&!blank(hit.Occurrence)),__attendanceId:hit?.ID??null,
       __parsedStart:range.start?isoDate(range.start):null,__parsedEnd:range.end?isoDate(range.end):null,__mergeKey:key,__parseStatus:range.status};
   });
   window.attendanceKeyDiagnostics={sampleTimeOffKeys,sampleAttendanceKeys:attendanceLoadStats.sampleAttendanceKeys||[],sampleMatchedKeys};
@@ -679,7 +653,7 @@ async function pullFromDataverse(silent = false) {
 
     const empData = await empRes.json();
     const toData = await toRes.json();
-    updateLoad("Merging Attendance Tracker...",64,`Using ${attendanceLoadStats.source}, JSON rows; matching employee name, start date, and end date.`);
+    updateLoad("Merging Attendance Tracker...",64,"Matching employee name, start date, and end date.");
     const attendanceMerge = mergeAttendanceIntoDataverse(toData.value || []);
     toData.value = attendanceMerge.rows;
 
