@@ -202,17 +202,20 @@ const msalInstance = new msal.PublicClientApplication(msalConfig);
 
 window.onload = async () => {
   try {
+    showLoadScreen("Restoring cached Workforce data...", 6, "Opening the browser database.");
+    S = await loadState();
+    render();
     await msalInstance.handleRedirectPromise();
     const accounts = msalInstance.getAllAccounts();
     if (accounts.length > 0) {
-      if (!S.employees || S.employees.length === 0) {
-        pullFromDataverse(false);
-      } else {
-        pullFromDataverse(true);
-      }
+      await pullFromDataverse(!S.employees || S.employees.length === 0 ? false : true);
+    } else {
+      hideLoadScreen();
     }
   } catch (err) {
-    console.error("MSAL init error:", err);
+    console.error("Workforce initialization error:", err);
+    hideLoadScreen();
+    render();
   }
 };
 
@@ -1067,27 +1070,77 @@ const MU_STATUS = ["Pending","Approved","Completed","Missed"];
 
 const TABS = [["dashboard","Dashboard"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
 
-let S = load() || { employees: [], records: [], makeups: [], settings: {} };
+const EMPTY_STATE = () => ({ employees: [], records: [], makeups: [], settings: {} });
+const STATE_DB_NAME = "wf.attendance.cache";
+const STATE_DB_VERSION = 1;
+const STATE_STORE = "state";
+const STATE_KEY = "wf.state.cr714_v10";
+let S = EMPTY_STATE();
 let UI = { tab:"dashboard", preset:"week", anchor:today(), from:null, to:null,
            dept:"", repName:"", title:"", supervisor:"", manager:"", q:"", type:"",
            sortKey:"date", sortDir:-1, muFilter:"", teamSortKey:"name", teamSortDir:1 };
 let charts = [];
-
-function load(){
-  try{
-    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v9"));
-    return s && s.employees && s.employees.length > 0 ? s : null;
-  }catch(e){
-    return null;
-  }
+let stateDbPromise = null;
+let saveTimer = null;
+let saveInFlight = Promise.resolve();
+function openStateDb(){
+  if(stateDbPromise) return stateDbPromise;
+  stateDbPromise = new Promise((resolve,reject)=>{
+    const req = indexedDB.open(STATE_DB_NAME, STATE_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if(!db.objectStoreNames.contains(STATE_STORE)) db.createObjectStore(STATE_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("Unable to open IndexedDB."));
+  });
+  return stateDbPromise;
 }
-
-function save(){
+async function idbGet(key){
+  const db = await openStateDb();
+  return new Promise((resolve,reject)=>{
+    const req = db.transaction(STATE_STORE,"readonly").objectStore(STATE_STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("Unable to read browser cache."));
+  });
+}
+async function idbPut(key,value){
+  const db = await openStateDb();
+  return new Promise((resolve,reject)=>{
+    const tx = db.transaction(STATE_STORE,"readwrite");
+    tx.objectStore(STATE_STORE).put(value,key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error("Unable to write browser cache."));
+    tx.onabort = () => reject(tx.error || new Error("Browser cache write was aborted."));
+  });
+}
+async function loadState(){
   try{
-    localStorage.setItem("wf.state.cr714_v9", JSON.stringify(S));
-  }catch(e){
-    toast("Storage limit exceeded");
-  }
+    const cached = await idbGet(STATE_KEY);
+    if(cached && Array.isArray(cached.employees)) return cached;
+  }catch(e){ console.warn("IndexedDB state read failed",e); }
+  try{
+    const legacyText = localStorage.getItem("wf.state.cr714_v9");
+    const legacy = legacyText ? JSON.parse(legacyText) : null;
+    if(legacy && Array.isArray(legacy.employees)){
+      await idbPut(STATE_KEY,legacy);
+      localStorage.removeItem("wf.state.cr714_v9");
+      return legacy;
+    }
+  }catch(e){ console.warn("Legacy cache migration skipped",e); }
+  return EMPTY_STATE();
+}
+function save(){
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(()=>{
+    const snapshot = structuredClone(S);
+    saveInFlight = saveInFlight.catch(()=>{}).then(()=>idbPut(STATE_KEY,snapshot)).then(()=>{
+      localStorage.removeItem("wf.state.cr714_v9");
+    }).catch(e=>{
+      console.error("IndexedDB save failed",e);
+      toast("Browser cache save failed: " + (e?.message || e));
+    });
+  },120);
 }
 
 const $ = s=>document.querySelector(s);
@@ -2197,7 +2250,6 @@ document.getElementById("loadRetry").onclick=()=>{
   pullFromDataverse(false);
 };
 
-render();
 </script>
 </body>
 </html>
