@@ -603,14 +603,24 @@ async function downloadAttendanceTracker(force=false){
       if(!res.ok)throw new Error(`Attendance flow HTTP ${res.status}: ${(await res.text()).slice(0,500)}`);
       const responseText=await res.text();
       const payload=unwrapAttendanceFlowPayload(parseFirstJsonValue(responseText));
+      if(payload&&typeof payload.rows==="string"){
+        try{payload.rows=parseFirstJsonValue(payload.rows);}
+        catch(err){throw new Error(`Attendance flow rows was returned as a string but could not be parsed: ${err.message}`);}
+      }
       if(!payload||!Array.isArray(payload.rows)){
         const fields=payload&&typeof payload==="object"?Object.keys(payload).join(", "):typeof payload;
-        throw new Error(`Attendance flow must return a JSON rows array (responseVersion 2). Returned fields: ${fields||"none"}.`);
+        throw new Error(`Attendance flow must return rows as a JSON array (responseVersion 2). Returned fields: ${fields||"none"}.`);
       }
-      updateLoad("Indexing Attendance rows...",44,`Received ${payload.rows.length.toLocaleString()} normalized LeaveTracker rows.`);
-      const built=buildAttendanceLookupFromRows(payload.rows);
+      const cutoff=new Date();cutoff.setHours(0,0,0,0);cutoff.setMonth(cutoff.getMonth()-24);
+      const cutoffKey=mergeDateKey(cutoff);
+      const filteredRows=payload.rows.filter(raw=>{
+        const r=normalizeFlowRow(raw),end=dateOnly(r.endDate)||dateOnly(r.startDate);
+        return end&&mergeDateKey(end)>=cutoffKey;
+      });
+      updateLoad("Indexing Attendance rows...",44,`Received ${payload.rows.length.toLocaleString()} rows; retained ${filteredRows.length.toLocaleString()} from the last 24 months.`);
+      const built=buildAttendanceLookupFromRows(filteredRows);
       attendanceLookup=built.lookup;
-      attendanceLoadStats={rows:payload.rows.length,keys:attendanceLookup.size,validRows:built.validRows,loaded:true,source:payload.source||"LeaveTracker",responseVersion:payload.responseVersion||2,sampleAttendanceKeys:[...attendanceLookup.keys()].slice(0,5)};
+      attendanceLoadStats={rows:filteredRows.length,receivedRows:payload.rows.length,filteredOut:payload.rows.length-filteredRows.length,cutoffDate:isoDate(cutoff),keys:attendanceLookup.size,validRows:built.validRows,loaded:true,source:payload.source||"LeaveTracker",responseVersion:payload.responseVersion||2,sampleAttendanceKeys:[...attendanceLookup.keys()].slice(0,5)};
       window.attendanceFlowDiagnostics={success:payload.success,rowCount:payload.rowCount,returnedRows:payload.rows.length,...attendanceLoadStats};
       console.info("Attendance JSON flow response",window.attendanceFlowDiagnostics);
       if(payload.rowCount!=null&&Number(payload.rowCount)!==payload.rows.length)console.warn("Attendance flow rowCount does not equal returned rows length",{rowCount:payload.rowCount,returned:payload.rows.length});
