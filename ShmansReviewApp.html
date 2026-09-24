@@ -584,11 +584,27 @@ async function downloadAttendanceTracker(force=false){
         const keys=payload&&typeof payload==="object"?Object.keys(payload).join(", "):typeof payload;
         throw new Error(`The flow response did not contain attendanceFileBase64. Returned fields: ${keys||"none"}.`);
       }
-      updateLoad("Parsing Attendance Tracker...",44,"Building the occurrence lookup in the browser.");
-      const wb=XLSX.read(payload.attendanceFileBase64,{type:"base64",cellDates:true});
-      const sheetName=wb.SheetNames.find(n=>n.toLowerCase()==="leavetracker")||wb.SheetNames.find(n=>n.toLowerCase()==="attendance tracker")||wb.SheetNames[0];
-      if(!sheetName)throw new Error("Attendance workbook contains no readable worksheet.");
-      const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{defval:null,raw:true}).filter(r=>Object.values(r).some(v=>!blank(v)));
+      updateLoad("Parsing Attendance Tracker...",44,"Locating the LeaveTracker table headers in the workbook.");
+      const cleanBase64=String(payload.attendanceFileBase64).replace(/^data:.*?;base64,/i,"").replace(/\s/g,"");
+      const wb=XLSX.read(cleanBase64,{type:"base64",cellDates:true});
+      const requiredHeaders=["employee name","start date","end date","occurrence"];
+      let sheetName=null,headerRow=-1,rows=[];
+      for(const candidate of wb.SheetNames){
+        const matrix=XLSX.utils.sheet_to_json(wb.Sheets[candidate],{header:1,defval:null,raw:true,blankrows:false});
+        const scanLimit=Math.min(matrix.length,100);
+        for(let i=0;i<scanLimit;i++){
+          const normalized=(matrix[i]||[]).map(v=>String(v??"").trim().toLowerCase());
+          if(requiredHeaders.every(h=>normalized.includes(h))){
+            sheetName=candidate;headerRow=i;
+            const range=XLSX.utils.decode_range(wb.Sheets[candidate]["!ref"]||"A1");
+            range.s.r=i;
+            rows=XLSX.utils.sheet_to_json(wb.Sheets[candidate],{range,defval:null,raw:true}).filter(r=>Object.values(r).some(v=>!blank(v)));
+            break;
+          }
+        }
+        if(sheetName)break;
+      }
+      if(!sheetName)throw new Error(`Could not locate LeaveTracker columns in workbook. Sheets found: ${wb.SheetNames.join(", ")}`);
       const lookup=new Map();
       for(const r of rows){
         const name=normalizeMergeName(r["Employee Name"]),start=dateOnly(r["Start Date"]),end=dateOnly(r["End Date"]);
@@ -597,7 +613,7 @@ async function downloadAttendanceTracker(force=false){
         if(!previous||(Number.isFinite(id)&&(!Number.isFinite(previousId)||id>previousId)))lookup.set(key,r);
       }
       attendanceLookup=lookup;
-      attendanceLoadStats={rows:rows.length,keys:lookup.size,loaded:true,headers:Object.keys(rows[0]||{}),sampleAttendanceKeys:[...lookup.keys()].slice(0,5)};
+      attendanceLoadStats={rows:rows.length,keys:lookup.size,loaded:true,sheetName,headerRow:headerRow+1,headers:Object.keys(rows[0]||{}),sampleAttendanceKeys:[...lookup.keys()].slice(0,5)};
       console.info("Attendance M-logic lookup",attendanceLoadStats);
       return lookup;
     }finally{clearTimeout(timer);}
@@ -653,7 +669,7 @@ async function pullFromDataverse(silent = false) {
 
     const empData = await empRes.json();
     const toData = await toRes.json();
-    updateLoad("Merging Attendance Tracker...",64,"Matching employee name, start date, and end date.");
+    updateLoad("Merging Attendance Tracker...",64,`Using ${attendanceLoadStats.sheetName}, header row ${attendanceLoadStats.headerRow}; matching employee name, start date, and end date.`);
     const attendanceMerge = mergeAttendanceIntoDataverse(toData.value || []);
     toData.value = attendanceMerge.rows;
 
