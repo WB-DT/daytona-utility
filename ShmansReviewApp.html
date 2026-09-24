@@ -486,7 +486,17 @@ function loadFailure(err){
   document.getElementById("loadRetry").style.display="inline-block";
   document.getElementById("loadDetail").textContent="The data was not replaced. Retry when ready.";
 }
-function normalizeMergeName(v){return v==null?null:String(v).replace(/[\u0000-\u001f\u007f]/g," ").trim().replace(/\s+/g," ").toUpperCase()||null;}
+function normalizeMergeText(v){
+  return v==null?null:String(v).replace(/[\u0000-\u001f\u007f\u00a0]/g," ").normalize("NFKC").trim().replace(/\s+/g," ")||null;
+}
+function normalizeMergeName(v){const text=normalizeMergeText(v);return text?text.toUpperCase():null;}
+function normalizeHeaderName(v){return String(v??"").replace(/[\u0000-\u001f\u007f\u00a0]/g," ").normalize("NFKC").trim().replace(/\s+/g," ").toLowerCase().replace(/[^a-z0-9]/g,"");}
+function rowField(row,...aliases){
+  if(!row||typeof row!=="object")return null;
+  const wanted=new Set(aliases.map(normalizeHeaderName));
+  for(const [key,value] of Object.entries(row))if(wanted.has(normalizeHeaderName(key)))return value;
+  return null;
+}
 function validDateParts(m,d,y,anchorYear){
   let yy=Number(y); const mm=Number(m),dd=Number(d); if(!yy)yy=anchorYear;if(yy<100)yy+=yy>=70?1900:2000;
   const x=new Date(yy,mm-1,dd);return x.getFullYear()===yy&&x.getMonth()===mm-1&&x.getDate()===dd?x:null;
@@ -495,7 +505,8 @@ function dateOnly(v,anchor){
   if(v instanceof Date&&!isNaN(v))return new Date(v.getFullYear(),v.getMonth(),v.getDate());
   if(typeof v==="number"&&isFinite(v)){const p=XLSX.SSF.parse_date_code(v);return p?new Date(p.y,p.m-1,p.d):null;}
   if(v==null||v==="")return null; const t=String(v).trim(); const a=anchor instanceof Date?anchor:new Date();
-  const m=t.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);if(m)return validDateParts(m[1],m[2],m[3],a.getFullYear());
+  const mdY=t.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?:[ T].*)?$/);if(mdY)return validDateParts(mdY[1],mdY[2],mdY[3],a.getFullYear());
+  const yMd=t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T].*)?$/);if(yMd)return validDateParts(yMd[2],yMd[3],yMd[1],a.getFullYear());
   const x=new Date(t);return isNaN(x)?null:new Date(x.getFullYear(),x.getMonth(),x.getDate());
 }
 function mergeDateKey(d){return d&&!isNaN(d)?`${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${d.getFullYear()}`:null;}
@@ -596,14 +607,21 @@ async function downloadAttendanceTracker(force=false){
       if(!sheetName)throw new Error("Attendance workbook contains no readable worksheet.");
       const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{defval:null,raw:true}).filter(r=>Object.values(r).some(v=>!blank(v)));
       const lookup=new Map();
+      let invalidName=0,invalidStart=0,invalidEnd=0;
       for(const r of rows){
-        const name=normalizeMergeName(r["Employee Name"]),start=dateOnly(r["Start Date"]),end=dateOnly(r["End Date"]);
+        const rawName=rowField(r,"Employee Name","EmployeeName","Name");
+        const rawStart=rowField(r,"Start Date","StartDate","Date From","From Date");
+        const rawEnd=rowField(r,"End Date","EndDate","Date To","To Date");
+        const name=normalizeMergeName(rawName),start=dateOnly(rawStart),end=dateOnly(rawEnd)||start;
+        if(!name)invalidName++;if(!start)invalidStart++;if(!end)invalidEnd++;
         const key=compositeKey(name,start,end);if(!key)continue;
-        const previous=lookup.get(key),id=Number(r.ID),previousId=previous?Number(previous.ID):NaN;
-        if(!previous||(Number.isFinite(id)&&(!Number.isFinite(previousId)||id>previousId)))lookup.set(key,r);
+        const idValue=rowField(r,"ID","Attendance ID","AttendanceID");
+        const previous=lookup.get(key),id=Number(idValue),previousId=previous?Number(previous.__attendanceId):NaN;
+        const normalized={...r,__attendanceId:idValue,__employeeName:normalizeMergeText(rawName),__startDate:mergeDateKey(start),__endDate:mergeDateKey(end),__leaveType:rowField(r,"Type of Leave","TypeOfLeave","Leave Type"),__occurrence:rowField(r,"Occurrence","Occurrences"),__notes:rowField(r,"Notes","Note")};
+        if(!previous||(Number.isFinite(id)&&(!Number.isFinite(previousId)||id>previousId)))lookup.set(key,normalized);
       }
       attendanceLookup=lookup;
-      attendanceLoadStats={rows:rows.length,keys:lookup.size,loaded:true,dateFormat:"MM/dd/yyyy",headers:Object.keys(rows[0]||{}),sampleAttendanceKeys:[...lookup.keys()].slice(0,5)};
+      attendanceLoadStats={rows:rows.length,keys:lookup.size,loaded:true,dateFormat:"MM/dd/yyyy",headers:Object.keys(rows[0]||{}),invalidName,invalidStart,invalidEnd,sampleAttendanceKeys:[...lookup.keys()].slice(0,5)};
       console.info("Attendance M-logic lookup",attendanceLoadStats);
       return lookup;
     }finally{clearTimeout(timer);}
@@ -621,15 +639,15 @@ function mergeAttendanceIntoDataverse(rows){
     const key=compositeKey(r.cr714_name,range.start,range.end);if(key&&sampleTimeOffKeys.length<5)sampleTimeOffKeys.push(key);
     const hit=key?attendanceLookup.get(key):null;if(hit){matched++;if(sampleMatchedKeys.length<5)sampleMatchedKeys.push(key);}
     const existingLeave=blank(r.cr714_leavetype),existingOccurrence=blank(r.cr714_occurrence),existingNotes=blank(r.cr714_requestnotes);
-    if(hit&&existingOccurrence&&!blank(hit.Occurrence))occurrenceFilled++;
+    if(hit&&existingOccurrence&&!blank(hit.__occurrence))occurrenceFilled++;
     return {...r,
-      cr714_leavetype:existingLeave&&hit?hit["Type of Leave"]:r.cr714_leavetype,
-      cr714_occurrence:existingOccurrence&&hit?hit.Occurrence:r.cr714_occurrence,
-      cr714_requestnotes:existingNotes&&hit?hit.Notes:r.cr714_requestnotes,
-      __attendanceMatched:!!hit,__attendanceOccurrenceFilled:!!(hit&&existingOccurrence&&!blank(hit.Occurrence)),__attendanceId:hit?.ID??null,
+      cr714_leavetype:existingLeave&&hit?hit.__leaveType:r.cr714_leavetype,
+      cr714_occurrence:existingOccurrence&&hit?hit.__occurrence:r.cr714_occurrence,
+      cr714_requestnotes:existingNotes&&hit?hit.__notes:r.cr714_requestnotes,
+      __attendanceMatched:!!hit,__attendanceOccurrenceFilled:!!(hit&&existingOccurrence&&!blank(hit.__occurrence)),__attendanceId:hit?.__attendanceId??null,
       __parsedStart:range.start?isoDate(range.start):null,__parsedEnd:range.end?isoDate(range.end):null,__mergeStart:range.start?mergeDateKey(range.start):null,__mergeEnd:range.end?mergeDateKey(range.end):null,__mergeKey:key,__parseStatus:range.status};
   });
-  window.attendanceKeyDiagnostics={sampleTimeOffKeys,sampleAttendanceKeys:attendanceLoadStats.sampleAttendanceKeys||[],sampleMatchedKeys};
+  window.attendanceKeyDiagnostics={dateFormat:"MM/dd/yyyy",attendanceHeaders:attendanceLoadStats.headers||[],attendanceRows:attendanceLoadStats.rows,attendanceKeys:attendanceLoadStats.keys,invalidAttendanceNames:attendanceLoadStats.invalidName||0,invalidAttendanceStartDates:attendanceLoadStats.invalidStart||0,invalidAttendanceEndDates:attendanceLoadStats.invalidEnd||0,sampleTimeOffKeys,sampleAttendanceKeys:attendanceLoadStats.sampleAttendanceKeys||[],sampleMatchedKeys};
   console.info("Attendance exact-key diagnostics",window.attendanceKeyDiagnostics);
   return {rows:output,matched,occurrenceFilled,unmatched:rows.length-matched,unparsed};
 }
@@ -906,7 +924,7 @@ async function pullFromDataverse(silent = false) {
     S.records = newRecords;
     S.makeups = newMakeups;
     S.settings.lastSync = new Date().toLocaleString();
-    S.settings.attendanceMerge = { matched:attendanceMerge.matched, occurrenceFilled:attendanceMerge.occurrenceFilled, unmatched:attendanceMerge.unmatched, unparsed:attendanceMerge.unparsed, attendanceRows:attendanceLoadStats.rows, attendanceKeys:attendanceLoadStats.keys };
+    S.settings.attendanceMerge={matched:attendanceMerge.matched,occurrenceFilled:attendanceMerge.occurrenceFilled,unmatched:attendanceMerge.unmatched,unparsed:attendanceMerge.unparsed,attendanceRows:attendanceLoadStats.rows,attendanceKeys:attendanceLoadStats.keys,invalidAttendanceNames:attendanceLoadStats.invalidName||0,invalidAttendanceStartDates:attendanceLoadStats.invalidStart||0,invalidAttendanceEndDates:attendanceLoadStats.invalidEnd||0,dateFormat:"MM/dd/yyyy"};
     window.attendanceMergeDiagnostics = S.settings.attendanceMerge;
     console.info("Attendance merge diagnostics", window.attendanceMergeDiagnostics);
 
@@ -1423,7 +1441,7 @@ function setSync(t){
   if(t){ $("#syncStatus").textContent=t; return; }
   const last=S.settings?.lastSync ? "Last sync: "+S.settings.lastSync : "";
   const m=S.settings?.attendanceMerge;
-  $("#syncStatus").textContent=m ? `${last} · Attendance ${m.matched}/${m.matched+m.unmatched} matched · ${m.occurrenceFilled||0} blank occurrences filled` : last;
+  $("#syncStatus").textContent=m ? `${last} · Attendance ${m.matched}/${m.matched+m.unmatched} matched · ${m.occurrenceFilled||0} blank occurrences filled · ${m.attendanceKeys||0} lookup keys` : last;
 }
 
 function kpi(v,l,accent,cat){ 
