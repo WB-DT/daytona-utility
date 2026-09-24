@@ -627,30 +627,114 @@ async function downloadAttendanceTracker(force=false){
     }finally{clearTimeout(timer);}
   })();return attendanceLoadPromise;
 }
-function mergeAttendanceIntoDataverse(rows){
-  let matched=0,unparsed=0,occurrenceFilled=0;
-  const sampleTimeOffKeys=[],sampleMatchedKeys=[];
-  const output=rows.map(r=>{
-    const newDateText=r.cr714_requestdates==null?"":String(r.cr714_requestdates).trim();
-    const oldDateText=r.cr714_requestdatesold==null?"":String(r.cr714_requestdatesold).trim();
+function buildDataverseMergeIndex(rows){
+  const exact=new Map(),byNameStart=new Map(),prepared=[];
+  let unparsed=0,duplicateKeys=0;
+  for(const r of rows||[]){
+    const newDateText=normalizeMergeText(r.cr714_requestdates)||"";
+    const oldDateText=normalizeMergeText(r.cr714_requestdatesold)||"";
     const source=newDateText||oldDateText||null;
     const anchor=r.cr714_completiontime||r.cr714_starttime||r.overriddencreatedon||r.createdon;
-    const range=requestDateRange(source,anchor);if(!range.start||!range.end)unparsed++;
-    const key=compositeKey(r.cr714_name,range.start,range.end);if(key&&sampleTimeOffKeys.length<5)sampleTimeOffKeys.push(key);
-    const hit=key?attendanceLookup.get(key):null;if(hit){matched++;if(sampleMatchedKeys.length<5)sampleMatchedKeys.push(key);}
+    const range=requestDateRange(source,anchor);
+    const name=normalizeMergeName(r.cr714_name);
+    const startKey=mergeDateKey(range.start),endKey=mergeDateKey(range.end);
+    const exactKey=name&&startKey&&endKey?`${name}|${startKey}|${endKey}`:null;
+    const nameStartKey=name&&startKey?`${name}|${startKey}`:null;
+    if(!exactKey)unparsed++;
+    const item={row:r,name,start:range.start,end:range.end,startKey,endKey,exactKey,nameStartKey,parseStatus:range.status,dateSource:source};
+    prepared.push(item);
+    if(exactKey){
+      if(exact.has(exactKey))duplicateKeys++;
+      if(!exact.has(exactKey))exact.set(exactKey,[]);
+      exact.get(exactKey).push(item);
+    }
+    if(nameStartKey){
+      if(!byNameStart.has(nameStartKey))byNameStart.set(nameStartKey,[]);
+      byNameStart.get(nameStartKey).push(item);
+    }
+  }
+  return {prepared,exact,byNameStart,unparsed,duplicateKeys};
+}
+function buildAttendanceMergeIndexes(){
+  const exact=attendanceLookup;
+  const byNameStart=new Map();
+  for(const [key,row] of exact.entries()){
+    const parts=key.split("|");
+    if(parts.length<3)continue;
+    const nameStartKey=`${parts[0]}|${parts[1]}`;
+    if(!byNameStart.has(nameStartKey))byNameStart.set(nameStartKey,[]);
+    byNameStart.get(nameStartKey).push({key,row});
+  }
+  return {exact,byNameStart};
+}
+function mergeAttendanceIntoDataverse(rows){
+  let matched=0,exactMatched=0,startFallbackMatched=0,ambiguousFallback=0,occurrenceFilled=0;
+  const dvIndex=buildDataverseMergeIndex(rows);
+  const attendanceIndex=buildAttendanceMergeIndexes();
+  const sampleTimeOffKeys=[],sampleMatchedKeys=[],sampleUnmatchedKeys=[];
+  const output=dvIndex.prepared.map(item=>{
+    const r=item.row;
+    if(item.exactKey&&sampleTimeOffKeys.length<10)sampleTimeOffKeys.push(item.exactKey);
+    let hit=item.exactKey?attendanceIndex.exact.get(item.exactKey):null;
+    let matchMethod=hit?"Exact name + start + end":null;
+    let matchedAttendanceKey=item.exactKey;
+    if(hit){exactMatched++;}
+    if(!hit&&item.nameStartKey){
+      const candidates=attendanceIndex.byNameStart.get(item.nameStartKey)||[];
+      if(candidates.length===1){
+        hit=candidates[0].row;
+        matchedAttendanceKey=candidates[0].key;
+        matchMethod="Name + start fallback";
+        startFallbackMatched++;
+      }else if(candidates.length>1){
+        ambiguousFallback++;
+      }
+    }
+    if(hit){matched++;if(sampleMatchedKeys.length<10)sampleMatchedKeys.push({dataverseKey:item.exactKey,attendanceKey:matchedAttendanceKey,method:matchMethod});}
+    else if(item.exactKey&&sampleUnmatchedKeys.length<10)sampleUnmatchedKeys.push(item.exactKey);
     const existingLeave=blank(r.cr714_leavetype),existingOccurrence=blank(r.cr714_occurrence),existingNotes=blank(r.cr714_requestnotes);
     if(hit&&existingOccurrence&&!blank(hit.__occurrence))occurrenceFilled++;
     return {...r,
       cr714_leavetype:existingLeave&&hit?hit.__leaveType:r.cr714_leavetype,
       cr714_occurrence:existingOccurrence&&hit?hit.__occurrence:r.cr714_occurrence,
       cr714_requestnotes:existingNotes&&hit?hit.__notes:r.cr714_requestnotes,
-      __attendanceMatched:!!hit,__attendanceOccurrenceFilled:!!(hit&&existingOccurrence&&!blank(hit.__occurrence)),__attendanceId:hit?.__attendanceId??null,
-      __parsedStart:range.start?isoDate(range.start):null,__parsedEnd:range.end?isoDate(range.end):null,__mergeStart:range.start?mergeDateKey(range.start):null,__mergeEnd:range.end?mergeDateKey(range.end):null,__mergeKey:key,__parseStatus:range.status};
+      __attendanceMatched:!!hit,
+      __attendanceMatchMethod:matchMethod,
+      __attendanceOccurrenceFilled:!!(hit&&existingOccurrence&&!blank(hit.__occurrence)),
+      __attendanceId:hit?.__attendanceId??null,
+      __parsedStart:item.start?isoDate(item.start):null,
+      __parsedEnd:item.end?isoDate(item.end):null,
+      __mergeStart:item.startKey,
+      __mergeEnd:item.endKey,
+      __mergeKey:item.exactKey,
+      __attendanceMergeKey:matchedAttendanceKey||null,
+      __parseStatus:item.parseStatus};
   });
-  window.attendanceKeyDiagnostics={dateFormat:"MM/dd/yyyy",attendanceHeaders:attendanceLoadStats.headers||[],attendanceRows:attendanceLoadStats.rows,attendanceKeys:attendanceLoadStats.keys,invalidAttendanceNames:attendanceLoadStats.invalidName||0,invalidAttendanceStartDates:attendanceLoadStats.invalidStart||0,invalidAttendanceEndDates:attendanceLoadStats.invalidEnd||0,sampleTimeOffKeys,sampleAttendanceKeys:attendanceLoadStats.sampleAttendanceKeys||[],sampleMatchedKeys};
-  console.info("Attendance exact-key diagnostics",window.attendanceKeyDiagnostics);
-  return {rows:output,matched,occurrenceFilled,unmatched:rows.length-matched,unparsed};
+  const exactIntersection=[...dvIndex.exact.keys()].filter(k=>attendanceIndex.exact.has(k));
+  window.dataverseMergeIndex=dvIndex;
+  window.attendanceKeyDiagnostics={
+    dateFormat:"MM/dd/yyyy",
+    dataverseRows:rows.length,
+    dataverseKeys:dvIndex.exact.size,
+    dataverseDuplicateKeys:dvIndex.duplicateKeys,
+    dataverseUnparsed:dvIndex.unparsed,
+    attendanceRows:attendanceLoadStats.rows,
+    attendanceKeys:attendanceIndex.exact.size,
+    exactKeyIntersection:exactIntersection.length,
+    exactMatched,
+    startFallbackMatched,
+    ambiguousFallback,
+    sampleTimeOffKeys,
+    sampleAttendanceKeys:[...attendanceIndex.exact.keys()].slice(0,10),
+    sampleMatchedKeys,
+    sampleUnmatchedKeys
+  };
+  console.info("Dataverse merge-key index",{rows:rows.length,keys:dvIndex.exact.size,duplicates:dvIndex.duplicateKeys,unparsed:dvIndex.unparsed,sample:[...dvIndex.exact.keys()].slice(0,10)});
+  console.info("Attendance merge-key index",{rows:attendanceLoadStats.rows,keys:attendanceIndex.exact.size,sample:[...attendanceIndex.exact.keys()].slice(0,10)});
+  console.info("Dataverse/Attendance key comparison",window.attendanceKeyDiagnostics);
+  return {rows:output,matched,exactMatched,startFallbackMatched,ambiguousFallback,occurrenceFilled,unmatched:rows.length-matched,unparsed:dvIndex.unparsed,dataverseKeys:dvIndex.exact.size,attendanceKeys:attendanceIndex.exact.size,exactKeyIntersection:exactIntersection.length};
 }
+
 async function pullFromDataverse(silent = false) {
   setSync("Syncing with Dataverse...");
   showLoadScreen("Loading Workforce data...", 10, "Connecting to Dataverse and downloading Attendance Tracker.");
@@ -813,6 +897,8 @@ async function pullFromDataverse(silent = false) {
           mergeStart:r.__mergeStart||null,
           mergeEnd:r.__mergeEnd||null,
           mergeKey:r.__mergeKey||null,
+          attendanceMergeKey:r.__attendanceMergeKey||null,
+          attendanceMatchMethod:r.__attendanceMatchMethod||null,
           attendanceMatched: !!r.__attendanceMatched,
           attendanceId: r.__attendanceId || null,
           attendanceOccurrenceFilled: !!r.__attendanceOccurrenceFilled,
@@ -924,7 +1010,7 @@ async function pullFromDataverse(silent = false) {
     S.records = newRecords;
     S.makeups = newMakeups;
     S.settings.lastSync = new Date().toLocaleString();
-    S.settings.attendanceMerge={matched:attendanceMerge.matched,occurrenceFilled:attendanceMerge.occurrenceFilled,unmatched:attendanceMerge.unmatched,unparsed:attendanceMerge.unparsed,attendanceRows:attendanceLoadStats.rows,attendanceKeys:attendanceLoadStats.keys,invalidAttendanceNames:attendanceLoadStats.invalidName||0,invalidAttendanceStartDates:attendanceLoadStats.invalidStart||0,invalidAttendanceEndDates:attendanceLoadStats.invalidEnd||0,dateFormat:"MM/dd/yyyy"};
+    S.settings.attendanceMerge={matched:attendanceMerge.matched,exactMatched:attendanceMerge.exactMatched,startFallbackMatched:attendanceMerge.startFallbackMatched,ambiguousFallback:attendanceMerge.ambiguousFallback,occurrenceFilled:attendanceMerge.occurrenceFilled,unmatched:attendanceMerge.unmatched,unparsed:attendanceMerge.unparsed,dataverseKeys:attendanceMerge.dataverseKeys,attendanceRows:attendanceLoadStats.rows,attendanceKeys:attendanceMerge.attendanceKeys,exactKeyIntersection:attendanceMerge.exactKeyIntersection,invalidAttendanceNames:attendanceLoadStats.invalidName||0,invalidAttendanceStartDates:attendanceLoadStats.invalidStart||0,invalidAttendanceEndDates:attendanceLoadStats.invalidEnd||0,dateFormat:"MM/dd/yyyy"};
     window.attendanceMergeDiagnostics = S.settings.attendanceMerge;
     console.info("Attendance merge diagnostics", window.attendanceMergeDiagnostics);
 
@@ -1441,7 +1527,7 @@ function setSync(t){
   if(t){ $("#syncStatus").textContent=t; return; }
   const last=S.settings?.lastSync ? "Last sync: "+S.settings.lastSync : "";
   const m=S.settings?.attendanceMerge;
-  $("#syncStatus").textContent=m ? `${last} · Attendance ${m.matched}/${m.matched+m.unmatched} matched · ${m.occurrenceFilled||0} blank occurrences filled · ${m.attendanceKeys||0} lookup keys` : last;
+  $("#syncStatus").textContent=m ? `${last} · Attendance ${m.matched}/${m.matched+m.unmatched} matched (${m.exactMatched||0} exact, ${m.startFallbackMatched||0} fallback) · ${m.occurrenceFilled||0} filled · Keys DV ${m.dataverseKeys||0} / Attendance ${m.attendanceKeys||0} / Intersection ${m.exactKeyIntersection||0}` : last;
 }
 
 function kpi(v,l,accent,cat){ 
@@ -1778,7 +1864,7 @@ function renderOccurrenceAudit(){
     <span class="small muted right">Showing ${shown.length} of ${auditRows.length}</span>
   </div></div>
   <div class="card tbl-wrap"><table><thead><tr>
-    <th>Employee</th><th>Record Date</th><th>Request Range</th><th>Type</th><th>Occurrence</th><th>Source</th><th>Match</th><th>Attendance ID</th><th>Merge Key</th><th>Status</th>
+    <th>Employee</th><th>Record Date</th><th>Request Range</th><th>Type</th><th>Occurrence</th><th>Source</th><th>Match</th><th>Method</th><th>Attendance ID</th><th>Dataverse Key</th><th>Attendance Key</th><th>Status</th>
   </tr></thead><tbody>${shown.map(({r,e,status,source})=>`<tr data-rec="${esc(r.rid)}" title="Click to inspect record">
     <td><b>${esc(e.name)}</b><div class="small muted">${esc(e.dept||"")}</div></td>
     <td>${fmt(r.date)}</td>
@@ -1787,10 +1873,12 @@ function renderOccurrenceAudit(){
     <td><span class="badge ${occurrenceValue(r)>0?"warn":""}">${occurrenceValue(r)}</span></td>
     <td>${esc(source)}</td>
     <td>${r.attendanceMatched?`<span class="badge ok">Matched</span>`:`<span class="badge warn">No match</span>`}</td>
+    <td class="small">${esc(r.attendanceMatchMethod||"")}</td>
     <td>${esc(r.attendanceId||"")}</td>
-    <td class="small" style="max-width:280px;word-break:break-all">${esc(r.mergeKey||"")}</td>
+    <td class="small" style="max-width:260px;word-break:break-all">${esc(r.mergeKey||"")}</td>
+    <td class="small" style="max-width:260px;word-break:break-all">${esc(r.attendanceMergeKey||"")}</td>
     <td><span class="badge ${status.cls}">${esc(status.label)}</span></td>
-  </tr>`).join("")||`<tr class="norow"><td colspan="10" class="empty">No occurrence audit rows match the current filters.</td></tr>`}</tbody></table></div>`;
+  </tr>`).join("")||`<tr class="norow"><td colspan="12" class="empty">No occurrence audit rows match the current filters.</td></tr>`}</tbody></table></div>`;
 }
 
 function muRow(m){
