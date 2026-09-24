@@ -496,15 +496,32 @@ function dateOnly(v,anchor){
 }
 function mergeDateKey(d){return d&&!isNaN(d)?`${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}`:null;}
 function requestDateRange(raw,anchorValue){
-  const text=raw==null?"":String(raw).trim();const anchor=dateOnly(anchorValue)||new Date();if(!text)return {start:null,end:null,status:"No request date"};
-  const normal=text.toLowerCase().replace(/[\\／]/g,"/").replace(/[–—−]/g,"-").replace(/(\d)(st|nd|rd|th)\b/g,"$1").replace(/[\n\r\t,;|&()[\]{}]/g," ");
-  const dates=[];let m;const full=/(?<!\d)(\d{1,2})\s*\/\s*(\d{1,2})\s*\/\s*(\d{2,4})(?!\d)/g;
-  while((m=full.exec(normal))){const d=validDateParts(m[1],m[2],m[3],anchor.getFullYear());if(d)dates.push(d);}
-  if(!dates.length){const short=/(?<![\d/])(\d{1,2})\s*\/\s*(\d{1,2})(?!\s*\/\s*\d)/g;while((m=short.exec(normal))){const d=validDateParts(m[1],m[2],null,anchor.getFullYear());if(d)dates.push(d);}}
-  if(!dates.length){const months={january:1,jan:1,february:2,feb:2,march:3,mar:3,april:4,apr:4,may:5,june:6,jun:6,july:7,jul:7,august:8,aug:8,september:9,sept:9,sep:9,october:10,oct:10,november:11,nov:11,december:12,dec:12};const rx=/\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\s+(\d{1,2})(?:\s*,?\s*(\d{2,4}))?\b/g;while((m=rx.exec(normal))){const d=validDateParts(months[m[1]],m[2],m[3],anchor.getFullYear());if(d)dates.push(d);}}
-  const unique=[...new Map(dates.map(d=>[mergeDateKey(d),d])).values()].sort((a,b)=>a-b);return {start:unique[0]||null,end:unique[unique.length-1]||null,status:!unique.length?"Unable to parse":unique.length===1?"Single date":"Date range"};
+  const anchor=dateOnly(anchorValue)||new Date();
+  const anchorYear=anchor.getFullYear();
+  const rawText=raw==null?"":String(raw).replace(/[\u0000-\u001f\u007f]/g," ").trim();
+  if(!rawText)return {start:null,end:null,status:"No request date"};
+  const replacements=[["\\","/"],["／","/"],["–","-"],["—","-"],["−","-"],["\n"," "],["\r"," "],["\t"," "],[","," "],[";"," "],["|"," "],["&"," "],["("," "],[")"," "],["["," "],["]"," "],["{"," "],["}"," "]];
+  let normalized=rawText.toLowerCase();
+  for(const [from,to] of replacements)normalized=normalized.split(from).join(to);
+  const rangeNormalized=normalized.replaceAll(" - "," ").replaceAll("- "," ").replaceAll(" -"," ");
+  const tokens=rangeNormalized.split(/[ !?="'<>+*]+/).map(t=>t.replace(/^[.:!?"'()\[\]{}]+|[.:!?"'()\[\]{}]+$/g,"").trim()).filter(Boolean);
+  const dates=[];
+  const parseToken=token=>{
+    const slashCount=(token.match(/\//g)||[]).length;
+    if(slashCount!==1&&slashCount!==2)return null;
+    const parts=token.split('/').map(x=>Number(x));
+    if(parts.some(x=>!Number.isFinite(x)))return null;
+    return slashCount===2?validDateParts(parts[0],parts[1],parts[2],anchorYear):validDateParts(parts[0],parts[1],null,anchorYear);
+  };
+  for(const token of tokens){const d=parseToken(token);if(d)dates.push(d);}
+  if(!dates.length){
+    const monthNames={january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12,jan:1,feb:2,mar:3,apr:4,jun:6,jul:7,aug:8,sep:9,sept:9,oct:10,nov:11,dec:12};
+    for(let i=0;i<tokens.length-1;i++)if(monthNames[tokens[i]]){const day=Number((tokens[i+1].match(/\d+/)||[])[0]);const d=validDateParts(monthNames[tokens[i]],day,null,anchorYear);if(d)dates.push(d);}
+  }
+  const unique=[...new Map(dates.map(d=>[mergeDateKey(d),d])).values()].sort((a,b)=>a-b);
+  return {start:unique[0]||null,end:unique[unique.length-1]||null,status:!unique.length?"Unable to parse":unique.length===1?"Single date":"Date range"};
 }
-function compositeKey(name,start,end){const n=normalizeMergeName(name),s=mergeDateKey(start),e=mergeDateKey(end);return n&&s&&e?`${n}|${s}|${e}`:null;}
+function compositeKey(name,start,end){const n=normalizeMergeName(name),a=mergeDateKey(start),b=mergeDateKey(end);return n&&a&&b?`${n}|${a}|${b}`:null;}
 function blank(v){return v==null||(typeof v==="string"&&!v.trim());}
 function parseFirstJsonValue(rawText){
   const text=String(rawText??"").replace(/^\uFEFF/,"").trim();
@@ -572,26 +589,43 @@ async function downloadAttendanceTracker(force=false){
       const sheetName=wb.SheetNames.find(n=>n.toLowerCase()==="leavetracker")||wb.SheetNames.find(n=>n.toLowerCase()==="attendance tracker")||wb.SheetNames[0];
       if(!sheetName)throw new Error("Attendance workbook contains no readable worksheet.");
       const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{defval:null,raw:true}).filter(r=>Object.values(r).some(v=>!blank(v)));
-      const lookup=new Map();for(const r of rows){const key=compositeKey(r["Employee Name"],dateOnly(r["Start Date"]),dateOnly(r["End Date"]));if(!key)continue;const old=lookup.get(key),id=Number(r.ID),oldId=old?Number(old.ID):NaN;if(!old||(isFinite(id)&&(!isFinite(oldId)||id>oldId)))lookup.set(key,r);}
-      attendanceLookup=lookup;attendanceLoadStats={rows:rows.length,keys:lookup.size,loaded:true};return lookup;
+      const lookup=new Map();
+      for(const r of rows){
+        const name=normalizeMergeName(r["Employee Name"]),start=dateOnly(r["Start Date"]),end=dateOnly(r["End Date"]);
+        const key=compositeKey(name,start,end);if(!key)continue;
+        const previous=lookup.get(key),id=Number(r.ID),previousId=previous?Number(previous.ID):NaN;
+        if(!previous||(Number.isFinite(id)&&(!Number.isFinite(previousId)||id>previousId)))lookup.set(key,r);
+      }
+      attendanceLookup=lookup;
+      attendanceLoadStats={rows:rows.length,keys:lookup.size,loaded:true,headers:Object.keys(rows[0]||{}),sampleAttendanceKeys:[...lookup.keys()].slice(0,5)};
+      console.info("Attendance M-logic lookup",attendanceLoadStats);
+      return lookup;
     }finally{clearTimeout(timer);}
   })();return attendanceLoadPromise;
 }
 function mergeAttendanceIntoDataverse(rows){
-  let matched=0,unparsed=0;
+  let matched=0,unparsed=0,occurrenceFilled=0;
+  const sampleTimeOffKeys=[],sampleMatchedKeys=[];
   const output=rows.map(r=>{
-    const source=!blank(r.cr714_requestdates)?r.cr714_requestdates:r.cr714_requestdatesold;
+    const newDateText=r.cr714_requestdates==null?"":String(r.cr714_requestdates).trim();
+    const oldDateText=r.cr714_requestdatesold==null?"":String(r.cr714_requestdatesold).trim();
+    const source=newDateText||oldDateText||null;
     const anchor=r.cr714_completiontime||r.cr714_starttime||r.overriddencreatedon||r.createdon;
     const range=requestDateRange(source,anchor);if(!range.start||!range.end)unparsed++;
-    const hit=attendanceLookup.get(compositeKey(r.cr714_name,range.start,range.end));if(hit)matched++;
+    const key=compositeKey(r.cr714_name,range.start,range.end);if(key&&sampleTimeOffKeys.length<5)sampleTimeOffKeys.push(key);
+    const hit=key?attendanceLookup.get(key):null;if(hit){matched++;if(sampleMatchedKeys.length<5)sampleMatchedKeys.push(key);}
+    const existingLeave=blank(r.cr714_leavetype),existingOccurrence=blank(r.cr714_occurrence),existingNotes=blank(r.cr714_requestnotes);
+    if(hit&&existingOccurrence&&!blank(hit.Occurrence))occurrenceFilled++;
     return {...r,
-      cr714_leavetype:blank(r.cr714_leavetype)&&hit?hit["Type of Leave"]:r.cr714_leavetype,
-      cr714_occurrence:blank(r.cr714_occurrence)&&hit?hit.Occurrence:r.cr714_occurrence,
-      cr714_requestnotes:blank(r.cr714_requestnotes)&&hit?hit.Notes:r.cr714_requestnotes,
-      __attendanceMatched:!!hit,__attendanceId:hit?.ID??null,__parsedStart:range.start?isoDate(range.start):null,__parsedEnd:range.end?isoDate(range.end):null
-    };
+      cr714_leavetype:existingLeave&&hit?hit["Type of Leave"]:r.cr714_leavetype,
+      cr714_occurrence:existingOccurrence&&hit?hit.Occurrence:r.cr714_occurrence,
+      cr714_requestnotes:existingNotes&&hit?hit.Notes:r.cr714_requestnotes,
+      __attendanceMatched:!!hit,__attendanceOccurrenceFilled:!!(hit&&existingOccurrence&&!blank(hit.Occurrence)),__attendanceId:hit?.ID??null,
+      __parsedStart:range.start?isoDate(range.start):null,__parsedEnd:range.end?isoDate(range.end):null,__mergeKey:key,__parseStatus:range.status};
   });
-  return {rows:output,matched,unmatched:rows.length-matched,unparsed};
+  window.attendanceKeyDiagnostics={sampleTimeOffKeys,sampleAttendanceKeys:attendanceLoadStats.sampleAttendanceKeys||[],sampleMatchedKeys};
+  console.info("Attendance exact-key diagnostics",window.attendanceKeyDiagnostics);
+  return {rows:output,matched,occurrenceFilled,unmatched:rows.length-matched,unparsed};
 }
 async function pullFromDataverse(silent = false) {
   setSync("Syncing with Dataverse...");
@@ -750,6 +784,7 @@ async function pullFromDataverse(silent = false) {
           occurrence: parseFloat(r.cr714_occurrence) || 0,
           attendanceMatched: !!r.__attendanceMatched,
           attendanceId: r.__attendanceId || null,
+          attendanceOccurrenceFilled: !!r.__attendanceOccurrenceFilled,
           waived: !!r.cr714_completed,
           cancelled: isCancelled,
           source: r.__attendanceMatched ? "dataverse+attendance" : "dataverse"
@@ -858,13 +893,13 @@ async function pullFromDataverse(silent = false) {
     S.records = newRecords;
     S.makeups = newMakeups;
     S.settings.lastSync = new Date().toLocaleString();
-    S.settings.attendanceMerge = { matched:attendanceMerge.matched, unmatched:attendanceMerge.unmatched, unparsed:attendanceMerge.unparsed, attendanceRows:attendanceLoadStats.rows, attendanceKeys:attendanceLoadStats.keys };
+    S.settings.attendanceMerge = { matched:attendanceMerge.matched, occurrenceFilled:attendanceMerge.occurrenceFilled, unmatched:attendanceMerge.unmatched, unparsed:attendanceMerge.unparsed, attendanceRows:attendanceLoadStats.rows, attendanceKeys:attendanceLoadStats.keys };
     window.attendanceMergeDiagnostics = S.settings.attendanceMerge;
     console.info("Attendance merge diagnostics", window.attendanceMergeDiagnostics);
 
     save();
     render();
-    updateLoad("Workforce data ready",100,`${attendanceMerge.matched.toLocaleString()} Time Off rows matched to ${attendanceLoadStats.rows.toLocaleString()} Attendance Tracker rows.`);
+    updateLoad("Workforce data ready",100,`${attendanceMerge.matched.toLocaleString()} exact Time Off matches; ${attendanceMerge.occurrenceFilled.toLocaleString()} blank occurrence fields filled from ${attendanceLoadStats.rows.toLocaleString()} Attendance rows.`);
     setTimeout(hideLoadScreen,450);
     if (!silent) toast(`Synced ${S.employees.length} active reps, ${newRecords.length} records, ${attendanceMerge.matched} attendance matches`);
   } catch (err) {
@@ -1317,7 +1352,7 @@ function setSync(t){
   if(t){ $("#syncStatus").textContent=t; return; }
   const last=S.settings?.lastSync ? "Last sync: "+S.settings.lastSync : "";
   const m=S.settings?.attendanceMerge;
-  $("#syncStatus").textContent=m ? `${last} · Attendance ${m.matched}/${m.matched+m.unmatched} matched` : last;
+  $("#syncStatus").textContent=m ? `${last} · Attendance ${m.matched}/${m.matched+m.unmatched} matched · ${m.occurrenceFilled||0} blank occurrences filled` : last;
 }
 
 function kpi(v,l,accent,cat){ 
@@ -1760,7 +1795,8 @@ function rowRecord(r, slim){
     r.voicemail?`<span class="badge" title="Called in via Voicemail">Voicemail</span>`:null,
     r.waived?`<span class="badge ok" title="Occurrence waived via completed make-up">waived</span>`:null,
     r.cancelled?`<span class="badge bad" title="Cancelled request">Cancelled</span>`:null,
-    r.attendanceMatched?`<span class="badge" title="Matched to Attendance Tracker">Attendance</span>`:null,
+    r.attendanceMatched?`<span class="badge" title="Exact M-logic match to Attendance Tracker">Attendance Match</span>`:null,
+    r.attendanceOccurrenceFilled?`<span class="badge ok" title="Blank Time Off occurrence filled from Attendance Tracker">Mapped Occurrence</span>`:null,
     occurrenceValue(r)>0?`<span class="badge warn" title="Occurrence value used by reports">Occ ${occurrenceValue(r)}</span>`:null
   ].filter(Boolean).join(" ");
 
