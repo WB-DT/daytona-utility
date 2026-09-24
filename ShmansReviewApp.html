@@ -747,7 +747,9 @@ async function pullFromDataverse(silent = false) {
           partialShift: r.cr714_hoursofpartialshift || "",
           fmla: r.cr714_fmla === 1 || r.cr714_fmla === true || String(r.cr714_fmla) === "true",
           voicemail: r.cr714_voicemail === 1 || r.cr714_voicemail === true || String(r.cr714_voicemail) === "true",
-          occurrence: parseInt(r.cr714_occurrence, 10) || 0,
+          occurrence: parseFloat(r.cr714_occurrence) || 0,
+          attendanceMatched: !!r.__attendanceMatched,
+          attendanceId: r.__attendanceId || null,
           waived: !!r.cr714_completed,
           cancelled: isCancelled,
           source: r.__attendanceMatched ? "dataverse+attendance" : "dataverse"
@@ -856,6 +858,9 @@ async function pullFromDataverse(silent = false) {
     S.records = newRecords;
     S.makeups = newMakeups;
     S.settings.lastSync = new Date().toLocaleString();
+    S.settings.attendanceMerge = { matched:attendanceMerge.matched, unmatched:attendanceMerge.unmatched, unparsed:attendanceMerge.unparsed, attendanceRows:attendanceLoadStats.rows, attendanceKeys:attendanceLoadStats.keys };
+    window.attendanceMergeDiagnostics = S.settings.attendanceMerge;
+    console.info("Attendance merge diagnostics", window.attendanceMergeDiagnostics);
 
     save();
     render();
@@ -1223,12 +1228,18 @@ function filteredRecords(from,to){
 }
 
 function emp(id){ return S.employees?.find(e=>e.id===id); }
-function isOcc(r){ return !!TYPES[r.type]?.occ && !r.waived; }
+function occurrenceValue(r){
+  if (!r || r.waived || r.cancelled) return 0;
+  const mergedValue = Number(r.occurrence);
+  if (Number.isFinite(mergedValue) && mergedValue > 0) return mergedValue;
+  return Number(TYPES[r.type]?.occ) || 0;
+}
+function isOcc(r){ return occurrenceValue(r) > 0; }
 
 function occCount(empId, asOf){
   if (!S.records) return 0;
   const from = addDays(asOf, -OCC_WINDOW_DAYS);
-  return S.records.filter(r=>r.empId===empId && r.date>from && r.date<=asOf && isOcc(r)).length;
+  return S.records.filter(r=>r.empId===empId && r.date>from && r.date<=asOf).reduce((n,r)=>n+occurrenceValue(r),0);
 }
 
 function level(n){ for(const [k,name,cls] of LADDER) if(n>=k) return {name,cls}; return null; }
@@ -1246,7 +1257,7 @@ function metrics(){
   
   recs.forEach(r=>{ 
     c[r.type]=(c[r.type]||0)+1; 
-    if(isOcc(r)) occ++; 
+    occ += occurrenceValue(r); 
   });
 
   // Calculate default Present count for days without explicit records
@@ -1302,7 +1313,12 @@ function renderFilters(){
     <span class="small muted right">${fmt(f)} → ${fmt(t)}</span>`;
 }
 
-function setSync(t){ $("#syncStatus").textContent = t || (S.settings?.lastSync? "Last sync: "+S.settings.lastSync : ""); }
+function setSync(t){
+  if(t){ $("#syncStatus").textContent=t; return; }
+  const last=S.settings?.lastSync ? "Last sync: "+S.settings.lastSync : "";
+  const m=S.settings?.attendanceMerge;
+  $("#syncStatus").textContent=m ? `${last} · Attendance ${m.matched}/${m.matched+m.unmatched} matched` : last;
+}
 
 function kpi(v,l,accent,cat){ 
   const clickAttr = cat ? ` onclick="kpiModal('${cat}', '${l}')" style="--accent:${accent||"var(--brand)"}; cursor:pointer;" title="Click to view ${l}"` : `style="--accent:${accent||"var(--brand)"}"`;
@@ -1534,7 +1550,7 @@ function renderTeam(){
   const m=metrics();
   const teamRows=m.emps.map(e=>{
     const rs=m.recs.filter(r=>r.empId===e.id);
-    const occ=rs.filter(isOcc).length, n90=occCount(e.id,m.to), lv=level(n90);
+    const occ=rs.reduce((n,r)=>n+occurrenceValue(r),0), n90=occCount(e.id,m.to), lv=level(n90);
     const perfect=rs.length&&!occ;
     return {
       e, 
@@ -1743,7 +1759,9 @@ function rowRecord(r, slim){
     r.fmla?`<span class="badge" title="FMLA Protected">FMLA</span>`:null,
     r.voicemail?`<span class="badge" title="Called in via Voicemail">Voicemail</span>`:null,
     r.waived?`<span class="badge ok" title="Occurrence waived via completed make-up">waived</span>`:null,
-    r.cancelled?`<span class="badge bad" title="Cancelled request">Cancelled</span>`:null
+    r.cancelled?`<span class="badge bad" title="Cancelled request">Cancelled</span>`:null,
+    r.attendanceMatched?`<span class="badge" title="Matched to Attendance Tracker">Attendance</span>`:null,
+    occurrenceValue(r)>0?`<span class="badge warn" title="Occurrence value used by reports">Occ ${occurrenceValue(r)}</span>`:null
   ].filter(Boolean).join(" ");
 
   if (slim) {
