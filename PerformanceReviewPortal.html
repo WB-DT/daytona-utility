@@ -17589,7 +17589,12 @@ function sync(){var b=document.getElementById('btn-admin-diagnostic-export'),on=
 window.addEventListener('error',function(e){runtimeErrors.push({type:'error',message:e.message,source:e.filename,line:e.lineno,column:e.colno,stack:e.error&&e.error.stack||'',time:new Date().toISOString()})});
 window.addEventListener('unhandledrejection',function(e){runtimeErrors.push({type:'unhandledrejection',reason:safe(e.reason,0,new WeakSet()),time:new Date().toISOString()})});
 document.addEventListener('DOMContentLoaded',function(){var b=document.getElementById('btn-admin-diagnostic-export');if(b)b.addEventListener('click',exportJson);sync()});
-new MutationObserver(sync).observe(document.documentElement,{attributes:true,attributeFilter:['class'],subtree:true});setInterval(sync,500);window.exportAdminDiagnosticJson=exportJson;window.buildAdminDiagnostic=diagnostic;
+/* Memory fix v244: Admin diagnostics are event-driven. The old subtree observer plus 500 ms interval ran forever. */
+var adminSyncQueued=false;
+function queueAdminSync(){if(adminSyncQueued)return;adminSyncQueued=true;requestAnimationFrame(function(){adminSyncQueued=false;sync()})}
+new MutationObserver(queueAdminSync).observe(document.body||document.documentElement,{attributes:true,attributeFilter:['class']});
+['admin-demo-changed','review-session-reset'].forEach(function(name){window.addEventListener(name,queueAdminSync,{passive:true})});
+window.exportAdminDiagnosticJson=exportJson;window.buildAdminDiagnostic=diagnostic;
 }());
 </script>
 <style id="v102-table-only-page3-final-css">
@@ -17719,7 +17724,11 @@ function repairPrint(root){
 }
 function repairAll(){fit();['eom-template-print-root','submitted-print-root','print-summary','summary-preview'].forEach(id=>repairPrint(document.getElementById(id)))}
 /* The source field is assigned programmatically, which does not fire input/change. Polling catches that exact case. */
-let last='';setInterval(()=>{const el=document.getElementById(FIELD);const now=el?.value||'';if(now!==last||el?.scrollHeight>el?.clientHeight+2){last=now;fit()}},200);
+let last='';
+/* Memory fix v244: replace perpetual 200 ms polling with bounded, event-driven fitting. */
+const checkField=()=>{const el=document.getElementById(FIELD);const now=el?.value||'';if(now!==last||el?.scrollHeight>el?.clientHeight+2){last=now;fit()}};
+['previous-review-parsed','previous-review-file-processed','kpi-flow-data-ready','review-form-populated','review-panel-changed'].forEach(name=>window.addEventListener(name,checkField,{passive:true}));
+window.addEventListener('load',()=>{checkField();setTimeout(checkField,250);setTimeout(checkField,1200)},{once:true});
 document.addEventListener('input',e=>{if(e.target?.id===FIELD)fit()},true);
 document.addEventListener('change',e=>{if(e.target?.id===FIELD)fit()},true);
 window.addEventListener('beforeprint',repairAll);
@@ -17872,6 +17881,7 @@ function base64FromBytes(bytes){let raw='';for(let i=0;i<bytes.length;i+=32768)r
 function freezeDocument(html){const doc=new DOMParser().parseFromString(html,'text/html');doc.querySelectorAll('input,select,textarea').forEach(el=>{let value='';if(el.tagName==='SELECT')value=el.options[el.selectedIndex]?.text||el.value||'';else if(el.type==='checkbox'||el.type==='radio')value=el.checked?'Yes':'No';else value=el.value||el.getAttribute('value')||'';const span=doc.createElement('span');span.textContent=clean(value);span.style.cssText='display:inline-block;min-width:70px;padding:2px 4px;border-bottom:1px solid #777';el.replaceWith(span)});doc.querySelectorAll('script,button,.comparison-source-note,.v16-screen-only').forEach(el=>el.remove());return doc.body.innerHTML}
 async function completedReviewFile(){const pkg=await window.buildManagerDeliveryPackage();const source=new TextDecoder('utf-8').decode(bytesFromBase64(pkg.attachmentContentBase64));const body=freezeDocument(source);const word=`<!DOCTYPE html><html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"><meta name="ProgId" content="Word.Document"><style>@page{size:8.5in 11in;margin:.45in}body{font-family:Arial,sans-serif;color:#111}table{width:100%;border-collapse:collapse}th,td{border:1px solid #777;padding:5px;vertical-align:top}th{background:#e5e7eb}</style></head><body>${body}
 <!-- v207 Authoritative KPI mapping repair: Page 2 SBS grid -> Page 3 editor -> print/export surfaces -->
+
 
 
 
@@ -21531,4 +21541,32 @@ window.addEventListener('review-file-composition-changed',scan);
 })();
 </script>
 
+
+<script id="memory-lag-correction-v244">
+(function(){
+  'use strict';
+  if(window.__memoryLagCorrectionV244)return;
+  window.__memoryLagCorrectionV244=true;
+  var idleHandles=new Set();
+  var nativeSetTimeout=window.setTimeout.bind(window);
+  window.scheduleReviewIdleTask=function(fn,delay){
+    var id=nativeSetTimeout(function(){idleHandles.delete(id);if(document.visibilityState!=='hidden')fn()},Math.max(0,delay||0));
+    idleHandles.add(id);return id;
+  };
+  function releaseTransientMemory(){
+    idleHandles.forEach(function(id){clearTimeout(id)});idleHandles.clear();
+    try{
+      if(document.body&&!document.body.classList.contains('comparison-open')){
+        var frame=document.getElementById('comparison-iframe');
+        var docx=document.getElementById('comparison-docx');
+        if(frame&&frame.src&&frame.src!=='about:blank')frame.src='about:blank';
+        if(docx)docx.replaceChildren();
+      }
+    }catch(_e){}
+  }
+  window.addEventListener('pagehide',releaseTransientMemory,{once:true});
+  window.addEventListener('afterprint',releaseTransientMemory,{passive:true});
+  document.documentElement.setAttribute('data-memory-lag-fix','v244-event-driven');
+})();
+</script>
 </body></html>
