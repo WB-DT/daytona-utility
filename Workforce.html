@@ -168,25 +168,62 @@ const DATAVERSE_URL = "https://org23279050.crm.dynamics.com";
 const TABLE_TIMEOFF = "cr714_timeoff_2s";
 const TABLE_EMPLOYEES = "cr714_employeeinformation1s";
 
-const msalConfig = { 
-  auth: { 
-    clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
-    authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", 
-    redirectUri: window.location.origin + window.location.pathname 
+const msalConfig = {
+  auth: {
+    clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee",
+    authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401",
+    redirectUri: "https://WB-DT.github.io/daytona-utility/"
   },
-  cache: { cacheLocation: "localStorage", storeAuthStateInCookie: true } 
+  cache: {
+    cacheLocation: "localStorage",
+    storeAuthStateInCookie: false
+  }
 };
 const msalInstance = new msal.PublicClientApplication(msalConfig);
+let msalAccount = null;
+
+// ACT authentication helper. Uses the exact selected account and tenant authority
+// to avoid multiple_matching_tokens cache collisions.
+window.getToken = async function(scopeStr, silentFallback = false) {
+  let account = msalAccount || null;
+
+  if (!account) {
+    const activeAccounts = msalInstance.getAllAccounts();
+    if (activeAccounts.length > 0) account = activeAccounts[0];
+  }
+
+  const request = {
+    scopes: scopeStr.split(" "),
+    account,
+    authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401"
+  };
+
+  try {
+    return (await msalInstance.acquireTokenSilent(request)).accessToken;
+  } catch (error) {
+    if (silentFallback) {
+      console.warn(`Silent token fetch failed for ${scopeStr}. Error: ${error.message}`);
+      throw error;
+    }
+
+    console.log(`Interactive token request needed for ${scopeStr}`);
+    const response = await msalInstance.acquireTokenPopup(request);
+    if (response.account) msalAccount = response.account;
+    return response.accessToken;
+  }
+};
 
 window.onload = async () => {
   try {
-    await msalInstance.handleRedirectPromise();
+    const redirectResponse = await msalInstance.handleRedirectPromise();
     const accounts = msalInstance.getAllAccounts();
-    if (accounts.length > 0) {
+    msalAccount = redirectResponse?.account || accounts[0] || null;
+
+    if (msalAccount) {
       if (!S.employees || S.employees.length === 0) {
-        pullFromDataverse(false);
+        await pullFromDataverse(false);
       } else {
-        pullFromDataverse(true);
+        await pullFromDataverse(true);
       }
     }
   } catch (err) {
@@ -195,23 +232,21 @@ window.onload = async () => {
 };
 
 async function getDataverseToken() {
-  const scope = `${DATAVERSE_URL}/.default`;
-  let account = msalInstance.getAllAccounts()[0];
+  const dataverseScope = `${DATAVERSE_URL}//user_impersonation`;
 
-  if (!account) {
-    const loginResp = await msalInstance.loginPopup({ scopes: ["User.Read", scope] });
-    account = loginResp.account;
+  if (!msalAccount) {
+    const accounts = msalInstance.getAllAccounts();
+    msalAccount = accounts[0] || null;
   }
 
-  const tokenRequest = { scopes: [scope], account };
-
-  try {
-    const resp = await msalInstance.acquireTokenSilent(tokenRequest);
-    return resp.accessToken;
-  } catch (silentErr) {
-    const popupResp = await msalInstance.acquireTokenPopup(tokenRequest);
-    return popupResp.accessToken;
+  if (!msalAccount) {
+    const loginResponse = await msalInstance.loginPopup({
+      scopes: ["User.Read", dataverseScope]
+    });
+    msalAccount = loginResponse.account;
   }
+
+  return window.getToken(dataverseScope);
 }
 
 function to12Hour(timeStr) {
