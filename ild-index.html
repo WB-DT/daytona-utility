@@ -4342,15 +4342,23 @@ window.preloadTemplateImages = async function() {
                 'city','stateorprovince','postalcode','country','addresstypecode',
                 'mss_modeofdelivery','mss_altaddressrecid','mss_addressstatus','createdon','modifiedon'
             ].join(',');
-            const filter = `_parentid_value eq ${cleanGuid}`;
-            const url = `${PRIMARY_CRM_URL}/customeraddresses?$select=${select}&$filter=${encodeURIComponent(filter)}&$orderby=name asc`;
-            const res = await fetch(url, { headers });
-            if (!res.ok) {
-                console.warn('D365 customeraddress lookup failed', res.status, await res.text());
-                return [];
+            const filters = [
+                `_parentid_value eq ${cleanGuid}`,
+                `_parentid_value eq '${cleanGuid}'`
+            ];
+            let lastFailure = null;
+            for (const filter of filters) {
+                const url = `${PRIMARY_CRM_URL}/customeraddresses?$select=${select}&$filter=${encodeURIComponent(filter)}&$orderby=name asc`;
+                const res = await fetch(url, { headers });
+                if (res.ok) {
+                    const data = await res.json();
+                    return Array.isArray(data.value) ? data.value : [];
+                }
+                lastFailure = { status: res.status, body: await res.text() };
+                if (res.status !== 400) break;
             }
-            const data = await res.json();
-            return Array.isArray(data.value) ? data.value : [];
+            console.warn('D365 customeraddress lookup failed', lastFailure?.status, lastFailure?.body || 'Unknown response');
+            return [];
         } catch (e) {
             console.warn('D365 customeraddress lookup error', e);
             return [];
@@ -6237,15 +6245,19 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
             accountGuidResolutionRecordId = resolutionRecordId;
             window.clearD365AltAddresses('Loading alternate addresses...');
             accountGuidResolutionPromise = (async () => {
+                // Restore the known-good account lookup so the full D365 account payload is available.
+                // The GUID itself still prefers the HAR-backed accountid column on the selected record.
                 const selectedAccountGuid = cleanActGuid(currentSelectedRecord?.accountid);
-                const resolved = isValidActGuid(selectedAccountGuid)
-                    ? currentSelectedRecord
-                    : await window.fetchD365Account(id);
+                const resolved = await window.fetchD365Account(id);
                 // Ignore stale responses if the rep selected another record before this lookup completed.
                 if (resolutionSequence !== accountGuidResolutionSequence || String(currentRecordId) !== resolutionRecordId) return null;
-                const resolvedGuid = cleanActGuid(resolved?.accountid);
+                const resolvedGuid = isValidActGuid(selectedAccountGuid)
+                    ? selectedAccountGuid
+                    : cleanActGuid(resolved?.accountid);
                 currentAccountGuid = isValidActGuid(resolvedGuid) ? resolvedGuid : null;
-                return resolved;
+                // Keep the full account row for contact/address fields, but do not fail alternate-address
+                // loading when accountid was already supplied by the selected dataset row.
+                return resolved || (currentAccountGuid ? { accountid: currentAccountGuid } : null);
             })();
             let d365Acct = null;
             try {
