@@ -493,9 +493,14 @@ function normalizeMatchId(value) {
   return v || null;
 }
 function occurrenceNumber(value) {
-  if (value === null || value === undefined || String(value).trim() === "") return null;
+  if (value === null || value === undefined) return null;
   if (typeof value === "boolean") return value ? 1 : 0;
-  const n = Number(String(value).trim());
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const text = String(value).trim().toLowerCase().replace(/[.!]+$/g, "").trim();
+  if (!text) return null;
+  if (["true", "yes", "y", "1"].includes(text)) return 1;
+  if (["false", "no", "n", "0"].includes(text)) return 0;
+  const n = Number(text);
   return Number.isFinite(n) ? n : null;
 }
 function currentDataRange() {
@@ -560,16 +565,34 @@ async function pullFromDataverse(silent = false) {
       return record;
     });
 
-    // Mirror the M query: group Attendance by normalized ID, but keep Time Off as the master list.
+    // Index CSR Attendance by ID and by employee/date. The legacy IDs do not overlap
+    // the Time Off IDs, so employee/date is the required fallback mapping.
     const attendanceById = new Map();
+    const attendanceByEmployeeDate = new Map();
+    const addAttendanceKey = (key, item) => {
+      if (!key) return;
+      const list = attendanceByEmployeeDate.get(key) || [];
+      list.push(item);
+      attendanceByEmployeeDate.set(key, list);
+    };
     attendanceRows.forEach(a => {
-      const id = normalizeMatchId(a.cr714_id);
-      if (!id) return;
-      const existing = attendanceById.get(id) || { occurrence:0, hasOccurrence:false, ids:[] };
       const n = occurrenceNumber(a.cr714_occurrence);
-      if (n !== null) { existing.occurrence += n; existing.hasOccurrence = true; }
-      if (a.cr714_csrattendancetrackerid) existing.ids.push(a.cr714_csrattendancetrackerid);
-      attendanceById.set(id, existing);
+      const item = {
+        occurrence:n,
+        hasOccurrence:n !== null,
+        attendanceId:a.cr714_csrattendancetrackerid || "",
+        leaveType:String(a.cr714_typeofleave || "").trim(),
+        notes:String(a.cr714_notes || "").trim()
+      };
+      const id = normalizeMatchId(a.cr714_id);
+      if (id) attendanceById.set(id, item);
+      const employee = String(a.cr714_employeename || "").trim().toUpperCase();
+      const rawDate = a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : "";
+      if (employee && rawDate) {
+        addAttendanceKey(`${employee}|${rawDate}`, item);
+        // Dataverse midnight UTC dates may display as the prior local calendar date.
+        addAttendanceKey(`${employee}|${addDays(rawDate,-1)}`, item);
+      }
     });
 
     const cancelledDvIds = new Set((S.records || []).filter(r => r.cancelled).map(r => r.dvId).filter(Boolean));
@@ -584,9 +607,15 @@ async function pullFromDataverse(silent = false) {
       const allDates = parseDatesToIso(r.cr714_requestdates, r.createdon);
       const dates = allDates.filter(d => d >= rangeFrom && d <= rangeTo);
       if (!dates.length) return;
-      const attendance = attendanceById.get(normalizeMatchId(r.cr714_id));
       const timeOcc = occurrenceNumber(r.cr714_occurrence);
-      const finalOccurrence = timeOcc !== null ? timeOcc : (attendance?.hasOccurrence ? attendance.occurrence : 0);
+      const dateMatches = attendanceByEmployeeDate.get(`${name.toUpperCase()}|${dates[0]}`) || [];
+      const attendance = attendanceById.get(normalizeMatchId(r.cr714_id))
+        || dateMatches.find(x => x.hasOccurrence)
+        || dateMatches[0]
+        || null;
+      // CSR Attendance is authoritative when populated; otherwise use Time Off.
+      const finalOccurrence = attendance?.hasOccurrence ? attendance.occurrence : (timeOcc ?? 0);
+      const occurrenceSource = attendance?.hasOccurrence ? "CSR Attendance" : (timeOcc !== null ? "Time Off" : "None");
       const mappedType = mapLeaveType(r.cr714_leavetype);
       const hours = parseHours(r), muHours = parseMakeUpHours(r);
       const repNotes = String(r.cr714_requestnotes || "").trim();
@@ -600,8 +629,11 @@ async function pullFromDataverse(silent = false) {
         partialShift:r.cr714_hoursofpartialshift || "", fmla:r.cr714_fmla === 1 || r.cr714_fmla === true || String(r.cr714_fmla).toLowerCase() === "true",
         voicemail:r.cr714_voicemail === 1 || r.cr714_voicemail === true || String(r.cr714_voicemail).toLowerCase() === "true",
         // Assign the form-level occurrence once, not once per day in a multi-day request.
-        occurrence:idx === 0 ? finalOccurrence : 0, occurrenceSource:timeOcc !== null ? "Time Off" : (attendance?.hasOccurrence ? "Attendance" : "None"),
-        attendanceMatched:!!attendance, waived:!!r.cr714_completed, cancelled:isCancelled || cancelledDvIds.has(dvId), source:"dataverse" }));
+        occurrence:idx === 0 ? finalOccurrence : 0, occurrenceSource,
+        attendanceMatched:!!attendance, attendanceId:attendance?.attendanceId || "",
+        attendanceLeaveType:attendance?.leaveType || "", attendanceNotes:attendance?.notes || "",
+        // cr714_completed is workflow completion status, not an occurrence waiver.
+        waived:false, cancelled:isCancelled || cancelledDvIds.has(dvId), source:"dataverse" }));
 
       if (r.cr714_makeuptime || String(r.cr714_leavetype || "").toLowerCase().includes("make up")) {
         const rawMu = String(r.cr714_makeuptime || "");
@@ -782,7 +814,7 @@ const OCC_WINDOW_DAYS = 90;
 const ORG_FIELDS = [["dept","Department"],["repName","Reps"],["supervisor","Supervisor"],["manager","Manager"]];
 const MU_STATUS = ["Pending","Approved","Completed","Missed"];
 
-const TABS = [["dashboard","Dashboard"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
+const TABS = [["dashboard","Dashboard"],["occurrenceOverview","Occurrence Overview"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
 
 let S = load() || { employees: [], records: [], makeups: [], settings: {} };
 let UI = { tab:"dashboard", preset:"week", anchor:today(), from:null, to:null,
@@ -1287,6 +1319,46 @@ function calShift(dir){
   render();
 }
 
+
+function renderOccurrenceOverview(){
+  const m=metrics();
+  const selectedId = UI.overviewRep || "";
+  const selected = selectedId ? emp(selectedId) : null;
+  const asOf = m.to;
+  const from90 = addDays(asOf, -OCC_WINDOW_DAYS);
+  const rows = m.emps.map(e => {
+    const periodRecords = m.recs.filter(r => r.empId === e.id);
+    const periodOcc = periodRecords.filter(isOcc).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
+    const rollingRecords = (S.records||[]).filter(r => r.empId===e.id && r.date>from90 && r.date<=asOf && isOcc(r));
+    const rolling90 = rollingRecords.reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
+    const lv = level(rolling90);
+    const last = rollingRecords.slice().sort((a,b)=>b.date.localeCompare(a.date))[0];
+    return {e,periodRecords,periodOcc,rollingRecords,rolling90,lv,last};
+  }).sort((a,b)=>b.rolling90-a.rolling90 || a.e.name.localeCompare(b.e.name));
+  if(!selected){
+    const total = rows.reduce((n,x)=>n+x.periodOcc,0);
+    const withOcc = rows.filter(x=>x.periodOcc>0).length;
+    const watch = rows.filter(x=>x.rolling90>=3).length;
+    return `<div class="section-title"><h2>Occurrence Overview by Rep</h2><span class="small muted">Select a rep to open their full occurrence history and rolling status.</span></div>
+      <div class="grid kpis mb">${kpi(total,"Occurrences in selected period","var(--red)","")}${kpi(withOcc,"Reps with occurrences","var(--orange)","")}${kpi(watch,"At corrective-action level","var(--amber)","")}${kpi(rows.length,"Reps reviewed","var(--blue)","")}</div>
+      <div class="card tbl-wrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Supervisor</th><th>Selected period</th><th>Rolling 90 days</th><th>Current level</th><th>Latest occurrence</th></tr></thead><tbody>
+      ${rows.map(x=>`<tr data-overview-rep="${esc(x.e.id)}"><td><b>${esc(x.e.name)}</b><div class="small muted">${esc(x.e.id)}</div></td><td>${esc(x.e.dept)}</td><td>${esc(x.e.supervisor)}</td><td><b>${x.periodOcc}</b></td><td><b>${x.rolling90}</b></td><td>${x.lv?`<span class="badge ${x.lv.cls}">${x.lv.name}</span>`:`<span class="badge ok">Clear</span>`}</td><td>${x.last?fmt(x.last.date):"—"}</td></tr>`).join("")||`<tr class="norow"><td colspan="7" class="empty">No representatives match the filters.</td></tr>`}
+      </tbody></table></div>`;
+  }
+  const data=rows.find(x=>x.e.id===selectedId) || {e:selected,periodRecords:[],periodOcc:0,rollingRecords:[],rolling90:0,lv:null};
+  const history=(S.records||[]).filter(r=>r.empId===selectedId&&isOcc(r)).sort((a,b)=>b.date.localeCompare(a.date));
+  const byType={}; history.forEach(r=>byType[r.type]=(byType[r.type]||0)+(occurrenceNumber(r.occurrence)||0));
+  const sourceCounts={}; history.forEach(r=>sourceCounts[r.occurrenceSource||"Unknown"]=(sourceCounts[r.occurrenceSource||"Unknown"]||0)+(occurrenceNumber(r.occurrence)||0));
+  return `<div class="section-title"><button class="btn ghost sm" id="overviewBack">&#8249; All reps</button><h2>${esc(selected.name)} · Occurrence Overview</h2><span class="small muted">As of ${fmt(asOf)}</span></div>
+    <div class="card mb"><div class="row"><div><b>${esc(selected.title||"Representative")}</b><div class="small muted">${esc(selected.dept)} · Supervisor: ${esc(selected.supervisor)}</div></div><div class="right"><span class="badge ${data.lv?data.lv.cls:"ok"}">${data.lv?data.lv.name:"Clear"}</span></div></div></div>
+    <div class="grid kpis mb">${kpi(data.periodOcc,"Selected-period occurrences","var(--red)","")}${kpi(data.rolling90,"Rolling 90-day occurrences","var(--orange)","")}${kpi(history.reduce((n,r)=>n+(occurrenceNumber(r.occurrence)||0),0),"Loaded history total","var(--purple)","")}${kpi(ossUsed(selectedId,asOf)+`/${OSS_LIMIT}`,"OSS used · 12 months","var(--teal)","")}</div>
+    <div class="grid two mb"><div class="card"><h3>Occurrence type summary</h3>${Object.keys(byType).length?`<div class="tbl-wrap"><table><tbody>${Object.entries(byType).sort((a,b)=>b[1]-a[1]).map(([type,n])=>`<tr><td>${pill(type)}</td><td><b>${n}</b></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No occurrences loaded.</div>`}</div>
+    <div class="card"><h3>Occurrence source</h3>${Object.keys(sourceCounts).length?`<div class="tbl-wrap"><table><tbody>${Object.entries(sourceCounts).map(([source,n])=>`<tr><td>${esc(source)}</td><td><b>${n}</b></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No occurrence sources loaded.</div>`}</div></div>
+    <div class="section-title"><h2>Occurrence Records (${history.length})</h2><span class="small muted">Cancelled and waived records are excluded.</span></div>
+    <div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Occurrence</th><th>Source</th><th>90-day total as of record</th><th>Level</th><th>Notes</th><th></th></tr></thead><tbody>
+      ${history.map(r=>{const n=occCount(selectedId,r.date),lv=level(n);return `<tr data-rec="${esc(r.rid)}"><td>${fmt(r.date)}</td><td>${pill(r.type)}</td><td><b>${occurrenceNumber(r.occurrence)||0}</b></td><td><span class="badge">${esc(r.occurrenceSource||"Unknown")}</span></td><td>${n}</td><td>${lv?`<span class="badge ${lv.cls}">${lv.name}</span>`:`<span class="badge ok">Clear</span>`}</td><td class="small">${esc(r.wfNotes||r.attendanceNotes||r.notes||"")}</td><td><button class="btn ghost sm" data-rec-edit="${esc(r.rid)}">Edit</button></td></tr>`;}).join("")||`<tr class="norow"><td colspan="8" class="empty">No occurrence records are loaded for this rep.</td></tr>`}
+    </tbody></table></div>`;
+}
 function renderTeam(){
   const m=metrics();
   const teamRows=m.emps.map(e=>{
@@ -1808,6 +1880,7 @@ function render(){
   const v=$("#view");
   switch(UI.tab){
     case "dashboard": v.innerHTML=renderDashboard(); drawCharts(); break;
+    case "occurrenceOverview": v.innerHTML=renderOccurrenceOverview(); break;
     case "calendar":  v.innerHTML=renderCalendar(); break;
     case "team":      v.innerHTML=renderTeam(); break;
     case "makeup":    v.innerHTML=renderMakeup(); break;
@@ -1822,6 +1895,7 @@ function bindRecordButtons(root){
 function bindView(){
   const v=$("#view");
   v.querySelectorAll("tr[data-emp]").forEach(tr=>tr.onclick=()=>empModal(tr.dataset.emp));
+  v.querySelectorAll("tr[data-overview-rep]").forEach(tr=>tr.onclick=()=>{UI.overviewRep=tr.dataset.overviewRep;render();});
   v.querySelectorAll(".cal-cell[data-day]").forEach(c=>c.onclick=()=>dayModal(c.dataset.day));
   
   // Weekly calendar day selection handlers
@@ -1873,12 +1947,13 @@ function bindView(){
   on("#calPrev","onclick",()=>calShift(-1)); on("#calNext","onclick",()=>calShift(1));
   on("#calToday","onclick",()=>{UI.anchor=today(); UI.selectedWeekDay=today(); UI.selectedMuWeekDay=today(); render();});
   on("#calAdd","onclick",()=>recordModal(null, UI.selectedWeekDay || UI.anchor));
+  on("#overviewBack","onclick",()=>{UI.overviewRep="";render();});
   on("#recNew","onclick",()=>recordModal());
   on("#muNew","onclick",()=>makeupModal());
   on("#muFilter","onchange",()=>{UI.muFilter=$("#muFilter").value;render();});
 }
 
-$("#nav").addEventListener("click",e=>{ const b=e.target.closest("[data-tab]"); if(b){ UI.tab=b.dataset.tab; render(); }});
+$("#nav").addEventListener("click",e=>{ const b=e.target.closest("[data-tab]"); if(b){ UI.tab=b.dataset.tab; if(UI.tab!=="occurrenceOverview") UI.overviewRep=""; render(); }});
 $("#filterBar").addEventListener("change",e=>{
   const t=e.target;
   if(t.id==="fPreset"){ UI.preset=t.value; if(UI.preset==="adjusted"){const [f,x]=range(); UI.from=UI.from||f; UI.to=UI.to||x;} }
