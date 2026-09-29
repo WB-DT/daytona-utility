@@ -2809,7 +2809,7 @@
     let accountGuidResolutionPromise = Promise.resolve(null);
     let accountGuidResolutionRecordId = null;
     let accountGuidResolutionSequence = 0;
-    const ACT_GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const ACT_GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     function cleanActGuid(value) { return String(value || '').replace(/[{}]/g, '').trim(); }
     function isValidActGuid(value) { return ACT_GUID_PATTERN.test(cleanActGuid(value)); }
     window.getAccountGuidResolutionState = () => ({ resolving: isAccountGuidResolving, recordId: accountGuidResolutionRecordId, guid: cleanActGuid(currentAccountGuid), valid: isValidActGuid(currentAccountGuid) });
@@ -3427,23 +3427,76 @@
         };
     }
 
-    async function mvSend(item, options = {}) {
-        // Final network boundary guard: Power Automate must never receive a blank account GUID.
-        const outboundGuid = cleanActGuid(item?.payload?.regardingGuid);
-        if (!isValidActGuid(outboundGuid)) {
-            const error = new Error("Flow submission blocked: missing or invalid Dynamics account GUID.");
-            error.code = "ACT_MISSING_ACCOUNT_GUID";
-            error.status = 0;
+    async function mvFetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try { return await fetch(url, { ...options, signal: controller.signal }); }
+        finally { clearTimeout(timer); }
+    }
+
+    async function mvVerifyAccountBeforeSubmit(accountNumber, existingGuid = "") {
+        const account = String(accountNumber || "").trim();
+        if (!account) {
+            const error = new Error("Flow submission blocked: missing ACT account number.");
+            error.code = "ACT_MISSING_ACCOUNT_NUMBER";
             error.isPermanent = true;
             throw error;
         }
-        item.payload.regardingGuid = outboundGuid;
+        const token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+        const escaped = account.replace(/'/g, "''");
+        const url = `https://wbmasonco.crm.dynamics.com/api/data/v9.2/accounts?$select=accountid,accountnumber,name,statecode&$filter=${encodeURIComponent(`accountnumber eq '${escaped}'`)}&$top=2`;
+        const response = await mvFetchWithTimeout(url, {
+            headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json", "OData-MaxVersion": "4.0", "OData-Version": "4.0" }
+        }, 15000);
+        const text = await response.text();
+        let body = {};
+        try { body = text ? JSON.parse(text) : {}; } catch (_) {}
+        if (!response.ok) {
+            const error = new Error(body?.error?.message || text || `D365 account verification failed (${response.status}).`);
+            error.code = "ACT_ACCOUNT_VERIFICATION_FAILED";
+            throw error;
+        }
+        const matches = Array.isArray(body.value) ? body.value : [];
+        if (matches.length !== 1) {
+            const error = new Error(matches.length > 1
+                ? `Flow submission blocked: multiple D365 accounts match ${account}.`
+                : `Flow submission blocked: no D365 account matches ${account}.`);
+            error.code = matches.length > 1 ? "ACT_MULTIPLE_ACCOUNTS" : "ACT_ACCOUNT_NOT_FOUND";
+            error.isPermanent = true;
+            throw error;
+        }
+        const verifiedGuid = cleanActGuid(matches[0].accountid);
+        if (!isValidActGuid(verifiedGuid)) {
+            const error = new Error(`Flow submission blocked: D365 returned an invalid account GUID for ${account}.`);
+            error.code = "ACT_INVALID_VERIFIED_GUID";
+            error.isPermanent = true;
+            throw error;
+        }
+        const priorGuid = cleanActGuid(existingGuid);
+        if (priorGuid && priorGuid.toLowerCase() !== verifiedGuid.toLowerCase()) {
+            console.warn("ACT corrected a stale/mismatched account GUID before Flow submission.", { accountNumber: account, priorGuid, verifiedGuid });
+        }
+        return { accountNumber: String(matches[0].accountnumber || account).trim(), accountGuid: verifiedGuid, accountName: matches[0].name || "" };
+    }
+
+    async function mvSend(item, options = {}) {
+        // Final network boundary guard: resolve the authoritative accountid from the
+        // account number immediately before every live send and queued retry.
+        const verification = await mvVerifyAccountBeforeSubmit(item?.payload?.accountId || item?.accountId, item?.payload?.regardingGuid);
+        item.accountId = verification.accountNumber;
+        item.payload.accountId = verification.accountNumber;
+        item.payload.regardingGuid = verification.accountGuid;
+        // Keep the selected-record GUID synchronized only when this item still belongs
+        // to the active ACT record. This prevents an older async request overwriting it.
+        if (String(currentRecordId || "").trim().toUpperCase() === verification.accountNumber.toUpperCase()) {
+            currentAccountGuid = verification.accountGuid;
+        }
         // The item is already in the durable queue. Give the live request three
         // seconds, show the user a countdown, then continue with the ACT workflow.
         const showCountdown = options.showCountdown === true;
         const hideCountdown = showCountdown ? mvShowSendCountdown(3) : () => {};
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort("Masonville Flow timed out after 3 seconds."), 3000);
+        const timeoutId = setTimeout(() => controller.abort("Masonville Flow timed out after 15 seconds."), 15000);
         try {
             const response = await fetch(MASONVILLE_FLOW_URL, {
                 method: "POST",
@@ -3452,7 +3505,15 @@
                     "X-ACT-Queue-Id": item.id,
                     "X-ACT-Original-Time": item.originalCreatedUtc
                 },
-                body: JSON.stringify(item.payload),
+                body: JSON.stringify({
+                    accountId: item.payload.accountId,
+                    notesPayload: item.payload.notesPayload,
+                    subject: item.payload.subject,
+                    activityType: item.payload.activityType,
+                    regardingGuid: item.payload.regardingGuid,
+                    repOwnerGuid: isValidActGuid(item.payload.repOwnerGuid) ? cleanActGuid(item.payload.repOwnerGuid) : "",
+                    repOwnerName: item.payload.repOwnerName || ""
+                }),
                 signal: controller.signal
             });
             if (!response.ok) {
@@ -3465,7 +3526,7 @@
             return { status: response.status };
         } catch (error) {
             if (error && error.name === "AbortError") {
-                const timeoutError = new Error("Masonville Flow timed out after 3 seconds.");
+                const timeoutError = new Error("Masonville Flow timed out after 15 seconds.");
                 timeoutError.status = 0;
                 timeoutError.isTimeout = true;
                 throw timeoutError;
@@ -4912,6 +4973,7 @@ allRaw.forEach(r => {
 
     document.getElementById("qb-notes-input").value = "";
     document.getElementById("opp-type-select").value = "";
+    window.setNoteOppType?.("");
     window.hasUnsavedChanges = false;
     window.takeSnapshot(currentSelectedRecord);
 
@@ -9037,11 +9099,17 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
 </button>
 </div>
 </div>
-<div class="relative flex flex-col min-h-[200px] mb-2 flex-grow flex-shrink-0">
+<div class="relative flex flex-col min-h-[200px] mb-2 flex-grow flex-shrink-0" id="note-entry-box">
 <button class="absolute top-2 right-2 z-10 text-[9px] font-bold text-status-info border px-2 py-1 rounded transition-all shadow-sm" onclick="window.insertTemplate()" style="background-color: var(--bg-card); border-color: var(--border-color);">
 <i class="fas fa-paste mr-1"></i>Template
                                 </button>
 <textarea class="note-textarea w-full p-2 pr-20 text-sm font-mono rounded border h-full resize-none min-h-[200px] custom-scrollbar whitespace-pre-wrap break-words overflow-y-auto overflow-x-hidden" disabled="" id="qb-notes-input" name="generalNote" oninput="window.markDirty()" placeholder="Enter note box here..." wrap="off"></textarea>
+<div aria-label="Opportunity type for this note" class="note-opp-type-buttons" id="note-opp-type-buttons" role="group">
+<button class="note-opp-type-btn" data-opp-type="Call" type="button"><i class="fas fa-phone"></i><span>Phone Call</span></button>
+<button class="note-opp-type-btn" data-opp-type="Email" type="button"><i class="fas fa-envelope"></i><span>Email</span></button>
+<button class="note-opp-type-btn" data-opp-type="General Note" type="button"><i class="fas fa-note-sticky"></i><span>General Note</span></button>
+</div>
+<select aria-hidden="true" hidden id="opp-type-select" tabindex="-1"><option value="">-- Select --</option><option value="Call">Phone Call</option><option value="Email">Email</option><option value="General Note">General Note</option></select>
 </div>
 <div class="grid grid-cols-4 gap-2 flex-shrink-0 p-2 rounded border" style="background-color: var(--bg-input); border-color: var(--border-color);">
 <div class="flex flex-col items-center">
@@ -9074,15 +9142,7 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
 </div>
 </div>
 </div>
-<div class="flex flex-col items-center">
-<select class="text-[10px] p-0 border rounded h-6 w-full font-bold text-center" id="opp-type-select" onchange="window.markDirty()">
-<option value="">-- Select --</option>
-<option value="Call">Phone Call</option>
-<option value="Email">Email</option>
-<option value="General Note">General Note</option>
-</select>
-<label class="text-[8px] uppercase font-bold text-muted mt-1 tracking-wider">Opp Type</label>
-</div>
+
 </div>
 <div class="email-template-card flex flex-col gap-1 p-2 border rounded flex-shrink-0 mt-2" id="email-template-card" style="background-color: var(--bg-input); border-color: var(--border-color);">
 <div class="email-template-title-row">
@@ -10681,5 +10741,133 @@ function schedule(){setTimeout(compare,180)};observer=new MutationObserver(()=>c
   window.__actV58={formatItemText:formatItemText,getSelectedD365AccountId:window.getSelectedD365AccountId};
 })();
 </script>
+
+<style id="act-compact-header-note-buttons-fix">
+#header-panel{min-height:0!important;height:auto!important;overflow:visible!important;flex-wrap:wrap!important;align-content:center!important}
+#header-panel>div:first-child{overflow:visible!important;flex-wrap:wrap!important}
+#topbar-utility-controls{overflow:visible!important;flex-wrap:wrap!important}
+#header-session-area{flex-wrap:wrap!important;justify-content:flex-end!important}
+#header-panel>div:first-child,#header-stats-strip,#header-session-area,#header-panel>.stats-pill{zoom:.60}
+@supports not (zoom:1){#header-panel>div:first-child,#header-stats-strip,#header-session-area,#header-panel>.stats-pill{transform:scale(.60);transform-origin:left center}#header-session-area{transform-origin:right center}}
+@media(max-width:1100px){#header-panel>div:first-child{flex:1 1 100%!important}#header-session-area{width:auto!important;margin-left:auto!important}}
+#note-entry-box #qb-notes-input{padding-bottom:3.1rem!important}
+#note-entry-box #opp-type-select{display:none!important;visibility:hidden!important;position:absolute!important;pointer-events:none!important}
+.note-opp-type-buttons{position:absolute;z-index:12;right:.5rem;bottom:.5rem;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:.32rem;max-width:calc(100% - 1rem)}
+.note-opp-type-btn{width:auto!important;min-height:26px;display:inline-flex;align-items:center;justify-content:center;gap:.3rem;padding:.28rem .5rem;border:1px solid var(--border-color);border-radius:.48rem;background:color-mix(in srgb,var(--bg-card) 92%,transparent);color:var(--text-muted);font-size:.62rem;font-weight:800;line-height:1;cursor:pointer;box-shadow:0 2px 5px rgba(15,23,42,.08);transition:background .15s,border-color .15s,color .15s,transform .15s}
+.note-opp-type-btn:hover{color:var(--primary);border-color:var(--primary);transform:translateY(-1px)}
+.note-opp-type-btn.is-selected,.note-opp-type-btn[aria-pressed="true"]{color:var(--primary-fg);border-color:var(--primary);background:var(--primary);box-shadow:0 0 0 2px color-mix(in srgb,var(--primary) 18%,transparent)}
+.note-opp-type-btn i{font-size:.58rem}
+@media(max-width:520px){#note-entry-box #qb-notes-input{padding-bottom:5.2rem!important}.note-opp-type-buttons{left:.5rem}.note-opp-type-btn{flex:1 1 30%}}
+#alt-address-modal{overflow:hidden!important}
+#alt-address-modal .alt-address-modal-window{min-height:0!important;overflow:hidden!important}
+#alt-address-modal-body{flex:1 1 auto!important;min-height:0!important;height:0!important;overflow-y:auto!important;overflow-x:hidden!important;overscroll-behavior:contain!important;touch-action:pan-y!important;-webkit-overflow-scrolling:touch}
+</style>
+<script id="note-opportunity-buttons-script">
+(()=>{const select=()=>document.getElementById('opp-type-select');const buttons=()=>Array.from(document.querySelectorAll('#note-opp-type-buttons .note-opp-type-btn'));window.setNoteOppType=function(value=''){const next=String(value||'');const el=select();if(el)el.value=next;buttons().forEach(btn=>{const active=btn.dataset.oppType===next;btn.classList.toggle('is-selected',active);btn.setAttribute('aria-pressed',active?'true':'false')})};function init(){buttons().forEach(btn=>btn.addEventListener('click',()=>{const current=select()?.value||'';const next=current===btn.dataset.oppType?'':btn.dataset.oppType;window.setNoteOppType(next);select()?.dispatchEvent(new Event('change',{bubbles:true}));window.markDirty?.()}));window.setNoteOppType(select()?.value||'')}document.readyState==='loading'?document.addEventListener('DOMContentLoaded',init,{once:true}):init()})();
+</script>
+
+<style id="act-nested-note-buttons-larger-session-controls">
+/* Keep note-type choices inside the note editor as a true footer, not an overlay. */
+#note-entry-box {
+  position:relative !important;
+  display:flex !important;
+  flex-direction:column !important;
+  min-height:200px !important;
+  overflow:hidden !important;
+  border:1px solid var(--border-color) !important;
+  border-radius:.45rem !important;
+  background:var(--bg-input) !important;
+}
+#note-entry-box #qb-notes-input {
+  position:relative !important;
+  flex:1 1 auto !important;
+  min-height:165px !important;
+  height:auto !important;
+  margin:0 !important;
+  padding:.5rem 5rem .5rem .5rem !important;
+  border:0 !important;
+  border-radius:0 !important;
+  box-shadow:none !important;
+}
+#note-entry-box .note-opp-type-buttons {
+  position:static !important;
+  inset:auto !important;
+  z-index:auto !important;
+  flex:0 0 auto !important;
+  width:100% !important;
+  max-width:none !important;
+  min-height:37px !important;
+  display:grid !important;
+  grid-template-columns:repeat(3,minmax(0,1fr)) !important;
+  align-items:stretch !important;
+  gap:.38rem !important;
+  padding:.38rem !important;
+  border-top:1px solid var(--border-color) !important;
+  background:color-mix(in srgb,var(--bg-card) 78%,var(--bg-input)) !important;
+  box-sizing:border-box !important;
+}
+#note-entry-box .note-opp-type-btn {
+  width:100% !important;
+  min-width:0 !important;
+  min-height:28px !important;
+  margin:0 !important;
+  position:relative !important;
+}
+/* The compatibility select remains available to save/history code but is never rendered. */
+#opp-type-select,
+#opp-type-select.history-up-select-native,
+#opp-type-select + .history-up-select-button,
+#opp-type-select ~ .history-up-select-button {
+  display:none !important;
+  visibility:hidden !important;
+  width:0 !important;
+  height:0 !important;
+  min-width:0 !important;
+  min-height:0 !important;
+  padding:0 !important;
+  margin:0 !important;
+  border:0 !important;
+  position:absolute !important;
+  pointer-events:none !important;
+}
+@media(max-width:520px) {
+  #note-entry-box #qb-notes-input { padding-bottom:.5rem !important; }
+  #note-entry-box .note-opp-type-buttons { grid-template-columns:1fr !important; }
+}
+/* Restore emphasis to key session controls after the 40% header compression. */
+#header-session-area .sword-secret-btn {
+  font-size:1.43rem !important;
+  min-width:30px !important;
+  min-height:30px !important;
+  padding:2px 4px !important;
+}
+#header-session-area button[onclick="window.reportIssue()"],
+#header-session-area button[onclick="window.promptAdminLogin()"] {
+  min-width:30px !important;
+  min-height:30px !important;
+  padding:4px !important;
+  display:inline-flex !important;
+  align-items:center !important;
+  justify-content:center !important;
+  font-size:1.3em !important;
+}
+#header-session-area button[onclick="window.reportIssue()"] i,
+#header-session-area button[onclick="window.promptAdminLogin()"] i {
+  font-size:1.3em !important;
+}
+#header-session-area #welcome-message {
+  font-size:1.1375rem !important;
+  line-height:1.15 !important;
+  gap:.5rem !important;
+}
+#header-session-area #welcome-message i {
+  font-size:1.625rem !important;
+}
+#header-session-area #welcome-message span {
+  font-size:1em !important;
+  font-weight:700 !important;
+}
+</style>
+<!-- ACT 46 PATCH: authoritative pre-submit D365 account verification + exact Flow schema -->
 </body>
 </html>
