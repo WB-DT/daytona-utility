@@ -143,34 +143,15 @@ canvas{max-height:280px}
   opacity: 0.6;
 }
   
-
-/* Attendance merge loading screen */
-#loadScreen{position:fixed;inset:0;z-index:9999;display:none;place-items:center;padding:24px;background:rgba(15,23,42,.84);backdrop-filter:blur(8px)}
-#loadScreen.on{display:grid}.load-card{width:min(520px,92vw);background:var(--card);border:1px solid var(--line);border-radius:18px;padding:28px;box-shadow:0 24px 70px rgba(0,0,0,.38);text-align:center}
-.load-ring{width:56px;height:56px;margin:0 auto 16px;border:6px solid var(--line);border-top-color:var(--brand);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
-.load-card h2{font-size:20px;margin-bottom:8px}.load-card p{color:var(--muted);margin:6px 0}.load-track{height:8px;background:var(--line);border-radius:999px;overflow:hidden;margin:18px 0 10px}.load-bar{height:100%;width:8%;background:linear-gradient(90deg,var(--brand),var(--purple));transition:width .25s;border-radius:inherit}
-#loadError{display:none;color:var(--red);font-weight:650}.source-badge{font-size:11px;color:var(--muted);margin-left:8px}
 </style>
 </head>
 <body>
-<div id="loadScreen" role="status" aria-live="polite" aria-busy="true">
-  <div class="load-card">
-    <div class="load-ring" aria-hidden="true"></div>
-    <h2>Loading Workforce attendance</h2>
-    <p id="loadMessage">Connecting to Dataverse and downloading Attendance Tracker...</p>
-    <div class="load-track"><div class="load-bar" id="loadBar"></div></div>
-    <p id="loadDetail" class="small">This may take a minute.</p>
-    <p id="loadError"></p>
-    <button class="btn" id="loadRetry" style="display:none;margin-top:12px">Try again</button>
-  </div>
-</div>
 <header>
   <div class="hd">
     <div class="logo">W</div>
     <h1>Workforce</h1>
     <span class="sync-dot" id="syncStatus"></span>
     <div class="spacer"></div>
-    <button class="btn ghost sm" id="exportBtn" title="Export the current filtered report to Excel">&#8681; Export Excel</button>
     <button class="btn ghost sm" id="syncBtn" title="Pull latest data from Dataverse">&#8635; Sync</button>
   </div>
   <nav id="nav"></nav>
@@ -185,59 +166,88 @@ canvas{max-height:280px}
 
 const DATAVERSE_URL = "https://org23279050.crm.dynamics.com";
 const TABLE_TIMEOFF = "cr714_timeoff_2s";
+const TABLE_ATTENDANCE = "cr714_csrattendancetrackers";
 const TABLE_EMPLOYEES = "cr714_employeeinformation1s";
-const ATTENDANCE_FLOW_URL = "https://e25b831597b0e29e9b9b7f764adfe8.0f.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/09/workflows/9db264926dec4064bf632dfb9bdab17c/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=j31kwwv4MjwKGCUkiLXGg5ez9082UjmeYcq48UbExI8";
-let attendanceLoadPromise = null;
-let attendanceLookup = new Map();
-let attendanceLoadStats = { rows:0, keys:0, loaded:false };
 
-const msalConfig = { 
-  auth: { 
-    clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee", 
-    authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401", 
-    redirectUri: window.location.origin + window.location.pathname 
+const msalConfig = {
+  auth: {
+    clientId: "afe649b6-9c70-4b1a-8592-78588284c8ee",
+    authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401",
+    redirectUri: "https://WB-DT.github.io/daytona-utility/"
   },
-  cache: { cacheLocation: "localStorage", storeAuthStateInCookie: true } 
+  cache: {
+    cacheLocation: "localStorage",
+    storeAuthStateInCookie: false
+  }
 };
 const msalInstance = new msal.PublicClientApplication(msalConfig);
+let msalAccount = null;
+
+// ACT authentication helper. Uses the exact selected account and tenant authority
+// to avoid multiple_matching_tokens cache collisions.
+window.getToken = async function(scopeStr, silentFallback = false) {
+  let account = msalAccount || null;
+
+  if (!account) {
+    const activeAccounts = msalInstance.getAllAccounts();
+    if (activeAccounts.length > 0) account = activeAccounts[0];
+  }
+
+  const request = {
+    scopes: scopeStr.split(" "),
+    account,
+    authority: "https://login.microsoftonline.com/9a7c474b-f702-4ae4-a2f9-b72a1e117401"
+  };
+
+  try {
+    return (await msalInstance.acquireTokenSilent(request)).accessToken;
+  } catch (error) {
+    if (silentFallback) {
+      console.warn(`Silent token fetch failed for ${scopeStr}. Error: ${error.message}`);
+      throw error;
+    }
+
+    console.log(`Interactive token request needed for ${scopeStr}`);
+    const response = await msalInstance.acquireTokenPopup(request);
+    if (response.account) msalAccount = response.account;
+    return response.accessToken;
+  }
+};
 
 window.onload = async () => {
   try {
-    showLoadScreen("Restoring cached Workforce data...", 6, "Opening the browser database.");
-    S = await loadState();
-    render();
-    await msalInstance.handleRedirectPromise();
+    const redirectResponse = await msalInstance.handleRedirectPromise();
     const accounts = msalInstance.getAllAccounts();
-    if (accounts.length > 0) {
-      await pullFromDataverse(!S.employees || S.employees.length === 0 ? false : true);
-    } else {
-      hideLoadScreen();
+    msalAccount = redirectResponse?.account || accounts[0] || null;
+
+    if (msalAccount) {
+      if (!S.employees || S.employees.length === 0) {
+        await pullFromDataverse(false);
+      } else {
+        await pullFromDataverse(true);
+      }
     }
   } catch (err) {
-    console.error("Workforce initialization error:", err);
-    hideLoadScreen();
-    render();
+    console.error("MSAL init error:", err);
   }
 };
 
 async function getDataverseToken() {
-  const scope = `${DATAVERSE_URL}/.default`;
-  let account = msalInstance.getAllAccounts()[0];
+  const dataverseScope = `${DATAVERSE_URL}//user_impersonation`;
 
-  if (!account) {
-    const loginResp = await msalInstance.loginPopup({ scopes: ["User.Read", scope] });
-    account = loginResp.account;
+  if (!msalAccount) {
+    const accounts = msalInstance.getAllAccounts();
+    msalAccount = accounts[0] || null;
   }
 
-  const tokenRequest = { scopes: [scope], account };
-
-  try {
-    const resp = await msalInstance.acquireTokenSilent(tokenRequest);
-    return resp.accessToken;
-  } catch (silentErr) {
-    const popupResp = await msalInstance.acquireTokenPopup(tokenRequest);
-    return popupResp.accessToken;
+  if (!msalAccount) {
+    const loginResponse = await msalInstance.loginPopup({
+      scopes: ["User.Read", dataverseScope]
+    });
+    msalAccount = loginResponse.account;
   }
+
+  return window.getToken(dataverseScope);
 }
 
 function to12Hour(timeStr) {
@@ -464,570 +474,160 @@ function parseMakeUpHours(r) {
   return 0.5;
 }
 
-
-function showLoadScreen(message, progress=8, detail=""){
-  const screen=document.getElementById("loadScreen");
-  screen.classList.add("on"); screen.setAttribute("aria-busy","true");
-  document.getElementById("loadMessage").textContent=message;
-  document.getElementById("loadBar").style.width=Math.max(4,Math.min(100,progress))+"%";
-  document.getElementById("loadDetail").textContent=detail||"This may take a minute.";
-  document.getElementById("loadError").style.display="none";
-  document.getElementById("loadRetry").style.display="none";
-}
-function updateLoad(message,progress,detail=""){
-  document.getElementById("loadMessage").textContent=message;
-  document.getElementById("loadBar").style.width=Math.max(4,Math.min(100,progress))+"%";
-  if(detail) document.getElementById("loadDetail").textContent=detail;
-}
-function hideLoadScreen(){const x=document.getElementById("loadScreen");x.classList.remove("on");x.setAttribute("aria-busy","false");}
-function loadFailure(err){
-  console.error("Workforce load failed",err);
-  const e=document.getElementById("loadError");e.textContent=err?.message||String(err);e.style.display="block";
-  document.getElementById("loadRetry").style.display="inline-block";
-  document.getElementById("loadDetail").textContent="The data was not replaced. Retry when ready.";
-}
-function normalizeMergeText(v){
-  return v==null?null:String(v).replace(/[\u0000-\u001f\u007f\u00a0]/g," ").normalize("NFKC").trim().replace(/\s+/g," ")||null;
-}
-function normalizeMergeName(v){const text=normalizeMergeText(v);return text?text.toUpperCase():null;}
-function normalizeHeaderName(v){return String(v??"").replace(/[\u0000-\u001f\u007f\u00a0]/g," ").normalize("NFKC").trim().replace(/\s+/g," ").toLowerCase().replace(/[^a-z0-9]/g,"");}
-function rowField(row,...aliases){
-  if(!row||typeof row!=="object")return null;
-  const wanted=new Set(aliases.map(normalizeHeaderName));
-  for(const [key,value] of Object.entries(row))if(wanted.has(normalizeHeaderName(key)))return value;
-  return null;
-}
-function validDateParts(m,d,y,anchorYear){
-  let yy=Number(y); const mm=Number(m),dd=Number(d); if(!yy)yy=anchorYear;if(yy<100)yy+=yy>=70?1900:2000;
-  const x=new Date(yy,mm-1,dd);return x.getFullYear()===yy&&x.getMonth()===mm-1&&x.getDate()===dd?x:null;
-}
-function dateOnly(v,anchor){
-  if(v instanceof Date&&!isNaN(v))return new Date(v.getFullYear(),v.getMonth(),v.getDate());
-  if(typeof v==="number"&&isFinite(v)){const p=XLSX.SSF.parse_date_code(v);return p?new Date(p.y,p.m-1,p.d):null;}
-  if(v==null||v==="")return null; const t=String(v).trim(); const a=anchor instanceof Date?anchor:new Date();
-  const mdY=t.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?:[ T].*)?$/);if(mdY)return validDateParts(mdY[1],mdY[2],mdY[3],a.getFullYear());
-  const yMd=t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T].*)?$/);if(yMd)return validDateParts(yMd[2],yMd[3],yMd[1],a.getFullYear());
-  const x=new Date(t);return isNaN(x)?null:new Date(x.getFullYear(),x.getMonth(),x.getDate());
-}
-function mergeDateKey(d){return d&&!isNaN(d)?`${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${d.getFullYear()}`:null;}
-function requestDateRange(raw,anchorValue){
-  const anchor=dateOnly(anchorValue)||new Date();
-  const anchorYear=anchor.getFullYear();
-  const rawText=raw==null?"":String(raw).replace(/[\u0000-\u001f\u007f]/g," ").trim();
-  if(!rawText)return {start:null,end:null,status:"No request date"};
-  const replacements=[["\\","/"],["／","/"],["–","-"],["—","-"],["−","-"],["\n"," "],["\r"," "],["\t"," "],[","," "],[";"," "],["|"," "],["&"," "],["("," "],[")"," "],["["," "],["]"," "],["{"," "],["}"," "]];
-  let normalized=rawText.toLowerCase();
-  for(const [from,to] of replacements)normalized=normalized.split(from).join(to);
-  const rangeNormalized=normalized.replaceAll(" - "," ").replaceAll("- "," ").replaceAll(" -"," ");
-  const tokens=rangeNormalized.split(/[ !?="'<>+*]+/).map(t=>t.replace(/^[.:!?"'()\[\]{}]+|[.:!?"'()\[\]{}]+$/g,"").trim()).filter(Boolean);
-  const dates=[];
-  const parseToken=token=>{
-    const slashCount=(token.match(/\//g)||[]).length;
-    if(slashCount!==1&&slashCount!==2)return null;
-    const parts=token.split('/').map(x=>Number(x));
-    if(parts.some(x=>!Number.isFinite(x)))return null;
-    return slashCount===2?validDateParts(parts[0],parts[1],parts[2],anchorYear):validDateParts(parts[0],parts[1],null,anchorYear);
-  };
-  for(const token of tokens){const d=parseToken(token);if(d)dates.push(d);}
-  if(!dates.length){
-    const monthNames={january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12,jan:1,feb:2,mar:3,apr:4,jun:6,jul:7,aug:8,sep:9,sept:9,oct:10,nov:11,dec:12};
-    for(let i=0;i<tokens.length-1;i++)if(monthNames[tokens[i]]){const day=Number((tokens[i+1].match(/\d+/)||[])[0]);const d=validDateParts(monthNames[tokens[i]],day,null,anchorYear);if(d)dates.push(d);}
+async function fetchAllOData(url, headers) {
+  const rows = [];
+  let next = url;
+  while (next) {
+    const res = await fetch(next, { headers });
+    if (!res.ok) throw new Error(`Dataverse HTTP ${res.status}: ${res.statusText}`);
+    const data = await res.json();
+    rows.push(...(data.value || []));
+    next = data["@odata.nextLink"] || null;
   }
-  const unique=[...new Map(dates.map(d=>[mergeDateKey(d),d])).values()].sort((a,b)=>a-b);
-  return {start:unique[0]||null,end:unique[unique.length-1]||null,status:!unique.length?"Unable to parse":unique.length===1?"Single date":"Date range"};
+  return rows;
 }
-function compositeKey(name,start,end){const n=normalizeMergeName(name),a=mergeDateKey(start),b=mergeDateKey(end);return n&&a&&b?`${n}|${a}|${b}`:null;}
-function blank(v){return v==null||(typeof v==="string"&&!v.trim());}
-function parseFirstJsonValue(rawText){
-  const text=String(rawText??"").replace(/^\uFEFF/,"").trim();
-  if(!text)throw new Error("Attendance flow returned an empty response.");
-  try{return JSON.parse(text);}catch(originalError){
-    const start=text.search(/[\[{]/);
-    if(start<0)throw new Error(`Attendance flow did not return JSON. Response starts with: ${text.slice(0,160)}`);
-    const opener=text[start],closer=opener==="{"?"}":"]";
-    let depth=0,inString=false,escaped=false;
-    for(let i=start;i<text.length;i++){
-      const ch=text[i];
-      if(inString){
-        if(escaped){escaped=false;continue;}
-        if(ch==="\\"){escaped=true;continue;}
-        if(ch==='"')inString=false;
-        continue;
-      }
-      if(ch==='"'){inString=true;continue;}
-      if(ch===opener)depth++;
-      else if(ch===closer){
-        depth--;
-        if(depth===0){
-          const firstValue=text.slice(start,i+1);
-          try{
-            const parsed=JSON.parse(firstValue);
-            const trailing=text.slice(i+1).trim();
-            if(trailing)console.warn("Attendance flow returned trailing content after the first JSON value; trailing content ignored.",{trailingLength:trailing.length,trailingPreview:trailing.slice(0,120)});
-            return parsed;
-          }catch(innerError){break;}
-        }
-      }
-    }
-    throw new Error(`Attendance flow returned malformed JSON: ${originalError.message}`);
-  }
+function odataDateTimeStart(iso) { return `${iso}T00:00:00Z`; }
+function odataDateTimeEnd(iso) { return `${iso}T23:59:59Z`; }
+function normalizeMatchId(value) {
+  const v = String(value ?? "").trim().toUpperCase();
+  return v || null;
 }
-function unwrapAttendanceFlowPayload(payload){
-  let current=payload;
-  for(let i=0;i<6;i++){
-    if(current&&typeof current==="object"&&!Array.isArray(current)){
-      const base64=current.attendanceFileBase64||current.fileBase64||current.fileContent||current.contentBytes||current.$content;
-      if(base64)return {...current,attendanceFileBase64:String(base64).replace(/^data:.*?;base64,/,"")};
-      if(current.body!==undefined){current=typeof current.body==="string"?parseFirstJsonValue(current.body):current.body;continue;}
-      if(current.data!==undefined){current=current.data;continue;}
-      if(current.result!==undefined){current=current.result;continue;}
-    }
-    if(typeof current==="string"){current=parseFirstJsonValue(current);continue;}
-    break;
-  }
-  return current;
+function occurrenceNumber(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  const n = Number(String(value).trim());
+  return Number.isFinite(n) ? n : null;
 }
-async function downloadAttendanceTracker(force=false){
-  if(attendanceLoadPromise&&!force)return attendanceLoadPromise;
-  attendanceLoadPromise=(async()=>{
-    updateLoad("Downloading Attendance Tracker...",24,"Retrieving the latest SharePoint workbook through Power Automate.");
-    const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),180000);
-    try{
-      const res=await fetch(ATTENDANCE_FLOW_URL,{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({action:"downloadAttendanceTracker",requestedAtUtc:new Date().toISOString()}),signal:ctl.signal});
-      if(!res.ok)throw new Error(`Attendance flow HTTP ${res.status}: ${(await res.text()).slice(0,250)}`);
-      const responseText=await res.text();
-      const payload=unwrapAttendanceFlowPayload(parseFirstJsonValue(responseText));
-      if(!payload||!payload.attendanceFileBase64){
-        const keys=payload&&typeof payload==="object"?Object.keys(payload).join(", "):typeof payload;
-        throw new Error(`The flow response did not contain attendanceFileBase64. Returned fields: ${keys||"none"}.`);
-      }
-      updateLoad("Parsing Attendance Tracker...",44,"Building the occurrence lookup in the browser.");
-      const wb=XLSX.read(payload.attendanceFileBase64,{type:"base64",cellDates:true});
-      const sheetName=wb.SheetNames.find(n=>n.toLowerCase()==="leavetracker")||wb.SheetNames.find(n=>n.toLowerCase()==="attendance tracker")||wb.SheetNames[0];
-      if(!sheetName)throw new Error("Attendance workbook contains no readable worksheet.");
-      const rows=XLSX.utils.sheet_to_json(wb.Sheets[sheetName],{defval:null,raw:true}).filter(r=>Object.values(r).some(v=>!blank(v)));
-      const lookup=new Map();
-      let invalidName=0,invalidStart=0,invalidEnd=0;
-      for(const r of rows){
-        const rawName=rowField(r,"Employee Name","EmployeeName","Name");
-        const rawStart=rowField(r,"Start Date","StartDate","Date From","From Date");
-        const rawEnd=rowField(r,"End Date","EndDate","Date To","To Date");
-        const name=normalizeMergeName(rawName),start=dateOnly(rawStart),end=dateOnly(rawEnd)||start;
-        if(!name)invalidName++;if(!start)invalidStart++;if(!end)invalidEnd++;
-        const key=compositeKey(name,start,end);if(!key)continue;
-        const idValue=rowField(r,"ID","Attendance ID","AttendanceID");
-        const previous=lookup.get(key),id=Number(idValue),previousId=previous?Number(previous.__attendanceId):NaN;
-        const normalized={...r,__attendanceId:idValue,__employeeName:normalizeMergeText(rawName),__startDate:mergeDateKey(start),__endDate:mergeDateKey(end),__leaveType:rowField(r,"Type of Leave","TypeOfLeave","Leave Type"),__occurrence:rowField(r,"Occurrence","Occurrences"),__notes:rowField(r,"Notes","Note")};
-        if(!previous||(Number.isFinite(id)&&(!Number.isFinite(previousId)||id>previousId)))lookup.set(key,normalized);
-      }
-      attendanceLookup=lookup;
-      attendanceLoadStats={rows:rows.length,keys:lookup.size,loaded:true,dateFormat:"MM/dd/yyyy",headers:Object.keys(rows[0]||{}),invalidName,invalidStart,invalidEnd,sampleAttendanceKeys:[...lookup.keys()].slice(0,5)};
-      console.info("Attendance M-logic lookup",attendanceLoadStats);
-      return lookup;
-    }finally{clearTimeout(timer);}
-  })();return attendanceLoadPromise;
+function currentDataRange() {
+  const [from, to] = range();
+  return from <= to ? [from, to] : [to, from];
 }
-function buildDataverseMergeIndex(rows){
-  const exact=new Map(),byNameStart=new Map(),prepared=[];
-  let unparsed=0,duplicateKeys=0;
-  for(const r of rows||[]){
-    const newDateText=normalizeMergeText(r.cr714_requestdates)||"";
-    const oldDateText=normalizeMergeText(r.cr714_requestdatesold)||"";
-    const source=newDateText||oldDateText||null;
-    const anchor=r.cr714_completiontime||r.cr714_starttime||r.overriddencreatedon||r.createdon;
-    const range=requestDateRange(source,anchor);
-    const name=normalizeMergeName(r.cr714_name);
-    const startKey=mergeDateKey(range.start),endKey=mergeDateKey(range.end);
-    const exactKey=name&&startKey&&endKey?`${name}|${startKey}|${endKey}`:null;
-    const nameStartKey=name&&startKey?`${name}|${startKey}`:null;
-    if(!exactKey)unparsed++;
-    const item={row:r,name,start:range.start,end:range.end,startKey,endKey,exactKey,nameStartKey,parseStatus:range.status,dateSource:source};
-    prepared.push(item);
-    if(exactKey){
-      if(exact.has(exactKey))duplicateKeys++;
-      if(!exact.has(exactKey))exact.set(exactKey,[]);
-      exact.get(exactKey).push(item);
-    }
-    if(nameStartKey){
-      if(!byNameStart.has(nameStartKey))byNameStart.set(nameStartKey,[]);
-      byNameStart.get(nameStartKey).push(item);
-    }
-  }
-  return {prepared,exact,byNameStart,unparsed,duplicateKeys};
-}
-function buildAttendanceMergeIndexes(){
-  const exact=attendanceLookup;
-  const byNameStart=new Map();
-  for(const [key,row] of exact.entries()){
-    const parts=key.split("|");
-    if(parts.length<3)continue;
-    const nameStartKey=`${parts[0]}|${parts[1]}`;
-    if(!byNameStart.has(nameStartKey))byNameStart.set(nameStartKey,[]);
-    byNameStart.get(nameStartKey).push({key,row});
-  }
-  return {exact,byNameStart};
-}
-function mergeAttendanceIntoDataverse(rows){
-  let matched=0,exactMatched=0,startFallbackMatched=0,ambiguousFallback=0,occurrenceFilled=0;
-  const dvIndex=buildDataverseMergeIndex(rows);
-  const attendanceIndex=buildAttendanceMergeIndexes();
-  const sampleTimeOffKeys=[],sampleMatchedKeys=[],sampleUnmatchedKeys=[];
-  const output=dvIndex.prepared.map(item=>{
-    const r=item.row;
-    if(item.exactKey&&sampleTimeOffKeys.length<10)sampleTimeOffKeys.push(item.exactKey);
-    let hit=item.exactKey?attendanceIndex.exact.get(item.exactKey):null;
-    let matchMethod=hit?"Exact name + start + end":null;
-    let matchedAttendanceKey=item.exactKey;
-    if(hit){exactMatched++;}
-    if(!hit&&item.nameStartKey){
-      const candidates=attendanceIndex.byNameStart.get(item.nameStartKey)||[];
-      if(candidates.length===1){
-        hit=candidates[0].row;
-        matchedAttendanceKey=candidates[0].key;
-        matchMethod="Name + start fallback";
-        startFallbackMatched++;
-      }else if(candidates.length>1){
-        ambiguousFallback++;
-      }
-    }
-    if(hit){matched++;if(sampleMatchedKeys.length<10)sampleMatchedKeys.push({dataverseKey:item.exactKey,attendanceKey:matchedAttendanceKey,method:matchMethod});}
-    else if(item.exactKey&&sampleUnmatchedKeys.length<10)sampleUnmatchedKeys.push(item.exactKey);
-    const existingLeave=blank(r.cr714_leavetype),existingOccurrence=blank(r.cr714_occurrence),existingNotes=blank(r.cr714_requestnotes);
-    if(hit&&existingOccurrence&&!blank(hit.__occurrence))occurrenceFilled++;
-    return {...r,
-      cr714_leavetype:existingLeave&&hit?hit.__leaveType:r.cr714_leavetype,
-      cr714_occurrence:existingOccurrence&&hit?hit.__occurrence:r.cr714_occurrence,
-      cr714_requestnotes:existingNotes&&hit?hit.__notes:r.cr714_requestnotes,
-      __attendanceMatched:!!hit,
-      __attendanceMatchMethod:matchMethod,
-      __attendanceOccurrenceFilled:!!(hit&&existingOccurrence&&!blank(hit.__occurrence)),
-      __attendanceId:hit?.__attendanceId??null,
-      __parsedStart:item.start?isoDate(item.start):null,
-      __parsedEnd:item.end?isoDate(item.end):null,
-      __mergeStart:item.startKey,
-      __mergeEnd:item.endKey,
-      __mergeKey:item.exactKey,
-      __attendanceMergeKey:matchedAttendanceKey||null,
-      __parseStatus:item.parseStatus};
-  });
-  const exactIntersection=[...dvIndex.exact.keys()].filter(k=>attendanceIndex.exact.has(k));
-  window.dataverseMergeIndex=dvIndex;
-  window.attendanceKeyDiagnostics={
-    dateFormat:"MM/dd/yyyy",
-    dataverseRows:rows.length,
-    dataverseKeys:dvIndex.exact.size,
-    dataverseDuplicateKeys:dvIndex.duplicateKeys,
-    dataverseUnparsed:dvIndex.unparsed,
-    attendanceRows:attendanceLoadStats.rows,
-    attendanceKeys:attendanceIndex.exact.size,
-    exactKeyIntersection:exactIntersection.length,
-    exactMatched,
-    startFallbackMatched,
-    ambiguousFallback,
-    sampleTimeOffKeys,
-    sampleAttendanceKeys:[...attendanceIndex.exact.keys()].slice(0,10),
-    sampleMatchedKeys,
-    sampleUnmatchedKeys
-  };
-  console.info("Dataverse merge-key index",{rows:rows.length,keys:dvIndex.exact.size,duplicates:dvIndex.duplicateKeys,unparsed:dvIndex.unparsed,sample:[...dvIndex.exact.keys()].slice(0,10)});
-  console.info("Attendance merge-key index",{rows:attendanceLoadStats.rows,keys:attendanceIndex.exact.size,sample:[...attendanceIndex.exact.keys()].slice(0,10)});
-  console.info("Dataverse/Attendance key comparison",window.attendanceKeyDiagnostics);
-  return {rows:output,matched,exactMatched,startFallbackMatched,ambiguousFallback,occurrenceFilled,unmatched:rows.length-matched,unparsed:dvIndex.unparsed,dataverseKeys:dvIndex.exact.size,attendanceKeys:attendanceIndex.exact.size,exactKeyIntersection:exactIntersection.length};
-}
-
 async function pullFromDataverse(silent = false) {
-  setSync("Syncing with Dataverse...");
-  showLoadScreen("Loading Workforce data...", 10, "Connecting to Dataverse and downloading Attendance Tracker.");
+  const [rangeFrom, rangeTo] = currentDataRange();
+  setSync(`Syncing ${fmt(rangeFrom)} to ${fmt(rangeTo)}...`);
   try {
     const token = await getDataverseToken();
     if (!token) throw new Error("Authentication missing");
-
     const headers = {
       "Authorization": `Bearer ${token}`,
       "Accept": "application/json",
       "OData-MaxVersion": "4.0",
       "OData-Version": "4.0",
-      "Prefer": 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
+      "Prefer": 'odata.include-annotations="OData.Community.Display.V1.FormattedValue",odata.maxpagesize=5000'
     };
+    const api = `${DATAVERSE_URL}/api/data/v9.2`;
+    const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_departmentname","cr714_department","cr714_titlename","cr714_jobtitle","cr714_managerassigned","cr714_locationname","cr714_location","cr714_statusname","cr714_status","cr714_loopnumber","cr714_shiftselectionname","cr714_breakselectionname","cr714_startdate","statecode"].join(",");
+    const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_id","cr714_name","cr714_email","cr714_department","cr714_requestdates","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes"].join(",");
+    const attendanceSelect = ["cr714_csrattendancetrackerid","cr714_id","cr714_employeename","cr714_startdate","cr714_enddate","cr714_typeofleave","cr714_notes","cr714_occurrence"].join(",");
 
-    const [empRes, toRes] = await Promise.all([
-      fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_EMPLOYEES}`, { headers }),
-      fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}?$orderby=createdon desc`, { headers }),
-      downloadAttendanceTracker(false)
+    // Time Off request dates are text, so Dataverse cannot compare them as dates.
+    // Use a bounded created/modified window, then apply the exact requested-date range after parsing.
+    const bufferFrom = addDays(rangeFrom, -45);
+    const bufferTo = addDays(rangeTo, 45);
+    const activityFilter = `((createdon ge ${odataDateTimeStart(bufferFrom)} and createdon le ${odataDateTimeEnd(bufferTo)}) or (modifiedon ge ${odataDateTimeStart(bufferFrom)} and modifiedon le ${odataDateTimeEnd(bufferTo)}))`;
+    const attendanceFilter = `(cr714_startdate le ${odataDateTimeEnd(rangeTo)} and cr714_enddate ge ${odataDateTimeStart(rangeFrom)})`;
+
+    const empUrl = `${api}/${TABLE_EMPLOYEES}?$select=${empSelect}&$filter=statecode eq 0`;
+    const timeUrl = `${api}/${TABLE_TIMEOFF}?$select=${timeSelect}&$filter=${encodeURIComponent(activityFilter)}&$orderby=createdon desc`;
+    const attendanceUrl = `${api}/${TABLE_ATTENDANCE}?$select=${attendanceSelect}&$filter=${encodeURIComponent(attendanceFilter)}&$orderby=cr714_startdate desc`;
+    const [allEmps, timeRows, attendanceRows] = await Promise.all([
+      fetchAllOData(empUrl, headers), fetchAllOData(timeUrl, headers), fetchAllOData(attendanceUrl, headers)
     ]);
 
-    if (!empRes.ok) throw new Error(`Employees Table HTTP ${empRes.status}: ${empRes.statusText}`);
-    if (!toRes.ok) throw new Error(`Time Off Table HTTP ${toRes.status}: ${toRes.statusText}`);
-
-    const empData = await empRes.json();
-    const toData = await toRes.json();
-    updateLoad("Merging Attendance Tracker...",64,"Matching employee name, start date, and end date.");
-    const attendanceMerge = mergeAttendanceIntoDataverse(toData.value || []);
-    toData.value = attendanceMerge.rows;
-
-    const allEmps = empData.value || [];
-
     const activeEmps = allEmps.filter(e => {
-      if (e.statecode === 1) return false;
-      const status = String(
-        e["cr714_statusname@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_statusname ||
-        e["cr714_status@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_status ||
-        ""
-      ).toLowerCase().trim();
-
-      if (status && (status.includes("term") || status.includes("inact") || status.includes("resign") || status.includes("former") || status.includes("depart"))) {
-        return false;
-      }
-      return true;
+      const status = String(e["cr714_statusname@OData.Community.Display.V1.FormattedValue"] || e.cr714_statusname || e["cr714_status@OData.Community.Display.V1.FormattedValue"] || e.cr714_status || "").toLowerCase().trim();
+      return !(status && (status.includes("term") || status.includes("inact") || status.includes("resign") || status.includes("former") || status.includes("depart")));
     });
-
     const locationFiltered = activeEmps.filter(e => {
-      const loc = String(
-        e["cr714_locationname@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_locationname ||
-        e["cr714_location@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_location ||
-        ""
-      ).toLowerCase().trim();
-
+      const loc = String(e["cr714_locationname@OData.Community.Display.V1.FormattedValue"] || e.cr714_locationname || e["cr714_location@OData.Community.Display.V1.FormattedValue"] || e.cr714_location || "").toLowerCase().trim();
       return loc.includes("daytona") || loc.includes("jacksonville") || loc.includes("jax");
     });
-
-    let targetEmps = locationFiltered;
-    if (locationFiltered.length === 0 && activeEmps.length > 0) {
-      targetEmps = activeEmps;
-    }
-
-    const empMapByEmail = new Map();
-    const empMapByName = new Map();
-
+    const targetEmps = locationFiltered.length ? locationFiltered : activeEmps;
+    const empMapByEmail = new Map(), empMapByName = new Map();
     S.employees = targetEmps.map(e => {
       const email = String(e.cr714_emailaddress || "").trim().toLowerCase();
       const name = String(e.cr714_employeename || "").trim();
       const id = email || `EMP-${name.replace(/\s+/g, '')}`;
-      const dept = String(
-        e["cr714_departmentname@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_departmentname ||
-        e["cr714_department@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_department ||
-        ""
-      ).trim();
-
-      const record = {
-        id,
-        name,
-        email,
-        dept: dept || "General",
-        repName: name,
-        title: String(e.cr714_titlename || e.cr714_jobtitle || "Representative"),
-        supervisor: String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Supervisor"),
-        manager: String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Manager"),
-        srManager: "Senior Leadership",
-        location: String(e["cr714_locationname@OData.Community.Display.V1.FormattedValue"] || e.cr714_locationname || "Daytona"),
-        status: String(e.cr714_statusname || "Active"),
-        loopNumber: e.cr714_loopnumber || "",
-        shift: e.cr714_shiftselectionname || "",
-        breakTime: e.cr714_breakselectionname || "",
-        startDate: e.cr714_startdate || ""
-      };
-
+      const dept = String(e["cr714_departmentname@OData.Community.Display.V1.FormattedValue"] || e.cr714_departmentname || e["cr714_department@OData.Community.Display.V1.FormattedValue"] || e.cr714_department || "").trim();
+      const record = { id, name, email, dept: dept || "General", repName:name,
+        title:String(e.cr714_titlename || e.cr714_jobtitle || "Representative"),
+        supervisor:String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Supervisor"),
+        manager:String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Manager"),
+        srManager:"Senior Leadership", location:String(e["cr714_locationname@OData.Community.Display.V1.FormattedValue"] || e.cr714_locationname || "Daytona"),
+        status:String(e.cr714_statusname || "Active"), loopNumber:e.cr714_loopnumber || "", shift:e.cr714_shiftselectionname || "", breakTime:e.cr714_breakselectionname || "", startDate:e.cr714_startdate || "" };
       if (email) empMapByEmail.set(email, record);
       if (name) empMapByName.set(name.toLowerCase(), record);
       return record;
     });
 
-    // Snapshot any currently cancelled records so a sync/refresh doesn't lose them
+    // Mirror the M query: group Attendance by normalized ID, but keep Time Off as the master list.
+    const attendanceById = new Map();
+    attendanceRows.forEach(a => {
+      const id = normalizeMatchId(a.cr714_id);
+      if (!id) return;
+      const existing = attendanceById.get(id) || { occurrence:0, hasOccurrence:false, ids:[] };
+      const n = occurrenceNumber(a.cr714_occurrence);
+      if (n !== null) { existing.occurrence += n; existing.hasOccurrence = true; }
+      if (a.cr714_csrattendancetrackerid) existing.ids.push(a.cr714_csrattendancetrackerid);
+      attendanceById.set(id, existing);
+    });
+
     const cancelledDvIds = new Set((S.records || []).filter(r => r.cancelled).map(r => r.dvId).filter(Boolean));
-    const cancelledRids = new Set((S.records || []).filter(r => r.cancelled).map(r => r.rid));
-
-    const newRecords = [];
-    const newMakeups = [];
-
-    (toData.value || []).forEach(r => {
+    const newRecords = [], newMakeups = [];
+    timeRows.forEach(r => {
       const email = String(r.cr714_email || "").trim().toLowerCase();
       const name = String(r.cr714_name || "").trim();
-
-      let matchedEmp = empMapByEmail.get(email) || empMapByName.get(name.toLowerCase());
+      const matchedEmp = empMapByEmail.get(email) || empMapByName.get(name.toLowerCase());
       if (!matchedEmp) return;
-
       const formDept = String(r["cr714_department@OData.Community.Display.V1.FormattedValue"] || r.cr714_department || "").trim();
-      if (formDept && matchedEmp.dept === "General") {
-        matchedEmp.dept = formDept;
-      }
-
-      const dates = parseDatesToIso(r.__parsedStart && r.__parsedEnd && r.__parsedStart !== r.__parsedEnd ? `${r.__parsedStart} - ${r.__parsedEnd}` : (r.__parsedStart || r.cr714_requestdates || r.cr714_requestdatesold), r.createdon);
+      if (formDept && matchedEmp.dept === "General") matchedEmp.dept = formDept;
+      const allDates = parseDatesToIso(r.cr714_requestdates, r.createdon);
+      const dates = allDates.filter(d => d >= rangeFrom && d <= rangeTo);
+      if (!dates.length) return;
+      const attendance = attendanceById.get(normalizeMatchId(r.cr714_id));
+      const timeOcc = occurrenceNumber(r.cr714_occurrence);
+      const finalOccurrence = timeOcc !== null ? timeOcc : (attendance?.hasOccurrence ? attendance.occurrence : 0);
       const mappedType = mapLeaveType(r.cr714_leavetype);
-      const hours = parseHours(r);
-      const muHours = parseMakeUpHours(r);
-
-      const repNotes = (r.cr714_requestnotes || "").trim();
-      const wfNotesVal = (r.cr714_wfnotes || "").trim();
-      const notesParts = [
-        repNotes,
-        r.cr714_lunch ? `Lunch: ${r.cr714_lunch}` : null
-      ].filter(Boolean);
-      const fullNotes = notesParts.join(" | ");
-
+      const hours = parseHours(r), muHours = parseMakeUpHours(r);
+      const repNotes = String(r.cr714_requestnotes || "").trim();
+      const wfNotesVal = String(r.cr714_wfnotes || "").trim();
+      const fullNotes = [repNotes, r.cr714_lunch ? `Lunch: ${r.cr714_lunch}` : null].filter(Boolean).join(" | ");
       const baseRid = r.cr714_autoid || r.cr714_timeoff_2id || uid("r");
       const dvId = r.cr714_timeoff_2id || "";
+      const isCancelled = r.cr714_cancelledrequest === 1 || r.cr714_cancelledrequest === true || String(r.cr714_cancelledrequest).toLowerCase() === "true";
+      dates.forEach((d, idx) => newRecords.push({ rid:`${baseRid}-${idx}`, dvId, date:d, empId:matchedEmp.id, type:mappedType,
+        hours:(mappedType === "Make up Time") ? (muHours || parseMakeUpHours(r)) : hours, notes:fullNotes, wfNotes:wfNotesVal,
+        partialShift:r.cr714_hoursofpartialshift || "", fmla:r.cr714_fmla === 1 || r.cr714_fmla === true || String(r.cr714_fmla).toLowerCase() === "true",
+        voicemail:r.cr714_voicemail === 1 || r.cr714_voicemail === true || String(r.cr714_voicemail).toLowerCase() === "true",
+        // Assign the form-level occurrence once, not once per day in a multi-day request.
+        occurrence:idx === 0 ? finalOccurrence : 0, occurrenceSource:timeOcc !== null ? "Time Off" : (attendance?.hasOccurrence ? "Attendance" : "None"),
+        attendanceMatched:!!attendance, waived:!!r.cr714_completed, cancelled:isCancelled || cancelledDvIds.has(dvId), source:"dataverse" }));
 
-      const isCancelled = r.cr714_cancelledrequest === 1 || r.cr714_cancelledrequest === true || String(r.cr714_cancelledrequest) === "true";
-
-      const parsedOccurrence=blank(r.cr714_occurrence)?null:Number(r.cr714_occurrence);
-      const occurrenceExplicit=parsedOccurrence!==null&&Number.isFinite(parsedOccurrence);
-      dates.forEach((d, idx) => {
-        const recordHours = (mappedType === "Make-Up") ? (muHours || parseMakeUpHours(r)) : hours;
-        newRecords.push({
-          rid: `${baseRid}-${idx}`,
-          dvId: dvId,
-          date: d,
-          empId: matchedEmp.id,
-          type: mappedType,
-          hours: recordHours,
-          notes: fullNotes,
-          wfNotes: wfNotesVal,
-          partialShift: r.cr714_hoursofpartialshift || "",
-          fmla: r.cr714_fmla === 1 || r.cr714_fmla === true || String(r.cr714_fmla) === "true",
-          voicemail: r.cr714_voicemail === 1 || r.cr714_voicemail === true || String(r.cr714_voicemail) === "true",
-          occurrence: idx===0&&occurrenceExplicit?parsedOccurrence:(idx===0?null:0),
-          occurrenceExplicit: idx===0?occurrenceExplicit:true,
-          occurrencePrimary: idx===0,
-          mergeStart:r.__mergeStart||null,
-          mergeEnd:r.__mergeEnd||null,
-          mergeKey:r.__mergeKey||null,
-          attendanceMergeKey:r.__attendanceMergeKey||null,
-          attendanceMatchMethod:r.__attendanceMatchMethod||null,
-          attendanceMatched: !!r.__attendanceMatched,
-          attendanceId: r.__attendanceId || null,
-          attendanceOccurrenceFilled: !!r.__attendanceOccurrenceFilled,
-          waived: !!r.cr714_completed,
-          cancelled: isCancelled,
-          source: r.__attendanceMatched ? "dataverse+attendance" : "dataverse"
-        });
-      });
-
-      if (r.cr714_makeuptime || (r.cr714_leavetype && String(r.cr714_leavetype).toLowerCase().includes("make up"))) {
+      if (r.cr714_makeuptime || String(r.cr714_leavetype || "").toLowerCase().includes("make up")) {
         const rawMu = String(r.cr714_makeuptime || "");
-        const dateMatchRegex = /(\d{2}\/\d{2}\/\d{4})\s*-\s*([\d:]+\s*(?:AM|PM)?)\s*-\s*([\d:]+\s*(?:AM|PM)?)\s*-\s*([\d:]+)/gi;
-        let matches = [...rawMu.matchAll(dateMatchRegex)];
-
-        if (matches.length > 0) {
-          matches.forEach((match, mIdx) => {
-            const dateStr = match[1];
-            const [mMonth, mDay, mYear] = dateStr.split('/');
-            const isoMuDate = `${mYear}-${mMonth}-${mDay}`;
-            
-            const durStr = match[4];
-            let segmentHours = 0;
-            if (durStr && durStr.includes(':')) {
-              const [hh, mm] = durStr.split(':').map(Number);
-              segmentHours = (hh || 0) + ((mm || 0) / 60);
-            } else if (durStr && !isNaN(parseFloat(durStr))) {
-              segmentHours = parseFloat(durStr);
-            } else {
-              segmentHours = muHours || 1;
-            }
-
-            const calculatedHours = Math.round(segmentHours * 100) / 100;
-            const startTime = to12Hour(match[2].trim());
-            const endTime = to12Hour(match[3].trim());
-            const durFormatted = formatDuration(match[4].trim());
-            const singleLineSchedule = `${dateStr} - ${startTime} - ${endTime} (${durFormatted})`;
-
-            const combinedMuNotes = [
-              `Schedule: ${singleLineSchedule}`,
-              repNotes ? `Rep Notes: ${repNotes}` : null
-            ].filter(Boolean).join("\n\n");
-
-            newRecords.push({
-              rid: `${baseRid}-mu-${mIdx}`,
-              dvId: dvId,
-              date: isoMuDate,
-              empId: matchedEmp.id,
-              type: "Make-Up",
-              hours: calculatedHours,
-              notes: combinedMuNotes,
-              fmla: false,
-              voicemail: false,
-              occurrence: 0,
-              waived: !!r.cr714_completed,
-              source: "dataverse"
-            });
-
-            newMakeups.push({
-              mid: `${baseRid}-${mIdx}`,
-              dvId: dvId,
-              empId: matchedEmp.id,
-              rid: `${baseRid}-0`,
-              dateMissed: isoMuDate,
-              hoursOwed: calculatedHours,
-              dueDate: addDays(isoMuDate, 7),
-              status: r.cr714_completed ? "Completed" : "Pending",
-              oss: true,
-              completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
-              notes: combinedMuNotes || fullNotes
-            });
-          });
-        } else {
-          const scheduleFormatted = cleanMakeUpString(rawMu);
-          const combinedMuNotes = [
-            scheduleFormatted ? `Schedule: ${scheduleFormatted}` : null,
-            repNotes ? `Rep Notes: ${repNotes}` : null
-          ].filter(Boolean).join("\n\n");
-
-          newMakeups.push({
-            mid: baseRid,
-            dvId: dvId,
-            empId: matchedEmp.id,
-            rid: `${baseRid}-0`,
-            dateMissed: dates[0] || today(),
-            hoursOwed: muHours,
-            dueDate: addDays(dates[0] || today(), 7),
-            status: r.cr714_completed ? "Completed" : "Pending",
-            oss: true,
-            completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
-            notes: combinedMuNotes || fullNotes
-          });
-        }
+        const rx = /(\d{2}\/\d{2}\/\d{4})\s*-\s*([\d:]+\s*(?:AM|PM)?)\s*-\s*([\d:]+\s*(?:AM|PM)?)\s*-\s*([\d:]+)/gi;
+        const matches = [...rawMu.matchAll(rx)];
+        if (matches.length) matches.forEach((match,mIdx) => {
+          const [mm,dd,yy] = match[1].split('/'), isoMuDate=`${yy}-${mm}-${dd}`;
+          if (isoMuDate < rangeFrom || isoMuDate > rangeTo) return;
+          const [hh,mn]=match[4].split(':').map(Number), calculatedHours=Math.round(((hh||0)+((mn||0)/60))*100)/100;
+          const notes=[`Schedule: ${match[1]} - ${to12Hour(match[2].trim())} - ${to12Hour(match[3].trim())} (${formatDuration(match[4].trim())})`, repNotes?`Rep Notes: ${repNotes}`:null].filter(Boolean).join("\n\n");
+          newMakeups.push({mid:`${baseRid}-${mIdx}`,dvId,empId:matchedEmp.id,rid:`${baseRid}-0`,dateMissed:isoMuDate,hoursOwed:calculatedHours,dueDate:addDays(isoMuDate,7),status:r.cr714_completed?"Completed":"Pending",oss:true,completedDate:r.cr714_completed?isoDate(new Date(r.createdon)):"",notes});
+        });
+        else newMakeups.push({mid:baseRid,dvId,empId:matchedEmp.id,rid:`${baseRid}-0`,dateMissed:dates[0],hoursOwed:muHours,dueDate:addDays(dates[0],7),status:r.cr714_completed?"Completed":"Pending",oss:true,completedDate:r.cr714_completed?isoDate(new Date(r.createdon)):"",notes:[rawMu?`Schedule: ${cleanMakeUpString(rawMu)}`:null,repNotes?`Rep Notes: ${repNotes}`:null].filter(Boolean).join("\n\n") || fullNotes});
       }
     });
-
-    newRecords.forEach(r => {
-      if (cancelledDvIds.has(r.dvId) || cancelledRids.has(r.rid)) {
-        r.cancelled = true;
-      }
-    });
-
-    newRecords.forEach(r => {
-      if (cancelledDvIds.has(r.dvId) || cancelledRids.has(r.rid)) {
-        r.cancelled = true;
-      }
-    });
-
-    S.employees.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-    S.records = newRecords;
-    S.makeups = newMakeups;
-    S.settings.lastSync = new Date().toLocaleString();
-    S.settings.attendanceMerge={matched:attendanceMerge.matched,exactMatched:attendanceMerge.exactMatched,startFallbackMatched:attendanceMerge.startFallbackMatched,ambiguousFallback:attendanceMerge.ambiguousFallback,occurrenceFilled:attendanceMerge.occurrenceFilled,unmatched:attendanceMerge.unmatched,unparsed:attendanceMerge.unparsed,dataverseKeys:attendanceMerge.dataverseKeys,attendanceRows:attendanceLoadStats.rows,attendanceKeys:attendanceMerge.attendanceKeys,exactKeyIntersection:attendanceMerge.exactKeyIntersection,invalidAttendanceNames:attendanceLoadStats.invalidName||0,invalidAttendanceStartDates:attendanceLoadStats.invalidStart||0,invalidAttendanceEndDates:attendanceLoadStats.invalidEnd||0,dateFormat:"MM/dd/yyyy"};
-    window.attendanceMergeDiagnostics = S.settings.attendanceMerge;
-    console.info("Attendance merge diagnostics", window.attendanceMergeDiagnostics);
-
-    save();
-    render();
-    updateLoad("Workforce data ready",100,`${attendanceMerge.matched.toLocaleString()} exact Time Off matches; ${attendanceMerge.occurrenceFilled.toLocaleString()} blank occurrence fields filled from ${attendanceLoadStats.rows.toLocaleString()} Attendance rows.`);
-    setTimeout(hideLoadScreen,450);
-    if (!silent) toast(`Synced ${S.employees.length} active reps, ${newRecords.length} records, ${attendanceMerge.matched} attendance matches`);
+    S.employees.sort((a,b)=>(a.name||"").localeCompare(b.name||""));
+    S.records = newRecords; S.makeups = newMakeups;
+    S.settings.lastSync = `${new Date().toLocaleString()} (${rangeFrom} to ${rangeTo})`;
+    S.settings.loadedFrom = rangeFrom; S.settings.loadedTo = rangeTo;
+    save(); render();
+    if (!silent) toast(`Synced ${newRecords.length} Time Off records for ${fmt(rangeFrom)} to ${fmt(rangeTo)}`);
   } catch (err) {
-    console.error(err);
-    if (!silent) toast("Dataverse sync failed: " + err.message);
-    setSync("Sync failed");
-    loadFailure(err);
+    console.error(err); if (!silent) toast("Dataverse sync failed: " + err.message); setSync("Sync failed");
   }
   setSync("");
 }
-
   async function cancelRecordRequest(rid) {
   const target = S.records.find(r => r.rid === rid);
   if (!target) return;
@@ -1128,7 +728,7 @@ async function patchDataverseRecord(dvId, fields) {
       payload.cr714_voicemail = fields.cr714_voicemail ? "true" : "false";
     }
     if (fields.cr714_occurrence !== undefined) {
-      payload.cr714_occurrence = String(parseInt(fields.cr714_occurrence, 10) || 0);
+      payload.cr714_occurrence = String(occurrenceNumber(fields.cr714_occurrence) || 0);
     }
     if (fields.cr714_cancelledrequest !== undefined) {
       payload.cr714_cancelledrequest = fields.cr714_cancelledrequest ? "true" : "false";
@@ -1182,80 +782,29 @@ const OCC_WINDOW_DAYS = 90;
 const ORG_FIELDS = [["dept","Department"],["repName","Reps"],["supervisor","Supervisor"],["manager","Manager"]];
 const MU_STATUS = ["Pending","Approved","Completed","Missed"];
 
-const TABS = [["dashboard","Dashboard"],["calendar","Calendar"],["team","Team & Records"],["audit","Occurrence Audit"],["makeup","Make-Up Time"]];
+const TABS = [["dashboard","Dashboard"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
 
-const EMPTY_STATE = () => ({ employees: [], records: [], makeups: [], settings: {} });
-const STATE_DB_NAME = "wf.attendance.cache";
-const STATE_DB_VERSION = 1;
-const STATE_STORE = "state";
-const STATE_KEY = "wf.state.cr714_v10";
-let S = EMPTY_STATE();
+let S = load() || { employees: [], records: [], makeups: [], settings: {} };
 let UI = { tab:"dashboard", preset:"week", anchor:today(), from:null, to:null,
            dept:"", repName:"", title:"", supervisor:"", manager:"", q:"", type:"",
-           sortKey:"date", sortDir:-1, muFilter:"", teamSortKey:"name", teamSortDir:1,
-           auditStatus:"", auditSource:"", auditOnlyIssues:false };
+           sortKey:"date", sortDir:-1, muFilter:"", teamSortKey:"name", teamSortDir:1 };
 let charts = [];
-let stateDbPromise = null;
-let saveTimer = null;
-let saveInFlight = Promise.resolve();
-function openStateDb(){
-  if(stateDbPromise) return stateDbPromise;
-  stateDbPromise = new Promise((resolve,reject)=>{
-    const req = indexedDB.open(STATE_DB_NAME, STATE_DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if(!db.objectStoreNames.contains(STATE_STORE)) db.createObjectStore(STATE_STORE);
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error("Unable to open IndexedDB."));
-  });
-  return stateDbPromise;
-}
-async function idbGet(key){
-  const db = await openStateDb();
-  return new Promise((resolve,reject)=>{
-    const req = db.transaction(STATE_STORE,"readonly").objectStore(STATE_STORE).get(key);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error("Unable to read browser cache."));
-  });
-}
-async function idbPut(key,value){
-  const db = await openStateDb();
-  return new Promise((resolve,reject)=>{
-    const tx = db.transaction(STATE_STORE,"readwrite");
-    tx.objectStore(STATE_STORE).put(value,key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error || new Error("Unable to write browser cache."));
-    tx.onabort = () => reject(tx.error || new Error("Browser cache write was aborted."));
-  });
-}
-async function loadState(){
+
+function load(){
   try{
-    const cached = await idbGet(STATE_KEY);
-    if(cached && Array.isArray(cached.employees)) return cached;
-  }catch(e){ console.warn("IndexedDB state read failed",e); }
-  try{
-    const legacyText = localStorage.getItem("wf.state.cr714_v9");
-    const legacy = legacyText ? JSON.parse(legacyText) : null;
-    if(legacy && Array.isArray(legacy.employees)){
-      await idbPut(STATE_KEY,legacy);
-      localStorage.removeItem("wf.state.cr714_v9");
-      return legacy;
-    }
-  }catch(e){ console.warn("Legacy cache migration skipped",e); }
-  return EMPTY_STATE();
+    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v9"));
+    return s && s.employees && s.employees.length > 0 ? s : null;
+  }catch(e){
+    return null;
+  }
 }
+
 function save(){
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(()=>{
-    const snapshot = structuredClone(S);
-    saveInFlight = saveInFlight.catch(()=>{}).then(()=>idbPut(STATE_KEY,snapshot)).then(()=>{
-      localStorage.removeItem("wf.state.cr714_v9");
-    }).catch(e=>{
-      console.error("IndexedDB save failed",e);
-      toast("Browser cache save failed: " + (e?.message || e));
-    });
-  },120);
+  try{
+    localStorage.setItem("wf.state.cr714_v9", JSON.stringify(S));
+  }catch(e){
+    toast("Storage limit exceeded");
+  }
 }
 
 const $ = s=>document.querySelector(s);
@@ -1315,7 +864,6 @@ function renderCalendar(){
     const selDay = UI.selectedWeekDay;
     const allRs = byDate[selDay]||[];
     const presentCount = allRs.filter(r => r.type === "Present").length;
-    const selectedDayOccurrences=occurrenceTotal(allRs);
     const occurrenceRs = allRs.filter(r => r.type !== "Present").sort((a,b)=>(a.type||"").localeCompare(b.type||""));
 
     const weekGridHtml = `<div class="cal-grid mt" style="margin-bottom: 20px;">
@@ -1357,7 +905,7 @@ function renderCalendar(){
     const daySectionHtml = `<div class="day-block card">
       <div class="row">
         <b>${formattedSelectedTitle}</b>
-        <span class="small muted">${presentCount}/${totalEmps} present · ${uniqueOccurrenceRs.length} record${uniqueOccurrenceRs.length===1?"":"s"} · ${selectedDayOccurrences} occurrence${selectedDayOccurrences===1?"":"s"}</span>
+        <span class="small muted">${presentCount}/${totalEmps} present · ${uniqueOccurrenceRs.length} record${uniqueOccurrenceRs.length===1?"":"s"}</span>
         <button class="btn ghost sm right" data-add-day="${selDay}">+ Add</button>
       </div>
       ${uniqueOccurrenceRs.length ? `<div class="mt" style="display:flex; flex-direction: column; gap:8px;">${uniqueOccurrenceRs.map(r => rowRecord(r, true)).join("")}</div>` : `<div class="small muted mt">No exception records for this day.</div>`}
@@ -1370,9 +918,8 @@ function renderCalendar(){
     let d = f;
     const allRs = byDate[d]||[];
     const presentCount = allRs.filter(r => r.type === "Present").length;
-    const dayOccurrences=occurrenceTotal(allRs);
     const rs=allRs.filter(r => r.type !== "Present").sort((a,b)=>(a.type||"").localeCompare(b.type||""));
-    return head+`<div class="day-block card"><div class="row"><b>${fmtShort(d)}</b><span class="small muted">${presentCount}/${totalEmps} present · ${rs.length} record${rs.length===1?"":"s"} · ${dayOccurrences} occurrence${dayOccurrences===1?"":"s"}</span>
+    return head+`<div class="day-block card"><div class="row"><b>${fmtShort(d)}</b><span class="small muted">${presentCount}/${totalEmps} present · ${rs.length} record${rs.length===1?"":"s"}</span>
       <button class="btn ghost sm right" data-add-day="${d}">+ Add</button></div>
       ${rs.length? `<div class="mt" style="display:flex; flex-direction:column; gap:8px;">${rs.map(r=>rowRecord(r,true)).join("")}</div>`:`<div class="small muted mt">No records.</div>`}
     </div>`;
@@ -1432,28 +979,13 @@ function filteredRecords(from,to){
   return S.records.filter(r => ids.has(r.empId) && r.date>=f && r.date<=t && (!UI.type || r.type === UI.type));
 }
 
-function reportingRecords(from,to){
-  // All reporting reads from the merged S.records collection.
-  return filteredRecords(from,to);
-}
 function emp(id){ return S.employees?.find(e=>e.id===id); }
-function occurrenceValue(r){
-  if(!r||r.waived||r.cancelled)return 0;
-  const explicit=r.occurrenceExplicit===true||(r.occurrenceExplicit!==false&&r.occurrence!==null&&r.occurrence!==undefined&&r.occurrence!=="");
-  const value=Number(r.occurrence);
-  if(explicit&&Number.isFinite(value))return value;
-  return Number(TYPES[r.type]?.occ)||0;
-}
-function occurrenceIdentity(r){return r.dvId||r.attendanceId||r.mergeKey||r.rid;}
-function occurrenceTotal(rows){
-  const seen=new Set();
-  return (rows||[]).reduce((sum,r)=>{const v=occurrenceValue(r),k=occurrenceIdentity(r);if(v<=0||seen.has(k))return sum;seen.add(k);return sum+v;},0);
-}
-function isOcc(r){return occurrenceValue(r)>0;}
-function occCount(empId,asOf){
-  if(!S.records)return 0;
-  const from=addDays(asOf,-OCC_WINDOW_DAYS);
-  return occurrenceTotal(S.records.filter(r=>r.empId===empId&&r.date>from&&r.date<=asOf));
+function isOcc(r){ return !r.cancelled && !r.waived && occurrenceNumber(r.occurrence) > 0; }
+
+function occCount(empId, asOf){
+  if (!S.records) return 0;
+  const from = addDays(asOf, -OCC_WINDOW_DAYS);
+  return S.records.filter(r=>r.empId===empId && r.date>from && r.date<=asOf && isOcc(r)).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
 }
 
 function level(n){ for(const [k,name,cls] of LADDER) if(n>=k) return {name,cls}; return null; }
@@ -1465,10 +997,14 @@ function ossUsed(empId, asOf){
 }
 
 function metrics(){
-  const [f,t]=range(), emps=filteredEmployees(), recs=reportingRecords();
+  const [f,t]=range(), emps=filteredEmployees(), recs=filteredRecords();
   const c = {}; TYPE_NAMES.forEach(n=>c[n]=0);
-  recs.forEach(r=>{c[r.type]=(c[r.type]||0)+1;});
-  const occ=occurrenceTotal(recs);
+  let occ=0; 
+  
+  recs.forEach(r=>{ 
+    c[r.type]=(c[r.type]||0)+1; 
+    if(isOcc(r)) occ += occurrenceNumber(r.occurrence) || 0; 
+  });
 
   // Calculate default Present count for days without explicit records
   let days=[]; for(let d=f; d<=t && days.length<370; d=addDays(d,1)) days.push(d);
@@ -1523,12 +1059,7 @@ function renderFilters(){
     <span class="small muted right">${fmt(f)} → ${fmt(t)}</span>`;
 }
 
-function setSync(t){
-  if(t){ $("#syncStatus").textContent=t; return; }
-  const last=S.settings?.lastSync ? "Last sync: "+S.settings.lastSync : "";
-  const m=S.settings?.attendanceMerge;
-  $("#syncStatus").textContent=m ? `${last} · Attendance ${m.matched}/${m.matched+m.unmatched} matched (${m.exactMatched||0} exact, ${m.startFallbackMatched||0} fallback) · ${m.occurrenceFilled||0} filled · Keys DV ${m.dataverseKeys||0} / Attendance ${m.attendanceKeys||0} / Intersection ${m.exactKeyIntersection||0}` : last;
-}
+function setSync(t){ $("#syncStatus").textContent = t || (S.settings?.lastSync? "Last sync: "+S.settings.lastSync : ""); }
 
 function kpi(v,l,accent,cat){ 
   const clickAttr = cat ? ` onclick="kpiModal('${cat}', '${l}')" style="--accent:${accent||"var(--brand)"}; cursor:pointer;" title="Click to view ${l}"` : `style="--accent:${accent||"var(--brand)"}"`;
@@ -1690,10 +1221,10 @@ function drawCharts(){
               return datasetIndex === 0 ? isCallOut : !isCallOut && r.type !== "Present" && r.type !== "Make up Time";
             });
 
-            let rows = dayRecs.length ? dayRecs.map(r => rowRecord(r)).join("") : `<tr class="norow"><td colspan="7" class="empty">No records for this category on ${fmt(clickedDate)}.</td></tr>`;
+            let rows = dayRecs.length ? dayRecs.map(r => rowRecord(r)).join("") : `<tr class="norow"><td colspan="6" class="empty">No records for this category on ${fmt(clickedDate)}.</td></tr>`;
 
             openModal(`<h2>Records — ${fmt(clickedDate)}</h2>
-              <div class="tbl-wrap"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type</th><th style="text-align:left">Occurrence</th><th style="text-align:left">Hours</th><th style="text-align:left">Notes</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+              <div class="tbl-wrap"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type</th><th style="text-align:left">Hours</th><th style="text-align:left">Notes</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
               <div class="mfoot mt"><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
             bindRecordButtons($("#modalHost"));
           }
@@ -1758,10 +1289,9 @@ function calShift(dir){
 
 function renderTeam(){
   const m=metrics();
-  const reportRows=reportingRecords();
   const teamRows=m.emps.map(e=>{
-    const rs=reportRows.filter(r=>r.empId===e.id);
-    const occ=occurrenceTotal(rs), n90=occCount(e.id,m.to), lv=level(n90);
+    const rs=m.recs.filter(r=>r.empId===e.id);
+    const occ=rs.filter(isOcc).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0), n90=occCount(e.id,m.to), lv=level(n90);
     const perfect=rs.length&&!occ;
     return {
       e, 
@@ -1771,8 +1301,7 @@ function renderTeam(){
       supervisor: e.supervisor, 
       manager: e.manager, 
       recordsCount: rs.length, 
-      occurrences: occ,
-      occurrences90: n90,
+      occurrences: occ, 
       oss: ossUsed(e.id,m.to), 
       perfect, 
       status: e.status
@@ -1796,95 +1325,30 @@ function renderTeam(){
     <th data-team-sort="supervisor">Supervisor ${arrow("supervisor")}</th>
     <th data-team-sort="manager">Manager ${arrow("manager")}</th>
     <th data-team-sort="recordsCount">Records ${arrow("recordsCount")}</th>
-    <th data-team-sort="occurrences">Period Occ. ${arrow("occurrences")}</th>
-    <th data-team-sort="occurrences90">90-Day Occ. ${arrow("occurrences90")}</th>
+    <th data-team-sort="occurrences">Occurrences ${arrow("occurrences")}</th>
     <th data-team-sort="oss">OSS used ${arrow("oss")}</th>
   </tr></thead><tbody>
-  ${teamRows.map(({e,recordsCount,occurrences,occurrences90,oss})=>`<tr data-emp="${esc(e.id)}">
+  ${teamRows.map(({e,recordsCount,occurrences,oss})=>`<tr data-emp="${esc(e.id)}">
     <td><b>${esc(e.name)}</b><div class="small muted">${esc(e.id)}</div></td>
     <td>${esc(e.dept)}</td><td>${esc(e.supervisor)}</td><td>${esc(e.manager)}</td>
-    <td>${recordsCount}</td><td><b>${occurrences}</b></td>
-    <td><span class="badge ${level(occurrences90)?.cls||"ok"}">${occurrences90}</span></td>
+    <td>${recordsCount}</td><td>${occurrences}</td>
     <td>${oss}/${OSS_LIMIT}</td>
-  </tr>`).join("")||`<tr class="norow"><td colspan="8" class="empty">No employees match the filters.</td></tr>`}
+  </tr>`).join("")||`<tr class="norow"><td colspan="7" class="empty">No employees match the filters.</td></tr>`}
   </tbody></table></div>`;
 
-  const recs=reportingRecords().sort((a,b)=>UI.sortDir*(a[UI.sortKey]<b[UI.sortKey]?-1:a[UI.sortKey]>b[UI.sortKey]?1:0));
+  const recs=filteredRecords().sort((a,b)=>UI.sortDir*(a[UI.sortKey]<b[UI.sortKey]?-1:a[UI.sortKey]>b[UI.sortKey]?1:0));
   const recordsHtml = `<div class="section-title mt" style="margin-top:32px;"><h2>Records (${recs.length})</h2>
     <button class="btn sm" id="recNew">+ Add record</button></div>
   <div class="card tbl-wrap"><table><thead><tr>
     <th data-sort="date">Date ${UI.sortKey==="date"?(UI.sortDir<0?"↓":"↑"):""}</th><th data-sort="empId">Employee</th>
-    <th data-sort="type">Type</th><th>Occurrence</th><th>Hours</th><th>Notes</th><th></th>
-  </tr></thead><tbody>${recs.map(r=>rowRecord(r)).join("")||`<tr class="norow"><td colspan="7" class="empty">No records in this period.</td></tr>`}</tbody></table></div>`;
+    <th data-sort="type">Type</th><th>Hours</th><th>Notes</th><th></th>
+  </tr></thead><tbody>${recs.map(r=>rowRecord(r)).join("")||`<tr class="norow"><td colspan="6" class="empty">No records in this period.</td></tr>`}</tbody></table></div>`;
 
   return teamHtml + recordsHtml;
 }
 
-
-function occurrenceSource(r){
-  if(r.cancelled)return "Cancelled";
-  if(r.waived)return "Waived";
-  if(r.attendanceOccurrenceFilled)return "Attendance Tracker";
-  if(r.occurrenceExplicit===true)return r.source==="local"?"Manual":"Dataverse";
-  return "Type Default";
-}
-function occurrenceAuditStatus(r){
-  if(r.cancelled)return {label:"Cancelled",cls:"bad",issue:false};
-  if(r.waived)return {label:"Waived",cls:"ok",issue:false};
-  if(!r.attendanceMatched)return {label:"Unmatched",cls:"warn",issue:true};
-  if(r.attendanceMatched&&!r.attendanceOccurrenceFilled&&!(r.occurrenceExplicit===true))return {label:"Matched / no occurrence",cls:"warn",issue:true};
-  if(!r.mergeStart||!r.mergeEnd)return {label:"Missing merge date",cls:"bad",issue:true};
-  return {label:"Verified",cls:"ok",issue:false};
-}
-function renderOccurrenceAudit(){
-  const [f,t]=range();
-  const ids=new Set(filteredEmployees().map(e=>e.id));
-  let rows=(S.records||[]).filter(r=>ids.has(r.empId)&&r.date>=f&&r.date<=t&&(!UI.type||r.type===UI.type));
-  const auditRows=rows.map(r=>({r,e:emp(r.empId)||{name:r.empId},status:occurrenceAuditStatus(r),source:occurrenceSource(r)}));
-  let shown=auditRows.filter(x=>(!UI.auditStatus||x.status.label===UI.auditStatus)&&(!UI.auditSource||x.source===UI.auditSource)&&(!UI.auditOnlyIssues||x.status.issue));
-  const matched=auditRows.filter(x=>x.r.attendanceMatched).length;
-  const filled=auditRows.filter(x=>x.r.attendanceOccurrenceFilled).length;
-  const issues=auditRows.filter(x=>x.status.issue).length;
-  const total=occurrenceTotal(auditRows.map(x=>x.r));
-  const statuses=[...new Set(auditRows.map(x=>x.status.label))].sort();
-  const sources=[...new Set(auditRows.map(x=>x.source))].sort();
-  shown.sort((a,b)=>(b.status.issue-a.status.issue)||b.r.date.localeCompare(a.r.date)||(a.e.name||"").localeCompare(b.e.name||""));
-  return `<div class="section-title"><h2>Occurrence Audit</h2><span class="small muted">Merge contract: normalized employee name + MM/dd/yyyy start + MM/dd/yyyy end</span></div>
-  <div class="grid kpis mb">
-    ${kpi(auditRows.length,"Records Reviewed","var(--blue)","")}
-    ${kpi(matched,"Attendance Matches","var(--teal)","")}
-    ${kpi(filled,"Mapped Occurrences","var(--green)","")}
-    ${kpi(total,"Occurrence Total","var(--red)","")}
-    ${kpi(issues,"Needs Review",issues?"var(--amber)":"var(--green)","")}
-  </div>
-  <div class="card mb"><div class="row">
-    <div class="fgroup"><label>Status</label><select id="auditStatus"><option value="">All statuses</option>${statuses.map(v=>`<option ${UI.auditStatus===v?"selected":""}>${esc(v)}</option>`).join("")}</select></div>
-    <div class="fgroup"><label>Occurrence source</label><select id="auditSource"><option value="">All sources</option>${sources.map(v=>`<option ${UI.auditSource===v?"selected":""}>${esc(v)}</option>`).join("")}</select></div>
-    <label class="row small" style="margin-top:16px;cursor:pointer"><input type="checkbox" id="auditIssues" ${UI.auditOnlyIssues?"checked":""}> Needs review only</label>
-    <span class="small muted right">Showing ${shown.length} of ${auditRows.length}</span>
-  </div></div>
-  <div class="card tbl-wrap"><table><thead><tr>
-    <th>Employee</th><th>Record Date</th><th>Request Range</th><th>Type</th><th>Occurrence</th><th>Source</th><th>Match</th><th>Method</th><th>Attendance ID</th><th>Dataverse Key</th><th>Attendance Key</th><th>Status</th>
-  </tr></thead><tbody>${shown.map(({r,e,status,source})=>`<tr data-rec="${esc(r.rid)}" title="Click to inspect record">
-    <td><b>${esc(e.name)}</b><div class="small muted">${esc(e.dept||"")}</div></td>
-    <td>${fmt(r.date)}</td>
-    <td><span class="small">${esc(r.mergeStart||exportDateMMDDYYYY(r.date))} → ${esc(r.mergeEnd||exportDateMMDDYYYY(r.date))}</span></td>
-    <td>${pill(r.type)}</td>
-    <td><span class="badge ${occurrenceValue(r)>0?"warn":""}">${occurrenceValue(r)}</span></td>
-    <td>${esc(source)}</td>
-    <td>${r.attendanceMatched?`<span class="badge ok">Matched</span>`:`<span class="badge warn">No match</span>`}</td>
-    <td class="small">${esc(r.attendanceMatchMethod||"")}</td>
-    <td>${esc(r.attendanceId||"")}</td>
-    <td class="small" style="max-width:260px;word-break:break-all">${esc(r.mergeKey||"")}</td>
-    <td class="small" style="max-width:260px;word-break:break-all">${esc(r.attendanceMergeKey||"")}</td>
-    <td><span class="badge ${status.cls}">${esc(status.label)}</span></td>
-  </tr>`).join("")||`<tr class="norow"><td colspan="12" class="empty">No occurrence audit rows match the current filters.</td></tr>`}</tbody></table></div>`;
-}
-
 function muRow(m){
   const e=emp(m.empId)||{name:m.empId};
-  const linkedRecord=(S.records||[]).find(r=>r.rid===m.rid)||(S.records||[]).find(r=>m.dvId&&r.dvId===m.dvId);
-  const linkedOccurrence=linkedRecord?occurrenceValue(linkedRecord):0;
   const isCancelled = m.status === "Cancelled";
   const stCls={Pending:"warn",Approved:"",Completed:"ok",Missed:"bad",Cancelled:"muted"}[m.status];
   const overdue=!isCancelled&&m.status!=="Completed"&&m.status!=="Missed"&&m.dueDate<today();
@@ -1902,7 +1366,6 @@ function muRow(m){
             <span class="badge ${stCls}">${esc(m.status)}</span>
             ${overdue?`<span class="badge bad">overdue</span>`:""}
             ${m.oss?`<span class="badge">OSS</span>`:""}
-            <span class="badge ${linkedOccurrence>0?"warn":"ok"}">Occurrence ${linkedOccurrence}</span>
           </span>
         </div>
       </div>
@@ -2037,10 +1500,7 @@ function rowRecord(r, slim){
     r.fmla?`<span class="badge" title="FMLA Protected">FMLA</span>`:null,
     r.voicemail?`<span class="badge" title="Called in via Voicemail">Voicemail</span>`:null,
     r.waived?`<span class="badge ok" title="Occurrence waived via completed make-up">waived</span>`:null,
-    r.cancelled?`<span class="badge bad" title="Cancelled request">Cancelled</span>`:null,
-    r.attendanceMatched?`<span class="badge" title="Exact M-logic match to Attendance Tracker">Attendance Match</span>`:null,
-    r.attendanceOccurrenceFilled?`<span class="badge ok" title="Blank Time Off occurrence filled from Attendance Tracker">Mapped Occurrence</span>`:null,
-    occurrenceValue(r)>0?`<span class="badge warn" title="Occurrence value used by reports">Occ ${occurrenceValue(r)}</span>`:null
+    r.cancelled?`<span class="badge bad" title="Cancelled request">Cancelled</span>`:null
   ].filter(Boolean).join(" ");
 
   if (slim) {
@@ -2066,7 +1526,6 @@ function rowRecord(r, slim){
       ${pill(r.type)}
       ${badges}
     </td>
-    <td><span class="badge ${occurrenceValue(r)>0?"warn":""}" title="Occurrence value used by reporting">${occurrenceValue(r)}</span></td>
     <td>${r.hours||""}${r.hours?"h":""}</td>
     <td class="small">
       ${r.notes ? `<div>${esc(r.notes)}</div>` : ""}
@@ -2076,13 +1535,13 @@ function rowRecord(r, slim){
 }
 
 function renderRecords(){
-  const recs=reportingRecords().sort((a,b)=>UI.sortDir*(a[UI.sortKey]<b[UI.sortKey]?-1:a[UI.sortKey]>b[UI.sortKey]?1:0));
+  const recs=filteredRecords().sort((a,b)=>UI.sortDir*(a[UI.sortKey]<b[UI.sortKey]?-1:a[UI.sortKey]>b[UI.sortKey]?1:0));
   return `<div class="section-title"><h2>Records (${recs.length})</h2>
     <button class="btn sm" id="recNew">+ Add record</button></div>
   <div class="card tbl-wrap"><table><thead><tr>
     <th data-sort="date">Date ${UI.sortKey==="date"?(UI.sortDir<0?"↓":"↑"):""}</th><th data-sort="empId">Employee</th>
-    <th data-sort="type">Type</th><th>Occurrence</th><th>Hours</th><th>Notes</th><th></th>
-  </tr></thead><tbody>${recs.map(r=>rowRecord(r)).join("")||`<tr class="norow"><td colspan="7" class="empty">No records in this period.</td></tr>`}</tbody></table></div>`;
+    <th data-sort="type">Type</th><th>Hours</th><th>Notes</th><th></th>
+  </tr></thead><tbody>${recs.map(r=>rowRecord(r)).join("")||`<tr class="norow"><td colspan="6" class="empty">No records in this period.</td></tr>`}</tbody></table></div>`;
 }
 
 function openModal(html){ $("#modalHost").innerHTML=`<div class="overlay" id="ovl"><div class="modal">${html}</div></div>`;
@@ -2092,7 +1551,7 @@ function empSelect(id,cur){ return `<select id="${id}">${filteredEmployees().len
 
 function recordModal(rid,presetDate){
   const r=rid? S.records.find(x=>x.rid===rid) : {date:presetDate||today(),empId:S.employees[0]?.id,type:"Present",hours:8,notes:"",wfNotes:"",fmla:false,voicemail:false,partialShift:""};
-  const currentOcc = r.occurrence!==undefined&&r.occurrence!==null?r.occurrence:(Number(TYPES[r.type]?.occ)||0);
+  const currentOcc = r.occurrence !== undefined ? r.occurrence : occCount(r.empId, today());
 
   openModal(`<h2>${rid?"Edit":"Add"} record</h2>
     <div class="mrow">
@@ -2111,7 +1570,7 @@ function recordModal(rid,presetDate){
       <div><label>Occurrences</label>
         <div class="row" style="gap:4px">
           <button class="btn ghost sm" id="occMinus" style="padding:4px 10px; font-size:16px;">-</button>
-          <input type="number" id="mOcc" value="${currentOcc}" style="width:60px; text-align:center" step="1">
+          <input type="number" id="mOcc" value="${currentOcc}" style="width:70px; text-align:center" step="0.5">
           <button class="btn ghost sm" id="occPlus" style="padding:4px 10px; font-size:16px;">+</button>
         </div>
       </div>
@@ -2141,11 +1600,13 @@ function recordModal(rid,presetDate){
     $("#mDel").onclick = () => toggleCancelRecord(rid);
   }
 
-  $("#occMinus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = Math.max(0, parseInt(inp.value||0) - 1); };
-  $("#occPlus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = parseInt(inp.value||0) + 1; };
+  $("#occMinus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = Math.max(0, (occurrenceNumber(inp.value)||0) - 0.5); };
+  $("#occPlus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = (occurrenceNumber(inp.value)||0) + 0.5; };
 
   if (!rid) {
-    $("#mType").onchange=e=>{$("#mOcc").value=Number(TYPES[e.target.value]?.occ)||0;};
+    $("#mEmp").onchange = (e) => {
+      $("#mOcc").value = occCount(e.target.value, today());
+    };
   }
       
   $("#mSave").onclick=()=>{
@@ -2164,12 +1625,12 @@ function recordModal(rid,presetDate){
     const partialShift = $("#mPartial").value.trim();
     const fmla = $("#mFmla").checked;
     const voicemail = $("#mVoicemail").checked;
-    const occurrence = parseInt($("#mOcc").value, 10) || 0;
+    const occurrence = occurrenceNumber($("#mOcc").value) || 0;
 
     if (rid) {
       const targetRec = S.records.find(x => x.rid === rid);
       if (targetRec) {
-        Object.assign(targetRec,{date:dFrom,empId,type,hours,notes,wfNotes,partialShift,fmla,voicemail,occurrence,occurrenceExplicit:true,occurrencePrimary:true});
+        Object.assign(targetRec, { date: dFrom, empId, type, hours, notes, wfNotes, partialShift, fmla, voicemail, occurrence });
         if (targetRec.dvId) {
           patchDataverseRecord(targetRec.dvId, {
             cr714_fmla: fmla,
@@ -2197,9 +1658,7 @@ function recordModal(rid,presetDate){
           waived: false, 
           fmla,
           voicemail,
-          occurrence,
-          occurrenceExplicit:true,
-          occurrencePrimary:true
+          occurrence
         });
         current.setDate(current.getDate() + 1);
       }
@@ -2328,146 +1787,20 @@ function empModal(id){
   const [f,t]=range();
   const rs=(S.records||[]).filter(r=>r.empId===id&&r.date>=f&&r.date<=t).sort((a,b)=>b.date.localeCompare(a.date));
   const mus=(S.makeups||[]).filter(m=>m.empId===id).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
-  const periodOcc=occurrenceTotal(rs);
   const n90=occCount(id,t), lv=level(n90);
   openModal(`<h2>${esc(e.name)} <span class="small muted">${esc(e.id)}</span></h2>
     <p class="small">${esc(e.title)} · ${esc(e.dept)} · ${esc(e.location)}<br>
     Supervisor: <b>${esc(e.supervisor)}</b> · Manager: <b>${esc(e.manager)}</b></p>
     <p class="row small">
-      <span class="badge warn">${periodOcc} occurrence${periodOcc===1?"":"s"} in selected period</span>
       <span class="badge ${lv?lv.cls:"ok"}">${lv?lv.name:"Clear"} — ${n90} occ. / 90d</span>
       <span class="badge">OSS ${ossUsed(id,t)}/${OSS_LIMIT}</span>
     </p>
     <h3 style="font-size:13px" class="mt">Records ${fmt(f)} → ${fmt(t)} (${rs.length})</h3>
-    ${rs.length?`<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Occurrence</th><th>Hours</th><th>Notes</th></tr></thead><tbody>${rs.map(r=>`<tr><td>${fmt(r.date)}</td><td>${pill(r.type)}${r.waived?` <span class="badge ok">waived</span>`:""}</td><td><span class="badge ${occurrenceValue(r)>0?"warn":""}">${occurrenceValue(r)}</span></td><td>${r.hours||""}h</td><td class="small">${esc(r.notes)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="small muted">None in period.</div>`}
+    ${rs.length?`<div class="tbl-wrap"><table><tbody>${rs.map(r=>`<tr><td>${fmt(r.date)}</td><td>${pill(r.type)}${r.waived?` <span class="badge ok">waived</span>`:""}</td><td>${r.hours||""}h</td><td class="small">${esc(r.notes)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="small muted">None in period.</div>`}
     <h3 style="font-size:13px" class="mt">Make-up agreements (${mus.length})</h3>
     ${mus.length?`<div class="tbl-wrap"><table><tbody>${mus.map(m=>`<tr><td>${fmt(m.dateMissed)}</td><td>${m.hoursOwed}h</td><td><span class="badge ${{Pending:"warn",Approved:"",Completed:"ok",Missed:"bad"}[m.status]}">${esc(m.status)}</span></td><td>${m.oss?"OSS":""}</td></tr>`).join("")}</tbody></table></div>`:`<div class="small muted">None.</div>`}
     <div class="mfoot"><button class="btn ghost" id="eMu">+ Make-up agreement</button><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
   $("#eMu").onclick=()=>makeupModal(null,{empId:id,date:today(),hours:0});
-}
-
-
-function exportDateMMDDYYYY(value){if(!value)return "";const d=typeof value==="string"&&/^\d{4}-\d{2}-\d{2}$/.test(value)?parseISO(value):dateOnly(value);return d?mergeDateKey(d):String(value);}
-function fitWorksheetColumns(ws, rows, minWidth=10, maxWidth=48){
-  const keys = rows.length ? Object.keys(rows[0]) : [];
-  ws["!cols"] = keys.map(key => {
-    const longest = rows.reduce((n,row) => Math.max(n, String(row[key] ?? "").length), String(key).length);
-    return { wch: Math.max(minWidth, Math.min(maxWidth, longest + 2)) };
-  });
-  if(ws["!ref"]) ws["!autofilter"] = { ref: ws["!ref"] };
-}
-function exportWorkforceReport(){
-  try{
-    if(typeof XLSX === "undefined") throw new Error("The Excel export library is unavailable.");
-    const reportRows = reportingRecords();
-    const employees = filteredEmployees();
-    const [fromDate,toDate] = range();
-    const selectedEmployeeIds = new Set(employees.map(e => e.id));
-    const selectedMakeups = (S.makeups || []).filter(m => selectedEmployeeIds.has(m.empId));
-
-    const recordRows = reportRows.map(r => {
-      const e = emp(r.empId) || {};
-      return {
-        "Employee": e.name || r.empId || "",
-        "Employee ID": r.empId || "",
-        "Department": e.dept || "",
-        "Supervisor": e.supervisor || "",
-        "Manager": e.manager || "",
-        "Date": exportDateMMDDYYYY(r.date),
-        "Merge Start": r.mergeStart||exportDateMMDDYYYY(r.date),
-        "Merge End": r.mergeEnd||exportDateMMDDYYYY(r.date),
-        "Merge Key": r.mergeKey||"",
-        "Type": r.type||"",
-        "Occurrence": occurrenceValue(r),
-        "Hours": Number(r.hours) || 0,
-        "Waived": r.waived ? "Yes" : "No",
-        "Cancelled": r.cancelled ? "Yes" : "No",
-        "FMLA": r.fmla ? "Yes" : "No",
-        "Voicemail": r.voicemail ? "Yes" : "No",
-        "Attendance Matched": r.attendanceMatched ? "Yes" : "No",
-        "Mapped Occurrence": r.attendanceOccurrenceFilled ? "Yes" : "No",
-        "Attendance ID": r.attendanceId || "",
-        "Source": r.source || "",
-        "Notes": r.notes || "",
-        "Workforce Notes": r.wfNotes || ""
-      };
-    });
-
-    const teamRows = employees.map(e => {
-      const periodRecords = reportRows.filter(r => r.empId === e.id);
-      const periodOccurrences = occurrenceTotal(periodRecords);
-      const occurrences90 = occCount(e.id, toDate);
-      const action = level(occurrences90);
-      return {
-        "Employee": e.name || "",
-        "Employee ID": e.id || "",
-        "Department": e.dept || "",
-        "Supervisor": e.supervisor || "",
-        "Manager": e.manager || "",
-        "Records": periodRecords.length,
-        "Period Occurrences": periodOccurrences,
-        "90-Day Occurrences": occurrences90,
-        "Corrective Action Level": action ? action.name : "Clear",
-        "OSS Used": ossUsed(e.id, toDate),
-        "Status": e.status || ""
-      };
-    });
-
-    const totalOccurrences = occurrenceTotal(reportRows);
-    const matchedRows = reportRows.filter(r => r.attendanceMatched).length;
-    const mappedRows = reportRows.filter(r => r.attendanceOccurrenceFilled).length;
-    const repsWithOccurrences = new Set(reportRows.filter(r => occurrenceValue(r) > 0).map(r => r.empId)).size;
-    const metricsNow = metrics();
-    const summaryRows = [
-      { "Metric": "Report From", "Value": exportDateMMDDYYYY(fromDate) },
-      { "Metric": "Report To", "Value": exportDateMMDDYYYY(toDate) },
-      { "Metric": "Exported At", "Value": new Date().toLocaleString() },
-      { "Metric": "Employees", "Value": employees.length },
-      { "Metric": "Records", "Value": reportRows.length },
-      { "Metric": "Total Occurrences", "Value": totalOccurrences },
-      { "Metric": "Reps With Occurrences", "Value": repsWithOccurrences },
-      { "Metric": "Perfect Attendance Reps", "Value": metricsNow.perfect.length },
-      { "Metric": "Attendance Rate", "Value": metricsNow.rate == null ? "" : metricsNow.rate + "%" },
-      { "Metric": "Attendance Matches", "Value": matchedRows },
-      { "Metric": "Mapped Occurrence Records", "Value": mappedRows },
-      { "Metric": "Pending Make-Ups", "Value": selectedMakeups.filter(m => m.status === "Pending").length },
-      { "Metric": "Completed Make-Ups", "Value": selectedMakeups.filter(m => m.status === "Completed").length }
-    ];
-
-    const makeupRows = selectedMakeups.map(m => {
-      const e = emp(m.empId) || {};
-      return {
-        "Employee": e.name || m.empId || "",
-        "Employee ID": m.empId || "",
-        "Date Missed": exportDateMMDDYYYY(m.dateMissed),
-        "Hours Owed": Number(m.hoursOwed) || 0,
-        "Due Date": exportDateMMDDYYYY(m.dueDate),
-        "Status": m.status || "",
-        "OSS": m.oss ? "Yes" : "No",
-        "Completed Date": exportDateMMDDYYYY(m.completedDate),
-        "Notes": m.notes || ""
-      };
-    });
-
-    const wb = XLSX.utils.book_new();
-    const summaryWs = XLSX.utils.json_to_sheet(summaryRows);
-    const teamWs = XLSX.utils.json_to_sheet(teamRows);
-    const recordsWs = XLSX.utils.json_to_sheet(recordRows);
-    const makeupWs = XLSX.utils.json_to_sheet(makeupRows);
-    fitWorksheetColumns(summaryWs, summaryRows, 14, 36);
-    fitWorksheetColumns(teamWs, teamRows, 10, 34);
-    fitWorksheetColumns(recordsWs, recordRows, 10, 48);
-    fitWorksheetColumns(makeupWs, makeupRows, 10, 48);
-    XLSX.utils.book_append_sheet(wb, summaryWs, "Summary");
-    XLSX.utils.book_append_sheet(wb, teamWs, "Team Summary");
-    XLSX.utils.book_append_sheet(wb, recordsWs, "Records");
-    XLSX.utils.book_append_sheet(wb, makeupWs, "Make-Up Time");
-    XLSX.writeFile(wb, `Workforce_Attendance_${fromDate}_to_${toDate}.xlsx`);
-    toast(`Exported ${reportRows.length} records with ${totalOccurrences} occurrences`);
-  }catch(err){
-    console.error("Workforce export failed", err);
-    toast("Export failed: " + (err?.message || err));
-  }
 }
 
 function render(){
@@ -2477,7 +1810,6 @@ function render(){
     case "dashboard": v.innerHTML=renderDashboard(); drawCharts(); break;
     case "calendar":  v.innerHTML=renderCalendar(); break;
     case "team":      v.innerHTML=renderTeam(); break;
-    case "audit":     v.innerHTML=renderOccurrenceAudit(); break;
     case "makeup":    v.innerHTML=renderMakeup(); break;
   }
   bindView();
@@ -2489,7 +1821,6 @@ function bindRecordButtons(root){
 
 function bindView(){
   const v=$("#view");
-  const on=(id,ev,fn)=>{const el=$(id);if(el)el[ev]=fn;};
   v.querySelectorAll("tr[data-emp]").forEach(tr=>tr.onclick=()=>empModal(tr.dataset.emp));
   v.querySelectorAll(".cal-cell[data-day]").forEach(c=>c.onclick=()=>dayModal(c.dataset.day));
   
@@ -2531,10 +1862,6 @@ function bindView(){
   });
 
   bindRecordButtons(v);
-  v.querySelectorAll("tr[data-rec]").forEach(tr=>tr.onclick=e=>{if(!e.target.closest("button"))recordModal(tr.dataset.rec);});
-  on("#auditStatus","onchange",()=>{UI.auditStatus=$("#auditStatus").value;render();});
-  on("#auditSource","onchange",()=>{UI.auditSource=$("#auditSource").value;render();});
-  on("#auditIssues","onchange",()=>{UI.auditOnlyIssues=$("#auditIssues").checked;render();});
   v.querySelectorAll("[data-mu-act]").forEach(b=>b.onclick=e=>{e.stopPropagation();
     const act=b.dataset.muAct, id=b.dataset.id;
     if(act==="edit") makeupModal(id);
@@ -2542,6 +1869,7 @@ function bindView(){
   v.querySelectorAll("tr[data-mu]").forEach(tr=>tr.onclick=()=>{ makeupModal(tr.dataset.mu); });
   v.querySelectorAll("th[data-sort]").forEach(th=>th.onclick=()=>{
     const k=th.dataset.sort; UI.sortDir=UI.sortKey===k?-UI.sortDir:-1; UI.sortKey=k; render();});
+  const on=(id,ev,fn)=>{ const el=$(id); if(el) el[ev]=fn; };
   on("#calPrev","onclick",()=>calShift(-1)); on("#calNext","onclick",()=>calShift(1));
   on("#calToday","onclick",()=>{UI.anchor=today(); UI.selectedWeekDay=today(); UI.selectedMuWeekDay=today(); render();});
   on("#calAdd","onclick",()=>recordModal(null, UI.selectedWeekDay || UI.anchor));
@@ -2559,20 +1887,20 @@ $("#filterBar").addEventListener("change",e=>{
   else if(t.id==="fTo") UI.to=t.value;
   else if(t.classList.contains("ffield")) UI[t.dataset.f]=t.value;
   render();
+  if (["fPreset","fAnchor","fFrom","fTo"].includes(t.id)) {
+    clearTimeout(window._dateSyncTimer);
+    window._dateSyncTimer = setTimeout(() => pullFromDataverse(true), 250);
+  }
 });
 $("#filterBar").addEventListener("input",e=>{ if(e.target.id==="fQ"){ UI.q=e.target.value;
   clearTimeout(window._qh); window._qh=setTimeout(render,250); }});
 $("#filterBar").addEventListener("click",e=>{ if(e.target.id==="fClear"){
   Object.assign(UI,{preset:"month",anchor:today(),from:null,to:null,dept:"",repName:"",title:"",supervisor:"",manager:"",q:"",type:""}); render(); }});
 
-$("#exportBtn").onclick=exportWorkforceReport;
 $("#syncBtn").onclick=()=>pullFromDataverse(false);
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
-document.getElementById("loadRetry").onclick=()=>{
-  attendanceLoadPromise=null;
-  pullFromDataverse(false);
-};
 
+render();
 </script>
 </body>
 </html>
