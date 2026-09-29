@@ -2809,7 +2809,7 @@
     let accountGuidResolutionPromise = Promise.resolve(null);
     let accountGuidResolutionRecordId = null;
     let accountGuidResolutionSequence = 0;
-    const ACT_GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const ACT_GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     function cleanActGuid(value) { return String(value || '').replace(/[{}]/g, '').trim(); }
     function isValidActGuid(value) { return ACT_GUID_PATTERN.test(cleanActGuid(value)); }
     window.getAccountGuidResolutionState = () => ({ resolving: isAccountGuidResolving, recordId: accountGuidResolutionRecordId, guid: cleanActGuid(currentAccountGuid), valid: isValidActGuid(currentAccountGuid) });
@@ -3427,23 +3427,76 @@
         };
     }
 
-    async function mvSend(item, options = {}) {
-        // Final network boundary guard: Power Automate must never receive a blank account GUID.
-        const outboundGuid = cleanActGuid(item?.payload?.regardingGuid);
-        if (!isValidActGuid(outboundGuid)) {
-            const error = new Error("Flow submission blocked: missing or invalid Dynamics account GUID.");
-            error.code = "ACT_MISSING_ACCOUNT_GUID";
-            error.status = 0;
+    async function mvFetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try { return await fetch(url, { ...options, signal: controller.signal }); }
+        finally { clearTimeout(timer); }
+    }
+
+    async function mvVerifyAccountBeforeSubmit(accountNumber, existingGuid = "") {
+        const account = String(accountNumber || "").trim();
+        if (!account) {
+            const error = new Error("Flow submission blocked: missing ACT account number.");
+            error.code = "ACT_MISSING_ACCOUNT_NUMBER";
             error.isPermanent = true;
             throw error;
         }
-        item.payload.regardingGuid = outboundGuid;
+        const token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
+        const escaped = account.replace(/'/g, "''");
+        const url = `https://wbmasonco.crm.dynamics.com/api/data/v9.2/accounts?$select=accountid,accountnumber,name,statecode&$filter=${encodeURIComponent(`accountnumber eq '${escaped}'`)}&$top=2`;
+        const response = await mvFetchWithTimeout(url, {
+            headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json", "OData-MaxVersion": "4.0", "OData-Version": "4.0" }
+        }, 15000);
+        const text = await response.text();
+        let body = {};
+        try { body = text ? JSON.parse(text) : {}; } catch (_) {}
+        if (!response.ok) {
+            const error = new Error(body?.error?.message || text || `D365 account verification failed (${response.status}).`);
+            error.code = "ACT_ACCOUNT_VERIFICATION_FAILED";
+            throw error;
+        }
+        const matches = Array.isArray(body.value) ? body.value : [];
+        if (matches.length !== 1) {
+            const error = new Error(matches.length > 1
+                ? `Flow submission blocked: multiple D365 accounts match ${account}.`
+                : `Flow submission blocked: no D365 account matches ${account}.`);
+            error.code = matches.length > 1 ? "ACT_MULTIPLE_ACCOUNTS" : "ACT_ACCOUNT_NOT_FOUND";
+            error.isPermanent = true;
+            throw error;
+        }
+        const verifiedGuid = cleanActGuid(matches[0].accountid);
+        if (!isValidActGuid(verifiedGuid)) {
+            const error = new Error(`Flow submission blocked: D365 returned an invalid account GUID for ${account}.`);
+            error.code = "ACT_INVALID_VERIFIED_GUID";
+            error.isPermanent = true;
+            throw error;
+        }
+        const priorGuid = cleanActGuid(existingGuid);
+        if (priorGuid && priorGuid.toLowerCase() !== verifiedGuid.toLowerCase()) {
+            console.warn("ACT corrected a stale/mismatched account GUID before Flow submission.", { accountNumber: account, priorGuid, verifiedGuid });
+        }
+        return { accountNumber: String(matches[0].accountnumber || account).trim(), accountGuid: verifiedGuid, accountName: matches[0].name || "" };
+    }
+
+    async function mvSend(item, options = {}) {
+        // Final network boundary guard: resolve the authoritative accountid from the
+        // account number immediately before every live send and queued retry.
+        const verification = await mvVerifyAccountBeforeSubmit(item?.payload?.accountId || item?.accountId, item?.payload?.regardingGuid);
+        item.accountId = verification.accountNumber;
+        item.payload.accountId = verification.accountNumber;
+        item.payload.regardingGuid = verification.accountGuid;
+        // Keep the selected-record GUID synchronized only when this item still belongs
+        // to the active ACT record. This prevents an older async request overwriting it.
+        if (String(currentRecordId || "").trim().toUpperCase() === verification.accountNumber.toUpperCase()) {
+            currentAccountGuid = verification.accountGuid;
+        }
         // The item is already in the durable queue. Give the live request three
         // seconds, show the user a countdown, then continue with the ACT workflow.
         const showCountdown = options.showCountdown === true;
         const hideCountdown = showCountdown ? mvShowSendCountdown(3) : () => {};
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort("Masonville Flow timed out after 3 seconds."), 3000);
+        const timeoutId = setTimeout(() => controller.abort("Masonville Flow timed out after 15 seconds."), 15000);
         try {
             const response = await fetch(MASONVILLE_FLOW_URL, {
                 method: "POST",
@@ -3452,7 +3505,15 @@
                     "X-ACT-Queue-Id": item.id,
                     "X-ACT-Original-Time": item.originalCreatedUtc
                 },
-                body: JSON.stringify(item.payload),
+                body: JSON.stringify({
+                    accountId: item.payload.accountId,
+                    notesPayload: item.payload.notesPayload,
+                    subject: item.payload.subject,
+                    activityType: item.payload.activityType,
+                    regardingGuid: item.payload.regardingGuid,
+                    repOwnerGuid: isValidActGuid(item.payload.repOwnerGuid) ? cleanActGuid(item.payload.repOwnerGuid) : "",
+                    repOwnerName: item.payload.repOwnerName || ""
+                }),
                 signal: controller.signal
             });
             if (!response.ok) {
@@ -3465,7 +3526,7 @@
             return { status: response.status };
         } catch (error) {
             if (error && error.name === "AbortError") {
-                const timeoutError = new Error("Masonville Flow timed out after 3 seconds.");
+                const timeoutError = new Error("Masonville Flow timed out after 15 seconds.");
                 timeoutError.status = 0;
                 timeoutError.isTimeout = true;
                 throw timeoutError;
@@ -5205,7 +5266,7 @@ ${signature}${wrapperEnd}`;
 </div>
 ${signature}${wrapperEnd}`;
 
-        } else if (template === "Stretch&KraftTapeSale") {
+        } else if (template === "Sketch&KraftTapeSale") {
             const greetingName = (contactName || "Customer").trim().split(/\s+/)[0] || "Customer";
             const stretchKraftSaleUrl = "https://www.wbmason.com/";
             subject = "Can't-Miss Savings on Stretch Film and Kraft Tape";
@@ -6547,7 +6608,7 @@ window.populateForm = function(rec) {
                {val: "Louise Brown 15% Off", txt: "Louise Brown 15% Off"},
                {val: "May Savings", txt: "May Savings"},
                {val: "NoMay", txt: "NoMay"},
-               {val: "Stretch&KraftTapeSale", txt: "Stretch Film & Kraft Tape Sale"},
+               {val: "Sketch&KraftTapeSale", txt: "Stretch Film & Kraft Tape Sale"},
                {val: "June Savings", txt: "June Savings"},
                {val: "NoJune", txt: "NoJune"},
                {val: "NoJuly", txt: "NoJuly", expiresAfter: "2026-08-03"},
@@ -10807,5 +10868,6 @@ function schedule(){setTimeout(compare,180)};observer=new MutationObserver(()=>c
   font-weight:700 !important;
 }
 </style>
+<!-- ACT 46 PATCH: authoritative pre-submit D365 account verification + exact Flow schema -->
 </body>
 </html>
