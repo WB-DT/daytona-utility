@@ -4469,23 +4469,38 @@ window.preloadTemplateImages = async function() {
     };
 
     window.fetchD365Account = async function(accountId) {
+        const cleanId = String(accountId || '').trim();
+        if (!cleanId) return null;
         try {
             let token;
-            try {
-                token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true);
-            } catch(tokenErr) {
-                console.warn("D365 wbmasonco token blocked by admin consent, skipping D365 overlay.", tokenErr);
-                return null;
-            }
-            if(!token) return null;
-            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
-            const cleanId = String(accountId).trim();
-            const res = await fetch(`${PRIMARY_CRM_URL}/accounts?$filter=accountnumber eq '${cleanId}'&$expand=primarycontactid($select=fullname,telephone1,emailaddress1)`, { headers });
-            if(res.ok) {
+            try { token = await window.getToken("https://wbmasonco.crm.dynamics.com//user_impersonation", true); }
+            catch(tokenErr) { console.warn("[Inactive Check] D365 token unavailable.", tokenErr); return null; }
+            if (!token) return null;
+            const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'Prefer': 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"', 'Cache-Control': 'no-cache' };
+            const escapeOData = value => String(value || '').replace(/'/g, "''");
+            const withoutPrefix = cleanId.replace(/^[A-Za-z]/, '');
+            const variants = [...new Set([cleanId, cleanId.toUpperCase(), withoutPrefix, withoutPrefix ? `C${withoutPrefix}` : ''].filter(Boolean))];
+            const select = '$select=accountid,accountnumber,name,statecode,statuscode';
+            const expand = '$expand=primarycontactid($select=fullname,telephone1,emailaddress1)';
+            for (const candidate of variants) {
+                const filter = encodeURIComponent(`accountnumber eq '${escapeOData(candidate)}'`);
+                const url = `${PRIMARY_CRM_URL}/accounts?${select}&$filter=${filter}&${expand}`;
+                const res = await fetch(url, { headers, cache: 'no-store' });
+                if (!res.ok) { console.warn('[Inactive Check] CRM lookup failed', candidate, res.status, res.statusText); continue; }
                 const data = await res.json();
-                if(data.value && data.value.length > 0) return data.value[0];
+                const row = Array.isArray(data?.value) ? data.value[0] : null;
+                if (row) {
+                    const stateLabel = String(row['statecode@OData.Community.Display.V1.FormattedValue'] || '').trim();
+                    const statusLabel = String(row['statuscode@OData.Community.Display.V1.FormattedValue'] || '').trim();
+                    row.__actInactive = Number(row.statecode) === 1 || /inactive/i.test(stateLabel) || /inactive/i.test(statusLabel);
+                    row.__actLookupCandidate = candidate;
+                    console.info('[Inactive Check] CRM account matched', { requested: cleanId, matched: candidate, accountnumber: row.accountnumber, statecode: row.statecode, stateLabel, statuscode: row.statuscode, statusLabel, inactive: row.__actInactive });
+                    return row;
+                }
+                console.info('[Inactive Check] No CRM match for account variant', candidate);
             }
-        } catch(e) { console.warn("D365 lookup error", e); }
+            console.warn('[Inactive Check] No CRM account returned for normalized variants.', cleanId, variants);
+        } catch(e) { console.warn('[Inactive Check] D365 lookup error', e); }
         return null;
     }
 
@@ -6381,7 +6396,7 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                     alertContainer.innerHTML += `<div class="alert-box declining overflow-y-auto max-h-24 custom-scrollbar"><span class="alert-label"><i class="fas fa-exclamation-triangle mr-1"></i>D365 Account Note</span>${window.escapeHTML(accountMessage)}</div>`;
                 }
                 
-                if (d365Acct.statecode === 1) { // Masonville displays this account state as the Inactive Status box.
+                if (d365Acct.__actInactive === true || Number(d365Acct.statecode) === 1 || /inactive/i.test(String(d365Acct['statecode@OData.Community.Display.V1.FormattedValue'] || d365Acct['statuscode@OData.Community.Display.V1.FormattedValue'] || ''))) { // Verified inactive from explicit CRM state/status fields.
                     window.pendingInactiveId = id;
                     window.pendingInactiveDetectionSource = 'Masonville/D365 account status';
                     const inactiveModal = document.getElementById('inactive-prompt-modal');
