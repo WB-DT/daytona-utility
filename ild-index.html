@@ -4480,11 +4480,12 @@ window.preloadTemplateImages = async function() {
             const escapeOData = value => String(value || '').replace(/'/g, "''");
             const withoutPrefix = cleanId.replace(/^[A-Za-z]/, '');
             const variants = [...new Set([cleanId, cleanId.toUpperCase(), withoutPrefix, withoutPrefix ? `C${withoutPrefix}` : ''].filter(Boolean))];
-            const select = '$select=accountid,accountnumber,name,statecode,statuscode';
+            // Deliberately omit $select so the one matched account returns every readable account column.
+            // Masonville's Inactive Status is not represented by account.statecode/statuscode on every closed account.
             const expand = '$expand=primarycontactid($select=fullname,telephone1,emailaddress1)';
             for (const candidate of variants) {
                 const filter = encodeURIComponent(`accountnumber eq '${escapeOData(candidate)}'`);
-                const url = `${PRIMARY_CRM_URL}/accounts?${select}&$filter=${filter}&${expand}`;
+                const url = `${PRIMARY_CRM_URL}/accounts?$filter=${filter}&$top=1&${expand}`;
                 const res = await fetch(url, { headers, cache: 'no-store' });
                 if (!res.ok) { console.warn('[Inactive Check] CRM lookup failed', candidate, res.status, res.statusText); continue; }
                 const data = await res.json();
@@ -4492,9 +4493,21 @@ window.preloadTemplateImages = async function() {
                 if (row) {
                     const stateLabel = String(row['statecode@OData.Community.Display.V1.FormattedValue'] || '').trim();
                     const statusLabel = String(row['statuscode@OData.Community.Display.V1.FormattedValue'] || '').trim();
-                    row.__actInactive = Number(row.statecode) === 1 || /inactive/i.test(stateLabel) || /inactive/i.test(statusLabel);
+                    const evidence = [];
+                    if (Number(row.statecode) === 1 || /inactive/i.test(stateLabel)) evidence.push(`statecode=${row.statecode} (${stateLabel || 'no label'})`);
+                    // statuscode=1 / Active is NOT considered inactive. The supplied closed account proves that combination is ambiguous.
+                    if (/inactive|closed|do not service|customer service/i.test(statusLabel) && !/^active$/i.test(statusLabel)) evidence.push(`statuscode=${row.statuscode} (${statusLabel})`);
+                    if (/(?:^|[\s\-–—:()])(?:closed|inactive)(?:$|[\s\-–—:()])/i.test(String(row.name || ''))) evidence.push(`name=${row.name}`);
+                    for (const [key, rawValue] of Object.entries(row)) {
+                        if (key.startsWith('@') || key.startsWith('__') || rawValue == null || typeof rawValue === 'object') continue;
+                        if (!/(status|state|active|inactive|closed|closure|block|service|customer)/i.test(key)) continue;
+                        const value = String(rawValue).trim();
+                        if (/inactive|closed|do not service|contact customer service/i.test(value) && !/^active$/i.test(value)) evidence.push(`${key}=${value}`);
+                    }
+                    row.__actInactiveEvidence = [...new Set(evidence)];
+                    row.__actInactive = row.__actInactiveEvidence.length > 0;
                     row.__actLookupCandidate = candidate;
-                    console.info('[Inactive Check] CRM account matched', { requested: cleanId, matched: candidate, accountnumber: row.accountnumber, statecode: row.statecode, stateLabel, statuscode: row.statuscode, statusLabel, inactive: row.__actInactive });
+                    console.info('[Inactive Check] Full CRM account matched', { requested: cleanId, matched: candidate, accountnumber: row.accountnumber, name: row.name, statecode: row.statecode, stateLabel, statuscode: row.statuscode, statusLabel, inactive: row.__actInactive, evidence: row.__actInactiveEvidence, returnedColumnCount: Object.keys(row).length, returnedColumns: Object.keys(row).sort() });
                     return row;
                 }
                 console.info('[Inactive Check] No CRM match for account variant', candidate);
@@ -5093,8 +5106,8 @@ allRaw.forEach(r => {
                 recordStatus: 'Inactive', accountRep: originalRep,
                 effectiveAction: 'Representative Unassigned',
                 actionMessage: 'Masonville Inactive Status confirmed; representative unassigned.',
-                noteText: `Inactive Account | Masonville Inactive Status confirmed | Previous Rep: ${originalRep || 'Unknown'} | Sources Unassigned: ${results.map(r => r.table).join(', ')}`,
-                details: `Account ${selectedAccount || 'Unknown'} was confirmed inactive. The representative assignment was removed after user confirmation.`,
+                noteText: `Inactive Account | Masonville Inactive Status confirmed | Evidence: ${(window.pendingInactiveEvidence || []).join('; ') || 'Masonville inactive indicator'} | Previous Rep: ${originalRep || 'Unknown'} | Sources Unassigned: ${results.map(r => r.table).join(', ')}`,
+                details: `Account ${selectedAccount || 'Unknown'} was confirmed inactive. Evidence: ${(window.pendingInactiveEvidence || []).join('; ') || 'Masonville inactive indicator'}. The representative assignment was removed after user confirmation.`,
                 sourceType: 'Masonville Status Verification'
             });
             currentSelectedRecord.sources.forEach(src => {
@@ -6396,9 +6409,10 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                     alertContainer.innerHTML += `<div class="alert-box declining overflow-y-auto max-h-24 custom-scrollbar"><span class="alert-label"><i class="fas fa-exclamation-triangle mr-1"></i>D365 Account Note</span>${window.escapeHTML(accountMessage)}</div>`;
                 }
                 
-                if (d365Acct.__actInactive === true || Number(d365Acct.statecode) === 1 || /inactive/i.test(String(d365Acct['statecode@OData.Community.Display.V1.FormattedValue'] || d365Acct['statuscode@OData.Community.Display.V1.FormattedValue'] || ''))) { // Verified inactive from explicit CRM state/status fields.
+                if (d365Acct.__actInactive === true) { // Full-row evidence can include state, formatted labels, account name, or applicable status/service columns.
                     window.pendingInactiveId = id;
-                    window.pendingInactiveDetectionSource = 'Masonville/D365 account status';
+                    window.pendingInactiveDetectionSource = 'Masonville/D365 full account verification';
+                    window.pendingInactiveEvidence = Array.isArray(d365Acct.__actInactiveEvidence) ? d365Acct.__actInactiveEvidence.slice() : [];
                     const inactiveModal = document.getElementById('inactive-prompt-modal');
                     if (inactiveModal) {
                         inactiveModal.classList.remove('hidden');
