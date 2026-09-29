@@ -5034,13 +5034,69 @@ allRaw.forEach(r => {
         }
     }
 
-    window.resolveInactivePrompt = function(move) {
-        document.getElementById('inactive-prompt-modal').classList.add('hidden');
-        if(move) { window.moveAccountToMaster('DEACTIVATE_ONLY'); window.showToast("Moved to Archive"); }
-        else {
-            localStorage.setItem('daytona_keep_inactive_' + window.pendingInactiveId, 'true');
-            window.handleCustomSave("[System]: Rep elected to keep inactive account in working list.", true);
-            window.showToast("Account kept in working list");
+    window.resolveInactivePrompt = async function(confirmUnassign) {
+        const modal = document.getElementById('inactive-prompt-modal');
+        if (!confirmUnassign) {
+            if (modal) { modal.classList.add('hidden'); modal.style.display = 'none'; }
+            window.showToast('No changes made. The representative remains assigned.', 'success');
+            return;
+        }
+        if (window._isUnassigningInactiveAccount) return;
+        window._isUnassigningInactiveAccount = true;
+        try {
+            if (!currentSelectedRecord || !Array.isArray(currentSelectedRecord.sources) || !currentSelectedRecord.sources.length) {
+                throw new Error('No selected ACT account sources were available to unassign.');
+            }
+            const selectedAccount = String(currentSelectedRecord.cr714_id || currentRecordId || window.pendingInactiveId || '').trim();
+            const originalRep = String(currentSelectedRecord.cr714_rep || currentUserRepName || '').trim();
+            const token = await window.getToken('https://org23279050.crm.dynamics.com//user_impersonation', true);
+            const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+            const repFieldByTable = {
+                cr714_accountmanagementdatasets: 'cr714_rep',
+                cr714_cadencedatasets: 'cr714_retentionrep',
+                cr714_prospectingdatasets: 'cr714_repassigned',
+                cr714_louisebrowndatasets: 'cr714_assignedrep',
+                cr714_leads_2s: 'cr714_assignedrep'
+            };
+            const results = [];
+            for (const src of currentSelectedRecord.sources) {
+                const table = String(src?.table || '').replace(/^\//, '').trim();
+                const rowId = String(src?.id || '').replace(/[{}]/g, '').trim();
+                const repField = repFieldByTable[table];
+                if (!table || !rowId || !repField) continue;
+                const response = await fetch(`${DATAVERSE_URL}/${table}(${rowId})`, {
+                    method: 'PATCH', headers, body: JSON.stringify({ [repField]: null })
+                });
+                if (!response.ok) {
+                    const detail = await window.getDataverseErrorMessage?.(response) || `${response.status} ${response.statusText}`;
+                    throw new Error(`Could not unassign ${table}: ${detail}`);
+                }
+                results.push({ table, rowId, repField });
+            }
+            if (!results.length) throw new Error('No supported representative assignment fields were found for this account.');
+            await window.recordActFactActivity?.('Inactive Account', {
+                recordStatus: 'Inactive', accountRep: originalRep,
+                effectiveAction: 'Representative Unassigned',
+                actionMessage: 'Masonville Inactive Status confirmed; representative unassigned.',
+                noteText: `Inactive Account | Masonville Inactive Status confirmed | Previous Rep: ${originalRep || 'Unknown'} | Sources Unassigned: ${results.map(r => r.table).join(', ')}`,
+                details: `Account ${selectedAccount || 'Unknown'} was confirmed inactive. The representative assignment was removed after user confirmation.`,
+                sourceType: 'Masonville Status Verification'
+            });
+            currentSelectedRecord.sources.forEach(src => {
+                const table = String(src?.table || '').replace(/^\//, '').trim();
+                const repField = repFieldByTable[table];
+                if (repField && src) src[repField] = null;
+            });
+            currentSelectedRecord.cr714_rep = '';
+            allRecords = allRecords.filter(r => String(r.cr714_id) !== String(currentSelectedRecord.cr714_id));
+            window.filterAndSortGallery(true);
+            if (modal) { modal.classList.add('hidden'); modal.style.display = 'none'; }
+            window.showToast('Inactive account confirmed. Representative unassigned and activity logged.', 'success');
+        } catch (error) {
+            console.error('Inactive account unassignment failed:', error);
+            window.showToast(error?.message || 'Unable to unassign the inactive account.', 'error');
+        } finally {
+            window._isUnassigningInactiveAccount = false;
         }
     }
 
@@ -6325,13 +6381,13 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                     alertContainer.innerHTML += `<div class="alert-box declining overflow-y-auto max-h-24 custom-scrollbar"><span class="alert-label"><i class="fas fa-exclamation-triangle mr-1"></i>D365 Account Note</span>${window.escapeHTML(accountMessage)}</div>`;
                 }
                 
-                if (d365Acct.statecode === 1) { // 1 corresponds to inactive in D365 statuscodes typically
-                    let act = (currentSelectedRecord.cr714_action || '').toLowerCase();
-                    if (!act.includes('cadence') && !localStorage.getItem('daytona_keep_inactive_' + id)) {
-                        window.pendingInactiveId = id;
-                        window.moveAccountToMaster('COPY_ONLY');
-                        document.getElementById('inactive-prompt-modal').classList.remove('hidden');
-                        document.getElementById('inactive-prompt-modal').style.display = 'flex';
+                if (d365Acct.statecode === 1) { // Masonville displays this account state as the Inactive Status box.
+                    window.pendingInactiveId = id;
+                    window.pendingInactiveDetectionSource = 'Masonville/D365 account status';
+                    const inactiveModal = document.getElementById('inactive-prompt-modal');
+                    if (inactiveModal) {
+                        inactiveModal.classList.remove('hidden');
+                        inactiveModal.style.display = 'flex';
                     }
                 }
                 window.takeSnapshot(currentSelectedRecord);
@@ -9316,11 +9372,11 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
 </div>
 <div class="modal-overlay hidden" id="inactive-prompt-modal" style="display:none; z-index: 9500;">
 <div class="modal-content w-96 text-center shadow-2xl rounded-xl">
-<h3 class="text-lg font-bold mb-4 text-status-danger"><i class="fas fa-ban mr-2"></i>Inactive Account Detected</h3>
-<p class="text-sm mb-4">This account is currently marked as Inactive in D365. It has automatically been copied to the Archive Report.<br/><br/>Would you also like to remove it from your working list?</p>
+<h3 class="text-lg font-bold mb-4 text-status-danger"><i class="fas fa-ban mr-2"></i>Masonville Inactive Status Detected</h3>
+<p class="text-sm mb-4">The customer account is marked <strong>Inactive</strong>, matching the Masonville <strong>Inactive Status</strong> box.<br/><br/>Confirm that ACT should unassign the representative and log this account as inactive in the ACT fact table. No changes will be made until you confirm.</p>
 <div class="flex justify-center gap-3">
-<button class="btn-primary" onclick="window.resolveInactivePrompt(true)" style="background-color: var(--accent-danger);">Remove from List</button>
-<button class="btn-secondary" onclick="window.resolveInactivePrompt(false)">Keep in List</button>
+<button class="btn-primary" onclick="window.resolveInactivePrompt(true)" style="background-color: var(--accent-danger);">Confirm &amp; Unassign Rep</button>
+<button class="btn-secondary" onclick="window.resolveInactivePrompt(false)">Cancel</button>
 </div>
 </div>
 </div>
