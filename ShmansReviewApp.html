@@ -143,9 +143,34 @@ canvas{max-height:280px}
   opacity: 0.6;
 }
   
+
+/* Full-screen loading cover used during Dataverse authentication and synchronization */
+#syncCover{position:fixed;inset:0;z-index:1000;display:none;place-items:center;padding:24px;background:rgba(15,23,42,.82);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+#syncCover.show{display:grid}
+.sync-cover-card{width:min(440px,92vw);background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:18px;box-shadow:0 24px 70px rgba(0,0,0,.38);padding:28px;text-align:center}
+.sync-cover-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:14px;background:var(--brand);color:#fff;display:grid;place-items:center;font-size:22px;font-weight:800;box-shadow:0 10px 25px rgba(0,102,192,.3)}
+.sync-cover-title{font-size:19px;font-weight:750;margin-bottom:6px}
+.sync-cover-message{min-height:21px;color:var(--muted);font-size:13.5px}
+.sync-cover-track{height:7px;margin-top:20px;border-radius:99px;background:var(--soft);overflow:hidden}
+.sync-cover-bar{height:100%;width:38%;border-radius:inherit;background:linear-gradient(90deg,var(--brand),var(--teal),var(--brand));animation:sync-cover-slide 1.15s ease-in-out infinite}
+.sync-cover-note{margin-top:12px;color:var(--muted);font-size:11.5px}
+body.syncing{overflow:hidden}
+@keyframes sync-cover-slide{0%{transform:translateX(-110%)}50%{transform:translateX(80%)}100%{transform:translateX(270%)}}
+@media(prefers-reduced-motion:reduce){.sync-cover-bar{animation:none;width:100%}}
+
 </style>
 </head>
 <body>
+<div id="syncCover" role="status" aria-live="polite" aria-busy="true" aria-hidden="true">
+  <div class="sync-cover-card">
+    <div class="sync-cover-logo">W</div>
+    <div class="sync-cover-title" id="syncCoverTitle">Syncing Workforce data</div>
+    <div class="sync-cover-message" id="syncCoverMessage">Connecting to Dataverse...</div>
+    <div class="sync-cover-track" aria-hidden="true"><div class="sync-cover-bar"></div></div>
+    <div class="sync-cover-note">Please keep this window open while the latest records are loaded.</div>
+  </div>
+</div>
+
 <header>
   <div class="hd">
     <div class="logo">W</div>
@@ -163,6 +188,36 @@ canvas{max-height:280px}
 
 <script>
 "use strict";
+
+let syncCoverDepth = 0;
+function showSyncCover(message = "Connecting to Dataverse...", title = "Syncing Workforce data") {
+  syncCoverDepth += 1;
+  const cover = document.getElementById("syncCover");
+  const titleEl = document.getElementById("syncCoverTitle");
+  const messageEl = document.getElementById("syncCoverMessage");
+  if (titleEl) titleEl.textContent = title;
+  if (messageEl) messageEl.textContent = message;
+  if (cover) {
+    cover.classList.add("show");
+    cover.setAttribute("aria-hidden", "false");
+  }
+  document.body.classList.add("syncing");
+}
+function updateSyncCover(message) {
+  const messageEl = document.getElementById("syncCoverMessage");
+  if (messageEl && message) messageEl.textContent = message;
+}
+function hideSyncCover(force = false) {
+  syncCoverDepth = force ? 0 : Math.max(0, syncCoverDepth - 1);
+  if (syncCoverDepth > 0) return;
+  const cover = document.getElementById("syncCover");
+  if (cover) {
+    cover.classList.remove("show");
+    cover.setAttribute("aria-hidden", "true");
+  }
+  document.body.classList.remove("syncing");
+}
+
 
 const DATAVERSE_URL = "https://org23279050.crm.dynamics.com";
 const TABLE_TIMEOFF = "cr714_timeoff_2s";
@@ -241,6 +296,7 @@ async function getDataverseToken() {
   }
 
   if (!msalAccount) {
+    updateSyncCover("Waiting for Microsoft sign-in...");
     const loginResponse = await msalInstance.loginPopup({
       scopes: ["User.Read", dataverseScope]
     });
@@ -501,7 +557,13 @@ function occurrenceNumber(value) {
   if (["true", "yes", "y", "1"].includes(text)) return 1;
   if (["false", "no", "n", "0"].includes(text)) return 0;
   const n = Number(text);
-  return Number.isFinite(n) ? n : null;
+  if (Number.isFinite(n)) return n;
+  const occurrenceMatch = text.match(/(?:occ(?:urrence)?\s*[:=-]?\s*)?(-?\d+(?:\.\d+)?)\s*(?:occ(?:urrence)?s?)?/i);
+  if (occurrenceMatch) {
+    const parsed = Number(occurrenceMatch[1]);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 function currentDataRange() {
   const [from, to] = range();
@@ -509,7 +571,12 @@ function currentDataRange() {
 }
 async function pullFromDataverse(silent = false) {
   const [rangeFrom, rangeTo] = currentDataRange();
-  setSync(`Syncing ${fmt(rangeFrom)} to ${fmt(rangeTo)}...`);
+  // Always retain the full rolling window ending on the report's through-date,
+  // even when the visible report range is shorter than 90 days.
+  const rollingFrom = addDays(rangeTo, -OCC_WINDOW_DAYS);
+  const syncFrom = rollingFrom < rangeFrom ? rollingFrom : rangeFrom;
+  showSyncCover(`Loading records for ${fmt(syncFrom)} to ${fmt(rangeTo)}...`);
+  setSync(`Syncing rolling data ${fmt(syncFrom)} to ${fmt(rangeTo)}...`);
   try {
     const token = await getDataverseToken();
     if (!token) throw new Error("Authentication missing");
@@ -527,14 +594,15 @@ async function pullFromDataverse(silent = false) {
 
     // Time Off request dates are text, so Dataverse cannot compare them as dates.
     // Use a bounded created/modified window, then apply the exact requested-date range after parsing.
-    const bufferFrom = addDays(rangeFrom, -45);
+    const bufferFrom = addDays(syncFrom, -45);
     const bufferTo = addDays(rangeTo, 45);
     const activityFilter = `((createdon ge ${odataDateTimeStart(bufferFrom)} and createdon le ${odataDateTimeEnd(bufferTo)}) or (modifiedon ge ${odataDateTimeStart(bufferFrom)} and modifiedon le ${odataDateTimeEnd(bufferTo)}))`;
-    const attendanceFilter = `(cr714_startdate le ${odataDateTimeEnd(rangeTo)} and cr714_enddate ge ${odataDateTimeStart(rangeFrom)})`;
+    const attendanceFilter = `(cr714_startdate le ${odataDateTimeEnd(rangeTo)} and cr714_enddate ge ${odataDateTimeStart(syncFrom)})`;
 
     const empUrl = `${api}/${TABLE_EMPLOYEES}?$select=${empSelect}&$filter=statecode eq 0`;
     const timeUrl = `${api}/${TABLE_TIMEOFF}?$select=${timeSelect}&$filter=${encodeURIComponent(activityFilter)}&$orderby=createdon desc`;
     const attendanceUrl = `${api}/${TABLE_ATTENDANCE}?$select=${attendanceSelect}&$filter=${encodeURIComponent(attendanceFilter)}&$orderby=cr714_startdate desc`;
+    updateSyncCover("Downloading employee, time-off, and attendance records...");
     const [allEmps, timeRows, attendanceRows] = await Promise.all([
       fetchAllOData(empUrl, headers), fetchAllOData(timeUrl, headers), fetchAllOData(attendanceUrl, headers)
     ]);
@@ -605,7 +673,7 @@ async function pullFromDataverse(silent = false) {
       const formDept = String(r["cr714_department@OData.Community.Display.V1.FormattedValue"] || r.cr714_department || "").trim();
       if (formDept && matchedEmp.dept === "General") matchedEmp.dept = formDept;
       const allDates = parseDatesToIso(r.cr714_requestdates, r.createdon);
-      const dates = allDates.filter(d => d >= rangeFrom && d <= rangeTo);
+      const dates = allDates.filter(d => d >= syncFrom && d <= rangeTo);
       if (!dates.length) return;
       const timeOcc = occurrenceNumber(r.cr714_occurrence);
       const dateMatches = attendanceByEmployeeDate.get(`${name.toUpperCase()}|${dates[0]}`) || [];
@@ -641,7 +709,7 @@ async function pullFromDataverse(silent = false) {
         const matches = [...rawMu.matchAll(rx)];
         if (matches.length) matches.forEach((match,mIdx) => {
           const [mm,dd,yy] = match[1].split('/'), isoMuDate=`${yy}-${mm}-${dd}`;
-          if (isoMuDate < rangeFrom || isoMuDate > rangeTo) return;
+          if (isoMuDate < syncFrom || isoMuDate > rangeTo) return;
           const [hh,mn]=match[4].split(':').map(Number), calculatedHours=Math.round(((hh||0)+((mn||0)/60))*100)/100;
           const notes=[`Schedule: ${match[1]} - ${to12Hour(match[2].trim())} - ${to12Hour(match[3].trim())} (${formatDuration(match[4].trim())})`, repNotes?`Rep Notes: ${repNotes}`:null].filter(Boolean).join("\n\n");
           newMakeups.push({mid:`${baseRid}-${mIdx}`,dvId,empId:matchedEmp.id,rid:`${baseRid}-0`,dateMissed:isoMuDate,hoursOwed:calculatedHours,dueDate:addDays(isoMuDate,7),status:r.cr714_completed?"Completed":"Pending",oss:true,completedDate:r.cr714_completed?isoDate(new Date(r.createdon)):"",notes});
@@ -649,16 +717,19 @@ async function pullFromDataverse(silent = false) {
         else newMakeups.push({mid:baseRid,dvId,empId:matchedEmp.id,rid:`${baseRid}-0`,dateMissed:dates[0],hoursOwed:muHours,dueDate:addDays(dates[0],7),status:r.cr714_completed?"Completed":"Pending",oss:true,completedDate:r.cr714_completed?isoDate(new Date(r.createdon)):"",notes:[rawMu?`Schedule: ${cleanMakeUpString(rawMu)}`:null,repNotes?`Rep Notes: ${repNotes}`:null].filter(Boolean).join("\n\n") || fullNotes});
       }
     });
+    updateSyncCover("Applying occurrence rules and preparing the dashboard...");
     S.employees.sort((a,b)=>(a.name||"").localeCompare(b.name||""));
     S.records = newRecords; S.makeups = newMakeups;
     S.settings.lastSync = `${new Date().toLocaleString()} (${rangeFrom} to ${rangeTo})`;
-    S.settings.loadedFrom = rangeFrom; S.settings.loadedTo = rangeTo;
+    S.settings.loadedFrom = syncFrom; S.settings.loadedTo = rangeTo;
     save(); render();
-    if (!silent) toast(`Synced ${newRecords.length} Time Off records for ${fmt(rangeFrom)} to ${fmt(rangeTo)}`);
+    if (!silent) toast(`Synced ${newRecords.length} Time Off records, including the rolling 90-day window through ${fmt(rangeTo)}`);
   } catch (err) {
     console.error(err); if (!silent) toast("Dataverse sync failed: " + err.message); setSync("Sync failed");
+  } finally {
+    setSync("");
+    hideSyncCover();
   }
-  setSync("");
 }
   async function cancelRecordRequest(rid) {
   const target = S.records.find(r => r.rid === rid);
@@ -1373,7 +1444,9 @@ function renderTeam(){
       supervisor: e.supervisor, 
       manager: e.manager, 
       recordsCount: rs.length, 
-      occurrences: occ, 
+      occurrences: occ,
+      rolling90: n90,
+      rollingLevel: lv,
       oss: ossUsed(e.id,m.to), 
       perfect, 
       status: e.status
@@ -1400,8 +1473,8 @@ function renderTeam(){
     <th data-team-sort="occurrences">Occurrences ${arrow("occurrences")}</th>
     <th data-team-sort="oss">OSS used ${arrow("oss")}</th>
   </tr></thead><tbody>
-  ${teamRows.map(({e,recordsCount,occurrences,oss})=>`<tr data-emp="${esc(e.id)}">
-    <td><b>${esc(e.name)}</b><div class="small muted">${esc(e.id)}</div></td>
+  ${teamRows.map(({e,recordsCount,occurrences,rolling90,rollingLevel,oss})=>`<tr data-emp="${esc(e.id)}">
+    <td><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>${esc(e.name)}</b><span class="badge ${rollingLevel?rollingLevel.cls:"ok"}" title="Rolling 90-day occurrence count through ${fmt(m.to)}">${rolling90} occ. / 90d</span></div><div class="small muted">${esc(e.id)}</div></td>
     <td>${esc(e.dept)}</td><td>${esc(e.supervisor)}</td><td>${esc(e.manager)}</td>
     <td>${recordsCount}</td><td>${occurrences}</td>
     <td>${oss}/${OSS_LIMIT}</td>
