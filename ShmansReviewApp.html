@@ -565,6 +565,42 @@ function occurrenceNumber(value) {
   }
   return null;
 }
+function uniqueBy(items, keyFn) {
+  const seen = new Set();
+  return (items || []).filter((item, index) => {
+    const key = keyFn(item, index);
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+function recordDedupeKey(r) {
+  if (!r) return "";
+  // Dataverse request + expanded request date is the authoritative identity.
+  if (r.dvId) return `dv:${String(r.dvId).toLowerCase()}|${r.date || ""}`;
+  return `local:${r.rid || ""}`;
+}
+function makeupDedupeKey(m) {
+  if (!m) return "";
+  // A repeated Dataverse make-up with the same employee, missed date and hours
+  // is one agreement even if parsing created multiple segment IDs.
+  const source = m.dvId || String(m.mid || "").replace(/-\d+$/, "");
+  return [source, m.empId, m.dateMissed, Number(m.hoursOwed || 0).toFixed(4), m.status, m.oss ? 1 : 0]
+    .map(v => String(v ?? "").toLowerCase()).join("|");
+}
+function uniqueRecords(items) { return uniqueBy(items, recordDedupeKey); }
+function uniqueMakeups(items) { return uniqueBy(items, makeupDedupeKey); }
+function recalculateAfterDedupe() {
+  const beforeRecords = (S.records || []).length;
+  const beforeMakeups = (S.makeups || []).length;
+  S.records = uniqueRecords(S.records || []);
+  S.makeups = uniqueMakeups(S.makeups || []);
+  const removedRecords = beforeRecords - S.records.length;
+  const removedMakeups = beforeMakeups - S.makeups.length;
+  return { removedRecords, removedMakeups };
+}
+
 function currentDataRange() {
   const [from, to] = range();
   return from <= to ? [from, to] : [to, from];
@@ -615,7 +651,12 @@ async function pullFromDataverse(silent = false) {
       const loc = String(e["cr714_location@OData.Community.Display.V1.FormattedValue"] || e.cr714_location || "").toLowerCase().trim();
       return loc.includes("daytona") || loc.includes("jacksonville") || loc.includes("jax");
     });
-    const targetEmps = locationFiltered.length ? locationFiltered : activeEmps;
+    const targetEmpsRaw = locationFiltered.length ? locationFiltered : activeEmps;
+    const targetEmps = uniqueBy(targetEmpsRaw, e => {
+      const email = String(e.cr714_emailaddress || "").trim().toLowerCase();
+      const name = String(e.cr714_employeename || "").trim().toLowerCase();
+      return email ? `email:${email}` : (name ? `name:${name}` : "");
+    });
     const empMapByEmail = new Map(), empMapByName = new Map();
     S.employees = targetEmps.map(e => {
       const email = String(e.cr714_emailaddress || "").trim().toLowerCase();
@@ -719,11 +760,13 @@ async function pullFromDataverse(silent = false) {
     });
     updateSyncCover("Applying occurrence rules and preparing the dashboard...");
     S.employees.sort((a,b)=>(a.name||"").localeCompare(b.name||""));
-    S.records = newRecords; S.makeups = newMakeups;
+    S.records = newRecords;
+    S.makeups = newMakeups;
+    recalculateAfterDedupe();
     S.settings.lastSync = `${new Date().toLocaleString()} (${rangeFrom} to ${rangeTo})`;
     S.settings.loadedFrom = syncFrom; S.settings.loadedTo = rangeTo;
     save(); render();
-    if (!silent) toast(`Synced ${newRecords.length} Time Off records, including the rolling 90-day window through ${fmt(rangeTo)}`);
+    if (!silent) toast(`Synced ${S.records.length} unique Time Off records and ${S.makeups.length} unique make-up agreements through ${fmt(rangeTo)}`);
   } catch (err) {
     console.error(err); if (!silent) toast("Dataverse sync failed: " + err.message); setSync("Sync failed");
   } finally {
@@ -888,6 +931,8 @@ const MU_STATUS = ["Pending","Approved","Completed","Missed"];
 const TABS = [["dashboard","Dashboard"],["occurrenceOverview","Occurrence Overview"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
 
 let S = load() || { employees: [], records: [], makeups: [], settings: {} };
+const startupDedupe = recalculateAfterDedupe();
+if (startupDedupe.removedRecords || startupDedupe.removedMakeups) save();
 let UI = { tab:"dashboard", preset:"week", anchor:today(), from:null, to:null,
            dept:"", repName:"", title:"", supervisor:"", manager:"", q:"", type:"",
            sortKey:"date", sortDir:-1, muFilter:"", teamSortKey:"name", teamSortDir:1 };
@@ -1079,7 +1124,7 @@ function filteredRecords(from,to){
   if (!S.records) return [];
   const ids = new Set(filteredEmployees().map(e=>e.id));
   const [f,t] = from?[from,to]:range();
-  return S.records.filter(r => ids.has(r.empId) && r.date>=f && r.date<=t && (!UI.type || r.type === UI.type));
+  return uniqueRecords(S.records.filter(r => ids.has(r.empId) && r.date>=f && r.date<=t && (!UI.type || r.type === UI.type)));
 }
 
 function emp(id){ return S.employees?.find(e=>e.id===id); }
@@ -1088,7 +1133,7 @@ function isOcc(r){ return !r.cancelled && !r.waived && occurrenceNumber(r.occurr
 function occCount(empId, asOf){
   if (!S.records) return 0;
   const from = addDays(asOf, -OCC_WINDOW_DAYS);
-  return S.records.filter(r=>r.empId===empId && r.date>from && r.date<=asOf && isOcc(r)).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
+  return uniqueRecords(S.records.filter(r=>r.empId===empId && r.date>from && r.date<=asOf && isOcc(r))).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
 }
 
 function level(n){ for(const [k,name,cls] of LADDER) if(n>=k) return {name,cls}; return null; }
@@ -1096,7 +1141,7 @@ function level(n){ for(const [k,name,cls] of LADDER) if(n>=k) return {name,cls};
 function ossUsed(empId, asOf){
   if (!S.makeups) return 0;
   const from = addDays(asOf||today(), -365);
-  return S.makeups.filter(m=>m.empId===empId && m.oss && m.status!=="Missed" && m.dateMissed>=from).length;
+  return uniqueMakeups(S.makeups.filter(m=>m.empId===empId && m.oss && m.status!=="Missed" && m.status!=="Cancelled" && m.dateMissed>=from)).length;
 }
 
 function metrics(){
@@ -1122,7 +1167,7 @@ function metrics(){
   const offenders = new Set(recs.filter(isOcc).map(r=>r.empId));
   const perfect = emps.filter(e=>!offenders.has(e.id));
   const empIds = new Set(emps.map(e=>e.id));
-  const mus = (S.makeups||[]).filter(m=>empIds.has(m.empId) && m.dateMissed>=f && m.dateMissed<=t);
+  const mus = uniqueMakeups((S.makeups||[]).filter(m=>empIds.has(m.empId) && m.dateMissed>=f && m.dateMissed<=t));
   const muDone = mus.filter(m=>m.status==="Completed").length;
   
   const denom = c["Present"] + Object.keys(c).filter(k => k !== "Present" && k !== "Make up Time").reduce((acc, k) => acc + c[k], 0);
@@ -1398,9 +1443,9 @@ function renderOccurrenceOverview(){
   const asOf = m.to;
   const from90 = addDays(asOf, -OCC_WINDOW_DAYS);
   const rows = m.emps.map(e => {
-    const periodRecords = m.recs.filter(r => r.empId === e.id);
+    const periodRecords = uniqueRecords(m.recs.filter(r => r.empId === e.id));
     const periodOcc = periodRecords.filter(isOcc).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
-    const rollingRecords = (S.records||[]).filter(r => r.empId===e.id && r.date>from90 && r.date<=asOf && isOcc(r));
+    const rollingRecords = uniqueRecords((S.records||[]).filter(r => r.empId===e.id && r.date>from90 && r.date<=asOf && isOcc(r)));
     const rolling90 = rollingRecords.reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
     const lv = level(rolling90);
     const last = rollingRecords.slice().sort((a,b)=>b.date.localeCompare(a.date))[0];
@@ -1533,7 +1578,7 @@ function muActions(m){
 function renderMakeup(){
   const [f,t] = range();
   const ids = new Set(filteredEmployees().map(e=>e.id));
-  const mus = (S.makeups||[]).filter(m => ids.has(m.empId) && (!UI.muFilter || m.status === UI.muFilter));
+  const mus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && (!UI.muFilter || m.status === UI.muFilter)));
   
   const byDate = {};
   mus.forEach(m => {
@@ -1541,7 +1586,7 @@ function renderMakeup(){
     if (d) (byDate[d] = byDate[d] || []).push(m);
   });
 
-  const counts = MU_STATUS.map(s => (S.makeups||[]).filter(m => ids.has(m.empId) && m.status === s).length);
+  const counts = MU_STATUS.map(s => uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.status === s)).length);
 
   const head = `<div class="section-title">
     <h2>Make-Up Time Calendar</h2>
@@ -1905,7 +1950,7 @@ function dayModal(ds){
 
 function muDayModal(ds){
   const ids = new Set(filteredEmployees().map(e=>e.id));
-  const dayMus = (S.makeups||[]).filter(m => ids.has(m.empId) && m.dateMissed === ds && (!UI.muFilter || m.status === UI.muFilter));
+  const dayMus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.dateMissed === ds && (!UI.muFilter || m.status === UI.muFilter)));
   
   openModal(`<h2>Make-Up Shifts: ${fmtShort(ds)}</h2>
     ${dayMus.length ? `<div class="tbl-wrap"><table><tbody>${dayMus.map(muRow).join("")}</tbody></table></div>` : `<div class="empty">No make-up shifts scheduled for this day.</div>`}
@@ -1930,8 +1975,8 @@ function muDayModal(ds){
 function empModal(id){
   const e=emp(id); if(!e) return;
   const [f,t]=range();
-  const rs=(S.records||[]).filter(r=>r.empId===id&&r.date>=f&&r.date<=t).sort((a,b)=>b.date.localeCompare(a.date));
-  const mus=(S.makeups||[]).filter(m=>m.empId===id).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
+  const rs=uniqueRecords((S.records||[]).filter(r=>r.empId===id&&r.date>=f&&r.date<=t)).sort((a,b)=>b.date.localeCompare(a.date));
+  const mus=uniqueMakeups((S.makeups||[]).filter(m=>m.empId===id)).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
   const n90=occCount(id,t), lv=level(n90);
   openModal(`<h2>${esc(e.name)} <span class="small muted">${esc(e.id)}</span></h2>
     <p class="small">${esc(e.title)} · ${esc(e.dept)} · ${esc(e.location)}<br>
