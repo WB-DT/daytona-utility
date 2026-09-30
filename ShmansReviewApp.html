@@ -772,7 +772,7 @@ async function pullFromDataverse(silent = false) {
       // CSR Attendance is authoritative when populated; otherwise use Time Off.
       const finalOccurrence = attendance?.hasOccurrence ? attendance.occurrence : (timeOcc ?? 0);
       const occurrenceSource = attendance?.hasOccurrence ? "CSR Attendance" : (timeOcc !== null ? "Time Off" : "None");
-      const mappedType = mapLeaveType(r.cr714_leavetype);
+      const mappedType = mapLeaveType(attendance?.leaveType || r.cr714_leavetype);
       const hours = parseHours(r), muHours = parseMakeUpHours(r);
       const repNotes = String(r.cr714_requestnotes || "").trim();
       const wfNotesVal = String(r.cr714_wfnotes || "").trim();
@@ -787,6 +787,7 @@ async function pullFromDataverse(silent = false) {
         // Assign the form-level occurrence once, not once per day in a multi-day request.
         occurrence:idx === 0 ? finalOccurrence : 0, occurrenceSource,
         dateSource:attendance?.startDate ? "CSR Attendance" : "Time Off Request Date",
+        requestId:normalizeMatchId(r.cr714_id) || dvId || baseRid,
         attendanceMatched:!!attendance, attendanceId:attendance?.attendanceId || "",
         attendanceLeaveType:attendance?.leaveType || "", attendanceNotes:attendance?.notes || "",
         // cr714_completed is workflow completion status, not an occurrence waiver.
@@ -1003,7 +1004,7 @@ let charts = [];
 
 function load(){
   try{
-    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v11"));
+    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v12"));
     return s && s.employees && s.employees.length > 0 ? s : null;
   }catch(e){
     return null;
@@ -1012,7 +1013,7 @@ function load(){
 
 function save(){
   try{
-    localStorage.setItem("wf.state.cr714_v11", JSON.stringify(S));
+    localStorage.setItem("wf.state.cr714_v12", JSON.stringify(S));
   }catch(e){
     toast("Storage limit exceeded");
   }
@@ -1040,6 +1041,27 @@ function range(){
     case "adjusted": return [UI.from||a, UI.to||a];
   }
   return [a,a];
+}
+
+function calendarTypeSummary(records) {
+  const byType = {};
+  uniqueRecords(records || []).forEach(r => {
+    if (!r || r.type === "Present" || r.cancelled) return;
+    const type = r.type || "Absent";
+    const bucket = byType[type] || { count: 0, hours: 0, requests: new Set() };
+    const requestKey = r.requestId || r.dvId || r.rid;
+    if (!bucket.requests.has(requestKey)) { bucket.requests.add(requestKey); bucket.count += 1; }
+    bucket.hours += Number(r.hours || 0);
+    byType[type] = bucket;
+  });
+  return byType;
+}
+function calendarDot(type, summary) {
+  const tObj = TYPES[type] || { color: "var(--muted)", abbr: type.slice(0,2).toUpperCase() };
+  const count = summary?.count || 0;
+  const hours = Math.round((summary?.hours || 0) * 100) / 100;
+  const ptoTitle = type === "PTO" ? ` · ${hours}h` : "";
+  return `<span class="dot" title="${esc(type)}: ${count} request${count===1?"":"s"}${ptoTitle}" style="background:${tObj.color}">${count>1?count:tObj.abbr}</span>`;
 }
 
 function renderCalendar(){
@@ -1084,18 +1106,11 @@ function renderCalendar(){
         const rs = byDate[ds]||[];
         const isSelected = ds === selDay;
         const isToday = ds === today();
-        const agg={}; 
-        rs.forEach(r=>{ 
-          const ty = r.type || "Absent";
-          if(ty !== "Present") agg[ty]=(agg[ty]||0)+1; 
-        });
+        const agg = calendarTypeSummary(rs);
 
         return `<div class="cal-cell ${isSelected ? "today" : ""}" data-select-day="${ds}" style="min-height: 80px; cursor: pointer; ${isSelected ? 'border-width: 2px; border-color: var(--brand); background: var(--soft);' : ''}">
           <div class="row"><div class="small muted" style="text-transform: uppercase;">${dowName}</div><div class="d">${dObj.getDate()}</div></div>
-          <div class="cal-mini">${Object.entries(agg).map(([ty,n])=> {
-            const tObj = TYPES[ty] || { color: "var(--muted)", abbr: ty.slice(0,2).toUpperCase() };
-            return `<span class="dot" title="${esc(ty)}:${n}" style="background:${tObj.color}">${n>1?n:tObj.abbr}</span>`;
-          }).join("")}</div>
+          <div class="cal-mini">${Object.entries(agg).map(([ty,summary])=>calendarDot(ty,summary)).join("")}</div>
         </div>`;
       }).join("")}
     </div>`;
@@ -1501,7 +1516,9 @@ function calShift(dir){
 
 function renderOccurrenceOverview(){
   const m=metrics();
-  const selectedId = UI.overviewRep || "";
+  const filteredIds = new Set(m.emps.map(e => e.id));
+  const selectedId = UI.overviewRep && filteredIds.has(UI.overviewRep) ? UI.overviewRep : "";
+  if (UI.overviewRep && !selectedId) UI.overviewRep = "";
   const selected = selectedId ? emp(selectedId) : null;
   const asOf = m.to;
   const from90 = addDays(asOf, -OCC_WINDOW_DAYS);
@@ -1525,15 +1542,16 @@ function renderOccurrenceOverview(){
       </tbody></table></div>`;
   }
   const data=rows.find(x=>x.e.id===selectedId) || {e:selected,periodRecords:[],periodOcc:0,rollingRecords:[],rolling90:0,lv:null};
-  const history=uniqueRecords((S.records||[]).filter(r=>r.empId===selectedId&&isOcc(r))).sort((a,b)=>b.date.localeCompare(a.date));
+  const history=uniqueRecords((S.records||[]).filter(r=>r.empId===selectedId&&r.date>=m.from&&r.date<=m.to&&isOcc(r))).sort((a,b)=>b.date.localeCompare(a.date));
+  const loadedHistory=uniqueRecords((S.records||[]).filter(r=>r.empId===selectedId&&isOcc(r)));
   const byType={}; history.forEach(r=>byType[r.type]=(byType[r.type]||0)+(occurrenceNumber(r.occurrence)||0));
   const sourceCounts={}; history.forEach(r=>sourceCounts[r.occurrenceSource||"Unknown"]=(sourceCounts[r.occurrenceSource||"Unknown"]||0)+(occurrenceNumber(r.occurrence)||0));
   return `<div class="section-title"><button class="btn ghost sm" id="overviewBack">&#8249; All reps</button><h2>${esc(selected.name)} · Occurrence Overview</h2><span class="small muted">As of ${fmt(asOf)}</span></div>
     <div class="card mb"><div class="row"><div><b>${esc(selected.title||"Representative")}</b><div class="small muted">${esc(selected.dept)} · Supervisor: ${esc(selected.supervisor)}</div></div><div class="right"><span class="badge ${data.lv?data.lv.cls:"ok"}">${data.lv?data.lv.name:"Clear"}</span></div></div></div>
-    <div class="grid kpis mb">${kpi(data.periodOcc,"Selected-period occurrences","var(--red)","")}${kpi(data.rolling90,"Rolling 90-day occurrences","var(--orange)","")}${kpi(history.reduce((n,r)=>n+(occurrenceNumber(r.occurrence)||0),0),"Loaded history total","var(--purple)","")}${kpi(ossUsed(selectedId,asOf)+`/${OSS_LIMIT}`,"OSS used · 12 months","var(--teal)","")}</div>
+    <div class="grid kpis mb">${kpi(data.periodOcc,"Selected-period occurrences","var(--red)","")}${kpi(data.rolling90,"Rolling 90-day occurrences","var(--orange)","")}${kpi(loadedHistory.reduce((n,r)=>n+(occurrenceNumber(r.occurrence)||0),0),"Loaded history total","var(--purple)","")}${kpi(ossUsed(selectedId,asOf)+`/${OSS_LIMIT}`,"OSS used · 12 months","var(--teal)","")}</div>
     <div class="grid two mb"><div class="card"><h3>Occurrence type summary</h3>${Object.keys(byType).length?`<div class="tbl-wrap"><table><tbody>${Object.entries(byType).sort((a,b)=>b[1]-a[1]).map(([type,n])=>`<tr><td>${pill(type)}</td><td><b>${n}</b></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No occurrences loaded.</div>`}</div>
     <div class="card"><h3>Occurrence source</h3>${Object.keys(sourceCounts).length?`<div class="tbl-wrap"><table><tbody>${Object.entries(sourceCounts).map(([source,n])=>`<tr><td>${esc(source)}</td><td><b>${n}</b></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No occurrence sources loaded.</div>`}</div></div>
-    <div class="section-title"><h2>Occurrence Records (${history.length})</h2><span class="small muted">Cancelled and waived records are excluded.</span></div>
+    <div class="section-title"><h2>Occurrence Records ${fmt(m.from)} → ${fmt(m.to)} (${history.length})</h2><span class="small muted">Current date and employee filters applied. Cancelled and waived records are excluded.</span></div>
     <div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Occurrence</th><th>Source</th><th>90-day total as of record</th><th>Level</th><th>Notes</th><th></th></tr></thead><tbody>
       ${history.map(r=>{const n=occCount(selectedId,r.date),lv=level(n);return `<tr data-rec="${esc(r.rid)}"><td>${fmt(r.date)}</td><td>${pill(r.type)}</td><td><b>${occurrenceNumber(r.occurrence)||0}</b></td><td><span class="badge">${esc(r.occurrenceSource||"Unknown")}</span></td><td>${n}</td><td>${lv?`<span class="badge ${lv.cls}">${lv.name}</span>`:`<span class="badge ok">Clear</span>`}</td><td class="small">${esc(r.wfNotes||r.attendanceNotes||r.notes||"")}</td><td><button class="btn ghost sm" data-rec-edit="${esc(r.rid)}">Edit</button></td></tr>`;}).join("")||`<tr class="norow"><td colspan="8" class="empty">No occurrence records are loaded for this rep.</td></tr>`}
     </tbody></table></div>`;
