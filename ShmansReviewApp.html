@@ -583,11 +583,23 @@ function recordDedupeKey(r) {
 }
 function makeupDedupeKey(m) {
   if (!m) return "";
-  // A repeated Dataverse make-up with the same employee, missed date and hours
-  // is one agreement even if parsing created multiple segment IDs.
-  const source = m.dvId || String(m.mid || "").replace(/-\d+$/, "");
-  return [source, m.empId, m.dateMissed, Number(m.hoursOwed || 0).toFixed(4), m.status, m.oss ? 1 : 0]
-    .map(v => String(v ?? "").toLowerCase()).join("|");
+  // Use the business values shown to the user, not the Dataverse row GUID.
+  // Duplicate submissions can have different GUIDs/mids while representing the
+  // same employee, missed date, hours, status, and schedule.
+  const normalizedNotes = String(m.notes || "")
+    .toLowerCase()
+    .replace(/rep notes:[\s\S]*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const schedule = normalizedNotes.match(/schedule:\s*([^\n]+)/i)?.[1] || "";
+  return [
+    String(m.empId || "").trim().toLowerCase(),
+    String(m.dateMissed || "").slice(0, 10),
+    Number(m.hoursOwed || 0).toFixed(4),
+    String(m.status || "").trim().toLowerCase(),
+    m.oss ? "1" : "0",
+    schedule
+  ].join("|");
 }
 function uniqueRecords(items) { return uniqueBy(items, recordDedupeKey); }
 function uniqueMakeups(items) { return uniqueBy(items, makeupDedupeKey); }
@@ -1462,7 +1474,7 @@ function renderOccurrenceOverview(){
       </tbody></table></div>`;
   }
   const data=rows.find(x=>x.e.id===selectedId) || {e:selected,periodRecords:[],periodOcc:0,rollingRecords:[],rolling90:0,lv:null};
-  const history=(S.records||[]).filter(r=>r.empId===selectedId&&isOcc(r)).sort((a,b)=>b.date.localeCompare(a.date));
+  const history=uniqueRecords((S.records||[]).filter(r=>r.empId===selectedId&&isOcc(r))).sort((a,b)=>b.date.localeCompare(a.date));
   const byType={}; history.forEach(r=>byType[r.type]=(byType[r.type]||0)+(occurrenceNumber(r.occurrence)||0));
   const sourceCounts={}; history.forEach(r=>sourceCounts[r.occurrenceSource||"Unknown"]=(sourceCounts[r.occurrenceSource||"Unknown"]||0)+(occurrenceNumber(r.occurrence)||0));
   return `<div class="section-title"><button class="btn ghost sm" id="overviewBack">&#8249; All reps</button><h2>${esc(selected.name)} · Occurrence Overview</h2><span class="small muted">As of ${fmt(asOf)}</span></div>
@@ -1976,7 +1988,10 @@ function empModal(id){
   const e=emp(id); if(!e) return;
   const [f,t]=range();
   const rs=uniqueRecords((S.records||[]).filter(r=>r.empId===id&&r.date>=f&&r.date<=t)).sort((a,b)=>b.date.localeCompare(a.date));
-  const mus=uniqueMakeups((S.makeups||[]).filter(m=>m.empId===id)).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
+  const mus=uniqueBy(
+    uniqueMakeups((S.makeups||[]).filter(m=>m.empId===id)),
+    m => [m.empId, m.dateMissed, Number(m.hoursOwed||0).toFixed(4), m.status, m.oss?1:0].join("|").toLowerCase()
+  ).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
   const n90=occCount(id,t), lv=level(n90);
   openModal(`<h2>${esc(e.name)} <span class="small muted">${esc(e.id)}</span></h2>
     <p class="small">${esc(e.title)} · ${esc(e.dept)} · ${esc(e.location)}<br>
@@ -1994,6 +2009,8 @@ function empModal(id){
 }
 
 function render(){
+  const dedupeResult = recalculateAfterDedupe();
+  if (dedupeResult.removedRecords || dedupeResult.removedMakeups) save();
   renderNav(); renderFilters(); setSync("");
   const v=$("#view");
   switch(UI.tab){
