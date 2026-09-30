@@ -434,29 +434,27 @@ function extractShiftHours(r) {
   return "—";
 }
 
-function parseDatesToIso(dateStr, createdOn) {
-  if (!dateStr && createdOn) return [isoDate(new Date(createdOn))];
-  if (!dateStr) return [today()];
-  const parts = String(dateStr).split(' - ').map(s => s.trim());
-  const parsePart = (p) => {
-    const m = p.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (m) return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
-    const iso = p.match(/^\d{4}-\d{2}-\d{2}/);
-    return iso ? iso[0] : null;
-  };
-  const d1 = parsePart(parts[0]);
-  const d2 = parts[1] ? parsePart(parts[1]) : d1;
-  if (!d1) return [createdOn ? isoDate(new Date(createdOn)) : today()];
-  if (d1 === d2 || !d2) return [d1];
+function parseDatesToIso(dateStr) {
+  // Form request-date fields only. createdon/modifiedon are migration or load
+  // timestamps and must never become attendance dates.
+  if (!dateStr) return [];
+  const text = String(dateStr).trim();
+  const matches = [...text.matchAll(/(\d{1,2})\/(\d{1,2})\/(\d{4})|(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)/g)];
+  const parsed = matches.map(m => m[1]
+    ? `${m[3]}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`
+    : `${m[4]}-${m[5]}-${m[6]}`);
+  if (!parsed.length) return [];
+  const d1 = parsed[0], d2 = parsed[1] || d1;
+  if (d1 === d2) return [d1];
   const list = [];
   let cur = parseISO(d1), target = parseISO(d2);
-  while (cur <= target) {
+  if (cur > target) return [d1, d2];
+  while (cur <= target && list.length < 370) {
     list.push(isoDate(cur));
     cur.setDate(cur.getDate() + 1);
   }
-  return list.length ? list : [d1];
+  return list;
 }
-
 function mapLeaveType(val) {
   if (!val) return "Present";
   const s = String(val).toLowerCase();
@@ -614,23 +612,12 @@ function recordDedupeKey(r) {
 }
 function makeupDedupeKey(m) {
   if (!m) return "";
-  // Use the business values shown to the user, not the Dataverse row GUID.
-  // Duplicate submissions can have different GUIDs/mids while representing the
-  // same employee, missed date, hours, status, and schedule.
-  const normalizedNotes = String(m.notes || "")
-    .toLowerCase()
-    .replace(/rep notes:[\s\S]*$/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  const schedule = normalizedNotes.match(/(?:schedule|unparsed schedule):\s*([^\n]+)/i)?.[1] || "";
-  return [
-    String(m.empId || "").trim().toLowerCase(),
-    String(m.dateMissed || "").slice(0, 10),
-    Number(m.hoursOwed || 0).toFixed(4),
-    String(m.status || "").trim().toLowerCase(),
-    m.oss ? "1" : "0",
-    schedule
-  ].join("|");
+  // A Dataverse Time Off submission represents one make-up agreement even when
+  // cr714_makeuptime contains several scheduled work sessions.
+  if (m.dvId) return `dv:${String(m.dvId).trim().toLowerCase()}`;
+  if (m.mid) return `local:${String(m.mid).trim().toLowerCase()}`;
+  return [m.empId, m.dateMissed, Number(m.hoursOwed || 0).toFixed(4), m.status, m.oss ? 1 : 0]
+    .map(v => String(v ?? "").trim().toLowerCase()).join("|");
 }
 function uniqueRecords(items) { return uniqueBy(items, recordDedupeKey); }
 function uniqueMakeups(items) { return uniqueBy(items, makeupDedupeKey); }
@@ -673,13 +660,12 @@ async function pullFromDataverse(silent = false) {
 
     // Time Off request dates are text, so Dataverse cannot compare them as dates.
     // Use a bounded created/modified window, then apply the exact requested-date range after parsing.
-    const bufferFrom = addDays(syncFrom, -45);
-    const bufferTo = addDays(rangeTo, 45);
-    const activityFilter = `((createdon ge ${odataDateTimeStart(bufferFrom)} and createdon le ${odataDateTimeEnd(bufferTo)}) or (modifiedon ge ${odataDateTimeStart(bufferFrom)} and modifiedon le ${odataDateTimeEnd(bufferTo)}))`;
+    // CSR Attendance contains the authoritative custom dates. Legacy Time Off
+    // records were migrated together, so createdon/modifiedon cannot filter them.
     const attendanceFilter = `(cr714_startdate le ${odataDateTimeEnd(rangeTo)} and cr714_enddate ge ${odataDateTimeStart(syncFrom)})`;
 
     const empUrl = `${api}/${TABLE_EMPLOYEES}?$select=${empSelect}&$filter=statecode eq 0`;
-    const timeUrl = `${api}/${TABLE_TIMEOFF}?$select=${timeSelect}&$filter=${encodeURIComponent(activityFilter)}&$orderby=createdon desc`;
+    const timeUrl = `${api}/${TABLE_TIMEOFF}?$select=${timeSelect}&$orderby=cr714_id desc`;
     const attendanceUrl = `${api}/${TABLE_ATTENDANCE}?$select=${attendanceSelect}&$filter=${encodeURIComponent(attendanceFilter)}&$orderby=cr714_startdate desc`;
     updateSyncCover("Downloading employee, time-off, and attendance records...");
     const [allEmps, timeRows, attendanceRows] = await Promise.all([
@@ -733,6 +719,8 @@ async function pullFromDataverse(silent = false) {
         occurrence:n,
         hasOccurrence:n !== null,
         attendanceId:a.cr714_csrattendancetrackerid || "",
+        startDate:a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : "",
+        endDate:a.cr714_enddate ? String(a.cr714_enddate).slice(0,10) : (a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : ""),
         leaveType:String(a.cr714_typeofleave || "").trim(),
         notes:String(a.cr714_notes || "").trim()
       };
@@ -756,15 +744,31 @@ async function pullFromDataverse(silent = false) {
       if (!matchedEmp) return;
       const formDept = String(r["cr714_department@OData.Community.Display.V1.FormattedValue"] || r.cr714_department || "").trim();
       if (formDept && matchedEmp.dept === "General") matchedEmp.dept = formDept;
-      const allDates = parseDatesToIso(r.cr714_requestdates, r.createdon);
-      const dates = allDates.filter(d => d >= syncFrom && d <= rangeTo);
-      if (!dates.length) return;
-      const timeOcc = occurrenceNumber(r.cr714_occurrence);
-      const dateMatches = attendanceByEmployeeDate.get(`${name.toUpperCase()}|${dates[0]}`) || [];
-      const attendance = attendanceById.get(normalizeMatchId(r.cr714_id))
+      const timeOffDates = parseDatesToIso(r.cr714_requestdates);
+      const attendanceByRecordId = attendanceById.get(normalizeMatchId(r.cr714_id)) || null;
+      const dateMatches = timeOffDates.length
+        ? (attendanceByEmployeeDate.get(`${name.toUpperCase()}|${timeOffDates[0]}`) || [])
+        : [];
+      const attendance = attendanceByRecordId
         || dateMatches.find(x => x.hasOccurrence)
         || dateMatches[0]
         || null;
+      const authoritativeDates = attendance?.startDate
+        ? (() => {
+            const start = attendance.startDate;
+            const end = attendance.endDate || start;
+            const values = [];
+            let cursor = parseISO(start), target = parseISO(end);
+            while (cursor <= target && values.length < 370) {
+              values.push(isoDate(cursor));
+              cursor.setDate(cursor.getDate() + 1);
+            }
+            return values;
+          })()
+        : timeOffDates;
+      const dates = authoritativeDates.filter(d => d >= syncFrom && d <= rangeTo);
+      if (!dates.length) return;
+      const timeOcc = occurrenceNumber(r.cr714_occurrence);
       // CSR Attendance is authoritative when populated; otherwise use Time Off.
       const finalOccurrence = attendance?.hasOccurrence ? attendance.occurrence : (timeOcc ?? 0);
       const occurrenceSource = attendance?.hasOccurrence ? "CSR Attendance" : (timeOcc !== null ? "Time Off" : "None");
@@ -782,6 +786,7 @@ async function pullFromDataverse(silent = false) {
         voicemail:r.cr714_voicemail === 1 || r.cr714_voicemail === true || String(r.cr714_voicemail).toLowerCase() === "true",
         // Assign the form-level occurrence once, not once per day in a multi-day request.
         occurrence:idx === 0 ? finalOccurrence : 0, occurrenceSource,
+        dateSource:attendance?.startDate ? "CSR Attendance" : "Time Off Request Date",
         attendanceMatched:!!attendance, attendanceId:attendance?.attendanceId || "",
         attendanceLeaveType:attendance?.leaveType || "", attendanceNotes:attendance?.notes || "",
         // cr714_completed is workflow completion status, not an occurrence waiver.
@@ -790,19 +795,30 @@ async function pullFromDataverse(silent = false) {
       if (r.cr714_makeuptime || String(r.cr714_leavetype || "").toLowerCase().includes("make up")) {
         const rawMu = String(r.cr714_makeuptime || "");
         const scheduleSegments = parseMakeUpSegments(rawMu);
-        if (scheduleSegments.length) scheduleSegments.forEach((segment,mIdx) => {
-          const isoMuDate = segment.date;
-          if (isoMuDate < syncFrom || isoMuDate > rangeTo) return;
-          const notes=[`Schedule: ${segment.displayDate} - ${to12Hour(segment.start)} - ${to12Hour(segment.end)} (${formatDuration(segment.duration)})`, repNotes?`Rep Notes: ${repNotes}`:null].filter(Boolean).join("\n\n");
-          newMakeups.push({mid:`${baseRid}-${mIdx}`,dvId,empId:matchedEmp.id,rid:`${baseRid}-0`,dateMissed:isoMuDate,hoursOwed:segment.hours,dueDate:addDays(isoMuDate,7),status:r.cr714_completed?"Completed":"Pending",oss:true,completedDate:r.cr714_completed?isoDate(new Date(r.createdon)):"",notes});
+        // One Time Off submission is one make-up agreement. The schedule can
+        // contain several work sessions, but those sessions must not become
+        // duplicate agreements in the employee modal, OSS count, or KPIs.
+        const missedDate = dates[0];
+        const scheduledHours = scheduleSegments.reduce((sum, segment) => sum + (Number(segment.hours) || 0), 0);
+        const notes = [
+          ...scheduleSegments.map(segment => `Schedule: ${segment.displayDate} - ${to12Hour(segment.start)} - ${to12Hour(segment.end)} (${formatDuration(segment.duration)})`),
+          !scheduleSegments.length && rawMu ? `Unparsed schedule: ${rawMu}` : null,
+          repNotes ? `Rep Notes: ${repNotes}` : null
+        ].filter(Boolean).join("\n");
+        newMakeups.push({
+          mid: String(baseRid),
+          dvId,
+          empId: matchedEmp.id,
+          rid: `${baseRid}-0`,
+          dateMissed: missedDate,
+          hoursOwed: Math.round((scheduledHours || muHours) * 100) / 100,
+          dueDate: addDays(missedDate, 7),
+          status: r.cr714_completed ? "Completed" : "Pending",
+          oss: true,
+          completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
+          scheduleSegments,
+          notes: notes || fullNotes
         });
-        else {
-          // Only fall back to the request date when no make-up schedule exists.
-          // If schedule text exists but cannot be parsed, retain the raw text and
-          // use one fallback row rather than cloning the request date repeatedly.
-          const fallbackDate = dates[0];
-          newMakeups.push({mid:baseRid,dvId,empId:matchedEmp.id,rid:`${baseRid}-0`,dateMissed:fallbackDate,hoursOwed:muHours,dueDate:addDays(fallbackDate,7),status:r.cr714_completed?"Completed":"Pending",oss:true,completedDate:r.cr714_completed?isoDate(new Date(r.createdon)):"",notes:[rawMu?`Unparsed schedule: ${rawMu}`:null,repNotes?`Rep Notes: ${repNotes}`:null].filter(Boolean).join("\n\n") || fullNotes});
-        }
       }
     });
     updateSyncCover("Applying occurrence rules and preparing the dashboard...");
@@ -987,7 +1003,7 @@ let charts = [];
 
 function load(){
   try{
-    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v9"));
+    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v11"));
     return s && s.employees && s.employees.length > 0 ? s : null;
   }catch(e){
     return null;
@@ -996,7 +1012,7 @@ function load(){
 
 function save(){
   try{
-    localStorage.setItem("wf.state.cr714_v9", JSON.stringify(S));
+    localStorage.setItem("wf.state.cr714_v11", JSON.stringify(S));
   }catch(e){
     toast("Storage limit exceeded");
   }
@@ -2023,10 +2039,7 @@ function empModal(id){
   const e=emp(id); if(!e) return;
   const [f,t]=range();
   const rs=uniqueRecords((S.records||[]).filter(r=>r.empId===id&&r.date>=f&&r.date<=t)).sort((a,b)=>b.date.localeCompare(a.date));
-  const mus=uniqueBy(
-    uniqueMakeups((S.makeups||[]).filter(m=>m.empId===id)),
-    m => [m.empId, m.dateMissed, Number(m.hoursOwed||0).toFixed(4), m.status, m.oss?1:0].join("|").toLowerCase()
-  ).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
+  const mus=uniqueMakeups((S.makeups||[]).filter(m=>m.empId===id)).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
   const n90=occCount(id,t), lv=level(n90);
   openModal(`<h2>${esc(e.name)} <span class="small muted">${esc(e.id)}</span></h2>
     <p class="small">${esc(e.title)} · ${esc(e.dept)} · ${esc(e.location)}<br>
@@ -2038,7 +2051,7 @@ function empModal(id){
     <h3 style="font-size:13px" class="mt">Records &amp; Occurrences ${fmt(f)} → ${fmt(t)} (${rs.length})</h3>
     ${rs.length?`<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Occurrence</th><th>Hours</th><th>Notes</th></tr></thead><tbody>${rs.map(r=>{const occ=occurrenceNumber(r.occurrence)||0;const counts=isOcc(r);return `<tr><td>${fmt(r.date)}</td><td>${pill(r.type)}${r.waived?` <span class="badge ok">waived</span>`:""}${r.cancelled?` <span class="badge bad">Cancelled</span>`:""}</td><td>${counts?`<span class="badge bad">Occurrence ${occ}</span>`:occ>0?`<span class="badge ok">Occurrence ${occ} waived</span>`:`<span class="small muted">No occurrence</span>`}</td><td>${r.hours||""}${r.hours?"h":""}</td><td class="small">${esc(r.wfNotes||r.attendanceNotes||r.notes||"")}</td></tr>`;}).join("")}</tbody></table></div>`:`<div class="small muted">No records or occurrences in this period.</div>`}
     <h3 style="font-size:13px" class="mt">Make-up agreements (${mus.length})</h3>
-    ${mus.length?`<div class="tbl-wrap"><table><tbody>${mus.map(m=>`<tr><td>${fmt(m.dateMissed)}</td><td>${m.hoursOwed}h</td><td><span class="badge ${{Pending:"warn",Approved:"",Completed:"ok",Missed:"bad"}[m.status]}">${esc(m.status)}</span></td><td>${m.oss?"OSS":""}</td></tr>`).join("")}</tbody></table></div>`:`<div class="small muted">None.</div>`}
+    ${mus.length?`<div class="tbl-wrap"><table><tbody>${mus.map(m=>`<tr><td>${fmt(m.dateMissed)}${m.scheduleSegments?.length?`<div class="small muted">${m.scheduleSegments.length} scheduled session${m.scheduleSegments.length===1?"":"s"}</div>`:""}</td><td>${m.hoursOwed}h</td><td><span class="badge ${{Pending:"warn",Approved:"",Completed:"ok",Missed:"bad"}[m.status]}">${esc(m.status)}</span></td><td>${m.oss?"OSS":""}</td></tr>`).join("")}</tbody></table></div>`:`<div class="small muted">None.</div>`}
     <div class="mfoot"><button class="btn ghost" id="eMu">+ Make-up agreement</button><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
   $("#eMu").onclick=()=>makeupModal(null,{empId:id,date:today(),hours:0});
 }
