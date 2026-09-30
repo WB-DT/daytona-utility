@@ -2779,6 +2779,8 @@
 
 
 .inactive-decision-grid{display:grid;grid-template-columns:minmax(340px,.9fr) minmax(440px,1.35fr);gap:1rem;min-height:0;flex:1 1 auto;overflow:hidden}.inactive-message-pane{min-width:0;overflow-y:auto;padding-right:.25rem}.inactive-timeline-pane{min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid var(--border-color);border-radius:.7rem;overflow:hidden;background:var(--bg-card)}#inactive-contact-timeline{flex:1 1 auto;min-height:0;overflow-y:auto;padding:.65rem}@media(max-width:900px){#inactive-prompt-modal .modal-content{height:94vh!important}.inactive-decision-grid{grid-template-columns:1fr;overflow-y:auto}.inactive-timeline-pane{min-height:320px}}
+
+.inactive-timeline-item{display:flex;gap:.65rem;padding:.65rem;border:1px solid var(--border-color);border-radius:.65rem;background:var(--bg-card);margin-bottom:.55rem}.inactive-timeline-icon{width:1.9rem;height:1.9rem;flex:0 0 1.9rem;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--accent-info);background:color-mix(in srgb,var(--accent-info) 12%,transparent)}.inactive-timeline-body{min-width:0;flex:1}.inactive-timeline-top{display:flex;align-items:center;justify-content:space-between;gap:.5rem;font-size:.62rem;color:var(--text-muted)}.inactive-timeline-type{font-weight:900;text-transform:uppercase;letter-spacing:.04em;color:var(--accent-info)}.inactive-timeline-subject{font-size:.76rem;font-weight:800;margin-top:.18rem;overflow-wrap:anywhere}.inactive-timeline-owner{font-size:.62rem;color:var(--text-muted);margin-top:.12rem}.inactive-timeline-description{font-size:.68rem;line-height:1.35;margin-top:.4rem;padding-top:.4rem;border-top:1px solid var(--border-color);white-space:pre-wrap;overflow-wrap:anywhere}
 </style>
 <script>
     // --- API ENDPOINTS ---
@@ -4497,9 +4499,14 @@ window.preloadTemplateImages = async function() {
                     const statusLabel = String(row['statuscode@OData.Community.Display.V1.FormattedValue'] || '').trim();
                     const getFormatted = key => String(row[`${key}@OData.Community.Display.V1.FormattedValue`] ?? row[key] ?? '').trim();
                     const opsStatus = getFormatted('mss_opsstatus');
-                    const oppEntry = Object.entries(row).find(([key,value]) => !key.includes('@') && /opportunity|opp/i.test(key) && value !== null && value !== '');
+                    const openDeals = Number(row.opendeals || 0);
+                    const openRevenue = Number(row.openrevenue || 0);
                     row.__actOpsStatus = opsStatus;
-                    row.__actOpportunityLabel = oppEntry ? String(row[`${oppEntry[0]}@OData.Community.Display.V1.FormattedValue`] ?? oppEntry[1]).trim() : 'Not indicated';
+                    row.__actOpenDeals = Number.isFinite(openDeals) ? openDeals : 0;
+                    row.__actOpenRevenue = Number.isFinite(openRevenue) ? openRevenue : 0;
+                    row.__actOpportunityLabel = row.__actOpenDeals > 0 || row.__actOpenRevenue > 0
+                        ? `${row.__actOpenDeals} open deal${row.__actOpenDeals === 1 ? '' : 's'}${row.__actOpenRevenue > 0 ? ` | ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(row.__actOpenRevenue)} open revenue` : ''}`
+                        : 'No open opportunity indicated';
                     row.__actInactiveEvidence = /^inactive$/i.test(opsStatus) ? [`mss_opsstatus=${opsStatus}`] : [];
                     row.__actInactive = row.__actInactiveEvidence.length > 0;
                     row.__actLookupCandidate = candidate;
@@ -5058,13 +5065,74 @@ allRaw.forEach(r => {
         }
     }
 
+    window.escapeInactiveTimelineHtml = function(value) {
+        return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    };
+
+    window.formatInactiveTimelineDate = function(value) {
+        if (!value) return 'Date not returned';
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+    };
+
+    window.loadD365InactiveTimeline = async function(accountGuid) {
+        const target = document.getElementById('inactive-contact-timeline');
+        if (target) target.innerHTML = '<div class="history-feed-state"><i class="fas fa-spinner fa-spin"></i><div>Loading the D365 timeline...</div></div>';
+        const cleanGuid = String(accountGuid || '').replace(/[{}]/g, '').trim();
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanGuid)) {
+            if (target) target.innerHTML = '<div class="history-feed-state"><i class="fas fa-circle-exclamation"></i><div>No D365 account GUID was available for the timeline.</div></div>';
+            return [];
+        }
+        try {
+            const token = await window.getToken('https://wbmasonco.crm.dynamics.com//user_impersonation', true);
+            const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json', Prefer: 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
+            const fields = 'activityid,activitytypecode,subject,description,createdon,modifiedon,actualstart,actualend,scheduledstart,scheduledend,statecode,statuscode,_ownerid_value';
+            const url = `${PRIMARY_CRM_URL}/accounts(${cleanGuid})/Account_ActivityPointers?$select=${fields}&$orderby=createdon desc&$top=100`;
+            const response = await fetch(url, { headers, cache: 'no-store' });
+            if (!response.ok) {
+                const msg = await response.text().catch(() => '');
+                throw new Error(`D365 timeline request failed (${response.status}): ${msg.slice(0, 240)}`);
+            }
+            const data = await response.json();
+            const activities = Array.isArray(data?.value) ? data.value : [];
+            window.pendingInactiveD365Timeline = activities;
+            window.renderD365InactiveTimeline(activities);
+            return activities;
+        } catch (error) {
+            console.error('[Inactive Timeline] Unable to load Account_ActivityPointers:', error);
+            if (target) target.innerHTML = `<div class="history-feed-state"><i class="fas fa-circle-exclamation"></i><div>${window.escapeInactiveTimelineHtml(error?.message || 'Unable to load the D365 timeline.')}</div></div>`;
+            return [];
+        }
+    };
+
+    window.renderD365InactiveTimeline = function(activities) {
+        const target = document.getElementById('inactive-contact-timeline');
+        if (!target) return;
+        const esc = window.escapeInactiveTimelineHtml;
+        if (!Array.isArray(activities) || !activities.length) {
+            target.innerHTML = '<div class="history-feed-state"><i class="fas fa-inbox"></i><div>No D365 timeline activities were returned.</div></div>';
+            return;
+        }
+        const icons = { email:'fa-envelope', phonecall:'fa-phone', appointment:'fa-calendar-check', task:'fa-list-check', letter:'fa-envelope-open-text', fax:'fa-fax', mss_salescall:'fa-headset' };
+        target.innerHTML = activities.map(activity => {
+            const type = String(activity['activitytypecode@OData.Community.Display.V1.FormattedValue'] || activity.activitytypecode || 'Activity');
+            const typeKey = type.toLowerCase().replace(/\s+/g, '');
+            const icon = icons[typeKey] || 'fa-clock-rotate-left';
+            const subject = String(activity.subject || 'Untitled activity');
+            const owner = String(activity['_ownerid_value@OData.Community.Display.V1.FormattedValue'] || 'Owner not returned');
+            const dateValue = activity.actualstart || activity.scheduledstart || activity.createdon || activity.modifiedon;
+            const description = window.stripHTML ? window.stripHTML(String(activity.description || '')) : String(activity.description || '').replace(/<[^>]*>/g, ' ');
+            return `<article class="inactive-timeline-item"><div class="inactive-timeline-icon"><i class="fas ${icon}"></i></div><div class="inactive-timeline-body"><div class="inactive-timeline-top"><span class="inactive-timeline-type">${esc(type)}</span><time>${esc(window.formatInactiveTimelineDate(dateValue))}</time></div><div class="inactive-timeline-subject">${esc(subject)}</div><div class="inactive-timeline-owner">${esc(owner)}</div>${description.trim() ? `<div class="inactive-timeline-description">${esc(description.trim())}</div>` : ''}</div></article>`;
+        }).join('');
+    };
+
     window.renderInactiveDecisionPanel = function() {
         const stats=window.pendingInactiveD365Stats||{};
         const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=String(v??'').trim()||'Not indicated';};
         set('inactive-value-account',stats.accountNumber); set('inactive-value-company',stats.accountName);
         set('inactive-value-ops',stats.opsStatus); set('inactive-value-opportunity',stats.opportunity);
-        const source=document.getElementById('qb-notes-preview'), target=document.getElementById('inactive-contact-timeline');
-        if(target){target.innerHTML=source?.innerHTML?.trim()||'<div class="history-feed-state"><i class="fas fa-inbox"></i><div>No contact history is available.</div></div>';target.querySelectorAll('[id]').forEach(el=>el.removeAttribute('id'));}
+        set('inactive-value-last-activity',stats.lastActivity);
+        set('inactive-value-next-contact',stats.nextContact);
     };
 
     window.resolveInactivePrompt = async function(decision) {
@@ -6373,8 +6441,18 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                     window.pendingInactiveId = id;
                     window.pendingInactiveDetectionSource='D365 mss_opsstatus';
                     window.pendingInactiveEvidence=Array.isArray(d365Acct.__actInactiveEvidence)?d365Acct.__actInactiveEvidence.slice():[];
-                    window.pendingInactiveD365Stats={accountNumber:d365Acct.accountnumber||id,accountName:d365Acct.name||currentSelectedRecord?.cr714_company||'',opsStatus:d365Acct.__actOpsStatus||d365Acct.mss_opsstatus||'',opportunity:d365Acct.__actOpportunityLabel||'Not indicated'};
+                    window.pendingInactiveD365Stats={
+                        accountNumber:d365Acct.accountnumber||id,
+                        accountName:d365Acct.name||currentSelectedRecord?.cr714_company||'',
+                        opsStatus:d365Acct.__actOpsStatus||d365Acct.mss_opsstatus||'',
+                        opportunity:d365Acct.__actOpportunityLabel||'No open opportunity indicated',
+                        openDeals:d365Acct.__actOpenDeals||0,
+                        openRevenue:d365Acct.__actOpenRevenue||0,
+                        lastActivity:[d365Acct.mss_lastactivitytype,d365Acct.mss_lastactivitysubject,d365Acct.mss_lastactivitydate ? window.formatInactiveTimelineDate(d365Acct.mss_lastactivitydate) : ''].filter(Boolean).join(' | ')||'Not indicated',
+                        nextContact:[d365Acct.mss_nextcallsubject||d365Acct.mss_followupsubject,d365Acct.mss_dateofnextcall||d365Acct.mss_followupdate ? window.formatInactiveTimelineDate(d365Acct.mss_dateofnextcall||d365Acct.mss_followupdate) : ''].filter(Boolean).join(' | ')||'Not indicated'
+                    };
                     window.renderInactiveDecisionPanel?.();
+                    window.loadD365InactiveTimeline?.(d365Acct.accountid||currentAccountGuid);
                     const inactiveModal = document.getElementById('inactive-prompt-modal');
                     if (inactiveModal) {
                         inactiveModal.classList.remove('hidden');
@@ -9361,7 +9439,7 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
 </div>
 </div>
 </div>
-<div class="modal-overlay hidden" id="inactive-prompt-modal" style="display:none;z-index:9500;padding:1rem"><div class="modal-content shadow-2xl rounded-xl" style="width:min(1180px,97vw);max-width:97vw;height:min(760px,92vh);overflow:hidden;display:flex;flex-direction:column"><div class="mb-3 flex-shrink-0"><h3 class="text-lg font-bold text-status-danger"><i class="fas fa-triangle-exclamation mr-2"></i>Inactive Operations Status</h3><p class="text-sm mt-1">D365 reports <strong>mss_opsstatus = Inactive</strong>. This does not always mean the account cannot be reactivated. Review the parsed values and contact timeline before deciding.</p></div><div class="inactive-decision-grid"><div class="inactive-message-pane custom-scrollbar"><div class="rounded-lg border p-3 mb-3" style="border-color:var(--border-color);background:var(--bg-input)"><div class="text-xs font-bold uppercase mb-2 text-status-info">D365 Parsed Account Values</div><div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs"><div><span class="text-muted font-bold">Account</span><div id="inactive-value-account" class="font-semibold">Not indicated</div></div><div><span class="text-muted font-bold">Company</span><div id="inactive-value-company" class="font-semibold">Not indicated</div></div><div><span class="text-muted font-bold">Operations Status</span><div id="inactive-value-ops" class="font-semibold text-status-danger">Inactive</div></div><div><span class="text-muted font-bold">Opportunity Available</span><div id="inactive-value-opportunity" class="font-semibold">Not indicated</div></div></div></div><div class="rounded-lg p-3 mb-3" style="background:rgba(234,179,8,.10);border:1px solid rgba(234,179,8,.35)"><div class="font-bold text-sm text-status-warning">If an opportunity is available, make contact.</div><div class="text-xs mt-1">Use the timeline to review prior activity before deciding whether this account should be processed for possible reactivation.</div></div><div class="rounded-lg p-3" style="background:rgba(37,99,235,.08);border:1px solid rgba(37,99,235,.24)"><div class="font-bold text-sm">Removal clarification</div><div class="text-xs mt-1"><strong>Remove Account from ACT List</strong> only removes the account from the representative’s ACT working list. It does not remove or change the representative, owner, or assignment on the D365 account.</div></div></div><div class="inactive-timeline-pane"><div class="p-3 border-b flex-shrink-0" style="border-color:var(--border-color);background:var(--bg-header)"><div class="text-xs font-bold uppercase text-status-info"><i class="fas fa-clock-rotate-left mr-1"></i>Contact Timeline</div><div class="text-xs text-muted mt-1">Prior contact history for this account</div></div><div id="inactive-contact-timeline" class="history-feed custom-scrollbar"><div class="history-feed-state"><i class="fas fa-inbox"></i><div>No contact history is available.</div></div></div></div></div><div class="flex flex-col sm:flex-row justify-end gap-2 mt-3 flex-shrink-0"><button class="btn-secondary" onclick="window.resolveInactivePrompt('cancel')">Cancel</button><button class="btn-secondary" onclick="window.resolveInactivePrompt('process')" style="border-color:var(--accent-success);color:var(--accent-success)"><i class="fas fa-phone mr-1"></i>Keep on List &amp; Process</button><button class="btn-primary" onclick="window.resolveInactivePrompt('remove')" style="background-color:var(--accent-danger)"><i class="fas fa-list-check mr-1"></i>Remove Account from ACT List</button></div></div></div>
+<div class="modal-overlay hidden" id="inactive-prompt-modal" style="display:none;z-index:9500;padding:1rem"><div class="modal-content shadow-2xl rounded-xl" style="width:min(1180px,97vw);max-width:97vw;height:min(760px,92vh);overflow:hidden;display:flex;flex-direction:column"><div class="mb-3 flex-shrink-0"><h3 class="text-lg font-bold text-status-danger"><i class="fas fa-triangle-exclamation mr-2"></i>Inactive Operations Status</h3><p class="text-sm mt-1">D365 reports <strong>mss_opsstatus = Inactive</strong>. This does not always mean the account cannot be reactivated. Review the parsed values and contact timeline before deciding.</p></div><div class="inactive-decision-grid"><div class="inactive-message-pane custom-scrollbar"><div class="rounded-lg border p-3 mb-3" style="border-color:var(--border-color);background:var(--bg-input)"><div class="text-xs font-bold uppercase mb-2 text-status-info">D365 Parsed Account Values</div><div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs"><div><span class="text-muted font-bold">Account</span><div id="inactive-value-account" class="font-semibold">Not indicated</div></div><div><span class="text-muted font-bold">Company</span><div id="inactive-value-company" class="font-semibold">Not indicated</div></div><div><span class="text-muted font-bold">Operations Status</span><div id="inactive-value-ops" class="font-semibold text-status-danger">Inactive</div></div><div><span class="text-muted font-bold">Opportunity Available</span><div id="inactive-value-opportunity" class="font-semibold">Not indicated</div></div><div class="sm:col-span-2"><span class="text-muted font-bold">Last D365 Activity</span><div id="inactive-value-last-activity" class="font-semibold">Not indicated</div></div><div class="sm:col-span-2"><span class="text-muted font-bold">Next Call / Follow-up</span><div id="inactive-value-next-contact" class="font-semibold">Not indicated</div></div></div></div><div class="rounded-lg p-3 mb-3" style="background:rgba(234,179,8,.10);border:1px solid rgba(234,179,8,.35)"><div class="font-bold text-sm text-status-warning">If an opportunity is available, make contact.</div><div class="text-xs mt-1">Use the timeline to review prior activity before deciding whether this account should be processed for possible reactivation.</div></div><div class="rounded-lg p-3" style="background:rgba(37,99,235,.08);border:1px solid rgba(37,99,235,.24)"><div class="font-bold text-sm">Removal clarification</div><div class="text-xs mt-1"><strong>Remove Account from ACT List</strong> only removes the account from the representative’s ACT working list. It does not remove or change the representative, owner, or assignment on the D365 account.</div></div></div><div class="inactive-timeline-pane"><div class="p-3 border-b flex-shrink-0" style="border-color:var(--border-color);background:var(--bg-header)"><div class="text-xs font-bold uppercase text-status-info"><i class="fas fa-clock-rotate-left mr-1"></i>Contact Timeline</div><div class="text-xs text-muted mt-1">Live D365 Account_ActivityPointers timeline, newest first</div></div><div id="inactive-contact-timeline" class="history-feed custom-scrollbar"><div class="history-feed-state"><i class="fas fa-inbox"></i><div>No contact history is available.</div></div></div></div></div><div class="flex flex-col sm:flex-row justify-end gap-2 mt-3 flex-shrink-0"><button class="btn-secondary" onclick="window.resolveInactivePrompt('cancel')">Cancel</button><button class="btn-secondary" onclick="window.resolveInactivePrompt('process')" style="border-color:var(--accent-success);color:var(--accent-success)"><i class="fas fa-phone mr-1"></i>Keep on List &amp; Process</button><button class="btn-primary" onclick="window.resolveInactivePrompt('remove')" style="background-color:var(--accent-danger)"><i class="fas fa-list-check mr-1"></i>Remove Account from ACT List</button></div></div></div>
 <div class="modal-overlay hidden" id="kb-modal" style="display:none; z-index: 9100;">
 <div class="modal-content w-[90%] max-w-2xl h-[80vh] flex flex-col p-0 overflow-hidden" style="background-color: var(--modal-bg) !important; color: var(--text-main) !important;">
 <div class="p-4 border-b flex justify-between items-center bg-gray-50" style="background-color: var(--bg-header) !important;">
