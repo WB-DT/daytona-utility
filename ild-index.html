@@ -5062,9 +5062,47 @@ allRaw.forEach(r => {
         }
     }
 
-    window.resolveInactivePrompt = async function(confirmUnassign) {
+    window.renderInactiveAccountDecision = function() {
+        const stats = window.pendingInactiveD365Stats || {};
+        const evidence = Array.isArray(window.pendingInactiveEvidence) ? window.pendingInactiveEvidence : [];
+        const value = (v) => {
+            const s = String(v ?? '').trim();
+            return s || 'Not returned';
+        };
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = value(v); };
+        set('inactive-stat-account-number', stats.accountNumber);
+        set('inactive-stat-account-name', stats.accountName);
+        set('inactive-stat-guid', stats.accountGuid);
+        set('inactive-stat-state', `${value(stats.stateLabel)} (${value(stats.statecode)})`);
+        set('inactive-stat-status', `${value(stats.statusLabel)} (${value(stats.statuscode)})`);
+        set('inactive-stat-owner', stats.ownerName);
+        set('inactive-stat-modified', stats.modifiedOn ? new Date(stats.modifiedOn).toLocaleString() : 'Not returned');
+        set('inactive-stat-contact', stats.contactName);
+        set('inactive-stat-email', stats.contactEmail);
+        set('inactive-stat-phone', stats.contactPhone);
+        set('inactive-stat-evidence', evidence.length ? evidence.join('; ') : 'Masonville inactive indicator');
+    };
+
+    window.resolveInactivePrompt = async function(decision) {
         const modal = document.getElementById('inactive-prompt-modal');
-        if (!confirmUnassign) {
+        if (decision === true) decision = 'remove';
+        if (decision === false) decision = 'cancel';
+        if (decision === 'process') {
+            if (modal) { modal.classList.add('hidden'); modal.style.display = 'none'; }
+            const stats = window.pendingInactiveD365Stats || {};
+            await window.recordActFactActivity?.('Inactive Account Retained for Processing', {
+                recordStatus: 'Review Required',
+                accountRep: String(currentSelectedRecord?.cr714_rep || currentUserRepName || '').trim(),
+                effectiveAction: 'Close Warning and Process',
+                actionMessage: 'User reviewed the D365 inactive/closed indicators and elected to continue processing the account.',
+                noteText: `Inactive decision | Continue Processing | D365 State: ${stats.stateLabel || stats.statecode || 'Unknown'} | D365 Status: ${stats.statusLabel || stats.statuscode || 'Unknown'} | Evidence: ${(window.pendingInactiveEvidence || []).join('; ') || 'Masonville inactive indicator'}`,
+                details: 'Representative assignment retained because the user elected to review/process the potentially reactivatable account.',
+                sourceType: 'Masonville Status Verification'
+            });
+            window.showToast('Warning closed. Account remains assigned and available for processing.', 'success');
+            return;
+        }
+        if (decision !== 'remove') {
             if (modal) { modal.classList.add('hidden'); modal.style.display = 'none'; }
             window.showToast('No changes made. The representative remains assigned.', 'success');
             return;
@@ -6413,6 +6451,21 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                     window.pendingInactiveId = id;
                     window.pendingInactiveDetectionSource = 'Masonville/D365 full account verification';
                     window.pendingInactiveEvidence = Array.isArray(d365Acct.__actInactiveEvidence) ? d365Acct.__actInactiveEvidence.slice() : [];
+                    window.pendingInactiveD365Stats = {
+                        accountNumber: d365Acct.accountnumber || id,
+                        accountName: d365Acct.name || currentSelectedRecord?.cr714_company || '',
+                        accountGuid: d365Acct.accountid || currentAccountGuid || '',
+                        statecode: d365Acct.statecode,
+                        stateLabel: d365Acct['statecode@OData.Community.Display.V1.FormattedValue'] || '',
+                        statuscode: d365Acct.statuscode,
+                        statusLabel: d365Acct['statuscode@OData.Community.Display.V1.FormattedValue'] || '',
+                        ownerName: d365Acct['_ownerid_value@OData.Community.Display.V1.FormattedValue'] || '',
+                        modifiedOn: d365Acct.modifiedon || '',
+                        contactName: d365Acct.primarycontactid?.fullname || '',
+                        contactEmail: d365Acct.primarycontactid?.emailaddress1 || '',
+                        contactPhone: d365Acct.primarycontactid?.telephone1 || ''
+                    };
+                    window.renderInactiveAccountDecision?.();
                     const inactiveModal = document.getElementById('inactive-prompt-modal');
                     if (inactiveModal) {
                         inactiveModal.classList.remove('hidden');
@@ -9400,12 +9453,33 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
 </div>
 </div>
 <div class="modal-overlay hidden" id="inactive-prompt-modal" style="display:none; z-index: 9500;">
-<div class="modal-content w-96 text-center shadow-2xl rounded-xl">
-<h3 class="text-lg font-bold mb-4 text-status-danger"><i class="fas fa-ban mr-2"></i>Masonville Inactive Status Detected</h3>
-<p class="text-sm mb-4">The customer account is marked <strong>Inactive</strong>, matching the Masonville <strong>Inactive Status</strong> box.<br/><br/>Confirm that ACT should unassign the representative and log this account as inactive in the ACT fact table. No changes will be made until you confirm.</p>
-<div class="flex justify-center gap-3">
-<button class="btn-primary" onclick="window.resolveInactivePrompt(true)" style="background-color: var(--accent-danger);">Confirm &amp; Unassign Rep</button>
-<button class="btn-secondary" onclick="window.resolveInactivePrompt(false)">Cancel</button>
+<div class="modal-content shadow-2xl rounded-xl" style="width:min(760px,94vw); max-width:94vw;">
+<h3 class="text-lg font-bold mb-2 text-status-danger"><i class="fas fa-triangle-exclamation mr-2"></i>Masonville Inactive or Closed Indicator</h3>
+<p class="text-sm mb-3 text-left">This account contains D365 information that may indicate it is inactive or closed. Some accounts may still be eligible for reactivation, so ACT will not remove the representative automatically.</p>
+<div class="text-left rounded-lg border p-3 mb-3" style="border-color:var(--border-color); background:var(--bg-input);">
+<div class="text-xs font-bold uppercase mb-2 text-status-info"><i class="fas fa-database mr-1"></i>D365 Account Details</div>
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+<div><span class="text-muted font-bold">Account Number</span><div id="inactive-stat-account-number" class="font-semibold break-words">Not returned</div></div>
+<div><span class="text-muted font-bold">Account Name</span><div id="inactive-stat-account-name" class="font-semibold break-words">Not returned</div></div>
+<div><span class="text-muted font-bold">State</span><div id="inactive-stat-state" class="font-semibold break-words">Not returned</div></div>
+<div><span class="text-muted font-bold">Status Reason</span><div id="inactive-stat-status" class="font-semibold break-words">Not returned</div></div>
+<div><span class="text-muted font-bold">D365 Account GUID</span><div id="inactive-stat-guid" class="font-semibold break-all">Not returned</div></div>
+<div><span class="text-muted font-bold">D365 Owner</span><div id="inactive-stat-owner" class="font-semibold break-words">Not returned</div></div>
+<div><span class="text-muted font-bold">Last Modified</span><div id="inactive-stat-modified" class="font-semibold break-words">Not returned</div></div>
+<div><span class="text-muted font-bold">Primary Contact</span><div id="inactive-stat-contact" class="font-semibold break-words">Not returned</div></div>
+<div><span class="text-muted font-bold">Contact Email</span><div id="inactive-stat-email" class="font-semibold break-all">Not returned</div></div>
+<div><span class="text-muted font-bold">Contact Phone</span><div id="inactive-stat-phone" class="font-semibold break-words">Not returned</div></div>
+<div class="sm:col-span-2"><span class="text-muted font-bold">Detection Evidence</span><div id="inactive-stat-evidence" class="font-semibold break-words text-status-danger">Masonville inactive indicator</div></div>
+</div>
+</div>
+<div class="rounded-lg p-3 mb-4 text-left" style="background:rgba(234,179,8,.10); border:1px solid rgba(234,179,8,.35);">
+<div class="font-bold text-sm text-status-warning mb-1">Do you truly want to remove this account?</div>
+<div class="text-xs">Choose <strong>Remove Rep from Account</strong> only when the account should leave the working list. Choose <strong>Close Warning &amp; Process Account</strong> when the account may be reactivated or requires additional review. That option keeps the representative assigned.</div>
+</div>
+<div class="flex flex-col sm:flex-row justify-end gap-2">
+<button class="btn-secondary" onclick="window.resolveInactivePrompt('cancel')">Cancel</button>
+<button class="btn-secondary" onclick="window.resolveInactivePrompt('process')" style="border-color:var(--accent-warning); color:var(--accent-warning);"><i class="fas fa-rotate mr-1"></i>Close Warning &amp; Process Account</button>
+<button class="btn-primary" onclick="window.resolveInactivePrompt('remove')" style="background-color:var(--accent-danger);"><i class="fas fa-user-minus mr-1"></i>Remove Rep from Account</button>
 </div>
 </div>
 </div>
