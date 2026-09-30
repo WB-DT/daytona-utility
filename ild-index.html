@@ -2777,6 +2777,8 @@
   #history-column .history-alt-address-section .alt-address-value { overflow-wrap: anywhere !important; }
 }
 
+
+.inactive-decision-grid{display:grid;grid-template-columns:minmax(340px,.9fr) minmax(440px,1.35fr);gap:1rem;min-height:0;flex:1 1 auto;overflow:hidden}.inactive-message-pane{min-width:0;overflow-y:auto;padding-right:.25rem}.inactive-timeline-pane{min-width:0;min-height:0;display:flex;flex-direction:column;border:1px solid var(--border-color);border-radius:.7rem;overflow:hidden;background:var(--bg-card)}#inactive-contact-timeline{flex:1 1 auto;min-height:0;overflow-y:auto;padding:.65rem}@media(max-width:900px){#inactive-prompt-modal .modal-content{height:94vh!important}.inactive-decision-grid{grid-template-columns:1fr;overflow-y:auto}.inactive-timeline-pane{min-height:320px}}
 </style>
 <script>
     // --- API ENDPOINTS ---
@@ -4493,18 +4495,12 @@ window.preloadTemplateImages = async function() {
                 if (row) {
                     const stateLabel = String(row['statecode@OData.Community.Display.V1.FormattedValue'] || '').trim();
                     const statusLabel = String(row['statuscode@OData.Community.Display.V1.FormattedValue'] || '').trim();
-                    const evidence = [];
-                    if (Number(row.statecode) === 1 || /inactive/i.test(stateLabel)) evidence.push(`statecode=${row.statecode} (${stateLabel || 'no label'})`);
-                    // statuscode=1 / Active is NOT considered inactive. The supplied closed account proves that combination is ambiguous.
-                    if (/inactive|closed|do not service|customer service/i.test(statusLabel) && !/^active$/i.test(statusLabel)) evidence.push(`statuscode=${row.statuscode} (${statusLabel})`);
-                    if (/(?:^|[\s\-–—:()])(?:closed|inactive)(?:$|[\s\-–—:()])/i.test(String(row.name || ''))) evidence.push(`name=${row.name}`);
-                    for (const [key, rawValue] of Object.entries(row)) {
-                        if (key.startsWith('@') || key.startsWith('__') || rawValue == null || typeof rawValue === 'object') continue;
-                        if (!/(status|state|active|inactive|closed|closure|block|service|customer)/i.test(key)) continue;
-                        const value = String(rawValue).trim();
-                        if (/inactive|closed|do not service|contact customer service/i.test(value) && !/^active$/i.test(value)) evidence.push(`${key}=${value}`);
-                    }
-                    row.__actInactiveEvidence = [...new Set(evidence)];
+                    const getFormatted = key => String(row[`${key}@OData.Community.Display.V1.FormattedValue`] ?? row[key] ?? '').trim();
+                    const opsStatus = getFormatted('mss_opsstatus');
+                    const oppEntry = Object.entries(row).find(([key,value]) => !key.includes('@') && /opportunity|opp/i.test(key) && value !== null && value !== '');
+                    row.__actOpsStatus = opsStatus;
+                    row.__actOpportunityLabel = oppEntry ? String(row[`${oppEntry[0]}@OData.Community.Display.V1.FormattedValue`] ?? oppEntry[1]).trim() : 'Not indicated';
+                    row.__actInactiveEvidence = /^inactive$/i.test(opsStatus) ? [`mss_opsstatus=${opsStatus}`] : [];
                     row.__actInactive = row.__actInactiveEvidence.length > 0;
                     row.__actLookupCandidate = candidate;
                     console.info('[Inactive Check] Full CRM account matched', { requested: cleanId, matched: candidate, accountnumber: row.accountnumber, name: row.name, statecode: row.statecode, stateLabel, statuscode: row.statuscode, statusLabel, inactive: row.__actInactive, evidence: row.__actInactiveEvidence, returnedColumnCount: Object.keys(row).length, returnedColumns: Object.keys(row).sort() });
@@ -5062,111 +5058,37 @@ allRaw.forEach(r => {
         }
     }
 
-    window.renderInactiveAccountDecision = function() {
-        const stats = window.pendingInactiveD365Stats || {};
-        const evidence = Array.isArray(window.pendingInactiveEvidence) ? window.pendingInactiveEvidence : [];
-        const value = (v) => {
-            const s = String(v ?? '').trim();
-            return s || 'Not returned';
-        };
-        const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = value(v); };
-        set('inactive-stat-account-number', stats.accountNumber);
-        set('inactive-stat-account-name', stats.accountName);
-        set('inactive-stat-guid', stats.accountGuid);
-        set('inactive-stat-state', `${value(stats.stateLabel)} (${value(stats.statecode)})`);
-        set('inactive-stat-status', `${value(stats.statusLabel)} (${value(stats.statuscode)})`);
-        set('inactive-stat-owner', stats.ownerName);
-        set('inactive-stat-modified', stats.modifiedOn ? new Date(stats.modifiedOn).toLocaleString() : 'Not returned');
-        set('inactive-stat-contact', stats.contactName);
-        set('inactive-stat-email', stats.contactEmail);
-        set('inactive-stat-phone', stats.contactPhone);
-        set('inactive-stat-evidence', evidence.length ? evidence.join('; ') : 'Masonville inactive indicator');
+    window.renderInactiveDecisionPanel = function() {
+        const stats=window.pendingInactiveD365Stats||{};
+        const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=String(v??'').trim()||'Not indicated';};
+        set('inactive-value-account',stats.accountNumber); set('inactive-value-company',stats.accountName);
+        set('inactive-value-ops',stats.opsStatus); set('inactive-value-opportunity',stats.opportunity);
+        const source=document.getElementById('qb-notes-preview'), target=document.getElementById('inactive-contact-timeline');
+        if(target){target.innerHTML=source?.innerHTML?.trim()||'<div class="history-feed-state"><i class="fas fa-inbox"></i><div>No contact history is available.</div></div>';target.querySelectorAll('[id]').forEach(el=>el.removeAttribute('id'));}
     };
 
     window.resolveInactivePrompt = async function(decision) {
-        const modal = document.getElementById('inactive-prompt-modal');
-        if (decision === true) decision = 'remove';
-        if (decision === false) decision = 'cancel';
-        if (decision === 'process') {
-            if (modal) { modal.classList.add('hidden'); modal.style.display = 'none'; }
-            const stats = window.pendingInactiveD365Stats || {};
-            await window.recordActFactActivity?.('Inactive Account Retained for Processing', {
-                recordStatus: 'Review Required',
-                accountRep: String(currentSelectedRecord?.cr714_rep || currentUserRepName || '').trim(),
-                effectiveAction: 'Close Warning and Process',
-                actionMessage: 'User reviewed the D365 inactive/closed indicators and elected to continue processing the account.',
-                noteText: `Inactive decision | Continue Processing | D365 State: ${stats.stateLabel || stats.statecode || 'Unknown'} | D365 Status: ${stats.statusLabel || stats.statuscode || 'Unknown'} | Evidence: ${(window.pendingInactiveEvidence || []).join('; ') || 'Masonville inactive indicator'}`,
-                details: 'Representative assignment retained because the user elected to review/process the potentially reactivatable account.',
-                sourceType: 'Masonville Status Verification'
-            });
-            window.showToast('Warning closed. Account remains assigned and available for processing.', 'success');
-            return;
+        const modal=document.getElementById('inactive-prompt-modal');
+        if(decision==='process'){
+            if(modal){modal.classList.add('hidden');modal.style.display='none';}
+            const stats=window.pendingInactiveD365Stats||{};
+            await window.recordActFactActivity?.('Inactive Account Kept for Processing',{recordStatus:'Review Required',effectiveAction:'Keep on ACT List and Process',actionMessage:'mss_opsstatus is Inactive; user kept the account on the ACT list for review or reactivation.',noteText:`Inactive decision | Kept on ACT list | Ops Status: ${stats.opsStatus||'Inactive'} | Opportunity: ${stats.opportunity||'Not indicated'}`,details:'The account remained on the representative ACT working list. No D365 account assignment was changed.',sourceType:'Masonville Status Verification'});
+            window.showToast('Account kept on the ACT list for contact and processing.','success'); return;
         }
-        if (decision !== 'remove') {
-            if (modal) { modal.classList.add('hidden'); modal.style.display = 'none'; }
-            window.showToast('No changes made. The representative remains assigned.', 'success');
-            return;
-        }
-        if (window._isUnassigningInactiveAccount) return;
-        window._isUnassigningInactiveAccount = true;
-        try {
-            if (!currentSelectedRecord || !Array.isArray(currentSelectedRecord.sources) || !currentSelectedRecord.sources.length) {
-                throw new Error('No selected ACT account sources were available to unassign.');
-            }
-            const selectedAccount = String(currentSelectedRecord.cr714_id || currentRecordId || window.pendingInactiveId || '').trim();
-            const originalRep = String(currentSelectedRecord.cr714_rep || currentUserRepName || '').trim();
-            const token = await window.getToken('https://org23279050.crm.dynamics.com//user_impersonation', true);
-            const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-            const repFieldByTable = {
-                cr714_accountmanagementdatasets: 'cr714_rep',
-                cr714_cadencedatasets: 'cr714_retentionrep',
-                cr714_prospectingdatasets: 'cr714_repassigned',
-                cr714_louisebrowndatasets: 'cr714_assignedrep',
-                cr714_leads_2s: 'cr714_assignedrep'
-            };
-            const results = [];
-            for (const src of currentSelectedRecord.sources) {
-                const table = String(src?.table || '').replace(/^\//, '').trim();
-                const rowId = String(src?.id || '').replace(/[{}]/g, '').trim();
-                const repField = repFieldByTable[table];
-                if (!table || !rowId || !repField) continue;
-                const response = await fetch(`${DATAVERSE_URL}/${table}(${rowId})`, {
-                    method: 'PATCH', headers, body: JSON.stringify({ [repField]: null })
-                });
-                if (!response.ok) {
-                    const detail = await window.getDataverseErrorMessage?.(response) || `${response.status} ${response.statusText}`;
-                    throw new Error(`Could not unassign ${table}: ${detail}`);
-                }
-                results.push({ table, rowId, repField });
-            }
-            if (!results.length) throw new Error('No supported representative assignment fields were found for this account.');
-            await window.recordActFactActivity?.('Inactive Account', {
-                recordStatus: 'Inactive', accountRep: originalRep,
-                effectiveAction: 'Representative Unassigned',
-                actionMessage: 'Masonville Inactive Status confirmed; representative unassigned.',
-                noteText: `Inactive Account | Masonville Inactive Status confirmed | Evidence: ${(window.pendingInactiveEvidence || []).join('; ') || 'Masonville inactive indicator'} | Previous Rep: ${originalRep || 'Unknown'} | Sources Unassigned: ${results.map(r => r.table).join(', ')}`,
-                details: `Account ${selectedAccount || 'Unknown'} was confirmed inactive. Evidence: ${(window.pendingInactiveEvidence || []).join('; ') || 'Masonville inactive indicator'}. The representative assignment was removed after user confirmation.`,
-                sourceType: 'Masonville Status Verification'
-            });
-            currentSelectedRecord.sources.forEach(src => {
-                const table = String(src?.table || '').replace(/^\//, '').trim();
-                const repField = repFieldByTable[table];
-                if (repField && src) src[repField] = null;
-            });
-            currentSelectedRecord.cr714_rep = '';
-            allRecords = allRecords.filter(r => String(r.cr714_id) !== String(currentSelectedRecord.cr714_id));
-            window.filterAndSortGallery(true);
-            if (modal) { modal.classList.add('hidden'); modal.style.display = 'none'; }
-            window.showToast('Inactive account confirmed. Representative unassigned and activity logged.', 'success');
-        } catch (error) {
-            console.error('Inactive account unassignment failed:', error);
-            window.showToast(error?.message || 'Unable to unassign the inactive account.', 'error');
-        } finally {
-            window._isUnassigningInactiveAccount = false;
-        }
+        if(decision!=='remove'){if(modal){modal.classList.add('hidden');modal.style.display='none';}window.showToast('No changes made. The account remains on the ACT list.','success');return;}
+        if(window._isRemovingInactiveAccountFromList)return; window._isRemovingInactiveAccountFromList=true;
+        try{
+            if(!currentSelectedRecord?.sources?.length)throw new Error('No selected ACT list records were available to remove.');
+            const selectedAccount=String(currentSelectedRecord.cr714_id||currentRecordId||'').trim(), originalRep=String(currentSelectedRecord.cr714_rep||currentUserRepName||'').trim();
+            const token=await window.getToken('https://org23279050.crm.dynamics.com//user_impersonation',true), headers={Authorization:`Bearer ${token}`,'Content-Type':'application/json'}, results=[];
+            for(const src of currentSelectedRecord.sources){const table=String(src?.table||'').replace(/^\//,'').trim(),rowId=String(src?.id||'').replace(/[{}]/g,'').trim();if(!table||!rowId)continue;const response=await fetch(`${DATAVERSE_URL}/${table}(${rowId})`,{method:'PATCH',headers,body:JSON.stringify({statecode:1,statuscode:2,cr714_actionmessage:'[INACTIVE OPS STATUS]: Removed from representative ACT list after confirmation.'})});if(!response.ok)throw new Error(`Could not remove ACT list record from ${table}.`);results.push(table);}
+            if(!results.length)throw new Error('No ACT list records were found.'); const stats=window.pendingInactiveD365Stats||{};
+            await window.recordActFactActivity?.('Inactive Account Removed from ACT List',{recordStatus:'Inactive',accountRep:originalRep,effectiveAction:'Removed from Representative ACT List',actionMessage:'mss_opsstatus is Inactive; account removed from ACT working list after confirmation.',noteText:`Inactive Account | Removed from ACT list only | Ops Status: ${stats.opsStatus||'Inactive'} | Opportunity: ${stats.opportunity||'Not indicated'} | D365 rep assignment unchanged`,details:`Account ${selectedAccount||'Unknown'} was removed from the representative ACT working list. The D365 owner and rep assignment were not changed.`,sourceType:'Masonville Status Verification'});
+            allRecords=allRecords.filter(r=>String(r.cr714_id)!==String(currentSelectedRecord.cr714_id));window.filterAndSortGallery(true);if(modal){modal.classList.add('hidden');modal.style.display='none';}window.showToast('Account removed from the ACT list. D365 rep assignment was not changed.','success');
+        }catch(error){console.error('Inactive ACT-list removal failed:',error);window.showToast(error?.message||'Unable to remove the account from the ACT list.','error');}finally{window._isRemovingInactiveAccountFromList=false;}
     }
 
-window.launchEmailLogic = async function() {
+    window.launchEmailLogic = async function() {
         try {
         if(!currentSelectedRecord) return;
 
@@ -6449,23 +6371,10 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                 
                 if (d365Acct.__actInactive === true) { // Full-row evidence can include state, formatted labels, account name, or applicable status/service columns.
                     window.pendingInactiveId = id;
-                    window.pendingInactiveDetectionSource = 'Masonville/D365 full account verification';
-                    window.pendingInactiveEvidence = Array.isArray(d365Acct.__actInactiveEvidence) ? d365Acct.__actInactiveEvidence.slice() : [];
-                    window.pendingInactiveD365Stats = {
-                        accountNumber: d365Acct.accountnumber || id,
-                        accountName: d365Acct.name || currentSelectedRecord?.cr714_company || '',
-                        accountGuid: d365Acct.accountid || currentAccountGuid || '',
-                        statecode: d365Acct.statecode,
-                        stateLabel: d365Acct['statecode@OData.Community.Display.V1.FormattedValue'] || '',
-                        statuscode: d365Acct.statuscode,
-                        statusLabel: d365Acct['statuscode@OData.Community.Display.V1.FormattedValue'] || '',
-                        ownerName: d365Acct['_ownerid_value@OData.Community.Display.V1.FormattedValue'] || '',
-                        modifiedOn: d365Acct.modifiedon || '',
-                        contactName: d365Acct.primarycontactid?.fullname || '',
-                        contactEmail: d365Acct.primarycontactid?.emailaddress1 || '',
-                        contactPhone: d365Acct.primarycontactid?.telephone1 || ''
-                    };
-                    window.renderInactiveAccountDecision?.();
+                    window.pendingInactiveDetectionSource='D365 mss_opsstatus';
+                    window.pendingInactiveEvidence=Array.isArray(d365Acct.__actInactiveEvidence)?d365Acct.__actInactiveEvidence.slice():[];
+                    window.pendingInactiveD365Stats={accountNumber:d365Acct.accountnumber||id,accountName:d365Acct.name||currentSelectedRecord?.cr714_company||'',opsStatus:d365Acct.__actOpsStatus||d365Acct.mss_opsstatus||'',opportunity:d365Acct.__actOpportunityLabel||'Not indicated'};
+                    window.renderInactiveDecisionPanel?.();
                     const inactiveModal = document.getElementById('inactive-prompt-modal');
                     if (inactiveModal) {
                         inactiveModal.classList.remove('hidden');
@@ -9452,37 +9361,7 @@ input:focus,select:focus,textarea:focus{box-shadow:0 0 0 3px color-mix(in srgb,v
 </div>
 </div>
 </div>
-<div class="modal-overlay hidden" id="inactive-prompt-modal" style="display:none; z-index: 9500;">
-<div class="modal-content shadow-2xl rounded-xl" style="width:min(760px,94vw); max-width:94vw;">
-<h3 class="text-lg font-bold mb-2 text-status-danger"><i class="fas fa-triangle-exclamation mr-2"></i>Masonville Inactive or Closed Indicator</h3>
-<p class="text-sm mb-3 text-left">This account contains D365 information that may indicate it is inactive or closed. Some accounts may still be eligible for reactivation, so ACT will not remove the representative automatically.</p>
-<div class="text-left rounded-lg border p-3 mb-3" style="border-color:var(--border-color); background:var(--bg-input);">
-<div class="text-xs font-bold uppercase mb-2 text-status-info"><i class="fas fa-database mr-1"></i>D365 Account Details</div>
-<div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-<div><span class="text-muted font-bold">Account Number</span><div id="inactive-stat-account-number" class="font-semibold break-words">Not returned</div></div>
-<div><span class="text-muted font-bold">Account Name</span><div id="inactive-stat-account-name" class="font-semibold break-words">Not returned</div></div>
-<div><span class="text-muted font-bold">State</span><div id="inactive-stat-state" class="font-semibold break-words">Not returned</div></div>
-<div><span class="text-muted font-bold">Status Reason</span><div id="inactive-stat-status" class="font-semibold break-words">Not returned</div></div>
-<div><span class="text-muted font-bold">D365 Account GUID</span><div id="inactive-stat-guid" class="font-semibold break-all">Not returned</div></div>
-<div><span class="text-muted font-bold">D365 Owner</span><div id="inactive-stat-owner" class="font-semibold break-words">Not returned</div></div>
-<div><span class="text-muted font-bold">Last Modified</span><div id="inactive-stat-modified" class="font-semibold break-words">Not returned</div></div>
-<div><span class="text-muted font-bold">Primary Contact</span><div id="inactive-stat-contact" class="font-semibold break-words">Not returned</div></div>
-<div><span class="text-muted font-bold">Contact Email</span><div id="inactive-stat-email" class="font-semibold break-all">Not returned</div></div>
-<div><span class="text-muted font-bold">Contact Phone</span><div id="inactive-stat-phone" class="font-semibold break-words">Not returned</div></div>
-<div class="sm:col-span-2"><span class="text-muted font-bold">Detection Evidence</span><div id="inactive-stat-evidence" class="font-semibold break-words text-status-danger">Masonville inactive indicator</div></div>
-</div>
-</div>
-<div class="rounded-lg p-3 mb-4 text-left" style="background:rgba(234,179,8,.10); border:1px solid rgba(234,179,8,.35);">
-<div class="font-bold text-sm text-status-warning mb-1">Do you truly want to remove this account?</div>
-<div class="text-xs">Choose <strong>Remove Rep from Account</strong> only when the account should leave the working list. Choose <strong>Close Warning &amp; Process Account</strong> when the account may be reactivated or requires additional review. That option keeps the representative assigned.</div>
-</div>
-<div class="flex flex-col sm:flex-row justify-end gap-2">
-<button class="btn-secondary" onclick="window.resolveInactivePrompt('cancel')">Cancel</button>
-<button class="btn-secondary" onclick="window.resolveInactivePrompt('process')" style="border-color:var(--accent-warning); color:var(--accent-warning);"><i class="fas fa-rotate mr-1"></i>Close Warning &amp; Process Account</button>
-<button class="btn-primary" onclick="window.resolveInactivePrompt('remove')" style="background-color:var(--accent-danger);"><i class="fas fa-user-minus mr-1"></i>Remove Rep from Account</button>
-</div>
-</div>
-</div>
+<div class="modal-overlay hidden" id="inactive-prompt-modal" style="display:none;z-index:9500;padding:1rem"><div class="modal-content shadow-2xl rounded-xl" style="width:min(1180px,97vw);max-width:97vw;height:min(760px,92vh);overflow:hidden;display:flex;flex-direction:column"><div class="mb-3 flex-shrink-0"><h3 class="text-lg font-bold text-status-danger"><i class="fas fa-triangle-exclamation mr-2"></i>Inactive Operations Status</h3><p class="text-sm mt-1">D365 reports <strong>mss_opsstatus = Inactive</strong>. This does not always mean the account cannot be reactivated. Review the parsed values and contact timeline before deciding.</p></div><div class="inactive-decision-grid"><div class="inactive-message-pane custom-scrollbar"><div class="rounded-lg border p-3 mb-3" style="border-color:var(--border-color);background:var(--bg-input)"><div class="text-xs font-bold uppercase mb-2 text-status-info">D365 Parsed Account Values</div><div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs"><div><span class="text-muted font-bold">Account</span><div id="inactive-value-account" class="font-semibold">Not indicated</div></div><div><span class="text-muted font-bold">Company</span><div id="inactive-value-company" class="font-semibold">Not indicated</div></div><div><span class="text-muted font-bold">Operations Status</span><div id="inactive-value-ops" class="font-semibold text-status-danger">Inactive</div></div><div><span class="text-muted font-bold">Opportunity Available</span><div id="inactive-value-opportunity" class="font-semibold">Not indicated</div></div></div></div><div class="rounded-lg p-3 mb-3" style="background:rgba(234,179,8,.10);border:1px solid rgba(234,179,8,.35)"><div class="font-bold text-sm text-status-warning">If an opportunity is available, make contact.</div><div class="text-xs mt-1">Use the timeline to review prior activity before deciding whether this account should be processed for possible reactivation.</div></div><div class="rounded-lg p-3" style="background:rgba(37,99,235,.08);border:1px solid rgba(37,99,235,.24)"><div class="font-bold text-sm">Removal clarification</div><div class="text-xs mt-1"><strong>Remove Account from ACT List</strong> only removes the account from the representative’s ACT working list. It does not remove or change the representative, owner, or assignment on the D365 account.</div></div></div><div class="inactive-timeline-pane"><div class="p-3 border-b flex-shrink-0" style="border-color:var(--border-color);background:var(--bg-header)"><div class="text-xs font-bold uppercase text-status-info"><i class="fas fa-clock-rotate-left mr-1"></i>Contact Timeline</div><div class="text-xs text-muted mt-1">Prior contact history for this account</div></div><div id="inactive-contact-timeline" class="history-feed custom-scrollbar"><div class="history-feed-state"><i class="fas fa-inbox"></i><div>No contact history is available.</div></div></div></div></div><div class="flex flex-col sm:flex-row justify-end gap-2 mt-3 flex-shrink-0"><button class="btn-secondary" onclick="window.resolveInactivePrompt('cancel')">Cancel</button><button class="btn-secondary" onclick="window.resolveInactivePrompt('process')" style="border-color:var(--accent-success);color:var(--accent-success)"><i class="fas fa-phone mr-1"></i>Keep on List &amp; Process</button><button class="btn-primary" onclick="window.resolveInactivePrompt('remove')" style="background-color:var(--accent-danger)"><i class="fas fa-list-check mr-1"></i>Remove Account from ACT List</button></div></div></div>
 <div class="modal-overlay hidden" id="kb-modal" style="display:none; z-index: 9100;">
 <div class="modal-content w-[90%] max-w-2xl h-[80vh] flex flex-col p-0 overflow-hidden" style="background-color: var(--modal-bg) !important; color: var(--text-main) !important;">
 <div class="p-4 border-b flex justify-between items-center bg-gray-50" style="background-color: var(--bg-header) !important;">
