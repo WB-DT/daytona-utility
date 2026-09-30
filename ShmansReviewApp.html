@@ -530,6 +530,37 @@ function parseMakeUpHours(r) {
   return 0.5;
 }
 
+function parseMakeUpSegments(value) {
+  const raw = String(value || "").replace(/\r/g, "\n").trim();
+  if (!raw) return [];
+  const segments = [];
+  // Entries are normally comma/newline separated. Times may or may not have
+  // spaces around their internal hyphen, e.g. 7:30 AM-8:00 AM.
+  const entryRx = /(\d{1,2}\/\d{1,2}\/\d{4})\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d+(?::\d{1,2})?|\d*\.\d+)/gi;
+  let match;
+  while ((match = entryRx.exec(raw)) !== null) {
+    const [mmRaw, ddRaw, yyyy] = match[1].split("/");
+    const mm = mmRaw.padStart(2, "0"), dd = ddRaw.padStart(2, "0");
+    const duration = match[4];
+    let hours = 0;
+    if (duration.includes(":")) {
+      const [hh, min] = duration.split(":").map(Number);
+      hours = (hh || 0) + ((min || 0) / 60);
+    } else {
+      hours = Number(duration) || 0;
+    }
+    segments.push({
+      date: `${yyyy}-${mm}-${dd}`,
+      displayDate: `${mm}/${dd}/${yyyy}`,
+      start: match[2].trim(),
+      end: match[3].trim(),
+      duration,
+      hours: Math.round(hours * 100) / 100
+    });
+  }
+  return segments;
+}
+
 async function fetchAllOData(url, headers) {
   const rows = [];
   let next = url;
@@ -591,7 +622,7 @@ function makeupDedupeKey(m) {
     .replace(/rep notes:[\s\S]*$/i, "")
     .replace(/\s+/g, " ")
     .trim();
-  const schedule = normalizedNotes.match(/schedule:\s*([^\n]+)/i)?.[1] || "";
+  const schedule = normalizedNotes.match(/(?:schedule|unparsed schedule):\s*([^\n]+)/i)?.[1] || "";
   return [
     String(m.empId || "").trim().toLowerCase(),
     String(m.dateMissed || "").slice(0, 10),
@@ -758,16 +789,20 @@ async function pullFromDataverse(silent = false) {
 
       if (r.cr714_makeuptime || String(r.cr714_leavetype || "").toLowerCase().includes("make up")) {
         const rawMu = String(r.cr714_makeuptime || "");
-        const rx = /(\d{2}\/\d{2}\/\d{4})\s*-\s*([\d:]+\s*(?:AM|PM)?)\s*-\s*([\d:]+\s*(?:AM|PM)?)\s*-\s*([\d:]+)/gi;
-        const matches = [...rawMu.matchAll(rx)];
-        if (matches.length) matches.forEach((match,mIdx) => {
-          const [mm,dd,yy] = match[1].split('/'), isoMuDate=`${yy}-${mm}-${dd}`;
+        const scheduleSegments = parseMakeUpSegments(rawMu);
+        if (scheduleSegments.length) scheduleSegments.forEach((segment,mIdx) => {
+          const isoMuDate = segment.date;
           if (isoMuDate < syncFrom || isoMuDate > rangeTo) return;
-          const [hh,mn]=match[4].split(':').map(Number), calculatedHours=Math.round(((hh||0)+((mn||0)/60))*100)/100;
-          const notes=[`Schedule: ${match[1]} - ${to12Hour(match[2].trim())} - ${to12Hour(match[3].trim())} (${formatDuration(match[4].trim())})`, repNotes?`Rep Notes: ${repNotes}`:null].filter(Boolean).join("\n\n");
-          newMakeups.push({mid:`${baseRid}-${mIdx}`,dvId,empId:matchedEmp.id,rid:`${baseRid}-0`,dateMissed:isoMuDate,hoursOwed:calculatedHours,dueDate:addDays(isoMuDate,7),status:r.cr714_completed?"Completed":"Pending",oss:true,completedDate:r.cr714_completed?isoDate(new Date(r.createdon)):"",notes});
+          const notes=[`Schedule: ${segment.displayDate} - ${to12Hour(segment.start)} - ${to12Hour(segment.end)} (${formatDuration(segment.duration)})`, repNotes?`Rep Notes: ${repNotes}`:null].filter(Boolean).join("\n\n");
+          newMakeups.push({mid:`${baseRid}-${mIdx}`,dvId,empId:matchedEmp.id,rid:`${baseRid}-0`,dateMissed:isoMuDate,hoursOwed:segment.hours,dueDate:addDays(isoMuDate,7),status:r.cr714_completed?"Completed":"Pending",oss:true,completedDate:r.cr714_completed?isoDate(new Date(r.createdon)):"",notes});
         });
-        else newMakeups.push({mid:baseRid,dvId,empId:matchedEmp.id,rid:`${baseRid}-0`,dateMissed:dates[0],hoursOwed:muHours,dueDate:addDays(dates[0],7),status:r.cr714_completed?"Completed":"Pending",oss:true,completedDate:r.cr714_completed?isoDate(new Date(r.createdon)):"",notes:[rawMu?`Schedule: ${cleanMakeUpString(rawMu)}`:null,repNotes?`Rep Notes: ${repNotes}`:null].filter(Boolean).join("\n\n") || fullNotes});
+        else {
+          // Only fall back to the request date when no make-up schedule exists.
+          // If schedule text exists but cannot be parsed, retain the raw text and
+          // use one fallback row rather than cloning the request date repeatedly.
+          const fallbackDate = dates[0];
+          newMakeups.push({mid:baseRid,dvId,empId:matchedEmp.id,rid:`${baseRid}-0`,dateMissed:fallbackDate,hoursOwed:muHours,dueDate:addDays(fallbackDate,7),status:r.cr714_completed?"Completed":"Pending",oss:true,completedDate:r.cr714_completed?isoDate(new Date(r.createdon)):"",notes:[rawMu?`Unparsed schedule: ${rawMu}`:null,repNotes?`Rep Notes: ${repNotes}`:null].filter(Boolean).join("\n\n") || fullNotes});
+        }
       }
     });
     updateSyncCover("Applying occurrence rules and preparing the dashboard...");
