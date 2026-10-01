@@ -221,7 +221,7 @@ function hideSyncCover(force = false) {
 
 const DATAVERSE_URL = "https://org23279050.crm.dynamics.com";
 const TABLE_TIMEOFF = "cr714_timeoff_2s";
-const TABLE_ATTENDANCE = "cr714_csrattendancetrackers";
+const TABLE_ATTENDANCE = "cr714_csrattendancetracker";
 const TABLE_EMPLOYEES = "cr714_employeeinformation1s";
 
 const msalConfig = {
@@ -660,7 +660,7 @@ async function pullFromDataverse(silent = false) {
     const api = `${DATAVERSE_URL}/api/data/v9.2`;
     const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_department","cr714_title","cr714_jobtitle","cr714_managerassigned","cr714_location","cr714_status","cr714_loopnumber","cr714_shiftselection","cr714_breakselection","cr714_startdate","statecode"].join(",");
     const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_id","cr714_name","cr714_email","cr714_department","cr714_requestdates","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade"].join(",");
-    const attendanceSelect = ["cr714_csrattendancetrackerid","cr714_id","cr714_employeename","cr714_startdate","cr714_enddate","cr714_typeofleave","cr714_notes","cr714_occurrence"].join(",");
+    const attendanceSelect = ["cr714_csrattendancetrackerid","cr714_id","cr714_employeename","cr714_startdate","cr714_enddate","cr714_typeofleave","cr714_notes","cr714_occurance","cr714_occurrence"].join(",");
 
     // Time Off request dates are text, so Dataverse cannot compare them as dates.
     // Use a bounded created/modified window, then apply the exact requested-date range after parsing.
@@ -707,9 +707,7 @@ async function pullFromDataverse(silent = false) {
       return record;
     });
 
-    // Index CSR Attendance by ID and by employee/date. The legacy IDs do not overlap
-    // the Time Off IDs, so employee/date is the required fallback mapping.
-    const attendanceById = new Map();
+    // Index CSR Attendance strictly by employee name and date
     const attendanceByEmployeeDate = new Map();
     const addAttendanceKey = (key, item) => {
       if (!key) return;
@@ -718,24 +716,22 @@ async function pullFromDataverse(silent = false) {
       attendanceByEmployeeDate.set(key, list);
     };
     attendanceRows.forEach(a => {
-      const n = occurrenceNumber(a.cr714_occurrence);
+      const rawOcc = a.cr714_occurance !== undefined ? a.cr714_occurance : a.cr714_occurrence;
+      const n = occurrenceNumber(rawOcc);
       const item = {
-        occurrence:n,
-        hasOccurrence:n !== null,
-        attendanceId:a.cr714_csrattendancetrackerid || "",
-        startDate:a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : "",
-        endDate:a.cr714_enddate ? String(a.cr714_enddate).slice(0,10) : (a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : ""),
-        leaveType:String(a.cr714_typeofleave || "").trim(),
-        notes:String(a.cr714_notes || "").trim()
+        occurrence: n,
+        hasOccurrence: n !== null,
+        attendanceId: a.cr714_csrattendancetrackerid || "",
+        startDate: a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : "",
+        endDate: a.cr714_enddate ? String(a.cr714_enddate).slice(0,10) : (a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : ""),
+        leaveType: String(a.cr714_typeofleave || "").trim(),
+        notes: String(a.cr714_notes || "").trim()
       };
-      const id = normalizeMatchId(a.cr714_id);
-      if (id) attendanceById.set(id, item);
       const employee = String(a.cr714_employeename || "").trim().toUpperCase();
       const rawDate = a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : "";
       if (employee && rawDate) {
         addAttendanceKey(`${employee}|${rawDate}`, item);
-        // Dataverse midnight UTC dates may display as the prior local calendar date.
-        addAttendanceKey(`${employee}|${addDays(rawDate,-1)}`, item);
+        addAttendanceKey(`${employee}|${addDays(rawDate, -1)}`, item);
       }
     });
 
@@ -748,15 +744,18 @@ async function pullFromDataverse(silent = false) {
       if (!matchedEmp) return;
       const formDept = String(r["cr714_department@OData.Community.Display.V1.FormattedValue"] || r.cr714_department || "").trim();
       if (formDept && matchedEmp.dept === "General") matchedEmp.dept = formDept;
+      
       const timeOffDates = parseDatesToIso(r.cr714_requestdates);
-      const attendanceByRecordId = attendanceById.get(normalizeMatchId(r.cr714_id)) || null;
-      const dateMatches = timeOffDates.length
-        ? (attendanceByEmployeeDate.get(`${name.toUpperCase()}|${timeOffDates[0]}`) || [])
-        : [];
-      const attendance = attendanceByRecordId
-        || dateMatches.find(x => x.hasOccurrence)
-        || dateMatches[0]
-        || null;
+      
+      // Find attendance matching by employee name and request date(s)
+      let attendance = null;
+      for (const d of timeOffDates) {
+        const matches = attendanceByEmployeeDate.get(`${name.toUpperCase()}|${d}`) || [];
+        if (matches.length > 0) {
+          attendance = matches.find(x => x.hasOccurrence) || matches[0];
+          break;
+        }
+      }
       const authoritativeDates = attendance?.startDate
         ? (() => {
             const start = attendance.startDate;
@@ -779,7 +778,10 @@ async function pullFromDataverse(silent = false) {
       const mappedType = mapLeaveType(attendance?.leaveType || r.cr714_leavetype);
       const hours = parseHours(r), muHours = parseMakeUpHours(r);
       const repNotes = String(r.cr714_requestnotes || "").trim();
-      const wfNotesVal = String(r.cr714_wfnotes || "").trim();
+      let wfNotesVal = String(r.cr714_wfnotes || "").trim();
+      if (attendance?.notes) {
+        wfNotesVal = wfNotesVal ? `${wfNotesVal} | ${attendance.notes}` : attendance.notes;
+      }
       const fullNotes = [repNotes, r.cr714_lunch ? `Lunch: ${r.cr714_lunch}` : null].filter(Boolean).join(" | ");
       const baseRid = r.cr714_autoid || r.cr714_timeoff_2id || uid("r");
       const dvId = r.cr714_timeoff_2id || "";
