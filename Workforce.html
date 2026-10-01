@@ -679,7 +679,7 @@ async function pullFromDataverse(silent = false) {
     };
     const api = `${DATAVERSE_URL}/api/data/v9.2`;
     const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_department","cr714_title","cr714_jobtitle","cr714_managerassigned","cr714_location","cr714_status","cr714_loopnumber","cr714_shiftselection","cr714_breakselection","cr714_startdate","statecode"].join(",");
-    const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_id","cr714_name","cr714_email","cr714_department","cr714_requestdates","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes"].join(",");
+    const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_id","cr714_name","cr714_email","cr714_department","cr714_requestdates","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade","cr714_makeupdisposition"].join(",");
     const attendanceSelect = ["cr714_csrattendancetrackerid","cr714_id","cr714_employeename","cr714_startdate","cr714_enddate","cr714_typeofleave","cr714_notes","cr714_occurrence"].join(",");
 
     // Time Off request dates are text, so Dataverse cannot compare them as dates.
@@ -839,7 +839,7 @@ async function pullFromDataverse(silent = false) {
               dateMissed: segment.date, // Sits on the specific make-up work date (e.g. 10/2)
               hoursOwed: segment.hours,
               dueDate: addDays(segment.date, 7),
-              status: r.cr714_completed ? "Completed" : "Pending",
+              status: r.cr714_makeupdisposition || (r.cr714_completed ? "Completed" : "Pending"),
               oss: true,
               completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
               scheduleSegments: [segment],
@@ -1013,6 +1013,61 @@ async function patchDataverseRecord(dvId, fields) {
   } catch(err) {
     console.error("Dataverse patch failed:", err);
   }
+}
+
+  async function patchMakeUpDisposition(dvId, status) {
+  if (!dvId) return;
+  try {
+    const token = await getDataverseToken();
+    if (!token) return;
+    
+    const res = await fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}(${dvId})`, {
+      method: "PATCH",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "OData-MaxVersion": "4.0",
+        "OData-Version": "4.0"
+      },
+      body: JSON.stringify({ cr714_makeupdisposition: status })
+    });
+
+    if (!res.ok && res.status !== 204) {
+      console.error("Make-up disposition patch error:", await res.text());
+      toast("Failed to save make-up status to Dataverse");
+    } else {
+      toast("Make-up status saved to Dataverse");
+    }
+  } catch(err) {
+    console.error("Make-up disposition patch failed:", err);
+  }
+}
+
+function setMuStatus(mid, status){
+  const m = S.makeups.find(x => x.mid === mid || x.mid.startsWith(mid)); 
+  if(!m) return;
+  
+  m.status = status;
+  if(status === "Completed"){ 
+    m.completedDate = today();
+    const r = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId) || S.records.find(r => r.empId === m.empId && r.date === m.dateMissed && TYPES[r.type].occ);
+    if(r){ r.waived = true; m.rid = r.rid; }
+    toast("Make-up completed — occurrence waived");
+  } else if(status === "Missed"){
+    const r = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId); 
+    if(r) r.waived = false;
+    toast("Marked missed — occurrence stands");
+  } else {
+    toast("Agreement " + status.toLowerCase());
+  }
+
+  if (m.dvId) {
+    patchMakeUpDisposition(m.dvId, status);
+  }
+
+  save(); 
+  render();
 }
   
 const TYPES = {
