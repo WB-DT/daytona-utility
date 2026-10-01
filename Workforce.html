@@ -57,7 +57,7 @@ main{max-width:1240px;margin:0 auto;padding:16px}
 .tbl-wrap{overflow-x:auto;border-radius:var(--radius)}
 table{width:100%;border-collapse:collapse;font-size:14px}
 th{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);text-align:left;padding:8px 10px;border-bottom:1.5px solid var(--line);white-space:nowrap;cursor:pointer;user-select:none}
-td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 tbody tr:hover{background:var(--soft);cursor:pointer}
 tbody tr.norow:hover{background:none;cursor:default}
 
@@ -143,9 +143,34 @@ canvas{max-height:280px}
   opacity: 0.6;
 }
   
+
+/* Full-screen loading cover used during Dataverse authentication and synchronization */
+#syncCover{position:fixed;inset:0;z-index:1000;display:none;place-items:center;padding:24px;background:rgba(15,23,42,.82);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+#syncCover.show{display:grid}
+.sync-cover-card{width:min(440px,92vw);background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:18px;box-shadow:0 24px 70px rgba(0,0,0,.38);padding:28px;text-align:center}
+.sync-cover-logo{width:52px;height:52px;margin:0 auto 16px;border-radius:14px;background:var(--brand);color:#fff;display:grid;place-items:center;font-size:22px;font-weight:800;box-shadow:0 10px 25px rgba(0,102,192,.3)}
+.sync-cover-title{font-size:19px;font-weight:750;margin-bottom:6px}
+.sync-cover-message{min-height:21px;color:var(--muted);font-size:13.5px}
+.sync-cover-track{height:7px;margin-top:20px;border-radius:99px;background:var(--soft);overflow:hidden}
+.sync-cover-bar{height:100%;width:38%;border-radius:inherit;background:linear-gradient(90deg,var(--brand),var(--teal),var(--brand));animation:sync-cover-slide 1.15s ease-in-out infinite}
+.sync-cover-note{margin-top:12px;color:var(--muted);font-size:11.5px}
+body.syncing{overflow:hidden}
+@keyframes sync-cover-slide{0%{transform:translateX(-110%)}50%{transform:translateX(80%)}100%{transform:translateX(270%)}}
+@media(prefers-reduced-motion:reduce){.sync-cover-bar{animation:none;width:100%}}
+
 </style>
 </head>
 <body>
+<div id="syncCover" role="status" aria-live="polite" aria-busy="true" aria-hidden="true">
+  <div class="sync-cover-card">
+    <div class="sync-cover-logo">W</div>
+    <div class="sync-cover-title" id="syncCoverTitle">Syncing Workforce data</div>
+    <div class="sync-cover-message" id="syncCoverMessage">Connecting to Dataverse...</div>
+    <div class="sync-cover-track" aria-hidden="true"><div class="sync-cover-bar"></div></div>
+    <div class="sync-cover-note">Please keep this window open while the latest records are loaded.</div>
+  </div>
+</div>
+
 <header>
   <div class="hd">
     <div class="logo">W</div>
@@ -164,8 +189,39 @@ canvas{max-height:280px}
 <script>
 "use strict";
 
+let syncCoverDepth = 0;
+function showSyncCover(message = "Connecting to Dataverse...", title = "Syncing Workforce data") {
+  syncCoverDepth += 1;
+  const cover = document.getElementById("syncCover");
+  const titleEl = document.getElementById("syncCoverTitle");
+  const messageEl = document.getElementById("syncCoverMessage");
+  if (titleEl) titleEl.textContent = title;
+  if (messageEl) messageEl.textContent = message;
+  if (cover) {
+    cover.classList.add("show");
+    cover.setAttribute("aria-hidden", "false");
+  }
+  document.body.classList.add("syncing");
+}
+function updateSyncCover(message) {
+  const messageEl = document.getElementById("syncCoverMessage");
+  if (messageEl && message) messageEl.textContent = message;
+}
+function hideSyncCover(force = false) {
+  syncCoverDepth = force ? 0 : Math.max(0, syncCoverDepth - 1);
+  if (syncCoverDepth > 0) return;
+  const cover = document.getElementById("syncCover");
+  if (cover) {
+    cover.classList.remove("show");
+    cover.setAttribute("aria-hidden", "true");
+  }
+  document.body.classList.remove("syncing");
+}
+
+
 const DATAVERSE_URL = "https://org23279050.crm.dynamics.com";
 const TABLE_TIMEOFF = "cr714_timeoff_2s";
+const TABLE_ATTENDANCE = "cr714_csrattendancetrackers";
 const TABLE_EMPLOYEES = "cr714_employeeinformation1s";
 
 const msalConfig = {
@@ -240,6 +296,7 @@ async function getDataverseToken() {
   }
 
   if (!msalAccount) {
+    updateSyncCover("Waiting for Microsoft sign-in...");
     const loginResponse = await msalInstance.loginPopup({
       scopes: ["User.Read", dataverseScope]
     });
@@ -344,6 +401,10 @@ function formatChipTime(notes) {
 }
 
 function extractShiftHours(r) {
+  if (r.type === "Shift Trade" && r.shiftTrade) {
+    return r.shiftTrade;
+  }
+
   if (r.partialShift) {
     let s = String(r.partialShift).trim();
     const milMatch = s.match(/^(\d{1,2}):(\d{2})\s*[–-]\s*(\d{1,2}):(\d{2})$/);
@@ -377,29 +438,27 @@ function extractShiftHours(r) {
   return "—";
 }
 
-function parseDatesToIso(dateStr, createdOn) {
-  if (!dateStr && createdOn) return [isoDate(new Date(createdOn))];
-  if (!dateStr) return [today()];
-  const parts = String(dateStr).split(' - ').map(s => s.trim());
-  const parsePart = (p) => {
-    const m = p.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (m) return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
-    const iso = p.match(/^\d{4}-\d{2}-\d{2}/);
-    return iso ? iso[0] : null;
-  };
-  const d1 = parsePart(parts[0]);
-  const d2 = parts[1] ? parsePart(parts[1]) : d1;
-  if (!d1) return [createdOn ? isoDate(new Date(createdOn)) : today()];
-  if (d1 === d2 || !d2) return [d1];
+function parseDatesToIso(dateStr) {
+  // Form request-date fields only. createdon/modifiedon are migration or load
+  // timestamps and must never become attendance dates.
+  if (!dateStr) return [];
+  const text = String(dateStr).trim();
+  const matches = [...text.matchAll(/(\d{1,2})\/(\d{1,2})\/(\d{4})|(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)/g)];
+  const parsed = matches.map(m => m[1]
+    ? `${m[3]}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`
+    : `${m[4]}-${m[5]}-${m[6]}`);
+  if (!parsed.length) return [];
+  const d1 = parsed[0], d2 = parsed[1] || d1;
+  if (d1 === d2) return [d1];
   const list = [];
   let cur = parseISO(d1), target = parseISO(d2);
-  while (cur <= target) {
+  if (cur > target) return [d1, d2];
+  while (cur <= target && list.length < 370) {
     list.push(isoDate(cur));
     cur.setDate(cur.getDate() + 1);
   }
-  return list.length ? list : [d1];
+  return list;
 }
-
 function mapLeaveType(val) {
   if (!val) return "Present";
   const s = String(val).toLowerCase();
@@ -473,276 +532,317 @@ function parseMakeUpHours(r) {
   return 0.5;
 }
 
+function parseMakeUpSegments(value) {
+  const raw = String(value || "").replace(/\r/g, "\n").trim();
+  if (!raw) return [];
+  const segments = [];
+  // Entries are normally comma/newline separated. Times may or may not have
+  // spaces around their internal hyphen, e.g. 7:30 AM-8:00 AM.
+  const entryRx = /(\d{1,2}\/\d{1,2}\/\d{4})\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d+(?::\d{1,2})?|\d*\.\d+)/gi;
+  let match;
+  while ((match = entryRx.exec(raw)) !== null) {
+    const [mmRaw, ddRaw, yyyy] = match[1].split("/");
+    const mm = mmRaw.padStart(2, "0"), dd = ddRaw.padStart(2, "0");
+    const duration = match[4];
+    let hours = 0;
+    if (duration.includes(":")) {
+      const [hh, min] = duration.split(":").map(Number);
+      hours = (hh || 0) + ((min || 0) / 60);
+    } else {
+      hours = Number(duration) || 0;
+    }
+    segments.push({
+      date: `${yyyy}-${mm}-${dd}`,
+      displayDate: `${mm}/${dd}/${yyyy}`,
+      start: match[2].trim(),
+      end: match[3].trim(),
+      duration,
+      hours: Math.round(hours * 100) / 100
+    });
+  }
+  return segments;
+}
+
+async function fetchAllOData(url, headers) {
+  const rows = [];
+  let next = url;
+  while (next) {
+    const res = await fetch(next, { headers });
+    if (!res.ok) throw new Error(`Dataverse HTTP ${res.status}: ${res.statusText}`);
+    const data = await res.json();
+    rows.push(...(data.value || []));
+    next = data["@odata.nextLink"] || null;
+  }
+  return rows;
+}
+function odataDateTimeStart(iso) { return `${iso}T00:00:00Z`; }
+function odataDateTimeEnd(iso) { return `${iso}T23:59:59Z`; }
+function normalizeMatchId(value) {
+  const v = String(value ?? "").trim().toUpperCase();
+  return v || null;
+}
+function occurrenceNumber(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const text = String(value).trim().toLowerCase().replace(/[.!]+$/g, "").trim();
+  if (!text) return null;
+  if (["true", "yes", "y", "1"].includes(text)) return 1;
+  if (["false", "no", "n", "0"].includes(text)) return 0;
+  const n = Number(text);
+  if (Number.isFinite(n)) return n;
+  const occurrenceMatch = text.match(/(?:occ(?:urrence)?\s*[:=-]?\s*)?(-?\d+(?:\.\d+)?)\s*(?:occ(?:urrence)?s?)?/i);
+  if (occurrenceMatch) {
+    const parsed = Number(occurrenceMatch[1]);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+function uniqueBy(items, keyFn) {
+  const seen = new Set();
+  return (items || []).filter((item, index) => {
+    const key = keyFn(item, index);
+    if (!key) return true;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+function recordDedupeKey(r) {
+  if (!r) return "";
+  // Dataverse request + expanded request date is the authoritative identity.
+  if (r.dvId) return `dv:${String(r.dvId).toLowerCase()}|${r.date || ""}`;
+  return `local:${r.rid || ""}`;
+}
+function makeupDedupeKey(m) {
+  if (!m) return "";
+  // A Dataverse Time Off submission represents one make-up agreement even when
+  // cr714_makeuptime contains several scheduled work sessions.
+  if (m.dvId) return `dv:${String(m.dvId).trim().toLowerCase()}`;
+  if (m.mid) return `local:${String(m.mid).trim().toLowerCase()}`;
+  return [m.empId, m.dateMissed, Number(m.hoursOwed || 0).toFixed(4), m.status, m.oss ? 1 : 0]
+    .map(v => String(v ?? "").trim().toLowerCase()).join("|");
+}
+function uniqueRecords(items) { return uniqueBy(items, recordDedupeKey); }
+function uniqueMakeups(items) { return uniqueBy(items, makeupDedupeKey); }
+function recalculateAfterDedupe() {
+  const beforeRecords = (S.records || []).length;
+  const beforeMakeups = (S.makeups || []).length;
+  S.records = uniqueRecords(S.records || []);
+  S.makeups = uniqueMakeups(S.makeups || []);
+  const removedRecords = beforeRecords - S.records.length;
+  const removedMakeups = beforeMakeups - S.makeups.length;
+  return { removedRecords, removedMakeups };
+}
+
+function currentDataRange() {
+  const [from, to] = range();
+  return from <= to ? [from, to] : [to, from];
+}
 async function pullFromDataverse(silent = false) {
-  setSync("Syncing with Dataverse...");
+  const [rangeFrom, rangeTo] = currentDataRange();
+  // Always retain the full rolling window ending on the report's through-date,
+  // even when the visible report range is shorter than 90 days.
+  const rollingFrom = addDays(rangeTo, -OCC_WINDOW_DAYS);
+  const syncFrom = rollingFrom < rangeFrom ? rollingFrom : rangeFrom;
+  showSyncCover(`Loading records for ${fmt(syncFrom)} to ${fmt(rangeTo)}...`);
+  setSync(`Syncing rolling data ${fmt(syncFrom)} to ${fmt(rangeTo)}...`);
   try {
     const token = await getDataverseToken();
     if (!token) throw new Error("Authentication missing");
-
     const headers = {
       "Authorization": `Bearer ${token}`,
       "Accept": "application/json",
       "OData-MaxVersion": "4.0",
       "OData-Version": "4.0",
-      "Prefer": 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"'
+      "Prefer": 'odata.include-annotations="OData.Community.Display.V1.FormattedValue",odata.maxpagesize=5000'
     };
+    const api = `${DATAVERSE_URL}/api/data/v9.2`;
+    const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_department","cr714_title","cr714_jobtitle","cr714_managerassigned","cr714_location","cr714_status","cr714_loopnumber","cr714_shiftselection","cr714_breakselection","cr714_startdate","statecode"].join(",");
+    const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_id","cr714_name","cr714_email","cr714_department","cr714_requestdates","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade"].join(",");
+    const attendanceSelect = ["cr714_csrattendancetrackerid","cr714_id","cr714_employeename","cr714_startdate","cr714_enddate","cr714_typeofleave","cr714_notes","cr714_occurrence"].join(",");
 
-    const [empRes, toRes] = await Promise.all([
-      fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_EMPLOYEES}`, { headers }),
-      fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}?$orderby=createdon desc`, { headers })
+    // Time Off request dates are text, so Dataverse cannot compare them as dates.
+    // Use a bounded created/modified window, then apply the exact requested-date range after parsing.
+    // CSR Attendance contains the authoritative custom dates. Legacy Time Off
+    // records were migrated together, so createdon/modifiedon cannot filter them.
+    const attendanceFilter = `(cr714_startdate le ${odataDateTimeEnd(rangeTo)} and cr714_enddate ge ${odataDateTimeStart(syncFrom)})`;
+
+    const empUrl = `${api}/${TABLE_EMPLOYEES}?$select=${empSelect}&$filter=statecode eq 0`;
+    const timeUrl = `${api}/${TABLE_TIMEOFF}?$select=${timeSelect}&$orderby=cr714_id desc`;
+    const attendanceUrl = `${api}/${TABLE_ATTENDANCE}?$select=${attendanceSelect}&$filter=${encodeURIComponent(attendanceFilter)}&$orderby=cr714_startdate desc`;
+    updateSyncCover("Downloading employee, time-off, and attendance records...");
+    const [allEmps, timeRows, attendanceRows] = await Promise.all([
+      fetchAllOData(empUrl, headers), fetchAllOData(timeUrl, headers), fetchAllOData(attendanceUrl, headers)
     ]);
 
-    if (!empRes.ok) throw new Error(`Employees Table HTTP ${empRes.status}: ${empRes.statusText}`);
-    if (!toRes.ok) throw new Error(`Time Off Table HTTP ${toRes.status}: ${toRes.statusText}`);
-
-    const empData = await empRes.json();
-    const toData = await toRes.json();
-
-    const allEmps = empData.value || [];
-
     const activeEmps = allEmps.filter(e => {
-      if (e.statecode === 1) return false;
-      const status = String(
-        e["cr714_statusname@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_statusname ||
-        e["cr714_status@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_status ||
-        ""
-      ).toLowerCase().trim();
-
-      if (status && (status.includes("term") || status.includes("inact") || status.includes("resign") || status.includes("former") || status.includes("depart"))) {
-        return false;
-      }
-      return true;
+      const status = String(e["cr714_status@OData.Community.Display.V1.FormattedValue"] || e.cr714_status || "").toLowerCase().trim();
+      return !(status && (status.includes("term") || status.includes("inact") || status.includes("resign") || status.includes("former") || status.includes("depart")));
     });
-
     const locationFiltered = activeEmps.filter(e => {
-      const loc = String(
-        e["cr714_locationname@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_locationname ||
-        e["cr714_location@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_location ||
-        ""
-      ).toLowerCase().trim();
-
+      const loc = String(e["cr714_location@OData.Community.Display.V1.FormattedValue"] || e.cr714_location || "").toLowerCase().trim();
       return loc.includes("daytona") || loc.includes("jacksonville") || loc.includes("jax");
     });
-
-    let targetEmps = locationFiltered;
-    if (locationFiltered.length === 0 && activeEmps.length > 0) {
-      targetEmps = activeEmps;
-    }
-
-    const empMapByEmail = new Map();
-    const empMapByName = new Map();
-
+    const targetEmpsRaw = locationFiltered.length ? locationFiltered : activeEmps;
+    const targetEmps = uniqueBy(targetEmpsRaw, e => {
+      const email = String(e.cr714_emailaddress || "").trim().toLowerCase();
+      const name = String(e.cr714_employeename || "").trim().toLowerCase();
+      return email ? `email:${email}` : (name ? `name:${name}` : "");
+    });
+    const empMapByEmail = new Map(), empMapByName = new Map();
     S.employees = targetEmps.map(e => {
       const email = String(e.cr714_emailaddress || "").trim().toLowerCase();
       const name = String(e.cr714_employeename || "").trim();
       const id = email || `EMP-${name.replace(/\s+/g, '')}`;
-      const dept = String(
-        e["cr714_departmentname@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_departmentname ||
-        e["cr714_department@OData.Community.Display.V1.FormattedValue"] ||
-        e.cr714_department ||
-        ""
-      ).trim();
-
-      const record = {
-        id,
-        name,
-        email,
-        dept: dept || "General",
-        repName: name,
-        title: String(e.cr714_titlename || e.cr714_jobtitle || "Representative"),
-        supervisor: String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Supervisor"),
-        manager: String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Manager"),
-        srManager: "Senior Leadership",
-        location: String(e["cr714_locationname@OData.Community.Display.V1.FormattedValue"] || e.cr714_locationname || "Daytona"),
-        status: String(e.cr714_statusname || "Active"),
-        loopNumber: e.cr714_loopnumber || "",
-        shift: e.cr714_shiftselectionname || "",
-        breakTime: e.cr714_breakselectionname || "",
-        startDate: e.cr714_startdate || ""
-      };
-
+      const dept = String(e["cr714_department@OData.Community.Display.V1.FormattedValue"] || e.cr714_department || "").trim();
+      const record = { id, name, email, dept: dept || "General", repName:name,
+        title:String(e["cr714_title@OData.Community.Display.V1.FormattedValue"] || e.cr714_title || e.cr714_jobtitle || "Representative"),
+        supervisor:String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Supervisor"),
+        manager:String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Manager"),
+        srManager:"Senior Leadership", location:String("Daytona"),
+        status:String(e["cr714_status@OData.Community.Display.V1.FormattedValue"] || e.cr714_status || "Active"), loopNumber:e.cr714_loopnumber || "", shift:String(e["cr714_shiftselection@OData.Community.Display.V1.FormattedValue"] || e.cr714_shiftselection || ""), breakTime:String(e["cr714_breakselection@OData.Community.Display.V1.FormattedValue"] || e.cr714_breakselection || ""), startDate:e.cr714_startdate || "" };
       if (email) empMapByEmail.set(email, record);
       if (name) empMapByName.set(name.toLowerCase(), record);
       return record;
     });
 
-    // Snapshot any currently cancelled records so a sync/refresh doesn't lose them
+    // Index CSR Attendance by ID and by employee/date. The legacy IDs do not overlap
+    // the Time Off IDs, so employee/date is the required fallback mapping.
+    const attendanceById = new Map();
+    const attendanceByEmployeeDate = new Map();
+    const addAttendanceKey = (key, item) => {
+      if (!key) return;
+      const list = attendanceByEmployeeDate.get(key) || [];
+      list.push(item);
+      attendanceByEmployeeDate.set(key, list);
+    };
+    attendanceRows.forEach(a => {
+      const n = occurrenceNumber(a.cr714_occurrence);
+      const item = {
+        occurrence:n,
+        hasOccurrence:n !== null,
+        attendanceId:a.cr714_csrattendancetrackerid || "",
+        startDate:a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : "",
+        endDate:a.cr714_enddate ? String(a.cr714_enddate).slice(0,10) : (a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : ""),
+        leaveType:String(a.cr714_typeofleave || "").trim(),
+        notes:String(a.cr714_notes || "").trim()
+      };
+      const id = normalizeMatchId(a.cr714_id);
+      if (id) attendanceById.set(id, item);
+      const employee = String(a.cr714_employeename || "").trim().toUpperCase();
+      const rawDate = a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : "";
+      if (employee && rawDate) {
+        addAttendanceKey(`${employee}|${rawDate}`, item);
+        // Dataverse midnight UTC dates may display as the prior local calendar date.
+        addAttendanceKey(`${employee}|${addDays(rawDate,-1)}`, item);
+      }
+    });
+
     const cancelledDvIds = new Set((S.records || []).filter(r => r.cancelled).map(r => r.dvId).filter(Boolean));
-    const cancelledRids = new Set((S.records || []).filter(r => r.cancelled).map(r => r.rid));
-
-    const newRecords = [];
-    const newMakeups = [];
-
-    (toData.value || []).forEach(r => {
+    const newRecords = [], newMakeups = [];
+    timeRows.forEach(r => {
       const email = String(r.cr714_email || "").trim().toLowerCase();
       const name = String(r.cr714_name || "").trim();
-
-      let matchedEmp = empMapByEmail.get(email) || empMapByName.get(name.toLowerCase());
+      const matchedEmp = empMapByEmail.get(email) || empMapByName.get(name.toLowerCase());
       if (!matchedEmp) return;
-
       const formDept = String(r["cr714_department@OData.Community.Display.V1.FormattedValue"] || r.cr714_department || "").trim();
-      if (formDept && matchedEmp.dept === "General") {
-        matchedEmp.dept = formDept;
-      }
-
-      const dates = parseDatesToIso(r.cr714_requestdates, r.createdon);
-      const mappedType = mapLeaveType(r.cr714_leavetype);
-      const hours = parseHours(r);
-      const muHours = parseMakeUpHours(r);
-
-      const repNotes = (r.cr714_requestnotes || "").trim();
-      const wfNotesVal = (r.cr714_wfnotes || "").trim();
-      const notesParts = [
-        repNotes,
-        r.cr714_lunch ? `Lunch: ${r.cr714_lunch}` : null
-      ].filter(Boolean);
-      const fullNotes = notesParts.join(" | ");
-
+      if (formDept && matchedEmp.dept === "General") matchedEmp.dept = formDept;
+      const timeOffDates = parseDatesToIso(r.cr714_requestdates);
+      const attendanceByRecordId = attendanceById.get(normalizeMatchId(r.cr714_id)) || null;
+      const dateMatches = timeOffDates.length
+        ? (attendanceByEmployeeDate.get(`${name.toUpperCase()}|${timeOffDates[0]}`) || [])
+        : [];
+      const attendance = attendanceByRecordId
+        || dateMatches.find(x => x.hasOccurrence)
+        || dateMatches[0]
+        || null;
+      const authoritativeDates = attendance?.startDate
+        ? (() => {
+            const start = attendance.startDate;
+            const end = attendance.endDate || start;
+            const values = [];
+            let cursor = parseISO(start), target = parseISO(end);
+            while (cursor <= target && values.length < 370) {
+              values.push(isoDate(cursor));
+              cursor.setDate(cursor.getDate() + 1);
+            }
+            return values;
+          })()
+        : timeOffDates;
+      const dates = authoritativeDates.filter(d => d >= syncFrom && d <= rangeTo);
+      if (!dates.length) return;
+      const timeOcc = occurrenceNumber(r.cr714_occurrence);
+      // CSR Attendance is authoritative when populated; otherwise use Time Off.
+      const finalOccurrence = attendance?.hasOccurrence ? attendance.occurrence : (timeOcc ?? 0);
+      const occurrenceSource = attendance?.hasOccurrence ? "CSR Attendance" : (timeOcc !== null ? "Time Off" : "None");
+      const mappedType = mapLeaveType(attendance?.leaveType || r.cr714_leavetype);
+      const hours = parseHours(r), muHours = parseMakeUpHours(r);
+      const repNotes = String(r.cr714_requestnotes || "").trim();
+      const wfNotesVal = String(r.cr714_wfnotes || "").trim();
+      const fullNotes = [repNotes, r.cr714_lunch ? `Lunch: ${r.cr714_lunch}` : null].filter(Boolean).join(" | ");
       const baseRid = r.cr714_autoid || r.cr714_timeoff_2id || uid("r");
       const dvId = r.cr714_timeoff_2id || "";
+      const isCancelled = r.cr714_cancelledrequest === 1 || r.cr714_cancelledrequest === true || String(r.cr714_cancelledrequest).toLowerCase() === "true";
+      dates.forEach((d, idx) => newRecords.push({ rid:`${baseRid}-${idx}`, dvId, date:d, empId:matchedEmp.id, type:mappedType,
+        hours:(mappedType === "Make up Time") ? (muHours || parseMakeUpHours(r)) : hours, notes:fullNotes, wfNotes:wfNotesVal,
+        shiftTrade: r.cr714_shifttrade || "",
+        partialShift:r.cr714_hoursofpartialshift || "", fmla:r.cr714_fmla === 1 || r.cr714_fmla === true || String(r.cr714_fmla).toLowerCase() === "true",
+        voicemail:r.cr714_voicemail === 1 || r.cr714_voicemail === true || String(r.cr714_voicemail).toLowerCase() === "true",
+        // Assign the form-level occurrence once, not once per day in a multi-day request.
+        occurrence:idx === 0 ? finalOccurrence : 0, occurrenceSource,
+        dateSource:attendance?.startDate ? "CSR Attendance" : "Time Off Request Date",
+        requestId:normalizeMatchId(r.cr714_id) || dvId || baseRid,
+        attendanceMatched:!!attendance, attendanceId:attendance?.attendanceId || "",
+        attendanceLeaveType:attendance?.leaveType || "", attendanceNotes:attendance?.notes || "",
+        // cr714_completed is workflow completion status, not an occurrence waiver.
+        waived:false, cancelled:isCancelled || cancelledDvIds.has(dvId), source:"dataverse" }));
 
-      const isCancelled = r.cr714_cancelledrequest === 1 || r.cr714_cancelledrequest === true || String(r.cr714_cancelledrequest) === "true";
-
-      dates.forEach((d, idx) => {
-        const recordHours = (mappedType === "Make-Up") ? (muHours || parseMakeUpHours(r)) : hours;
-        newRecords.push({
-          rid: `${baseRid}-${idx}`,
-          dvId: dvId,
-          date: d,
-          empId: matchedEmp.id,
-          type: mappedType,
-          hours: recordHours,
-          notes: fullNotes,
-          wfNotes: wfNotesVal,
-          partialShift: r.cr714_hoursofpartialshift || "",
-          fmla: r.cr714_fmla === 1 || r.cr714_fmla === true || String(r.cr714_fmla) === "true",
-          voicemail: r.cr714_voicemail === 1 || r.cr714_voicemail === true || String(r.cr714_voicemail) === "true",
-          occurrence: parseInt(r.cr714_occurrence, 10) || 0,
-          waived: !!r.cr714_completed,
-          cancelled: isCancelled,
-          source: "dataverse"
-        });
-      });
-
-      if (r.cr714_makeuptime || (r.cr714_leavetype && String(r.cr714_leavetype).toLowerCase().includes("make up"))) {
+      if (r.cr714_makeuptime || String(r.cr714_leavetype || "").toLowerCase().includes("make up")) {
         const rawMu = String(r.cr714_makeuptime || "");
-        const dateMatchRegex = /(\d{2}\/\d{2}\/\d{4})\s*-\s*([\d:]+\s*(?:AM|PM)?)\s*-\s*([\d:]+\s*(?:AM|PM)?)\s*-\s*([\d:]+)/gi;
-        let matches = [...rawMu.matchAll(dateMatchRegex)];
-
-        if (matches.length > 0) {
-          matches.forEach((match, mIdx) => {
-            const dateStr = match[1];
-            const [mMonth, mDay, mYear] = dateStr.split('/');
-            const isoMuDate = `${mYear}-${mMonth}-${mDay}`;
-            
-            const durStr = match[4];
-            let segmentHours = 0;
-            if (durStr && durStr.includes(':')) {
-              const [hh, mm] = durStr.split(':').map(Number);
-              segmentHours = (hh || 0) + ((mm || 0) / 60);
-            } else if (durStr && !isNaN(parseFloat(durStr))) {
-              segmentHours = parseFloat(durStr);
-            } else {
-              segmentHours = muHours || 1;
-            }
-
-            const calculatedHours = Math.round(segmentHours * 100) / 100;
-            const startTime = to12Hour(match[2].trim());
-            const endTime = to12Hour(match[3].trim());
-            const durFormatted = formatDuration(match[4].trim());
-            const singleLineSchedule = `${dateStr} - ${startTime} - ${endTime} (${durFormatted})`;
-
-            const combinedMuNotes = [
-              `Schedule: ${singleLineSchedule}`,
-              repNotes ? `Rep Notes: ${repNotes}` : null
-            ].filter(Boolean).join("\n\n");
-
-            newRecords.push({
-              rid: `${baseRid}-mu-${mIdx}`,
-              dvId: dvId,
-              date: isoMuDate,
-              empId: matchedEmp.id,
-              type: "Make-Up",
-              hours: calculatedHours,
-              notes: combinedMuNotes,
-              fmla: false,
-              voicemail: false,
-              occurrence: 0,
-              waived: !!r.cr714_completed,
-              source: "dataverse"
-            });
-
-            newMakeups.push({
-              mid: `${baseRid}-${mIdx}`,
-              dvId: dvId,
-              empId: matchedEmp.id,
-              rid: `${baseRid}-0`,
-              dateMissed: isoMuDate,
-              hoursOwed: calculatedHours,
-              dueDate: addDays(isoMuDate, 7),
-              status: r.cr714_completed ? "Completed" : "Pending",
-              oss: true,
-              completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
-              notes: combinedMuNotes || fullNotes
-            });
-          });
-        } else {
-          const scheduleFormatted = cleanMakeUpString(rawMu);
-          const combinedMuNotes = [
-            scheduleFormatted ? `Schedule: ${scheduleFormatted}` : null,
-            repNotes ? `Rep Notes: ${repNotes}` : null
-          ].filter(Boolean).join("\n\n");
-
-          newMakeups.push({
-            mid: baseRid,
-            dvId: dvId,
-            empId: matchedEmp.id,
-            rid: `${baseRid}-0`,
-            dateMissed: dates[0] || today(),
-            hoursOwed: muHours,
-            dueDate: addDays(dates[0] || today(), 7),
-            status: r.cr714_completed ? "Completed" : "Pending",
-            oss: true,
-            completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
-            notes: combinedMuNotes || fullNotes
-          });
-        }
+        const scheduleSegments = parseMakeUpSegments(rawMu);
+        // One Time Off submission is one make-up agreement. The schedule can
+        // contain several work sessions, but those sessions must not become
+        // duplicate agreements in the employee modal, OSS count, or KPIs.
+        const missedDate = dates[0];
+        const scheduledHours = scheduleSegments.reduce((sum, segment) => sum + (Number(segment.hours) || 0), 0);
+        const notes = [
+          ...scheduleSegments.map(segment => `Schedule: ${segment.displayDate} - ${to12Hour(segment.start)} - ${to12Hour(segment.end)} (${formatDuration(segment.duration)})`),
+          !scheduleSegments.length && rawMu ? `Unparsed schedule: ${rawMu}` : null,
+          repNotes ? `Rep Notes: ${repNotes}` : null
+        ].filter(Boolean).join("\n");
+        newMakeups.push({
+          mid: String(baseRid),
+          dvId,
+          empId: matchedEmp.id,
+          rid: `${baseRid}-0`,
+          dateMissed: missedDate,
+          hoursOwed: Math.round((scheduledHours || muHours) * 100) / 100,
+          dueDate: addDays(missedDate, 7),
+          status: r.cr714_completed ? "Completed" : "Pending",
+          oss: true,
+          completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
+          scheduleSegments,
+          notes: notes || fullNotes
+        });
       }
     });
-
-    newRecords.forEach(r => {
-      if (cancelledDvIds.has(r.dvId) || cancelledRids.has(r.rid)) {
-        r.cancelled = true;
-      }
-    });
-
-    newRecords.forEach(r => {
-      if (cancelledDvIds.has(r.dvId) || cancelledRids.has(r.rid)) {
-        r.cancelled = true;
-      }
-    });
-
-    S.employees.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    updateSyncCover("Applying occurrence rules and preparing the dashboard...");
+    S.employees.sort((a,b)=>(a.name||"").localeCompare(b.name||""));
     S.records = newRecords;
     S.makeups = newMakeups;
-    S.settings.lastSync = new Date().toLocaleString();
-
-    save();
-    render();
-    if (!silent) toast(`Synced ${S.employees.length} active reps & ${newRecords.length} records`);
+    recalculateAfterDedupe();
+    S.settings.lastSync = `${new Date().toLocaleString()} (${rangeFrom} to ${rangeTo})`;
+    S.settings.loadedFrom = syncFrom; S.settings.loadedTo = rangeTo;
+    save(); render();
+    if (!silent) toast(`Synced ${S.records.length} unique Time Off records and ${S.makeups.length} unique make-up agreements through ${fmt(rangeTo)}`);
   } catch (err) {
-    console.error(err);
-    if (!silent) toast("Dataverse sync failed: " + err.message);
-    setSync("Sync failed");
+    console.error(err); if (!silent) toast("Dataverse sync failed: " + err.message); setSync("Sync failed");
+  } finally {
+    setSync("");
+    hideSyncCover();
   }
-  setSync("");
 }
-
   async function cancelRecordRequest(rid) {
   const target = S.records.find(r => r.rid === rid);
   if (!target) return;
@@ -843,13 +943,19 @@ async function patchDataverseRecord(dvId, fields) {
       payload.cr714_voicemail = fields.cr714_voicemail ? "true" : "false";
     }
     if (fields.cr714_occurrence !== undefined) {
-      payload.cr714_occurrence = String(parseInt(fields.cr714_occurrence, 10) || 0);
+      payload.cr714_occurrence = String(occurrenceNumber(fields.cr714_occurrence) || 0);
     }
     if (fields.cr714_cancelledrequest !== undefined) {
       payload.cr714_cancelledrequest = fields.cr714_cancelledrequest ? "true" : "false";
     }
     if (fields.cr714_wfnotes !== undefined) {
       payload.cr714_wfnotes = fields.cr714_wfnotes;
+    }
+    if (fields.cr714_ptohoursrequested !== undefined) {
+      payload.cr714_ptohoursrequested = String(fields.cr714_ptohoursrequested);
+    }
+    if (fields.cr714_hoursofpartialshift !== undefined) {
+      payload.cr714_hoursofpartialshift = fields.cr714_hoursofpartialshift;
     }
 
     const res = await fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}(${dvId})`, {
@@ -897,9 +1003,11 @@ const OCC_WINDOW_DAYS = 90;
 const ORG_FIELDS = [["dept","Department"],["repName","Reps"],["supervisor","Supervisor"],["manager","Manager"]];
 const MU_STATUS = ["Pending","Approved","Completed","Missed"];
 
-const TABS = [["dashboard","Dashboard"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
+const TABS = [["dashboard","Dashboard"],["occurrenceOverview","Occurrence Overview"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
 
 let S = load() || { employees: [], records: [], makeups: [], settings: {} };
+const startupDedupe = recalculateAfterDedupe();
+if (startupDedupe.removedRecords || startupDedupe.removedMakeups) save();
 let UI = { tab:"dashboard", preset:"week", anchor:today(), from:null, to:null,
            dept:"", repName:"", title:"", supervisor:"", manager:"", q:"", type:"",
            sortKey:"date", sortDir:-1, muFilter:"", teamSortKey:"name", teamSortDir:1 };
@@ -907,7 +1015,7 @@ let charts = [];
 
 function load(){
   try{
-    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v9"));
+    const s = JSON.parse(localStorage.getItem("wf.state.cr714_v12"));
     return s && s.employees && s.employees.length > 0 ? s : null;
   }catch(e){
     return null;
@@ -916,7 +1024,7 @@ function load(){
 
 function save(){
   try{
-    localStorage.setItem("wf.state.cr714_v9", JSON.stringify(S));
+    localStorage.setItem("wf.state.cr714_v12", JSON.stringify(S));
   }catch(e){
     toast("Storage limit exceeded");
   }
@@ -926,6 +1034,10 @@ const $ = s=>document.querySelector(s);
 const esc = s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function uid(p){ return p+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-4); }
 function today(){ return isoDate(new Date()); }
+function isWeekend(isoStr) {
+  const day = parseISO(isoStr).getDay();
+  return day === 0 || day === 6; // 0 is Sunday, 6 is Saturday
+}
 function isoDate(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
 function parseISO(s){ const [y,m,d]=s.split("-").map(Number); return new Date(y,m-1,d); }
 function addDays(s,n){ const d=parseISO(s); d.setDate(d.getDate()+n); return isoDate(d); }
@@ -946,6 +1058,27 @@ function range(){
   return [a,a];
 }
 
+function calendarTypeSummary(records) {
+  const byType = {};
+  uniqueRecords(records || []).forEach(r => {
+    if (!r || r.type === "Present" || r.cancelled) return;
+    const type = r.type || "Absent";
+    const bucket = byType[type] || { count: 0, hours: 0, requests: new Set() };
+    const requestKey = r.requestId || r.dvId || r.rid;
+    if (!bucket.requests.has(requestKey)) { bucket.requests.add(requestKey); bucket.count += 1; }
+    bucket.hours += Number(r.hours || 0);
+    byType[type] = bucket;
+  });
+  return byType;
+}
+function calendarDot(type, summary) {
+  const tObj = TYPES[type] || { color: "var(--muted)", abbr: type.slice(0,2).toUpperCase() };
+  const count = summary?.count || 0;
+  const hours = Math.round((summary?.hours || 0) * 100) / 100;
+  const ptoTitle = type === "PTO" ? ` · ${hours}h` : "";
+  return `<span class="dot" title="${esc(type)}: ${count} request${count===1?"":"s"}${ptoTitle}" style="background:${tObj.color}">${count>1?count:tObj.abbr}</span>`;
+}
+
 function renderCalendar(){
   const [f,t]=range();
   const recs=filteredRecords(), byDate={};
@@ -961,45 +1094,39 @@ function renderCalendar(){
   </div>`;
 
   if(UI.preset==="week" || (UI.preset==="adjusted" && addDays(f,10)>t && addDays(f,1)<=t)){
-    // Build array of the 7 days in the current week
     let days=[]; 
-    let startD = UI.preset==="week" ? parseISO(f) : parseISO(UI.anchor || today());
-    if (UI.preset==="week") {
-      for(let i=0; i<7; i++) days.push(addDays(f, i));
-    } else {
-      for(let i=0; i<7; i++) days.push(addDays(f, i));
+    let dObj = parseISO(f);
+    while (dObj.getDay() !== 1) { // 1 = Monday
+      dObj.setDate(dObj.getDate() + 1);
+    }
+    let cur = isoDate(dObj);
+    for(let i=0; i<5; i++) {
+      days.push(cur);
+      cur = addDays(cur, 1);
     }
 
-    // Ensure selected day exists in the current week, otherwise default to the first day of the week or today
     if (!UI.selectedWeekDay || !days.includes(UI.selectedWeekDay)) {
       UI.selectedWeekDay = days.includes(today()) ? today() : days[0];
     }
 
-    const dows=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+    const dows=["Mon","Tue","Wed","Thu","Fri"];
     const selDay = UI.selectedWeekDay;
     const allRs = byDate[selDay]||[];
     const presentCount = allRs.filter(r => r.type === "Present").length;
     const occurrenceRs = allRs.filter(r => r.type !== "Present").sort((a,b)=>(a.type||"").localeCompare(b.type||""));
 
-    const weekGridHtml = `<div class="cal-grid mt" style="margin-bottom: 20px;">
+    const weekGridHtml = `<div class="cal-grid" style="grid-template-columns: repeat(5, 1fr); margin-bottom: 20px;">
       ${days.map(ds => {
         const dObj = parseISO(ds);
         const dowName = dows[dObj.getDay()];
         const rs = byDate[ds]||[];
         const isSelected = ds === selDay;
         const isToday = ds === today();
-        const agg={}; 
-        rs.forEach(r=>{ 
-          const ty = r.type || "Absent";
-          if(ty !== "Present") agg[ty]=(agg[ty]||0)+1; 
-        });
+        const agg = calendarTypeSummary(rs);
 
         return `<div class="cal-cell ${isSelected ? "today" : ""}" data-select-day="${ds}" style="min-height: 80px; cursor: pointer; ${isSelected ? 'border-width: 2px; border-color: var(--brand); background: var(--soft);' : ''}">
           <div class="row"><div class="small muted" style="text-transform: uppercase;">${dowName}</div><div class="d">${dObj.getDate()}</div></div>
-          <div class="cal-mini">${Object.entries(agg).map(([ty,n])=> {
-            const tObj = TYPES[ty] || { color: "var(--muted)", abbr: ty.slice(0,2).toUpperCase() };
-            return `<span class="dot" title="${esc(ty)}:${n}" style="background:${tObj.color}">${n>1?n:tObj.abbr}</span>`;
-          }).join("")}</div>
+          <div class="cal-mini">${Object.entries(agg).map(([ty,summary])=>calendarDot(ty,summary)).join("")}</div>
         </div>`;
       }).join("")}
     </div>`;
@@ -1091,16 +1218,16 @@ function filteredRecords(from,to){
   if (!S.records) return [];
   const ids = new Set(filteredEmployees().map(e=>e.id));
   const [f,t] = from?[from,to]:range();
-  return S.records.filter(r => ids.has(r.empId) && r.date>=f && r.date<=t && (!UI.type || r.type === UI.type));
+  return uniqueRecords(S.records.filter(r => ids.has(r.empId) && r.date>=f && r.date<=t && (!UI.type || r.type === UI.type)));
 }
 
 function emp(id){ return S.employees?.find(e=>e.id===id); }
-function isOcc(r){ return !!TYPES[r.type]?.occ && !r.waived; }
+function isOcc(r){ return !r.cancelled && !r.waived && occurrenceNumber(r.occurrence) > 0; }
 
 function occCount(empId, asOf){
   if (!S.records) return 0;
   const from = addDays(asOf, -OCC_WINDOW_DAYS);
-  return S.records.filter(r=>r.empId===empId && r.date>from && r.date<=asOf && isOcc(r)).length;
+  return uniqueRecords(S.records.filter(r=>r.empId===empId && r.date>from && r.date<=asOf && isOcc(r))).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
 }
 
 function level(n){ for(const [k,name,cls] of LADDER) if(n>=k) return {name,cls}; return null; }
@@ -1108,7 +1235,7 @@ function level(n){ for(const [k,name,cls] of LADDER) if(n>=k) return {name,cls};
 function ossUsed(empId, asOf){
   if (!S.makeups) return 0;
   const from = addDays(asOf||today(), -365);
-  return S.makeups.filter(m=>m.empId===empId && m.oss && m.status!=="Missed" && m.dateMissed>=from).length;
+  return uniqueMakeups(S.makeups.filter(m=>m.empId===empId && m.oss && m.status!=="Missed" && m.status!=="Cancelled" && m.dateMissed>=from)).length;
 }
 
 function metrics(){
@@ -1118,11 +1245,11 @@ function metrics(){
   
   recs.forEach(r=>{ 
     c[r.type]=(c[r.type]||0)+1; 
-    if(isOcc(r)) occ++; 
+    if(isOcc(r)) occ += occurrenceNumber(r.occurrence) || 0; 
   });
 
-  // Calculate default Present count for days without explicit records
-  let days=[]; for(let d=f; d<=t && days.length<370; d=addDays(d,1)) days.push(d);
+  // Calculate default Present count for weekdays only
+  let days=[]; for(let d=f; d<=t; d=addDays(d,1)) { if(!isWeekend(d)) days.push(d); }
   let totalPossibleWorkDays = days.length * emps.length;
   let loggedNonPresent = recs.filter(r => r.type !== "Present").length;
   let explicitPresent = recs.filter(r => r.type === "Present").length;
@@ -1134,7 +1261,7 @@ function metrics(){
   const offenders = new Set(recs.filter(isOcc).map(r=>r.empId));
   const perfect = emps.filter(e=>!offenders.has(e.id));
   const empIds = new Set(emps.map(e=>e.id));
-  const mus = (S.makeups||[]).filter(m=>empIds.has(m.empId) && m.dateMissed>=f && m.dateMissed<=t);
+  const mus = uniqueMakeups((S.makeups||[]).filter(m=>empIds.has(m.empId) && m.dateMissed>=f && m.dateMissed<=t));
   const muDone = mus.filter(m=>m.status==="Completed").length;
   
   const denom = c["Present"] + Object.keys(c).filter(k => k !== "Present" && k !== "Make up Time").reduce((acc, k) => acc + c[k], 0);
@@ -1217,7 +1344,7 @@ function kpiModal(cat, title) {
     if(recs.length === 0) {
       html += `<div class="empty">No records in this period.</div>`;
     } else {
-      html += `<div style="display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; padding-right: 4px;">${recs.map(r => rowRecord(r, true)).join("")}</div>`;
+      html += `<div class="tbl-wrap" style="max-height: 60vh; overflow-y: auto;"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type / Time</th><th style="text-align:left">Notes</th></tr></thead><tbody>${recs.map(r => rowRecord(r, false)).join("")}</tbody></table></div>`;
     }
   }
 
@@ -1279,20 +1406,38 @@ function drawCharts(){
   charts = [];
   if (typeof Chart === "undefined") return;
   const m = metrics(), days = []; 
-  for (let d = m.from; d <= m.to && days.length < 31; d = addDays(d, 1)) days.push(d);
+  for (let d = m.from; d <= m.to; d = addDays(d, 1)) {
+    if (!isWeekend(d)) days.push(d);
+  }
+
+  const colors = {
+    "PTO": "#0d9488",
+    "Shift Trade": "#2563eb",
+    "Make up Time": "#7c3aed",
+    "Schedule Adjustment": "#4f46e5",
+    "Jury Duty / Bereavement": "#6366f1",
+    "Call Out": "#dc2626",
+    "Cancellation": "#22c55e",
+    "Short Shift": "#ea580c",
+    "NCNS": "#1d4ed8",
+    "Tardy": "#d97706",
+    "LOA": "#4338ca"
+  };
 
   const trendLabels = [];
-  const absenceData = [];
-  const leaveData = [];
+  const activeTypes = TYPE_NAMES.filter(n => n !== "Present");
+  
+  const datasets = activeTypes.map(type => {
+    return {
+      label: type,
+      data: days.map(d => m.recs.filter(r => r.date === d && r.type === type).length),
+      backgroundColor: colors[type] || "var(--muted)",
+      borderRadius: 4
+    };
+  }).filter(ds => ds.data.some(val => val > 0));
 
   days.forEach(d => {
     trendLabels.push(parseISO(d).toLocaleDateString(undefined, {month:"short", day:"numeric"}));
-    
-    const dayCallOuts = m.recs.filter(r => r.date === d && (r.type === "Call Out" || r.type === "NCNS" || r.type === "Tardy")).length;
-    const dayOtherLeave = m.recs.filter(r => r.date === d && r.type !== "Call Out" && r.type !== "NCNS" && r.type !== "Tardy" && r.type !== "Present" && r.type !== "Make up Time").length;
-
-    absenceData.push(dayCallOuts);
-    leaveData.push(dayOtherLeave);
   });
 
   const tr = $("#chTrend"); 
@@ -1301,20 +1446,7 @@ function drawCharts(){
       type: "bar",
       data: {
         labels: trendLabels,
-        datasets: [
-          {
-            label: "Call Outs / Exceptions",
-            data: absenceData,
-            backgroundColor: "#dc2626",
-            borderRadius: 4
-          },
-          {
-            label: "PTO / Other Leave",
-            data: leaveData,
-            backgroundColor: "#0d9488",
-            borderRadius: 4
-          }
-        ]
+        datasets: datasets
       },
       options: {
         responsive: true,
@@ -1328,18 +1460,12 @@ function drawCharts(){
           if (elements.length > 0) {
             const index = elements[0].index;
             const clickedDate = days[index];
-            const datasetIndex = elements[0].datasetIndex;
-            
-            const dayRecs = m.recs.filter(r => {
-              if (r.date !== clickedDate) return false;
-              const isCallOut = (r.type === "Call Out" || r.type === "NCNS" || r.type === "Tardy");
-              return datasetIndex === 0 ? isCallOut : !isCallOut && r.type !== "Present" && r.type !== "Make up Time";
-            });
+            const dayRecs = m.recs.filter(r => r.date === clickedDate && r.type !== "Present");
 
-            let rows = dayRecs.length ? dayRecs.map(r => rowRecord(r)).join("") : `<tr class="norow"><td colspan="6" class="empty">No records for this category on ${fmt(clickedDate)}.</td></tr>`;
+            let rows = dayRecs.length ? dayRecs.map(r => rowRecord(r, false)).join("") : `<tr class="norow"><td colspan="4" class="empty">No records on ${fmt(clickedDate)}.</td></tr>`;
 
-            openModal(`<h2>Records — ${fmt(clickedDate)}</h2>
-              <div class="tbl-wrap"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type</th><th style="text-align:left">Hours</th><th style="text-align:left">Notes</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+            openModal(`<h2>All Records — ${fmt(clickedDate)}</h2>
+              <div class="tbl-wrap"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type / Time</th><th style="text-align:left">Notes</th></tr></thead><tbody>${rows}</tbody></table></div>
               <div class="mfoot mt"><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
             bindRecordButtons($("#modalHost"));
           }
@@ -1351,19 +1477,6 @@ function drawCharts(){
   const mx = $("#chMix"); 
   if (mx) { 
     const names = TYPE_NAMES.filter(n => n !== "Present" && m.c[n] > 0);
-    const colors = {
-      "PTO": "#0d9488",
-      "Shift Trade": "#2563eb",
-      "Make up Time": "#7c3aed",
-      "Schedule Adjustment": "#4f46e5",
-      "Jury Duty / Bereavement": "#6366f1",
-      "Call Out": "#dc2626",
-      "Cancellation": "#22c55e",
-      "Short Shift": "#ea580c",
-      "NCNS": "#1d4ed8",
-      "Tardy": "#d97706",
-      "LOA": "#4338ca"
-    };
     
     charts.push(new Chart(mx, {
       type: "doughnut",
@@ -1371,7 +1484,8 @@ function drawCharts(){
         labels: names,
         datasets: [{
           data: names.map(n => m.c[n]),
-          backgroundColor: names.map(n => colors[n] || "var(--muted)")
+          backgroundColor: names.map(n => colors[n] || "var(--muted)"),
+          borderWidth: 0
         }]
       },
       options: { 
@@ -1402,11 +1516,54 @@ function calShift(dir){
   render();
 }
 
+
+function renderOccurrenceOverview(){
+  const m=metrics();
+  const filteredIds = new Set(m.emps.map(e => e.id));
+  const selectedId = UI.overviewRep && filteredIds.has(UI.overviewRep) ? UI.overviewRep : "";
+  if (UI.overviewRep && !selectedId) UI.overviewRep = "";
+  const selected = selectedId ? emp(selectedId) : null;
+  const asOf = m.to;
+  const from90 = addDays(asOf, -OCC_WINDOW_DAYS);
+  const rows = m.emps.map(e => {
+    const periodRecords = uniqueRecords(m.recs.filter(r => r.empId === e.id));
+    const periodOcc = periodRecords.filter(isOcc).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
+    const rollingRecords = uniqueRecords((S.records||[]).filter(r => r.empId===e.id && r.date>from90 && r.date<=asOf && isOcc(r)));
+    const rolling90 = rollingRecords.reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
+    const lv = level(rolling90);
+    const last = rollingRecords.slice().sort((a,b)=>b.date.localeCompare(a.date))[0];
+    return {e,periodRecords,periodOcc,rollingRecords,rolling90,lv,last};
+  }).sort((a,b)=>b.rolling90-a.rolling90 || a.e.name.localeCompare(b.e.name));
+  if(!selected){
+    const total = rows.reduce((n,x)=>n+x.periodOcc,0);
+    const withOcc = rows.filter(x=>x.periodOcc>0).length;
+    const watch = rows.filter(x=>x.rolling90>=3).length;
+    return `<div class="section-title"><h2>Occurrence Overview by Rep</h2><span class="small muted">Select a rep to open their full occurrence history and rolling status.</span></div>
+      <div class="grid kpis mb">${kpi(total,"Occurrences in selected period","var(--red)","")}${kpi(withOcc,"Reps with occurrences","var(--orange)","")}${kpi(watch,"At corrective-action level","var(--amber)","")}${kpi(rows.length,"Reps reviewed","var(--blue)","")}</div>
+      <div class="card tbl-wrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Supervisor</th><th>Selected period</th><th>Rolling 90 days</th><th>Current level</th><th>Latest occurrence</th></tr></thead><tbody>
+      ${rows.map(x=>`<tr data-overview-rep="${esc(x.e.id)}"><td><b>${esc(x.e.name)}</b><div class="small muted">${esc(x.e.id)}</div></td><td>${esc(x.e.dept)}</td><td>${esc(x.e.supervisor)}</td><td><b>${x.periodOcc}</b></td><td><b>${x.rolling90}</b></td><td>${x.lv?`<span class="badge ${x.lv.cls}">${x.lv.name}</span>`:`<span class="badge ok">Clear</span>`}</td><td>${x.last?fmt(x.last.date):"—"}</td></tr>`).join("")||`<tr class="norow"><td colspan="7" class="empty">No representatives match the filters.</td></tr>`}
+      </tbody></table></div>`;
+  }
+  const data=rows.find(x=>x.e.id===selectedId) || {e:selected,periodRecords:[],periodOcc:0,rollingRecords:[],rolling90:0,lv:null};
+  const history=uniqueRecords((S.records||[]).filter(r=>r.empId===selectedId&&r.date>=m.from&&r.date<=m.to&&isOcc(r))).sort((a,b)=>b.date.localeCompare(a.date));
+  const loadedHistory=uniqueRecords((S.records||[]).filter(r=>r.empId===selectedId&&isOcc(r)));
+  const byType={}; history.forEach(r=>byType[r.type]=(byType[r.type]||0)+(occurrenceNumber(r.occurrence)||0));
+  const sourceCounts={}; history.forEach(r=>sourceCounts[r.occurrenceSource||"Unknown"]=(sourceCounts[r.occurrenceSource||"Unknown"]||0)+(occurrenceNumber(r.occurrence)||0));
+  return `<div class="section-title"><button class="btn ghost sm" id="overviewBack">&#8249; All reps</button><h2>${esc(selected.name)} · Occurrence Overview</h2><span class="small muted">As of ${fmt(asOf)}</span></div>
+    <div class="card mb"><div class="row"><div><b>${esc(selected.title||"Representative")}</b><div class="small muted">${esc(selected.dept)} · Supervisor: ${esc(selected.supervisor)}</div></div><div class="right"><span class="badge ${data.lv?data.lv.cls:"ok"}">${data.lv?data.lv.name:"Clear"}</span></div></div></div>
+    <div class="grid kpis mb">${kpi(data.periodOcc,"Selected-period occurrences","var(--red)","")}${kpi(data.rolling90,"Rolling 90-day occurrences","var(--orange)","")}${kpi(loadedHistory.reduce((n,r)=>n+(occurrenceNumber(r.occurrence)||0),0),"Loaded history total","var(--purple)","")}${kpi(ossUsed(selectedId,asOf)+`/${OSS_LIMIT}`,"OSS used · 12 months","var(--teal)","")}</div>
+    <div class="grid two mb"><div class="card"><h3>Occurrence type summary</h3>${Object.keys(byType).length?`<div class="tbl-wrap"><table><tbody>${Object.entries(byType).sort((a,b)=>b[1]-a[1]).map(([type,n])=>`<tr><td>${pill(type)}</td><td><b>${n}</b></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No occurrences loaded.</div>`}</div>
+    <div class="card"><h3>Occurrence source</h3>${Object.keys(sourceCounts).length?`<div class="tbl-wrap"><table><tbody>${Object.entries(sourceCounts).map(([source,n])=>`<tr><td>${esc(source)}</td><td><b>${n}</b></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No occurrence sources loaded.</div>`}</div></div>
+    <div class="section-title"><h2>Occurrence Records ${fmt(m.from)} → ${fmt(m.to)} (${history.length})</h2><span class="small muted">Current date and employee filters applied. Cancelled and waived records are excluded.</span></div>
+    <div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Occurrence</th><th>Source</th><th>90-day total as of record</th><th>Level</th><th>Notes</th><th></th></tr></thead><tbody>
+      ${history.map(r=>{const n=occCount(selectedId,r.date),lv=level(n);return `<tr data-rec="${esc(r.rid)}"><td>${fmt(r.date)}</td><td>${pill(r.type)}</td><td><b>${occurrenceNumber(r.occurrence)||0}</b></td><td><span class="badge">${esc(r.occurrenceSource||"Unknown")}</span></td><td>${n}</td><td>${lv?`<span class="badge ${lv.cls}">${lv.name}</span>`:`<span class="badge ok">Clear</span>`}</td><td class="small">${esc(r.wfNotes||r.attendanceNotes||r.notes||"")}</td><td><button class="btn ghost sm" data-rec-edit="${esc(r.rid)}">Edit</button></td></tr>`;}).join("")||`<tr class="norow"><td colspan="8" class="empty">No occurrence records are loaded for this rep.</td></tr>`}
+    </tbody></table></div>`;
+}
 function renderTeam(){
   const m=metrics();
   const teamRows=m.emps.map(e=>{
     const rs=m.recs.filter(r=>r.empId===e.id);
-    const occ=rs.filter(isOcc).length, n90=occCount(e.id,m.to), lv=level(n90);
+    const occ=rs.filter(isOcc).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0), n90=occCount(e.id,m.to), lv=level(n90);
     const perfect=rs.length&&!occ;
     return {
       e, 
@@ -1416,7 +1573,9 @@ function renderTeam(){
       supervisor: e.supervisor, 
       manager: e.manager, 
       recordsCount: rs.length, 
-      occurrences: occ, 
+      occurrences: occ,
+      rolling90: n90,
+      rollingLevel: lv,
       oss: ossUsed(e.id,m.to), 
       perfect, 
       status: e.status
@@ -1443,8 +1602,8 @@ function renderTeam(){
     <th data-team-sort="occurrences">Occurrences ${arrow("occurrences")}</th>
     <th data-team-sort="oss">OSS used ${arrow("oss")}</th>
   </tr></thead><tbody>
-  ${teamRows.map(({e,recordsCount,occurrences,oss})=>`<tr data-emp="${esc(e.id)}">
-    <td><b>${esc(e.name)}</b><div class="small muted">${esc(e.id)}</div></td>
+  ${teamRows.map(({e,recordsCount,occurrences,rolling90,rollingLevel,oss})=>`<tr data-emp="${esc(e.id)}">
+    <td><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>${esc(e.name)}</b><span class="badge ${rollingLevel?rollingLevel.cls:"ok"}" title="Rolling 90-day occurrence count through ${fmt(m.to)}">${rolling90} occ. / 90d</span></div><div class="small muted">${esc(e.id)}</div></td>
     <td>${esc(e.dept)}</td><td>${esc(e.supervisor)}</td><td>${esc(e.manager)}</td>
     <td>${recordsCount}</td><td>${occurrences}</td>
     <td>${oss}/${OSS_LIMIT}</td>
@@ -1503,7 +1662,7 @@ function muActions(m){
 function renderMakeup(){
   const [f,t] = range();
   const ids = new Set(filteredEmployees().map(e=>e.id));
-  const mus = (S.makeups||[]).filter(m => ids.has(m.empId) && (!UI.muFilter || m.status === UI.muFilter));
+  const mus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && (!UI.muFilter || m.status === UI.muFilter)));
   
   const byDate = {};
   mus.forEach(m => {
@@ -1511,7 +1670,7 @@ function renderMakeup(){
     if (d) (byDate[d] = byDate[d] || []).push(m);
   });
 
-  const counts = MU_STATUS.map(s => (S.makeups||[]).filter(m => ids.has(m.empId) && m.status === s).length);
+  const counts = MU_STATUS.map(s => uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.status === s)).length);
 
   const head = `<div class="section-title">
     <h2>Make-Up Time Calendar</h2>
@@ -1618,16 +1777,15 @@ function rowRecord(r, slim){
     r.cancelled?`<span class="badge bad" title="Cancelled request">Cancelled</span>`:null
   ].filter(Boolean).join(" ");
 
+  const shiftDisplay = extractShiftHours(r);
+
   if (slim) {
     const rawNotes = (r.type === "Make up Time") ? getRelevantMakeUpNotes(r.notes, r.date) : r.notes;
-    return `<div class="cal-row ${r.cancelled ? 'cancelled' : ''}" data-rec="${esc(r.rid)}" title="Click to edit record">
+    return `<div class="cal-row ${r.cancelled ? 'cancelled' : ''}" data-rec="${esc(r.rid)}" style="cursor:pointer" title="Click to edit record">
       <div class="row-top">
         <div style="font-weight: 600; font-size: 15px; min-width: 150px;">${esc(e.name)}</div>
         <div style="display: flex; align-items: center; gap: 8px;">${pill(r.type)} ${badges}</div>
-        <div style="font-weight: 600; font-size: 13.5px; color: var(--muted);">${extractShiftHours(r)}</div>
-        <div class="row right" style="gap: 6px; margin-left: auto;">
-          <button class="btn ghost sm" data-rec-edit="${esc(r.rid)}">Edit</button>
-        </div>
+        <div style="font-weight: 600; font-size: 13.5px; color: var(--muted); white-space: nowrap;">${esc(shiftDisplay)}</div>
       </div>
       ${rawNotes ? `<div class="small muted" style="word-break: break-word; overflow-wrap: break-word; width: 100%; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--line); line-height: 1.5; white-space: pre-line;">${esc(formatReadableNotes(rawNotes))}</div>` : ""}
       ${r.wfNotes ? `<div class="small" style="word-break: break-word; overflow-wrap: break-word; width: 100%; margin-top: 4px; padding-top: 6px; border-top: 1px dashed var(--line); line-height: 1.4; color: var(--brand); font-weight: 500;"><b>Workforce Notes:</b> ${esc(r.wfNotes)}</div>` : ""}
@@ -1635,18 +1793,17 @@ function rowRecord(r, slim){
   }
 
   return `<tr data-rec="${esc(r.rid)}" class="${r.cancelled ? 'cancelled' : ''}" style="cursor:pointer" title="Click to edit record">
-    <td>${fmt(r.date)}</td>
+    <td style="white-space: nowrap;">${fmt(r.date)}</td>
     <td><b>${esc(e.name)}</b></td>
-    <td>
-      ${pill(r.type)}
-      ${badges}
+    <td style="white-space: nowrap;">
+      <div>${pill(r.type)} ${badges}</div>
+      <div style="font-weight: 600; font-size: 13.5px; color: var(--muted); margin-top: 4px;">${esc(shiftDisplay)}</div>
     </td>
-    <td>${r.hours||""}${r.hours?"h":""}</td>
     <td class="small">
       ${r.notes ? `<div>${esc(r.notes)}</div>` : ""}
       ${r.wfNotes ? `<div style="color: var(--brand); margin-top: 2px;"><b>WF Notes:</b> ${esc(r.wfNotes)}</div>` : ""}
     </td>
-    <td class="row" style="gap:4px"><button class="btn ghost sm" data-rec-edit="${esc(r.rid)}">Edit</button></td></tr>`;
+  </tr>`;
 }
 
 function renderRecords(){
@@ -1655,10 +1812,10 @@ function renderRecords(){
     <button class="btn sm" id="recNew">+ Add record</button></div>
   <div class="card tbl-wrap"><table><thead><tr>
     <th data-sort="date">Date ${UI.sortKey==="date"?(UI.sortDir<0?"↓":"↑"):""}</th><th data-sort="empId">Employee</th>
-    <th data-sort="type">Type</th><th>Hours</th><th>Notes</th><th></th>
-  </tr></thead><tbody>${recs.map(r=>rowRecord(r)).join("")||`<tr class="norow"><td colspan="6" class="empty">No records in this period.</td></tr>`}</tbody></table></div>`;
+    <th data-sort="type">Type / Time</th><th>Notes</th>
+  </tr></thead><tbody>${recs.map(r=>rowRecord(r, false)).join("")||`<tr class="norow"><td colspan="4" class="empty">No records in this period.</td></tr>`}</tbody></table></div>`;
 }
-
+  
 function openModal(html){ $("#modalHost").innerHTML=`<div class="overlay" id="ovl"><div class="modal">${html}</div></div>`;
   $("#ovl").addEventListener("click",e=>{ if(e.target.id==="ovl") closeModal(); }); }
 function closeModal(){ $("#modalHost").innerHTML=""; }
@@ -1685,7 +1842,7 @@ function recordModal(rid,presetDate){
       <div><label>Occurrences</label>
         <div class="row" style="gap:4px">
           <button class="btn ghost sm" id="occMinus" style="padding:4px 10px; font-size:16px;">-</button>
-          <input type="number" id="mOcc" value="${currentOcc}" style="width:60px; text-align:center" step="1">
+          <input type="number" id="mOcc" value="${currentOcc}" style="width:70px; text-align:center" step="0.5">
           <button class="btn ghost sm" id="occPlus" style="padding:4px 10px; font-size:16px;">+</button>
         </div>
       </div>
@@ -1715,8 +1872,8 @@ function recordModal(rid,presetDate){
     $("#mDel").onclick = () => toggleCancelRecord(rid);
   }
 
-  $("#occMinus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = Math.max(0, parseInt(inp.value||0) - 1); };
-  $("#occPlus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = parseInt(inp.value||0) + 1; };
+  $("#occMinus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = Math.max(0, (occurrenceNumber(inp.value)||0) - 0.5); };
+  $("#occPlus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = (occurrenceNumber(inp.value)||0) + 0.5; };
 
   if (!rid) {
     $("#mEmp").onchange = (e) => {
@@ -1740,7 +1897,7 @@ function recordModal(rid,presetDate){
     const partialShift = $("#mPartial").value.trim();
     const fmla = $("#mFmla").checked;
     const voicemail = $("#mVoicemail").checked;
-    const occurrence = parseInt($("#mOcc").value, 10) || 0;
+    const occurrence = occurrenceNumber($("#mOcc").value) || 0;
 
     if (rid) {
       const targetRec = S.records.find(x => x.rid === rid);
@@ -1751,7 +1908,9 @@ function recordModal(rid,presetDate){
             cr714_fmla: fmla,
             cr714_voicemail: voicemail,
             cr714_occurrence: occurrence,
-            cr714_wfnotes: wfNotes
+            cr714_wfnotes: wfNotes,
+            cr714_ptohoursrequested: hours,
+            cr714_hoursofpartialshift: partialShift
           });
         }
       }
@@ -1875,7 +2034,7 @@ function dayModal(ds){
 
 function muDayModal(ds){
   const ids = new Set(filteredEmployees().map(e=>e.id));
-  const dayMus = (S.makeups||[]).filter(m => ids.has(m.empId) && m.dateMissed === ds && (!UI.muFilter || m.status === UI.muFilter));
+  const dayMus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.dateMissed === ds && (!UI.muFilter || m.status === UI.muFilter)));
   
   openModal(`<h2>Make-Up Shifts: ${fmtShort(ds)}</h2>
     ${dayMus.length ? `<div class="tbl-wrap"><table><tbody>${dayMus.map(muRow).join("")}</tbody></table></div>` : `<div class="empty">No make-up shifts scheduled for this day.</div>`}
@@ -1900,8 +2059,8 @@ function muDayModal(ds){
 function empModal(id){
   const e=emp(id); if(!e) return;
   const [f,t]=range();
-  const rs=(S.records||[]).filter(r=>r.empId===id&&r.date>=f&&r.date<=t).sort((a,b)=>b.date.localeCompare(a.date));
-  const mus=(S.makeups||[]).filter(m=>m.empId===id).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
+  const rs=uniqueRecords((S.records||[]).filter(r=>r.empId===id&&r.date>=f&&r.date<=t)).sort((a,b)=>b.date.localeCompare(a.date));
+  const mus=uniqueMakeups((S.makeups||[]).filter(m=>m.empId===id)).sort((a,b)=>b.dateMissed.localeCompare(a.dateMissed));
   const n90=occCount(id,t), lv=level(n90);
   openModal(`<h2>${esc(e.name)} <span class="small muted">${esc(e.id)}</span></h2>
     <p class="small">${esc(e.title)} · ${esc(e.dept)} · ${esc(e.location)}<br>
@@ -1910,19 +2069,22 @@ function empModal(id){
       <span class="badge ${lv?lv.cls:"ok"}">${lv?lv.name:"Clear"} — ${n90} occ. / 90d</span>
       <span class="badge">OSS ${ossUsed(id,t)}/${OSS_LIMIT}</span>
     </p>
-    <h3 style="font-size:13px" class="mt">Records ${fmt(f)} → ${fmt(t)} (${rs.length})</h3>
-    ${rs.length?`<div class="tbl-wrap"><table><tbody>${rs.map(r=>`<tr><td>${fmt(r.date)}</td><td>${pill(r.type)}${r.waived?` <span class="badge ok">waived</span>`:""}</td><td>${r.hours||""}h</td><td class="small">${esc(r.notes)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="small muted">None in period.</div>`}
+    <h3 style="font-size:13px" class="mt">Records &amp; Occurrences ${fmt(f)} → ${fmt(t)} (${rs.length})</h3>
+    ${rs.length?`<div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Occurrence</th><th>Hours</th><th>Notes</th></tr></thead><tbody>${rs.map(r=>{const occ=occurrenceNumber(r.occurrence)||0;const counts=isOcc(r);return `<tr><td>${fmt(r.date)}</td><td>${pill(r.type)}${r.waived?` <span class="badge ok">waived</span>`:""}${r.cancelled?` <span class="badge bad">Cancelled</span>`:""}</td><td>${counts?`<span class="badge bad">Occurrence ${occ}</span>`:occ>0?`<span class="badge ok">Occurrence ${occ} waived</span>`:`<span class="small muted">No occurrence</span>`}</td><td>${r.hours||""}${r.hours?"h":""}</td><td class="small">${esc(r.wfNotes||r.attendanceNotes||r.notes||"")}</td></tr>`;}).join("")}</tbody></table></div>`:`<div class="small muted">No records or occurrences in this period.</div>`}
     <h3 style="font-size:13px" class="mt">Make-up agreements (${mus.length})</h3>
-    ${mus.length?`<div class="tbl-wrap"><table><tbody>${mus.map(m=>`<tr><td>${fmt(m.dateMissed)}</td><td>${m.hoursOwed}h</td><td><span class="badge ${{Pending:"warn",Approved:"",Completed:"ok",Missed:"bad"}[m.status]}">${esc(m.status)}</span></td><td>${m.oss?"OSS":""}</td></tr>`).join("")}</tbody></table></div>`:`<div class="small muted">None.</div>`}
+    ${mus.length?`<div class="tbl-wrap"><table><tbody>${mus.map(m=>`<tr><td>${fmt(m.dateMissed)}${m.scheduleSegments?.length?`<div class="small muted">${m.scheduleSegments.length} scheduled session${m.scheduleSegments.length===1?"":"s"}</div>`:""}</td><td>${m.hoursOwed}h</td><td><span class="badge ${{Pending:"warn",Approved:"",Completed:"ok",Missed:"bad"}[m.status]}">${esc(m.status)}</span></td><td>${m.oss?"OSS":""}</td></tr>`).join("")}</tbody></table></div>`:`<div class="small muted">None.</div>`}
     <div class="mfoot"><button class="btn ghost" id="eMu">+ Make-up agreement</button><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
   $("#eMu").onclick=()=>makeupModal(null,{empId:id,date:today(),hours:0});
 }
 
 function render(){
+  const dedupeResult = recalculateAfterDedupe();
+  if (dedupeResult.removedRecords || dedupeResult.removedMakeups) save();
   renderNav(); renderFilters(); setSync("");
   const v=$("#view");
   switch(UI.tab){
     case "dashboard": v.innerHTML=renderDashboard(); drawCharts(); break;
+    case "occurrenceOverview": v.innerHTML=renderOccurrenceOverview(); break;
     case "calendar":  v.innerHTML=renderCalendar(); break;
     case "team":      v.innerHTML=renderTeam(); break;
     case "makeup":    v.innerHTML=renderMakeup(); break;
@@ -1931,12 +2093,14 @@ function render(){
 }
   
 function bindRecordButtons(root){
-  root.querySelectorAll("[data-rec-edit]").forEach(b=>b.onclick=e=>{e.stopPropagation();recordModal(b.dataset.recEdit);});
+  root.querySelectorAll("tr[data-rec]").forEach(tr => tr.onclick = () => recordModal(tr.dataset.rec));
+  root.querySelectorAll(".cal-row[data-rec]").forEach(div => div.onclick = () => recordModal(div.dataset.rec));
 }
 
 function bindView(){
   const v=$("#view");
   v.querySelectorAll("tr[data-emp]").forEach(tr=>tr.onclick=()=>empModal(tr.dataset.emp));
+  v.querySelectorAll("tr[data-overview-rep]").forEach(tr=>tr.onclick=()=>{UI.overviewRep=tr.dataset.overviewRep;render();});
   v.querySelectorAll(".cal-cell[data-day]").forEach(c=>c.onclick=()=>dayModal(c.dataset.day));
   
   // Weekly calendar day selection handlers
@@ -1988,12 +2152,13 @@ function bindView(){
   on("#calPrev","onclick",()=>calShift(-1)); on("#calNext","onclick",()=>calShift(1));
   on("#calToday","onclick",()=>{UI.anchor=today(); UI.selectedWeekDay=today(); UI.selectedMuWeekDay=today(); render();});
   on("#calAdd","onclick",()=>recordModal(null, UI.selectedWeekDay || UI.anchor));
+  on("#overviewBack","onclick",()=>{UI.overviewRep="";render();});
   on("#recNew","onclick",()=>recordModal());
   on("#muNew","onclick",()=>makeupModal());
   on("#muFilter","onchange",()=>{UI.muFilter=$("#muFilter").value;render();});
 }
 
-$("#nav").addEventListener("click",e=>{ const b=e.target.closest("[data-tab]"); if(b){ UI.tab=b.dataset.tab; render(); }});
+$("#nav").addEventListener("click",e=>{ const b=e.target.closest("[data-tab]"); if(b){ UI.tab=b.dataset.tab; if(UI.tab!=="occurrenceOverview") UI.overviewRep=""; render(); }});
 $("#filterBar").addEventListener("change",e=>{
   const t=e.target;
   if(t.id==="fPreset"){ UI.preset=t.value; if(UI.preset==="adjusted"){const [f,x]=range(); UI.from=UI.from||f; UI.to=UI.to||x;} }
@@ -2002,6 +2167,10 @@ $("#filterBar").addEventListener("change",e=>{
   else if(t.id==="fTo") UI.to=t.value;
   else if(t.classList.contains("ffield")) UI[t.dataset.f]=t.value;
   render();
+  if (["fPreset","fAnchor","fFrom","fTo"].includes(t.id)) {
+    clearTimeout(window._dateSyncTimer);
+    window._dateSyncTimer = setTimeout(() => pullFromDataverse(true), 250);
+  }
 });
 $("#filterBar").addEventListener("input",e=>{ if(e.target.id==="fQ"){ UI.q=e.target.value;
   clearTimeout(window._qh); window._qh=setTimeout(render,250); }});
