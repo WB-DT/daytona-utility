@@ -820,30 +820,50 @@ async function pullFromDataverse(silent = false) {
       if (r.cr714_makeuptime || String(r.cr714_leavetype || "").toLowerCase().includes("make up")) {
         const rawMu = String(r.cr714_makeuptime || "");
         const scheduleSegments = parseMakeUpSegments(rawMu);
-        // One Time Off submission is one make-up agreement. The schedule can
-        // contain several work sessions, but those sessions must not become
-        // duplicate agreements in the employee modal, OSS count, or KPIs.
-        const missedDate = dates[0];
-        const scheduledHours = scheduleSegments.reduce((sum, segment) => sum + (Number(segment.hours) || 0), 0);
-        const notes = [
-          ...scheduleSegments.map(segment => `Schedule: ${segment.displayDate} - ${to12Hour(segment.start)} - ${to12Hour(segment.end)} (${formatDuration(segment.duration)})`),
-          !scheduleSegments.length && rawMu ? `Unparsed schedule: ${rawMu}` : null,
-          repNotes ? `Rep Notes: ${repNotes}` : null
-        ].filter(Boolean).join("\n");
-        newMakeups.push({
-          mid: String(baseRid),
-          dvId,
-          empId: matchedEmp.id,
-          rid: `${baseRid}-0`,
-          dateMissed: missedDate,
-          hoursOwed: Math.round((scheduledHours || muHours) * 100) / 100,
-          dueDate: addDays(missedDate, 7),
-          status: r.cr714_completed ? "Completed" : "Pending",
-          oss: true,
-          completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
-          scheduleSegments,
-          notes: notes || fullNotes
-        });
+        const repNotesStr = repNotes ? `Rep Notes: ${repNotes}` : null;
+        const fullNotesVal = fullNotes;
+
+        if (scheduleSegments.length > 0) {
+          // If multiple make-up work sessions are scheduled, create an agreement entry for each date
+          scheduleSegments.forEach((segment, sIdx) => {
+            const segmentNotes = [
+              `Schedule: ${segment.displayDate} - ${to12Hour(segment.start)} - ${to12Hour(segment.end)} (${formatDuration(segment.duration)})`,
+              repNotesStr
+            ].filter(Boolean).join("\n");
+
+            newMakeups.push({
+              mid: `${baseRid}-s${sIdx}`,
+              dvId,
+              empId: matchedEmp.id,
+              rid: `${baseRid}-0`,
+              dateMissed: segment.date, // Sits on the specific make-up work date (e.g. 10/2)
+              hoursOwed: segment.hours,
+              dueDate: addDays(segment.date, 7),
+              status: r.cr714_completed ? "Completed" : "Pending",
+              oss: true,
+              completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
+              scheduleSegments: [segment],
+              notes: segmentNotes || fullNotesVal
+            });
+          });
+        } else {
+          // Fallback if no structured segments were parsed
+          const fallbackDate = dates[0];
+          newMakeups.push({
+            mid: String(baseRid),
+            dvId,
+            empId: matchedEmp.id,
+            rid: `${baseRid}-0`,
+            dateMissed: fallbackDate,
+            hoursOwed: Math.round((muHours) * 100) / 100,
+            dueDate: addDays(fallbackDate, 7),
+            status: r.cr714_completed ? "Completed" : "Pending",
+            oss: true,
+            completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
+            scheduleSegments: [],
+            notes: rawMu ? `Unparsed schedule: ${rawMu}\n${repNotesStr || ''}`.trim() : fullNotesVal
+          });
+        }
       }
     });
     updateSyncCover("Applying occurrence rules and preparing the dashboard...");
