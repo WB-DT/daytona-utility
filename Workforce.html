@@ -57,7 +57,7 @@ main{max-width:1240px;margin:0 auto;padding:16px}
 .tbl-wrap{overflow-x:auto;border-radius:var(--radius)}
 table{width:100%;border-collapse:collapse;font-size:14px}
 th{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);text-align:left;padding:8px 10px;border-bottom:1.5px solid var(--line);white-space:nowrap;cursor:pointer;user-select:none}
-td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 tbody tr:hover{background:var(--soft);cursor:pointer}
 tbody tr.norow:hover{background:none;cursor:default}
 
@@ -401,6 +401,10 @@ function formatChipTime(notes) {
 }
 
 function extractShiftHours(r) {
+  if (r.type === "Shift Trade" && r.shiftTrade) {
+    return r.shiftTrade;
+  }
+
   if (r.partialShift) {
     let s = String(r.partialShift).trim();
     const milMatch = s.match(/^(\d{1,2}):(\d{2})\s*[–-]\s*(\d{1,2}):(\d{2})$/);
@@ -577,30 +581,6 @@ function normalizeMatchId(value) {
   const v = String(value ?? "").trim().toUpperCase();
   return v || null;
 }
-// Canonical comparison key used across Employee Information, Time Off, and CSR Attendance.
-// Removing all separators makes "First Last Last" and "First LastLast" match both ways.
-const NAME_MATCH_ALIASES = new Map([
-  ["reggiecostascott", "reggiecostascott"],
-  ["rebecamendezvelez", "rebecamendezvelez"]
-]);
-function normalizeNameKey(value) {
-  const key = String(value ?? "")
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
-  return NAME_MATCH_ALIASES.get(key) || key;
-}
-function normalizeDateKey(value) {
-  if (value === null || value === undefined || value === "") return "";
-  const text = String(value).trim();
-  let m = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (m) return `${m[1]}-${m[2].padStart(2,"0")}-${m[3].padStart(2,"0")}`;
-  m = text.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
-  if (m) return `${m[3]}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`;
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? "" : `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`;
-}
 function occurrenceNumber(value) {
   if (value === null || value === undefined) return null;
   if (typeof value === "boolean") return value ? 1 : 0;
@@ -679,14 +659,14 @@ async function pullFromDataverse(silent = false) {
     };
     const api = `${DATAVERSE_URL}/api/data/v9.2`;
     const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_department","cr714_title","cr714_jobtitle","cr714_managerassigned","cr714_location","cr714_status","cr714_loopnumber","cr714_shiftselection","cr714_breakselection","cr714_startdate","statecode"].join(",");
-    const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_id","cr714_name","cr714_email","cr714_department","cr714_requestdates","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade","cr714_makeupdisposition"].join(",");
+    const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_id","cr714_name","cr714_email","cr714_department","cr714_requestdates","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade"].join(",");
     const attendanceSelect = ["cr714_csrattendancetrackerid","cr714_id","cr714_employeename","cr714_startdate","cr714_enddate","cr714_typeofleave","cr714_notes","cr714_occurrence"].join(",");
 
     // Time Off request dates are text, so Dataverse cannot compare them as dates.
     // Use a bounded created/modified window, then apply the exact requested-date range after parsing.
     // CSR Attendance contains the authoritative custom dates. Legacy Time Off
     // records were migrated together, so createdon/modifiedon cannot filter them.
-    const attendanceFilter = `(cr714_startdate le ${odataDateTimeEnd(rangeTo)} and (cr714_enddate eq null or cr714_enddate ge ${odataDateTimeStart(syncFrom)}))`;
+    const attendanceFilter = `(cr714_startdate le ${odataDateTimeEnd(rangeTo)} and cr714_enddate ge ${odataDateTimeStart(syncFrom)})`;
 
     const empUrl = `${api}/${TABLE_EMPLOYEES}?$select=${empSelect}&$filter=statecode eq 0`;
     const timeUrl = `${api}/${TABLE_TIMEOFF}?$select=${timeSelect}&$orderby=cr714_id desc`;
@@ -707,7 +687,7 @@ async function pullFromDataverse(silent = false) {
     const targetEmpsRaw = locationFiltered.length ? locationFiltered : activeEmps;
     const targetEmps = uniqueBy(targetEmpsRaw, e => {
       const email = String(e.cr714_emailaddress || "").trim().toLowerCase();
-      const name = normalizeNameKey(e.cr714_employeename);
+      const name = String(e.cr714_employeename || "").trim().toLowerCase();
       return email ? `email:${email}` : (name ? `name:${name}` : "");
     });
     const empMapByEmail = new Map(), empMapByName = new Map();
@@ -723,7 +703,7 @@ async function pullFromDataverse(silent = false) {
         srManager:"Senior Leadership", location:String("Daytona"),
         status:String(e["cr714_status@OData.Community.Display.V1.FormattedValue"] || e.cr714_status || "Active"), loopNumber:e.cr714_loopnumber || "", shift:String(e["cr714_shiftselection@OData.Community.Display.V1.FormattedValue"] || e.cr714_shiftselection || ""), breakTime:String(e["cr714_breakselection@OData.Community.Display.V1.FormattedValue"] || e.cr714_breakselection || ""), startDate:e.cr714_startdate || "" };
       if (email) empMapByEmail.set(email, record);
-      if (name) empMapByName.set(normalizeNameKey(name), record);
+      if (name) empMapByName.set(name.toLowerCase(), record);
       return record;
     });
 
@@ -743,15 +723,15 @@ async function pullFromDataverse(silent = false) {
         occurrence:n,
         hasOccurrence:n !== null,
         attendanceId:a.cr714_csrattendancetrackerid || "",
-        startDate:normalizeDateKey(a.cr714_startdate),
-        endDate:normalizeDateKey(a.cr714_enddate || a.cr714_startdate),
+        startDate:a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : "",
+        endDate:a.cr714_enddate ? String(a.cr714_enddate).slice(0,10) : (a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : ""),
         leaveType:String(a.cr714_typeofleave || "").trim(),
         notes:String(a.cr714_notes || "").trim()
       };
       const id = normalizeMatchId(a.cr714_id);
       if (id) attendanceById.set(id, item);
-      const employee = normalizeNameKey(a.cr714_employeename);
-      const rawDate = normalizeDateKey(a.cr714_startdate);
+      const employee = String(a.cr714_employeename || "").trim().toUpperCase();
+      const rawDate = a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : "";
       if (employee && rawDate) {
         addAttendanceKey(`${employee}|${rawDate}`, item);
         // Dataverse midnight UTC dates may display as the prior local calendar date.
@@ -764,14 +744,14 @@ async function pullFromDataverse(silent = false) {
     timeRows.forEach(r => {
       const email = String(r.cr714_email || "").trim().toLowerCase();
       const name = String(r.cr714_name || "").trim();
-      const matchedEmp = empMapByEmail.get(email) || empMapByName.get(normalizeNameKey(name));
+      const matchedEmp = empMapByEmail.get(email) || empMapByName.get(name.toLowerCase());
       if (!matchedEmp) return;
       const formDept = String(r["cr714_department@OData.Community.Display.V1.FormattedValue"] || r.cr714_department || "").trim();
       if (formDept && matchedEmp.dept === "General") matchedEmp.dept = formDept;
       const timeOffDates = parseDatesToIso(r.cr714_requestdates);
       const attendanceByRecordId = attendanceById.get(normalizeMatchId(r.cr714_id)) || null;
       const dateMatches = timeOffDates.length
-        ? (attendanceByEmployeeDate.get(`${normalizeNameKey(name)}|${normalizeDateKey(timeOffDates[0])}`) || [])
+        ? (attendanceByEmployeeDate.get(`${name.toUpperCase()}|${timeOffDates[0]}`) || [])
         : [];
       const attendance = attendanceByRecordId
         || dateMatches.find(x => x.hasOccurrence)
@@ -806,6 +786,7 @@ async function pullFromDataverse(silent = false) {
       const isCancelled = r.cr714_cancelledrequest === 1 || r.cr714_cancelledrequest === true || String(r.cr714_cancelledrequest).toLowerCase() === "true";
       dates.forEach((d, idx) => newRecords.push({ rid:`${baseRid}-${idx}`, dvId, date:d, empId:matchedEmp.id, type:mappedType,
         hours:(mappedType === "Make up Time") ? (muHours || parseMakeUpHours(r)) : hours, notes:fullNotes, wfNotes:wfNotesVal,
+        shiftTrade: r.cr714_shifttrade || "",
         partialShift:r.cr714_hoursofpartialshift || "", fmla:r.cr714_fmla === 1 || r.cr714_fmla === true || String(r.cr714_fmla).toLowerCase() === "true",
         voicemail:r.cr714_voicemail === 1 || r.cr714_voicemail === true || String(r.cr714_voicemail).toLowerCase() === "true",
         // Assign the form-level occurrence once, not once per day in a multi-day request.
@@ -820,50 +801,30 @@ async function pullFromDataverse(silent = false) {
       if (r.cr714_makeuptime || String(r.cr714_leavetype || "").toLowerCase().includes("make up")) {
         const rawMu = String(r.cr714_makeuptime || "");
         const scheduleSegments = parseMakeUpSegments(rawMu);
-        const repNotesStr = repNotes ? `Rep Notes: ${repNotes}` : null;
-        const fullNotesVal = fullNotes;
-
-        if (scheduleSegments.length > 0) {
-          // If multiple make-up work sessions are scheduled, create an agreement entry for each date
-          scheduleSegments.forEach((segment, sIdx) => {
-            const segmentNotes = [
-              `Schedule: ${segment.displayDate} - ${to12Hour(segment.start)} - ${to12Hour(segment.end)} (${formatDuration(segment.duration)})`,
-              repNotesStr
-            ].filter(Boolean).join("\n");
-
-            newMakeups.push({
-              mid: `${baseRid}-s${sIdx}`,
-              dvId,
-              empId: matchedEmp.id,
-              rid: `${baseRid}-0`,
-              dateMissed: segment.date, // Sits on the specific make-up work date (e.g. 10/2)
-              hoursOwed: segment.hours,
-              dueDate: addDays(segment.date, 7),
-              status: r.cr714_makeupdisposition || (r.cr714_completed ? "Completed" : "Pending"),
-              oss: true,
-              completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
-              scheduleSegments: [segment],
-              notes: segmentNotes || fullNotesVal
-            });
-          });
-        } else {
-          // Fallback if no structured segments were parsed
-          const fallbackDate = dates[0];
-          newMakeups.push({
-            mid: String(baseRid),
-            dvId,
-            empId: matchedEmp.id,
-            rid: `${baseRid}-0`,
-            dateMissed: fallbackDate,
-            hoursOwed: Math.round((muHours) * 100) / 100,
-            dueDate: addDays(fallbackDate, 7),
-            status: r.cr714_completed ? "Completed" : "Pending",
-            oss: true,
-            completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
-            scheduleSegments: [],
-            notes: rawMu ? `Unparsed schedule: ${rawMu}\n${repNotesStr || ''}`.trim() : fullNotesVal
-          });
-        }
+        // One Time Off submission is one make-up agreement. The schedule can
+        // contain several work sessions, but those sessions must not become
+        // duplicate agreements in the employee modal, OSS count, or KPIs.
+        const missedDate = dates[0];
+        const scheduledHours = scheduleSegments.reduce((sum, segment) => sum + (Number(segment.hours) || 0), 0);
+        const notes = [
+          ...scheduleSegments.map(segment => `Schedule: ${segment.displayDate} - ${to12Hour(segment.start)} - ${to12Hour(segment.end)} (${formatDuration(segment.duration)})`),
+          !scheduleSegments.length && rawMu ? `Unparsed schedule: ${rawMu}` : null,
+          repNotes ? `Rep Notes: ${repNotes}` : null
+        ].filter(Boolean).join("\n");
+        newMakeups.push({
+          mid: String(baseRid),
+          dvId,
+          empId: matchedEmp.id,
+          rid: `${baseRid}-0`,
+          dateMissed: missedDate,
+          hoursOwed: Math.round((scheduledHours || muHours) * 100) / 100,
+          dueDate: addDays(missedDate, 7),
+          status: r.cr714_completed ? "Completed" : "Pending",
+          oss: true,
+          completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
+          scheduleSegments,
+          notes: notes || fullNotes
+        });
       }
     });
     updateSyncCover("Applying occurrence rules and preparing the dashboard...");
@@ -990,6 +951,12 @@ async function patchDataverseRecord(dvId, fields) {
     if (fields.cr714_wfnotes !== undefined) {
       payload.cr714_wfnotes = fields.cr714_wfnotes;
     }
+    if (fields.cr714_ptohoursrequested !== undefined) {
+      payload.cr714_ptohoursrequested = String(fields.cr714_ptohoursrequested);
+    }
+    if (fields.cr714_hoursofpartialshift !== undefined) {
+      payload.cr714_hoursofpartialshift = fields.cr714_hoursofpartialshift;
+    }
 
     const res = await fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}(${dvId})`, {
       method: "PATCH",
@@ -1013,61 +980,6 @@ async function patchDataverseRecord(dvId, fields) {
   } catch(err) {
     console.error("Dataverse patch failed:", err);
   }
-}
-
-  async function patchMakeUpDisposition(dvId, status) {
-  if (!dvId) return;
-  try {
-    const token = await getDataverseToken();
-    if (!token) return;
-    
-    const res = await fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}(${dvId})`, {
-      method: "PATCH",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "OData-MaxVersion": "4.0",
-        "OData-Version": "4.0"
-      },
-      body: JSON.stringify({ cr714_makeupdisposition: status })
-    });
-
-    if (!res.ok && res.status !== 204) {
-      console.error("Make-up disposition patch error:", await res.text());
-      toast("Failed to save make-up status to Dataverse");
-    } else {
-      toast("Make-up status saved to Dataverse");
-    }
-  } catch(err) {
-    console.error("Make-up disposition patch failed:", err);
-  }
-}
-
-function setMuStatus(mid, status){
-  const m = S.makeups.find(x => x.mid === mid || x.mid.startsWith(mid)); 
-  if(!m) return;
-  
-  m.status = status;
-  if(status === "Completed"){ 
-    m.completedDate = today();
-    const r = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId) || S.records.find(r => r.empId === m.empId && r.date === m.dateMissed && TYPES[r.type].occ);
-    if(r){ r.waived = true; m.rid = r.rid; }
-    toast("Make-up completed — occurrence waived");
-  } else if(status === "Missed"){
-    const r = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId); 
-    if(r) r.waived = false;
-    toast("Marked missed — occurrence stands");
-  } else {
-    toast("Agreement " + status.toLowerCase());
-  }
-
-  if (m.dvId) {
-    patchMakeUpDisposition(m.dvId, status);
-  }
-
-  save(); 
-  render();
 }
   
 const TYPES = {
@@ -1122,6 +1034,10 @@ const $ = s=>document.querySelector(s);
 const esc = s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function uid(p){ return p+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-4); }
 function today(){ return isoDate(new Date()); }
+function isWeekend(isoStr) {
+  const day = parseISO(isoStr).getDay();
+  return day === 0 || day === 6; // 0 is Sunday, 6 is Saturday
+}
 function isoDate(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
 function parseISO(s){ const [y,m,d]=s.split("-").map(Number); return new Date(y,m-1,d); }
 function addDays(s,n){ const d=parseISO(s); d.setDate(d.getDate()+n); return isoDate(d); }
@@ -1178,27 +1094,28 @@ function renderCalendar(){
   </div>`;
 
   if(UI.preset==="week" || (UI.preset==="adjusted" && addDays(f,10)>t && addDays(f,1)<=t)){
-    // Build array of the 7 days in the current week
     let days=[]; 
-    let startD = UI.preset==="week" ? parseISO(f) : parseISO(UI.anchor || today());
-    if (UI.preset==="week") {
-      for(let i=0; i<7; i++) days.push(addDays(f, i));
-    } else {
-      for(let i=0; i<7; i++) days.push(addDays(f, i));
+    let dObj = parseISO(f);
+    while (dObj.getDay() !== 1) { // 1 = Monday
+      dObj.setDate(dObj.getDate() + 1);
+    }
+    let cur = isoDate(dObj);
+    for(let i=0; i<5; i++) {
+      days.push(cur);
+      cur = addDays(cur, 1);
     }
 
-    // Ensure selected day exists in the current week, otherwise default to the first day of the week or today
     if (!UI.selectedWeekDay || !days.includes(UI.selectedWeekDay)) {
       UI.selectedWeekDay = days.includes(today()) ? today() : days[0];
     }
 
-    const dows=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+    const dows=["Mon","Tue","Wed","Thu","Fri"];
     const selDay = UI.selectedWeekDay;
     const allRs = byDate[selDay]||[];
     const presentCount = allRs.filter(r => r.type === "Present").length;
     const occurrenceRs = allRs.filter(r => r.type !== "Present").sort((a,b)=>(a.type||"").localeCompare(b.type||""));
 
-    const weekGridHtml = `<div class="cal-grid mt" style="margin-bottom: 20px;">
+    const weekGridHtml = `<div class="cal-grid" style="grid-template-columns: repeat(5, 1fr); margin-bottom: 20px;">
       ${days.map(ds => {
         const dObj = parseISO(ds);
         const dowName = dows[dObj.getDay()];
@@ -1331,8 +1248,8 @@ function metrics(){
     if(isOcc(r)) occ += occurrenceNumber(r.occurrence) || 0; 
   });
 
-  // Calculate default Present count for days without explicit records
-  let days=[]; for(let d=f; d<=t && days.length<370; d=addDays(d,1)) days.push(d);
+  // Calculate default Present count for weekdays only
+  let days=[]; for(let d=f; d<=t; d=addDays(d,1)) { if(!isWeekend(d)) days.push(d); }
   let totalPossibleWorkDays = days.length * emps.length;
   let loggedNonPresent = recs.filter(r => r.type !== "Present").length;
   let explicitPresent = recs.filter(r => r.type === "Present").length;
@@ -1427,7 +1344,7 @@ function kpiModal(cat, title) {
     if(recs.length === 0) {
       html += `<div class="empty">No records in this period.</div>`;
     } else {
-      html += `<div style="display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; padding-right: 4px;">${recs.map(r => rowRecord(r, true)).join("")}</div>`;
+      html += `<div class="tbl-wrap" style="max-height: 60vh; overflow-y: auto;"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type / Time</th><th style="text-align:left">Notes</th></tr></thead><tbody>${recs.map(r => rowRecord(r, false)).join("")}</tbody></table></div>`;
     }
   }
 
@@ -1489,20 +1406,38 @@ function drawCharts(){
   charts = [];
   if (typeof Chart === "undefined") return;
   const m = metrics(), days = []; 
-  for (let d = m.from; d <= m.to && days.length < 31; d = addDays(d, 1)) days.push(d);
+  for (let d = m.from; d <= m.to; d = addDays(d, 1)) {
+    if (!isWeekend(d)) days.push(d);
+  }
+
+  const colors = {
+    "PTO": "#0d9488",
+    "Shift Trade": "#2563eb",
+    "Make up Time": "#7c3aed",
+    "Schedule Adjustment": "#4f46e5",
+    "Jury Duty / Bereavement": "#6366f1",
+    "Call Out": "#dc2626",
+    "Cancellation": "#22c55e",
+    "Short Shift": "#ea580c",
+    "NCNS": "#1d4ed8",
+    "Tardy": "#d97706",
+    "LOA": "#4338ca"
+  };
 
   const trendLabels = [];
-  const absenceData = [];
-  const leaveData = [];
+  const activeTypes = TYPE_NAMES.filter(n => n !== "Present");
+  
+  const datasets = activeTypes.map(type => {
+    return {
+      label: type,
+      data: days.map(d => m.recs.filter(r => r.date === d && r.type === type).length),
+      backgroundColor: colors[type] || "var(--muted)",
+      borderRadius: 4
+    };
+  }).filter(ds => ds.data.some(val => val > 0));
 
   days.forEach(d => {
     trendLabels.push(parseISO(d).toLocaleDateString(undefined, {month:"short", day:"numeric"}));
-    
-    const dayCallOuts = m.recs.filter(r => r.date === d && (r.type === "Call Out" || r.type === "NCNS" || r.type === "Tardy")).length;
-    const dayOtherLeave = m.recs.filter(r => r.date === d && r.type !== "Call Out" && r.type !== "NCNS" && r.type !== "Tardy" && r.type !== "Present" && r.type !== "Make up Time").length;
-
-    absenceData.push(dayCallOuts);
-    leaveData.push(dayOtherLeave);
   });
 
   const tr = $("#chTrend"); 
@@ -1511,20 +1446,7 @@ function drawCharts(){
       type: "bar",
       data: {
         labels: trendLabels,
-        datasets: [
-          {
-            label: "Call Outs / Exceptions",
-            data: absenceData,
-            backgroundColor: "#dc2626",
-            borderRadius: 4
-          },
-          {
-            label: "PTO / Other Leave",
-            data: leaveData,
-            backgroundColor: "#0d9488",
-            borderRadius: 4
-          }
-        ]
+        datasets: datasets
       },
       options: {
         responsive: true,
@@ -1538,18 +1460,12 @@ function drawCharts(){
           if (elements.length > 0) {
             const index = elements[0].index;
             const clickedDate = days[index];
-            const datasetIndex = elements[0].datasetIndex;
-            
-            const dayRecs = m.recs.filter(r => {
-              if (r.date !== clickedDate) return false;
-              const isCallOut = (r.type === "Call Out" || r.type === "NCNS" || r.type === "Tardy");
-              return datasetIndex === 0 ? isCallOut : !isCallOut && r.type !== "Present" && r.type !== "Make up Time";
-            });
+            const dayRecs = m.recs.filter(r => r.date === clickedDate && r.type !== "Present");
 
-            let rows = dayRecs.length ? dayRecs.map(r => rowRecord(r)).join("") : `<tr class="norow"><td colspan="6" class="empty">No records for this category on ${fmt(clickedDate)}.</td></tr>`;
+            let rows = dayRecs.length ? dayRecs.map(r => rowRecord(r, false)).join("") : `<tr class="norow"><td colspan="4" class="empty">No records on ${fmt(clickedDate)}.</td></tr>`;
 
-            openModal(`<h2>Records — ${fmt(clickedDate)}</h2>
-              <div class="tbl-wrap"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type</th><th style="text-align:left">Hours</th><th style="text-align:left">Notes</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+            openModal(`<h2>All Records — ${fmt(clickedDate)}</h2>
+              <div class="tbl-wrap"><table><thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Employee</th><th style="text-align:left">Type / Time</th><th style="text-align:left">Notes</th></tr></thead><tbody>${rows}</tbody></table></div>
               <div class="mfoot mt"><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
             bindRecordButtons($("#modalHost"));
           }
@@ -1561,19 +1477,6 @@ function drawCharts(){
   const mx = $("#chMix"); 
   if (mx) { 
     const names = TYPE_NAMES.filter(n => n !== "Present" && m.c[n] > 0);
-    const colors = {
-      "PTO": "#0d9488",
-      "Shift Trade": "#2563eb",
-      "Make up Time": "#7c3aed",
-      "Schedule Adjustment": "#4f46e5",
-      "Jury Duty / Bereavement": "#6366f1",
-      "Call Out": "#dc2626",
-      "Cancellation": "#22c55e",
-      "Short Shift": "#ea580c",
-      "NCNS": "#1d4ed8",
-      "Tardy": "#d97706",
-      "LOA": "#4338ca"
-    };
     
     charts.push(new Chart(mx, {
       type: "doughnut",
@@ -1581,7 +1484,8 @@ function drawCharts(){
         labels: names,
         datasets: [{
           data: names.map(n => m.c[n]),
-          backgroundColor: names.map(n => colors[n] || "var(--muted)")
+          backgroundColor: names.map(n => colors[n] || "var(--muted)"),
+          borderWidth: 0
         }]
       },
       options: { 
@@ -1873,16 +1777,15 @@ function rowRecord(r, slim){
     r.cancelled?`<span class="badge bad" title="Cancelled request">Cancelled</span>`:null
   ].filter(Boolean).join(" ");
 
+  const shiftDisplay = extractShiftHours(r);
+
   if (slim) {
     const rawNotes = (r.type === "Make up Time") ? getRelevantMakeUpNotes(r.notes, r.date) : r.notes;
-    return `<div class="cal-row ${r.cancelled ? 'cancelled' : ''}" data-rec="${esc(r.rid)}" title="Click to edit record">
+    return `<div class="cal-row ${r.cancelled ? 'cancelled' : ''}" data-rec="${esc(r.rid)}" style="cursor:pointer" title="Click to edit record">
       <div class="row-top">
         <div style="font-weight: 600; font-size: 15px; min-width: 150px;">${esc(e.name)}</div>
         <div style="display: flex; align-items: center; gap: 8px;">${pill(r.type)} ${badges}</div>
-        <div style="font-weight: 600; font-size: 13.5px; color: var(--muted);">${extractShiftHours(r)}</div>
-        <div class="row right" style="gap: 6px; margin-left: auto;">
-          <button class="btn ghost sm" data-rec-edit="${esc(r.rid)}">Edit</button>
-        </div>
+        <div style="font-weight: 600; font-size: 13.5px; color: var(--muted); white-space: nowrap;">${esc(shiftDisplay)}</div>
       </div>
       ${rawNotes ? `<div class="small muted" style="word-break: break-word; overflow-wrap: break-word; width: 100%; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--line); line-height: 1.5; white-space: pre-line;">${esc(formatReadableNotes(rawNotes))}</div>` : ""}
       ${r.wfNotes ? `<div class="small" style="word-break: break-word; overflow-wrap: break-word; width: 100%; margin-top: 4px; padding-top: 6px; border-top: 1px dashed var(--line); line-height: 1.4; color: var(--brand); font-weight: 500;"><b>Workforce Notes:</b> ${esc(r.wfNotes)}</div>` : ""}
@@ -1890,18 +1793,17 @@ function rowRecord(r, slim){
   }
 
   return `<tr data-rec="${esc(r.rid)}" class="${r.cancelled ? 'cancelled' : ''}" style="cursor:pointer" title="Click to edit record">
-    <td>${fmt(r.date)}</td>
+    <td style="white-space: nowrap;">${fmt(r.date)}</td>
     <td><b>${esc(e.name)}</b></td>
-    <td>
-      ${pill(r.type)}
-      ${badges}
+    <td style="white-space: nowrap;">
+      <div>${pill(r.type)} ${badges}</div>
+      <div style="font-weight: 600; font-size: 13.5px; color: var(--muted); margin-top: 4px;">${esc(shiftDisplay)}</div>
     </td>
-    <td>${r.hours||""}${r.hours?"h":""}</td>
     <td class="small">
       ${r.notes ? `<div>${esc(r.notes)}</div>` : ""}
       ${r.wfNotes ? `<div style="color: var(--brand); margin-top: 2px;"><b>WF Notes:</b> ${esc(r.wfNotes)}</div>` : ""}
     </td>
-    <td class="row" style="gap:4px"><button class="btn ghost sm" data-rec-edit="${esc(r.rid)}">Edit</button></td></tr>`;
+  </tr>`;
 }
 
 function renderRecords(){
@@ -1910,10 +1812,10 @@ function renderRecords(){
     <button class="btn sm" id="recNew">+ Add record</button></div>
   <div class="card tbl-wrap"><table><thead><tr>
     <th data-sort="date">Date ${UI.sortKey==="date"?(UI.sortDir<0?"↓":"↑"):""}</th><th data-sort="empId">Employee</th>
-    <th data-sort="type">Type</th><th>Hours</th><th>Notes</th><th></th>
-  </tr></thead><tbody>${recs.map(r=>rowRecord(r)).join("")||`<tr class="norow"><td colspan="6" class="empty">No records in this period.</td></tr>`}</tbody></table></div>`;
+    <th data-sort="type">Type / Time</th><th>Notes</th>
+  </tr></thead><tbody>${recs.map(r=>rowRecord(r, false)).join("")||`<tr class="norow"><td colspan="4" class="empty">No records in this period.</td></tr>`}</tbody></table></div>`;
 }
-
+  
 function openModal(html){ $("#modalHost").innerHTML=`<div class="overlay" id="ovl"><div class="modal">${html}</div></div>`;
   $("#ovl").addEventListener("click",e=>{ if(e.target.id==="ovl") closeModal(); }); }
 function closeModal(){ $("#modalHost").innerHTML=""; }
@@ -2006,7 +1908,9 @@ function recordModal(rid,presetDate){
             cr714_fmla: fmla,
             cr714_voicemail: voicemail,
             cr714_occurrence: occurrence,
-            cr714_wfnotes: wfNotes
+            cr714_wfnotes: wfNotes,
+            cr714_ptohoursrequested: hours,
+            cr714_hoursofpartialshift: partialShift
           });
         }
       }
@@ -2189,7 +2093,8 @@ function render(){
 }
   
 function bindRecordButtons(root){
-  root.querySelectorAll("[data-rec-edit]").forEach(b=>b.onclick=e=>{e.stopPropagation();recordModal(b.dataset.recEdit);});
+  root.querySelectorAll("tr[data-rec]").forEach(tr => tr.onclick = () => recordModal(tr.dataset.rec));
+  root.querySelectorAll(".cal-row[data-rec]").forEach(div => div.onclick = () => recordModal(div.dataset.rec));
 }
 
 function bindView(){
