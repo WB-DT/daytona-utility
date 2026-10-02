@@ -1842,7 +1842,7 @@ function recordModal(rid,presetDate){
       <div><label>Occurrences</label>
         <div class="row" style="gap:4px">
           <button class="btn ghost sm" id="occMinus" style="padding:4px 10px; font-size:16px;">-</button>
-          <input type="number" id="mOcc" value="${currentOcc}" style="width:70px; text-align:center" step="0.5">
+          <input type="number" id="mOcc" value="${currentOcc}" style="width:70px; text-align:center" step="1" min="0">
           <button class="btn ghost sm" id="occPlus" style="padding:4px 10px; font-size:16px;">+</button>
         </div>
       </div>
@@ -1856,8 +1856,8 @@ function recordModal(rid,presetDate){
       </div>
     </div>
     
-    <div><label>Notes</label><textarea id="mNotes" rows="2">${esc(r.notes)}</textarea></div>
-    <div class="mt"><label>Workforce Notes</label><textarea id="mWfNotes" rows="2" placeholder="Enter workforce notes here...">${esc(r.wfNotes || "")}</textarea></div>
+    <div><label for="mNotes">Notes</label><textarea id="mNotes" rows="2">${esc(r.notes)}</textarea></div>
+    <div class="mt"><label for="mWfNotes">Workforce Notes</label><textarea id="mWfNotes" rows="2" placeholder="Enter workforce notes here...">${esc(r.wfNotes || "")}</textarea></div>
 
     <div class="mfoot">
       ${rid?`<button class="btn ghost" id="mDel" style="margin-right:auto">Cancel request</button>`:`<span class="small muted right" style="margin-right:auto">Tip: for an occurrence type you can create a make-up agreement after saving.</span>`}
@@ -1872,8 +1872,8 @@ function recordModal(rid,presetDate){
     $("#mDel").onclick = () => toggleCancelRecord(rid);
   }
 
-  $("#occMinus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = Math.max(0, (occurrenceNumber(inp.value)||0) - 0.5); };
-  $("#occPlus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = (occurrenceNumber(inp.value)||0) + 0.5; };
+  $("#occMinus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = Math.max(0, parseInt(inp.value || 0, 10) - 1); };
+  $("#occPlus").onclick = (e) => { e.preventDefault(); const inp = $("#mOcc"); inp.value = parseInt(inp.value || 0, 10) + 1; };
 
   if (!rid) {
     $("#mEmp").onchange = (e) => {
@@ -1917,24 +1917,77 @@ function recordModal(rid,presetDate){
     } else {
       let current = parseISO(dFrom);
       const end = parseISO(dTo);
-      while(current <= end) {
-        S.records.push({ 
-          rid: uid("r"), 
-          dvId: "",
-          date: isoDate(current), 
-          empId, 
-          type, 
-          hours, 
-          notes, 
-          wfNotes,
-          partialShift,
-          source: "local", 
-          waived: false, 
-          fmla,
-          voicemail,
-          occurrence
-        });
-        current.setDate(current.getDate() + 1);
+      const selectedEmp = emp(empId);
+      
+      showSyncCover("Creating record in Dataverse...");
+      try {
+        const token = await getDataverseToken();
+        if (!token) throw new Error("Authentication missing");
+
+        while(current <= end) {
+          const curDateStr = isoDate(current);
+          const payload = {
+            cr714_name: selectedEmp ? selectedEmp.name : empId,
+            cr714_email: selectedEmp ? selectedEmp.email : "",
+            cr714_requestdates: curDateStr,
+            cr714_leavetype: type,
+            cr714_requestnotes: notes,
+            cr714_wfnotes: wfNotes,
+            cr714_occurrence: String(occurrence),
+            cr714_ptohoursrequested: String(hours),
+            cr714_hoursofpartialshift: partialShift,
+            cr714_fmla: fmla ? "true" : "false",
+            cr714_voicemail: voicemail ? "true" : "false"
+          };
+
+          const res = await fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}`, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${token}`,
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "OData-MaxVersion": "4.0",
+              "OData-Version": "4.0"
+            },
+            body: JSON.stringify(payload)
+          });
+
+          if (!res.ok) {
+            throw new Error(`Dataverse POST failed [${res.status}]: ${await res.text()}`);
+          }
+
+          const entityIdHeader = res.headers.get("OData-EntityId");
+          let newDvId = "";
+          if (entityIdHeader) {
+            const match = entityIdHeader.match(/\(([^)]+)\)/);
+            if (match) newDvId = match[1];
+          }
+
+          S.records.push({ 
+            rid: uid("r"), 
+            dvId: newDvId,
+            date: curDateStr, 
+            empId, 
+            type, 
+            hours, 
+            notes, 
+            wfNotes,
+            partialShift,
+            source: "dataverse", 
+            waived: false, 
+            fmla,
+            voicemail,
+            occurrence
+          });
+
+          current.setDate(current.getDate() + 1);
+        }
+        toast(dFrom === dTo ? "Record saved to Dataverse" : "Records saved to Dataverse");
+      } catch (err) {
+        console.error("Failed to create record in Dataverse:", err);
+        toast("Failed to save to Dataverse: " + err.message);
+      } finally {
+        hideSyncCover();
       }
     }
       
