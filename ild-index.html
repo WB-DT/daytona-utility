@@ -5143,37 +5143,6 @@ allRaw.forEach(r => {
         return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
     };
 
-    window.loadD365InactiveTimeline = async function(accountGuid) {
-        const target = document.getElementById('inactive-contact-timeline');
-        if (target) target.innerHTML = '<div class="history-feed-state"><i class="fas fa-spinner fa-spin"></i><div>Loading the D365 timeline...</div></div>';
-        const cleanGuid = String(accountGuid || '').replace(/[{}]/g, '').trim();
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanGuid)) {
-            if (target) target.innerHTML = '<div class="history-feed-state"><i class="fas fa-circle-exclamation"></i><div>No D365 account GUID was available for the timeline.</div></div>';
-            return [];
-        }
-        try {
-            const token = await window.getToken('https://wbmasonco.crm.dynamics.com//user_impersonation', true);
-            const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json', Prefer: 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' };
-            const fields = 'activityid,activitytypecode,subject,description,createdon,modifiedon,actualstart,actualend,scheduledstart,scheduledend,statecode,statuscode,_ownerid_value';
-            const url = `${PRIMARY_CRM_URL}/accounts(${cleanGuid})/Account_ActivityPointers?$select=${fields}&$orderby=createdon desc&$top=100`;
-            const response = await fetch(url, { headers, cache: 'no-store' });
-            if (!response.ok) {
-                const msg = await response.text().catch(() => '');
-                throw new Error(`D365 timeline request failed (${response.status}): ${msg.slice(0, 240)}`);
-            }
-            const data = await response.json();
-            const activities = Array.isArray(data?.value) ? data.value : [];
-            window.pendingInactiveD365Timeline = activities;
-            window.renderD365InactiveTimeline(activities);
-            window.mergeD365TimelineIntoHistory(activities);
-            return activities;
-        } catch (error) {
-            console.error('[Inactive Timeline] Unable to load Account_ActivityPointers:', error);
-            if (target) target.innerHTML = `<div class="history-feed-state"><i class="fas fa-circle-exclamation"></i><div>${window.escapeInactiveTimelineHtml(error?.message || 'Unable to load the D365 timeline.')}</div></div>`;
-            return [];
-        }
-    };
-
     window.showHistoryLoadBlocker=function(text='Loading and merging history…'){const box=document.getElementById('history-container');if(!box)return;let el=document.getElementById('history-visible-blocker');if(!el){el=document.createElement('div');el.id='history-visible-blocker';el.innerHTML='<div><i class="fas fa-spinner fa-spin"></i><b>Loading unified history</b><span id="history-visible-stage"></span></div>';box.appendChild(el);}document.getElementById('history-visible-stage').textContent=text;el.classList.add('show');};window.hideHistoryLoadBlocker=function(){document.getElementById('history-visible-blocker')?.classList.remove('show');};
 
     window.getD365ActivityUrl=function(a){const id=String(a?.activityid||'').replace(/[{}]/g,'');const etn=String(a?.activitytypecode||'activitypointer').toLowerCase().replace(/[^a-z0-9_]/g,'');return id?`https://wbmasonco.crm.dynamics.com/main.aspx?pagetype=entityrecord&etn=${encodeURIComponent(etn)}&id=${encodeURIComponent(id)}`:'';};
@@ -6512,12 +6481,10 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
             isAccountGuidResolving = true;
             accountGuidResolutionRecordId = resolutionRecordId;
             window.clearD365AltAddresses('Loading alternate addresses...');
-            let d365HistoryPromise=Promise.resolve([]);
             const d365Acct = await window.fetchD365Account(id);
             if (!d365Acct) window.clearD365AltAddresses('No matching D365 account was found.');
             if (d365Acct) {
                 currentAccountGuid = d365Acct.accountid; // Capture the hidden D365 GUID
-                d365HistoryPromise=Promise.resolve(window.loadD365InactiveTimeline?.(currentAccountGuid));
                 const addressRows = await window.fetchD365AltAddresses(currentAccountGuid);
                 window.renderD365AltAddresses(addressRows);
                 const pc = d365Acct.primarycontactid || {};
@@ -6543,37 +6510,12 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                 if (accountMessage && accountMessage.trim() !== '') {
                     alertContainer.innerHTML += `<div class="alert-box declining overflow-y-auto max-h-24 custom-scrollbar"><span class="alert-label"><i class="fas fa-exclamation-triangle mr-1"></i>D365 Account Note</span>${window.escapeHTML(accountMessage)}</div>`;
                 }
-                
-                if (d365Acct.__actInactive === true) { // Full-row evidence can include state, formatted labels, account name, or applicable status/service columns.
-                    window.pendingInactiveId = id;
-                    window.pendingInactiveDetectionSource='D365 mss_opsstatus';
-                    window.pendingInactiveEvidence=Array.isArray(d365Acct.__actInactiveEvidence)?d365Acct.__actInactiveEvidence.slice():[];
-                    window.pendingInactiveD365Stats={
-                        accountNumber:d365Acct.accountnumber||id, accountName:d365Acct.name||currentSelectedRecord?.cr714_company||'',
-                        opsStatus:d365Acct.mss_opsstatus||'', stateLabel:d365Acct['statecode@OData.Community.Display.V1.FormattedValue']||'', statecode:d365Acct.statecode,
-                        statusLabel:d365Acct['statuscode@OData.Community.Display.V1.FormattedValue']||'', statuscode:d365Acct.statuscode,
-                        modifiedOn:d365Acct.modifiedon||'', accountGuid:d365Acct.accountid||currentAccountGuid||'', owner:d365Acct['_ownerid_value@OData.Community.Display.V1.FormattedValue']||'',
-                        contactName:pc.fullname||'', contactEmail:pc.emailaddress1||'', contactPhone:pc.telephone1||'',
-                        lastOrderDate:d365Acct.mss_lastorderdate||'', lastInvoiceDate:d365Acct.mss_lastinvoicedate||'', lastActivityDate:d365Acct.mss_lastactivitydate||'',
-                        monthlySpend:Number(d365Acct.mss_monthlyspend||0), totalSpend12:Number(d365Acct.mss_monthlyspend||0)*12,
-                        orderFrequency:d365Acct.mss_orderfrequency, avgDaysBetweenOrders:d365Acct.mss_avgdaysbetweenorders||'',
-                        openDeals:Number(d365Acct.opendeals||0), openRevenue:Number(d365Acct.openrevenue||0), pulledQuote:d365Acct.mss_pulledquote||'',
-                        accountBalance:Number(d365Acct.mss_balance||d365Acct.mss_delinquentbalance||0), creditLimit:Number(d365Acct.creditlimit||0), creditOnHold:Boolean(d365Acct.creditonhold), creditHoldCode:d365Acct.mss_creditholdcode||'',
-                        balance30:Number(d365Acct.mss_balance30||0), balance60:Number(d365Acct.mss_balance60||0), balance90:Number(d365Acct.mss_balance90||0), balance120:Number(d365Acct.mss_balanceover120||0),
-                        beverageNotes:d365Acct.mss_beverageservicenotes||'', duplicateAccount:(String(d365Acct.name||'').match(/\bC\d+\b/i)||[])[0]||''
-                    };
-                    window.renderInactiveDecisionPanel?.();
-                    window.showAccountStatusBanner?.();
-                }
+                // Inactive Account workflow removed until ready.
                 window.takeSnapshot(currentSelectedRecord);
             }
             
-            window.showHistoryLoadBlocker?.('Displaying ACT notes and D365 activities…');
-            const combinedHistoryResults=await Promise.allSettled([actHistoryPromise,d365HistoryPromise]);
-            const d365Activities=combinedHistoryResults[1]?.status==='fulfilled'&&Array.isArray(combinedHistoryResults[1].value)?combinedHistoryResults[1].value:[];
-            window.pendingInactiveD365Timeline=d365Activities;
-            window.displayD365ActivitiesAlongsideNotes(d365Activities);
-            window.hideHistoryLoadBlocker?.();
+            // Activities lookup removed. ACT note history remains available.
+            await Promise.resolve(actHistoryPromise);
 
             const cswAppId = "9e06e7d4-8616-eb11-a817-000d3a8b6b20";
             const preloads = {
@@ -11390,6 +11332,18 @@ window.submitCloseAccountRequest=()=>{valid();if(document.getElementById('acr-se
 </style>
 <script id="account-status-banner-direct-child-guard">
 (()=>{if(window.__ACT_ASB_DIRECT_CHILD__)return;window.__ACT_ASB_DIRECT_CHILD__=true;function place(){const header=document.getElementById('contact-sticky-header'),banner=document.getElementById('account-status-banner'),profile=document.getElementById('profile-card-header');if(!header||!banner)return false;if(banner.parentElement!==header||banner.nextElementSibling!==profile)header.insertBefore(banner,profile&&profile.parentElement===header?profile:null);return true}const show=window.showAccountStatusBanner;window.showAccountStatusBanner=function(){const result=typeof show==='function'?show.apply(this,arguments):undefined;place();return result};const schedule=()=>requestAnimationFrame(place);window.addEventListener('act-record-selected',schedule);window.addEventListener('act-data-loaded',schedule);document.readyState==='loading'?document.addEventListener('DOMContentLoaded',schedule,{once:true}):schedule();})();
+</script>
+
+<script id="removed-inactive-activities-compatibility-guard">
+window.loadD365InactiveTimeline=async function(){return [];};
+window.displayD365ActivitiesAlongsideNotes=function(){};
+window.mergeD365TimelineIntoHistory=function(){};
+window.renderInactiveDecisionPanel=function(){};
+window.showAccountStatusBanner=function(){};
+window.openInactivePrompt=function(){};
+window.pendingInactiveId=null;window.pendingInactiveDetectionSource=null;
+window.pendingInactiveEvidence=[];window.pendingInactiveD365Stats=null;window.pendingInactiveD365Timeline=null;
+document.addEventListener('DOMContentLoaded',function(){['inactive-prompt-modal','account-status-banner'].forEach(function(id){document.getElementById(id)?.remove();});document.querySelectorAll('.asb').forEach(function(el){el.remove();});});
 </script>
 </body>
 </html>
