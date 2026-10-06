@@ -957,6 +957,11 @@ async function patchDataverseRecord(dvId, fields) {
     if (fields.cr714_hoursofpartialshift !== undefined) {
       payload.cr714_hoursofpartialshift = fields.cr714_hoursofpartialshift;
     }
+    
+    // Support patching core request details on edit
+    if (fields.cr714_requestdates !== undefined) payload.cr714_requestdates = fields.cr714_requestdates;
+    if (fields.cr714_leavetype !== undefined) payload.cr714_leavetype = fields.cr714_leavetype;
+    if (fields.cr714_requestnotes !== undefined) payload.cr714_requestnotes = fields.cr714_requestnotes;
 
     const res = await fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}(${dvId})`, {
       method: "PATCH",
@@ -1868,8 +1873,8 @@ function recordModal(rid,presetDate){
   openModal(`<h2>${rid?"Edit":"Add"} record</h2>
     <div class="mrow">
       <div><label>Employee</label>${empSelect("mEmp",r.empId)}</div>
-      <div><label>${rid ? "Date" : "From"}</label><input type="date" id="mDate" value="${esc(r.date)}"></div>
-      ${rid ? "" : `<div><label>To</label><input type="date" id="mDateTo" value="${esc(r.date)}"></div>`}
+      <div><label>From</label><input type="date" id="mDate" value="${esc(r.date)}"></div>
+      <div><label>To</label><input type="date" id="mDateTo" value="${esc(r.date)}"></div>
     </div>
     
     <div class="mrow">
@@ -1942,9 +1947,17 @@ function recordModal(rid,presetDate){
     if (rid) {
       const targetRec = S.records.find(x => x.rid === rid);
       if (targetRec) {
-        Object.assign(targetRec, { date: dFrom, empId, type, hours, notes, wfNotes, partialShift, fmla, voicemail, occurrence });
+        let current = parseISO(dFrom);
+        const end = parseISO(dTo);
+        const firstDateStr = isoDate(current);
+
+        // 1. Update the existing record to represent the FIRST day of the range
+        Object.assign(targetRec, { date: firstDateStr, empId, type, hours, notes, wfNotes, partialShift, fmla, voicemail, occurrence });
         if (targetRec.dvId) {
           await patchDataverseRecord(targetRec.dvId, {
+            cr714_requestdates: firstDateStr,
+            cr714_leavetype: type,
+            cr714_requestnotes: notes,
             cr714_fmla: fmla,
             cr714_voicemail: voicemail,
             cr714_occurrence: occurrence,
@@ -1952,6 +1965,82 @@ function recordModal(rid,presetDate){
             cr714_ptohoursrequested: hours,
             cr714_hoursofpartialshift: partialShift
           });
+        }
+
+        // Advance to the next day
+        current.setDate(current.getDate() + 1);
+
+        // 2. If the user extended the edit into a multi-day range, POST new records for the extra days
+        if (current <= end) {
+          showSyncCover("Creating additional records in Dataverse...");
+          try {
+            const token = await getDataverseToken();
+            if (!token) throw new Error("Authentication missing");
+            const selectedEmp = emp(empId);
+
+            const existingManualIds = (S.records || [])
+              .map(r => r.requestId)
+              .filter(id => id && String(id).startsWith("M"))
+              .map(id => parseInt(String(id).slice(1), 10))
+              .filter(n => !isNaN(n));
+            let nextSeq = existingManualIds.length > 0 ? Math.max(...existingManualIds) + 1 : 1;
+
+            while(current <= end) {
+              const manualId = `M${String(nextSeq).padStart(5, "0")}`;
+              nextSeq++;
+              const curDateStr = isoDate(current);
+              
+              const payload = {
+                cr714_id: manualId,
+                cr714_name: selectedEmp ? selectedEmp.name : empId,
+                cr714_email: selectedEmp ? selectedEmp.email : "",
+                cr714_requestdates: curDateStr,
+                cr714_leavetype: type,
+                cr714_requestnotes: notes,
+                cr714_wfnotes: wfNotes,
+                cr714_occurrence: String(occurrence),
+                cr714_ptohoursrequested: String(hours),
+                cr714_hoursofpartialshift: partialShift,
+                cr714_fmla: fmla ? "true" : "false",
+                cr714_voicemail: voicemail ? "true" : "false"
+              };
+
+              const res = await fetch(`${DATAVERSE_URL}/api/data/v9.2/${TABLE_TIMEOFF}`, {
+                method: "POST",
+                headers: {
+                  "Authorization": `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                  "Accept": "application/json",
+                  "OData-MaxVersion": "4.0",
+                  "OData-Version": "4.0"
+                },
+                body: JSON.stringify(payload)
+              });
+
+              if (!res.ok) throw new Error(`Dataverse POST failed [${res.status}]: ${await res.text()}`);
+
+              const entityIdHeader = res.headers.get("OData-EntityId");
+              let newDvId = "";
+              if (entityIdHeader) {
+                const match = entityIdHeader.match(/\(([^)]+)\)/);
+                if (match) newDvId = match[1];
+              }
+
+              S.records.push({ 
+                rid: uid("r"), dvId: newDvId, requestId: manualId, date: curDateStr, 
+                empId, type, hours, notes, wfNotes, partialShift, 
+                submittedOn: new Date().toISOString(), source: "dataverse", 
+                waived: false, fmla, voicemail, occurrence
+              });
+
+              current.setDate(current.getDate() + 1);
+            }
+          } catch (err) {
+            console.error("Failed to create extra records in Dataverse:", err);
+            toast("Failed to save extra dates to Dataverse: " + err.message);
+          } finally {
+            hideSyncCover();
+          }
         }
       }
     } else {
