@@ -259,7 +259,7 @@ body.syncing{overflow:hidden}
     <h1>Workforce</h1>
     <span class="sync-dot" id="syncStatus"></span>
     <div class="spacer"></div>
-    <button class="btn ghost sm" id="syncBtn" title="Pull latest data from Dataverse">&#8635; Sync</button>
+    <button class="btn ghost sm" id="syncBtn" title="Pull latest data from Dataverse">&#8635; Sync</button><button class="btn ghost" id="previewBackfillBtn" title="Preview confirmed missing CSR Attendance records without writing anything">Preview Backfill</button><button class="btn ghost" id="manualBackfillBtn" title="Scan current calendar period and create only confirmed missing CSR Attendance records">Backfill CSR</button>
   </div>
   <nav id="nav"></nav>
 </header>
@@ -722,7 +722,7 @@ function currentDataRange() {
   return from <= to ? [from, to] : [to, from];
 }
   
-async function pullFromDataverse(silent = false) {
+async function pullFromDataverse(silent = false, options = {}) {
   const [rangeFrom, rangeTo] = currentDataRange();
   // Attendance reporting is scoped to the selected calendar period.
   const syncFrom = rangeFrom;
@@ -918,6 +918,10 @@ async function pullFromDataverse(silent = false) {
     S.settings.lastSync = `${new Date().toLocaleString()} (${rangeFrom} to ${rangeTo})`;
     S.settings.loadedFrom = syncFrom; S.settings.loadedTo = rangeTo;
     save(); render();
+    if (!options.skipAutoBackfill) {
+      const backfill=await runAutomaticCsrBackfill({refreshAfter:true,notify:!silent});
+      if(backfill.created || backfill.matched) return;
+    }
     if (!silent) toast(`Synced ${S.records.length} unique Time Off records and ${S.makeups.length} unique make-up agreements through ${fmt(rangeTo)}`);
   } catch (err) {
     console.error(err); if (!silent) toast("Dataverse sync failed: " + err.message); setSync("Sync failed");
@@ -1082,6 +1086,126 @@ async function upsertCsrAttendance(record, overrides={}){
   save();
   return {created:!existingId,id:attendanceId};
 }
+function automaticCsrBackfillDecision(r){
+  if(!r || r.attendanceMatched) return {eligible:false,reason:"Already matched"};
+  if(r.cancelled || r.waived || r.fmla) return {eligible:false,reason:"Cancelled, waived, or excused"};
+  const occ=occurrenceNumber(r.occurrence);
+  if((r.type==="Call Out" || r.type==="Short Shift") && occ!==null && occ>0)
+    return {eligible:true,reason:`Confirmed ${r.type} with occurrence ${occ}`};
+  return {eligible:false,reason:"Requires review or is excluded"};
+}
+function backfillReviewRows(){
+  const seen=new Set(), out=[];
+  for(const r of (S.records||[])){
+    const key=normalizeMatchId(r.requestId)||r.dvId||String(r.rid||"").split("-")[0];
+    if(!key || seen.has(key)) continue; seen.add(key);
+    const d=automaticCsrBackfillDecision(r);
+    let skipReason=d.reason;
+    if(r.attendanceMatched) skipReason="CSR Attendance record already matched";
+    else if(r.cancelled) skipReason="Cancelled request";
+    else if(r.waived) skipReason="Occurrence waived";
+    else if(r.fmla) skipReason="FMLA / excused request";
+    else if(r.type==="PTO") skipReason="PTO requires discretionary notice review";
+    else if(r.type==="Jury Duty / Bereavement") skipReason="Jury Duty/Bereavement is discretionary";
+    else if(r.type==="Call Out" || r.type==="Short Shift") {
+      const n=occurrenceNumber(r.occurrence); if(n===null || n<=0) skipReason="Occurrence marker is 0 or missing";
+    } else if(!d.eligible) skipReason=`Leave type excluded from automatic backfill: ${r.type||"Unknown"}`;
+    out.push({record:r,reason:d.eligible?d.reason:skipReason,key,eligible:d.eligible});
+  }
+  return out;
+}
+function automaticBackfillCandidates(){ return backfillReviewRows().filter(x=>x.eligible); }
+let csrAutoBackfillRunning=false;
+async function runAutomaticCsrBackfill({refreshAfter=true,notify=false}={}){
+  if(csrAutoBackfillRunning) return {created:0,matched:0,failed:0,skipped:0};
+  csrAutoBackfillRunning=true;
+  const result={created:0,matched:0,failed:0,skipped:0};
+  try{
+    const candidates=automaticBackfillCandidates();
+    if(!candidates.length) return result;
+    updateSyncCover(`Checking ${candidates.length} missing CSR Attendance candidate${candidates.length===1?"":"s"}...`);
+    for(const {record} of candidates){
+      try{
+        // Re-query Dataverse immediately before every POST. findExistingAttendance checks
+        // stable cr714_id first, then historical employee + start-date rows.
+        const existingId=await findExistingAttendance(record);
+        if(existingId){
+          record.attendanceMatched=true; record.attendanceId=existingId; result.matched++; continue;
+        }
+        const payload=csrAttendancePayload(record);
+        const written=await dataverseWrite(TABLE_ATTENDANCE,"POST","",payload);
+        record.attendanceMatched=true; record.attendanceId=written.id||"";
+        record.attendanceLeaveType=payload.cr714_typeofleave; record.attendanceNotes=payload.cr714_notes;
+        record.attendanceOccurrence=occurrenceNumber(payload.cr714_occurrence)??0; record.occurrenceSource="CSR Attendance";
+        result.created++;
+      }catch(err){ result.failed++; console.error("CSR auto-backfill failed",record.requestId||record.rid,err); }
+    }
+    save();
+    if(notify && (result.created||result.matched||result.failed)) toast(`CSR backfill: ${result.created} created, ${result.matched} already existed${result.failed?`, ${result.failed} failed`:""}`);
+    if(refreshAfter && (result.created||result.matched)) await pullFromDataverse(true,{skipAutoBackfill:true});
+    return result;
+  }finally{csrAutoBackfillRunning=false;}
+}
+
+let lastBackfillPreview=[];
+function csvEscape(value){const s=String(value??"");return /[",\r\n]/.test(s)?`"${s.replace(/"/g,'""')}"`:s;}
+function exportBackfillPreviewCsv(){
+  if(!lastBackfillPreview.length) return toast("Nothing to export from the preview");
+  const headers=["Action","Employee","Start Date","End Date","Leave Type","Occurrence","Request ID","Reason","Existing CSR ID"];
+  const lines=[headers.join(","),...lastBackfillPreview.map(x=>{const r=x.record;return [x.action,emp(r.empId)?.name||r.empId||"",r.requestStartDate||r.date||"",r.requestEndDate||r.date||"",r.type||"",occurrenceNumber(r.occurrence)??0,r.requestId||"",x.reason||x.error||"",x.existingId||""].map(csvEscape).join(",")})];
+  const blob=new Blob(["\ufeff"+lines.join("\r\n")],{type:"text/csv;charset=utf-8"});
+  const url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download=`CSR_Backfill_Preview_${today()}.csv`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+async function previewCsrBackfill(){
+  const btn=$("#previewBackfillBtn"); if(btn) btn.disabled=true;
+  showSyncCover("Building CSR backfill dry-run preview...","No changes will be written");
+  try{
+    await pullFromDataverse(true,{skipAutoBackfill:true});
+    const reviewRows=backfillReviewRows(), preview=[];
+    for(const entry of reviewRows){
+      const {record,reason,eligible}=entry;
+      if(!eligible){preview.push({record,reason,action:"SKIP",existingId:record.attendanceId||""});continue;}
+      try{
+        const existingId=await findExistingAttendance(record);
+        preview.push({record,reason:existingId?"Matching CSR Attendance record already exists":reason,action:existingId?"SKIP":"CREATE",existingId});
+      }catch(err){preview.push({record,reason:"Duplicate check failed",action:"ERROR",error:err.message,existingId:""});}
+    }
+    lastBackfillPreview=preview;
+    hideSyncCover();
+    const creates=preview.filter(x=>x.action==="CREATE").length, skips=preview.filter(x=>x.action==="SKIP").length, errors=preview.filter(x=>x.action==="ERROR").length;
+    const rows=preview.map(x=>{const r=x.record;return `<tr><td><span class="badge ${x.action==="CREATE"?'warn':x.action==="ERROR"?'bad':'ok'}">${esc(x.action)}</span></td><td>${esc(emp(r.empId)?.name||r.empId||"")}</td><td>${fmt(r.requestStartDate||r.date)}</td><td>${esc(r.requestEndDate||r.date||"")}</td><td>${esc(r.type||"")}</td><td>${occurrenceNumber(r.occurrence)??0}</td><td>${esc(r.requestId||"")}</td><td class="small">${esc(x.error||x.reason||"")}</td></tr>`}).join("");
+    openModal(`<h2>CSR Backfill Dry-Run</h2><div class="small muted mb"><b>No Dataverse changes have been made.</b> Skipped records are included with the exact reason they will not be created.</div><div class="row mb"><span class="badge warn">${creates} would create</span><span class="badge ok">${skips} skipped</span>${errors?`<span class="badge bad">${errors} errors</span>`:""}</div><div class="tbl-wrap" style="max-height:60vh;overflow:auto"><table><thead><tr><th>Action</th><th>Employee</th><th>Start</th><th>End</th><th>Leave Type</th><th>Occurrence</th><th>Request ID</th><th>Reason</th></tr></thead><tbody>${rows||`<tr><td colspan="8" class="empty">No records in the current backfill review.</td></tr>`}</tbody></table></div><div class="mfoot"><button class="btn ghost" id="exportBackfillCsv">Export CSV</button>${creates?`<button class="btn" id="runBackfillFromPreview">Run Backfill (${creates})</button>`:""}<button class="btn ghost" onclick="closeModal()">Close</button></div>`);
+    bindGenericTableSorting($("#modalHost"));
+    const exp=$("#exportBackfillCsv");if(exp)exp.onclick=exportBackfillPreviewCsv;
+    const run=$("#runBackfillFromPreview"); if(run) run.onclick=()=>confirmAndRunBackfill(creates);
+  }catch(err){console.error(err);toast("CSR backfill preview failed: "+err.message);}
+  finally{hideSyncCover();if(btn)btn.disabled=false;}
+}
+function confirmAndRunBackfill(expectedCount){
+  const ok=confirm(`Confirm CSR Attendance backfill?\n\nUp to ${expectedCount} previewed record${expectedCount===1?"":"s"} may be created. Every record will be checked again for duplicates before it is written. Skipped and discretionary records will not be created.`);
+  if(!ok) return;
+  closeModal(); manualCsrBackfill(true);
+}
+
+async function manualCsrBackfill(confirmed=false){
+  if(!confirmed){
+    const ok=confirm("Run CSR Attendance backfill now?\n\nThe app will refresh both datasets, recheck every candidate for duplicates, and create only confirmed missing Call Out/Short Shift occurrence records. Discretionary and skipped records will not be created.");
+    if(!ok) return;
+  }
+  const btn=$("#manualBackfillBtn"); if(btn) btn.disabled=true;
+  showSyncCover("Checking for missing CSR Attendance records...","Manual backfill");
+  try{
+    // Always start from fresh Time Off + CSR Attendance data, but do not let that refresh
+    // launch the automatic backfill before the user-requested scan runs.
+    await pullFromDataverse(true,{skipAutoBackfill:true});
+    const candidates=automaticBackfillCandidates();
+    if(!candidates.length){toast("CSR backfill complete: no confirmed missing records found");return;}
+    const result=await runAutomaticCsrBackfill({refreshAfter:true,notify:false});
+    toast(`CSR backfill complete: ${result.created} created, ${result.matched} already existed${result.failed?`, ${result.failed} failed`:""}`);
+  }catch(err){console.error(err);toast("CSR backfill failed: "+err.message);}
+  finally{hideSyncCover();if(btn)btn.disabled=false;}
+}
+
 async function syncPendingRecordToCsr(rid, overrides={}){
   const record=S.records.find(x=>x.rid===rid); if(!record) throw new Error("Record not found");
   showSyncCover("Updating CSR Attendance Tracker...","Saving attendance review");
@@ -1833,7 +1957,7 @@ function dismissDoctorBanner(key){try{localStorage.setItem(`wf.drnote.dismissed.
 function renderOccurrenceReview(){
  const items=pendingOccurrenceReviews();
  const banners=items.filter(x=>x.group&&x.group.dates.length>3&&!doctorBannerDismissed(x.group.id));
- return `${banners.map(x=>`<div class="card mb" style="border-left:4px solid var(--amber);background:#fff7ed"><div class="row"><b>Return documentation may be required</b><span class="small">${esc(emp(x.r.empId)?.name||x.r.empId)} has ${x.group.dates.length} consecutive non-pre-approved absence days (${fmt(x.group.dates[0])} → ${fmt(x.group.dates[x.group.dates.length-1])}). A doctor's note may be required before return.</span><button class="btn ghost sm right" data-dismiss-dr="${esc(x.group.id)}">Dismiss permanently</button></div></div>`).join('')}<div class="section-title"><h2>Pending Occurrence Reviews (${items.length})</h2><span class="small muted">Discretionary or ambiguous requests stay here until reviewed.</span></div><div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Leave type</th><th>Reason</th><th>Group</th><th>CSR Sync</th></tr></thead><tbody>${items.map(x=>`<tr data-pending-review="${esc(x.r.rid)}" style="cursor:pointer" title="Click to review all row data"><td>${fmt(x.r.requestStartDate||x.r.date)}</td><td><b>${esc(emp(x.r.empId)?.name||x.r.empId)}</b></td><td>${pill(x.r.type)}</td><td>${esc(x.d.reason)}</td><td>${x.group?`<span class="badge warn">${x.group.dates.length} consecutive days</span>`:'Discretionary'}</td><td>${x.r.attendanceMatched?`<span class="badge ok">Matched</span>`:`<span class="badge warn">Needs CSR record</span>`}</td></tr>`).join('')||`<tr class="norow"><td colspan="6" class="empty">No pending occurrence reviews for this calendar month.</td></tr>`}</tbody></table></div>`;
+ return `${banners.map(x=>`<div class="card mb" style="border-left:4px solid var(--amber);background:#fff7ed"><div class="row"><b>Return documentation may be required</b><span class="small">${esc(emp(x.r.empId)?.name||x.r.empId)} has ${x.group.dates.length} consecutive non-pre-approved absence days (${fmt(x.group.dates[0])} → ${fmt(x.group.dates[x.group.dates.length-1])}). A doctor's note may be required before return.</span><button class="btn ghost sm right" data-dismiss-dr="${esc(x.group.id)}">Dismiss permanently</button></div></div>`).join('')}<div class="section-title"><h2>Pending Occurrence Reviews (${items.length})</h2><span class="small muted">Confirmed missing Call Out/Short Shift occurrences are backfilled automatically. Discretionary or ambiguous requests stay here until reviewed.</span></div><div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Leave type</th><th>Reason</th><th>Group</th><th>CSR Sync</th></tr></thead><tbody>${items.map(x=>`<tr data-pending-review="${esc(x.r.rid)}" style="cursor:pointer" title="Click to review all row data"><td>${fmt(x.r.requestStartDate||x.r.date)}</td><td><b>${esc(emp(x.r.empId)?.name||x.r.empId)}</b></td><td>${pill(x.r.type)}</td><td>${esc(x.d.reason)}</td><td>${x.group?`<span class="badge warn">${x.group.dates.length} consecutive days</span>`:'Discretionary'}</td><td>${x.r.attendanceMatched?`<span class="badge ok">Matched</span>`:`<span class="badge warn">Needs CSR record</span>`}</td></tr>`).join('')||`<tr class="norow"><td colspan="6" class="empty">No pending occurrence reviews for this calendar month.</td></tr>`}</tbody></table></div>`;
 }
 function pendingReviewDetailModal(rid){
   const item=pendingOccurrenceReviews().find(x=>x.r.rid===rid); if(!item) return;
@@ -2654,6 +2778,8 @@ $("#filterBar").addEventListener("click",e=>{ if(e.target.id==="fClear"){
   Object.assign(UI,{preset:"month",anchor:today(),from:null,to:null,dept:"",repName:"",title:"",supervisor:"",manager:"",q:"",type:""}); render(); }});
 
 $("#syncBtn").onclick=()=>pullFromDataverse(false);
+$("#previewBackfillBtn").onclick=()=>previewCsrBackfill();
+$("#manualBackfillBtn").onclick=()=>manualCsrBackfill();
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
 
 render();
