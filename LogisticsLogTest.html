@@ -724,12 +724,10 @@ function currentDataRange() {
   
 async function pullFromDataverse(silent = false) {
   const [rangeFrom, rangeTo] = currentDataRange();
-  // Always retain the full rolling window ending on the report's through-date,
-  // even when the visible report range is shorter than 90 days.
-  const rollingFrom = addDays(rangeTo, -OCC_WINDOW_DAYS);
-  const syncFrom = rollingFrom < rangeFrom ? rollingFrom : rangeFrom;
+  // Attendance reporting is scoped to the selected calendar period.
+  const syncFrom = rangeFrom;
   showSyncCover(`Loading records for ${fmt(syncFrom)} to ${fmt(rangeTo)}...`);
-  setSync(`Syncing rolling data ${fmt(syncFrom)} to ${fmt(rangeTo)}...`);
+  setSync(`Syncing calendar-period data ${fmt(syncFrom)} to ${fmt(rangeTo)}...`);
   try {
     const token = await getDataverseToken();
     if (!token) throw new Error("Authentication missing");
@@ -743,7 +741,7 @@ async function pullFromDataverse(silent = false) {
     const api = `${DATAVERSE_URL}/api/data/v9.2`;
     const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_department","cr714_title","cr714_jobtitle","cr714_managerassigned","cr714_location","cr714_status","cr714_loopnumber","cr714_shiftselection","cr714_breakselection","cr714_startdate","statecode"].join(",");
     const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_id","cr714_name","cr714_email","cr714_department","cr714_requestdates","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade"].join(",");
-    const attendanceSelect = ["cr714_csrattendancetrackerid","cr714_id","cr714_employeename","cr714_startdate","cr714_enddate","cr714_typeofleave","cr714_notes","cr714_occurrence"].join(",");
+    const attendanceSelect = ["cr714_csrattendancetrackerid","createdon","cr714_id","cr714_employeename","cr714_startdate","cr714_enddate","cr714_typeofleave","cr714_notes","cr714_occurrence"].join(",");
 
     // Time Off request dates are text, so Dataverse cannot compare them as dates.
     // Use a bounded created/modified window, then apply the exact requested-date range after parsing.
@@ -809,7 +807,8 @@ async function pullFromDataverse(silent = false) {
         startDate:a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : "",
         endDate:a.cr714_enddate ? String(a.cr714_enddate).slice(0,10) : (a.cr714_startdate ? String(a.cr714_startdate).slice(0,10) : ""),
         leaveType:String(a.cr714_typeofleave || "").trim(),
-        notes:String(a.cr714_notes || "").trim()
+        notes:String(a.cr714_notes || "").trim(),
+        createdOn:a.createdon || ""
       };
       const id = normalizeMatchId(a.cr714_id);
       if (id) attendanceById.set(id, item);
@@ -878,7 +877,8 @@ async function pullFromDataverse(silent = false) {
         requestId:normalizeMatchId(r.cr714_id) || dvId || baseRid,
         attendanceMatched:!!attendance, attendanceId:attendance?.attendanceId || "",
         attendanceLeaveType:attendance?.leaveType || "", attendanceNotes:attendance?.notes || "",
-        submittedOn: r.createdon || new Date().toISOString(),
+        requestStartDate: attendance?.startDate || dates[0] || d, requestEndDate: attendance?.endDate || dates[dates.length-1] || d,
+        submittedOn: r.createdon || "",
         waived:false, cancelled:isCancelled || cancelledDvIds.has(dvId), source:"dataverse" }));
 
       if (r.cr714_makeuptime || String(r.cr714_leavetype || "").toLowerCase().includes("make up")) {
@@ -1087,16 +1087,15 @@ const TYPES = {
 const TYPE_NAMES = Object.keys(TYPES);
 const LADDER = [[6,"Termination Eligible","bad"],[5,"Final","bad"],[4,"Written","warn"],[3,"Verbal","warn"]];
 const OSS_LIMIT = 2;
-const OCC_WINDOW_DAYS = 90;
 const ORG_FIELDS = [["dept","Department"],["repName","Reps"],["supervisor","Supervisor"],["manager","Manager"]];
 const MU_STATUS = ["Pending","Approved","Completed","Missed"];
 
-const TABS = [["dashboard","Dashboard"],["occurrenceOverview","Occurrence Overview"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
+const TABS = [["dashboard","Dashboard"],["occurrenceOverview","Occurrence Overview"],["occurrenceReview","Pending Occurrence Reviews"],["calendar","Calendar"],["team","Team & Records"],["makeup","Make-Up Time"]];
 
 let S = load() || { employees: [], records: [], makeups: [], settings: {} };
 const startupDedupe = recalculateAfterDedupe();
 if (startupDedupe.removedRecords || startupDedupe.removedMakeups) save();
-let UI = { tab:"dashboard", preset:"week", anchor:today(), from:null, to:null,
+let UI = { tab:"dashboard", preset:"month", anchor:today(), from:null, to:null,
            dept:"", repName:"", title:"", supervisor:"", manager:"", q:"", type:"",
            sortKey:"submittedOn", sortDir:1, muFilter:"", teamSortKey:"name", teamSortDir:1 };
 let charts = [];
@@ -1377,14 +1376,75 @@ function filteredRecords(from,to){
 }
 
 function emp(id){ return S.employees?.find(e=>e.id===id); }
-function isOcc(r){ return !r.cancelled && !r.waived && occurrenceNumber(r.occurrence) > 0; }
-
-function occCount(empId, asOf){
-  if (!S.records) return 0;
-  const from = addDays(asOf, -OCC_WINDOW_DAYS);
-  return uniqueRecords(S.records.filter(r=>r.empId===empId && r.date>from && r.date<=asOf && isOcc(r))).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
+function monthBounds(anchor=today()) {
+  const d=parseISO(anchor);
+  return [isoDate(new Date(d.getFullYear(),d.getMonth(),1)), isoDate(new Date(d.getFullYear(),d.getMonth()+1,0))];
 }
-
+function strictCalendarDate(value) {
+  if(typeof value !== "string") return null;
+  const m = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(!m) return null;
+  const y=Number(m[1]), mo=Number(m[2]), d=Number(m[3]);
+  if(y < 1900 || y > 9999 || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  const check=new Date(Date.UTC(y,mo-1,d));
+  if(check.getUTCFullYear()!==y || check.getUTCMonth()!==mo-1 || check.getUTCDate()!==d) return null;
+  return {y,mo,d,iso:`${m[1]}-${m[2]}-${m[3]}`};
+}
+function strictCreatedOnCalendarDate(value) {
+  if(typeof value !== "string") return null;
+  const raw=value.trim();
+  if(!raw) return null;
+  // Dataverse createdon is expected as ISO 8601. Preserve the date portion as supplied
+  // so an offset timestamp cannot roll to a different day during Date conversion.
+  const m=raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,7}))?)?(Z|[+-]\d{2}:\d{2})?)?$/);
+  if(!m) return null;
+  const date=strictCalendarDate(`${m[1]}-${m[2]}-${m[3]}`);
+  if(!date) return null;
+  if(m[4]!==undefined){
+    const hh=Number(m[4]), mm=Number(m[5]), ss=m[6]===undefined?0:Number(m[6]);
+    if(hh>23 || mm>59 || ss>59) return null;
+    if(m[8] && m[8]!=="Z"){ const oh=Number(m[8].slice(1,3)), om=Number(m[8].slice(4,6)); if(oh>23 || om>59) return null; }
+  }
+  return date;
+}
+function calendarDayDiff(startIso, createdOn) {
+  const start=strictCalendarDate(startIso);
+  const submitted=strictCreatedOnCalendarDate(createdOn);
+  if(!start || !submitted) return null;
+  const startUtc=Date.UTC(start.y,start.mo-1,start.d);
+  const submittedUtc=Date.UTC(submitted.y,submitted.mo-1,submitted.d);
+  return Math.round((startUtc-submittedUtc)/864e5);
+}
+function occurrenceDecision(r){
+  if(!r || r.cancelled || r.waived || r.fmla) return {status:"ignored",reason:"Cancelled, waived, or excused"};
+  if(r.type==="Call Out") return {status:"count",reason:"Call Out"};
+  if(r.type==="Short Shift") return {status:"count",reason:"Short Shift (Late/Leaving Early - No Make-Up)"};
+  if(r.type==="PTO") {
+    const days=calendarDayDiff(r.requestStartDate||r.date,r.submittedOn);
+    if(days===null) return {status:"review",reason:"PTO notice cannot be verified"};
+    if(days>=0 && days<14) return {status:"review",reason:`PTO submitted ${days} day${days===1?"":"s"} in advance (<14)`};
+    return {status:"ignored",reason:`PTO submitted ${days} days in advance`};
+  }
+  if(r.type==="Jury Duty / Bereavement") return {status:"review",reason:"Jury Duty/Bereavement is discretionary"};
+  return {status:"ignored",reason:"Leave type excluded from occurrence reporting"};
+}
+function occurrenceGroups(empId, from, to){
+  const candidates=uniqueRecords((S.records||[]).filter(r=>r.empId===empId&&r.date>=from&&r.date<=to&&occurrenceDecision(r).status==="count"));
+  const days=[...new Set(candidates.map(r=>r.date))].sort();
+  const groups=[]; let cur=[];
+  days.forEach(d=>{ if(!cur.length||d===addDays(cur[cur.length-1],1)) cur.push(d); else {groups.push(cur);cur=[d];} });
+  if(cur.length) groups.push(cur);
+  return groups.map((dates,i)=>({id:`${empId}:${dates[0]}`,dates,grouped:dates.length>1,needsReview:dates.length>3, label:dates.length>1?`Grouped occurrence · ${dates.length} consecutive days`:"Single occurrence"}));
+}
+function countedOccurrenceRecords(empId, from, to){
+  const groups=occurrenceGroups(empId,from,to);
+  return groups.map(g=>({group:g,record:(S.records||[]).find(r=>r.empId===empId&&r.date===g.dates[0])}));
+}
+function isOcc(r){ return occurrenceDecision(r).status==="count"; }
+function occCount(empId, asOf){
+  const [from,monthEnd]=monthBounds(asOf); const to=asOf<monthEnd?asOf:monthEnd;
+  return countedOccurrenceRecords(empId,from,to).length;
+}
 function level(n){ for(const [k,name,cls] of LADDER) if(n>=k) return {name,cls}; return null; }
 
 function ossUsed(empId, asOf){
@@ -1543,7 +1603,7 @@ function renderDashboard(){
     <div class="card"><h3>Breakdown</h3><canvas id="chMix"></canvas></div>
   </div>
   <div class="grid two mt">
-    <div class="card"><h3>Corrective action watch <span class="small muted">(rolling ${OCC_WINDOW_DAYS} days as of ${fmt(m.to)})</span></h3>
+    <div class="card"><h3>Corrective action watch <span class="small muted">(calendar month ${fmt(m.from)} → ${fmt(m.to)})</span></h3>
       ${ladder.length? `<div class="tbl-wrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Occurrences</th><th>Level</th></tr></thead><tbody>
         ${ladder.map(({e,n})=>{const lv=level(n);return `<tr data-emp="${esc(e.id)}"><td><b>${esc(e.name)}</b></td><td>${esc(e.dept)}</td><td>${n}</td><td><span class="badge ${lv.cls}">${lv.name}</span></td></tr>`;}).join("")}
       </tbody></table></div>` : `<div class="empty">No one at Verbal level or above. 🎉</div>`}
@@ -1674,45 +1734,23 @@ function calShift(dir){
 
 function renderOccurrenceOverview(){
   const m=metrics();
-  const filteredIds = new Set(m.emps.map(e => e.id));
-  const selectedId = UI.overviewRep && filteredIds.has(UI.overviewRep) ? UI.overviewRep : "";
-  if (UI.overviewRep && !selectedId) UI.overviewRep = "";
-  const selected = selectedId ? emp(selectedId) : null;
-  const asOf = m.to;
-  const from90 = addDays(asOf, -OCC_WINDOW_DAYS);
-  const rows = m.emps.map(e => {
-    const periodRecords = uniqueRecords(m.recs.filter(r => r.empId === e.id));
-    const periodOcc = periodRecords.filter(isOcc).reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
-    const rollingRecords = uniqueRecords((S.records||[]).filter(r => r.empId===e.id && r.date>from90 && r.date<=asOf && isOcc(r)));
-    const rolling90 = rollingRecords.reduce((sum,r)=>sum+(occurrenceNumber(r.occurrence)||0),0);
-    const lv = level(rolling90);
-    const last = rollingRecords.slice().sort((a,b)=>b.date.localeCompare(a.date))[0];
-    return {e,periodRecords,periodOcc,rollingRecords,rolling90,lv,last};
-  }).sort((a,b)=>b.rolling90-a.rolling90 || a.e.name.localeCompare(b.e.name));
-  if(!selected){
-    const total = rows.reduce((n,x)=>n+x.periodOcc,0);
-    const withOcc = rows.filter(x=>x.periodOcc>0).length;
-    const watch = rows.filter(x=>x.rolling90>=3).length;
-    return `<div class="section-title"><h2>Occurrence Overview by Rep</h2><span class="small muted">Select a rep to open their full occurrence history and rolling status.</span></div>
-      <div class="grid kpis mb">${kpi(total,"Occurrences in selected period","var(--red)","")}${kpi(withOcc,"Reps with occurrences","var(--orange)","")}${kpi(watch,"At corrective-action level","var(--amber)","")}${kpi(rows.length,"Reps reviewed","var(--blue)","")}</div>
-      <div class="card tbl-wrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Supervisor</th><th>Selected period</th><th>Rolling 90 days</th><th>Current level</th><th>Latest occurrence</th></tr></thead><tbody>
-      ${rows.map(x=>`<tr data-overview-rep="${esc(x.e.id)}"><td><b>${esc(x.e.name)}</b><div class="small muted">${esc(x.e.id)}</div></td><td>${esc(x.e.dept)}</td><td>${esc(x.e.supervisor)}</td><td><b>${x.periodOcc}</b></td><td><b>${x.rolling90}</b></td><td>${x.lv?`<span class="badge ${x.lv.cls}">${x.lv.name}</span>`:`<span class="badge ok">Clear</span>`}</td><td>${x.last?fmt(x.last.date):"—"}</td></tr>`).join("")||`<tr class="norow"><td colspan="7" class="empty">No representatives match the filters.</td></tr>`}
-      </tbody></table></div>`;
-  }
-  const data=rows.find(x=>x.e.id===selectedId) || {e:selected,periodRecords:[],periodOcc:0,rollingRecords:[],rolling90:0,lv:null};
-  const history=uniqueRecords((S.records||[]).filter(r=>r.empId===selectedId&&r.date>=m.from&&r.date<=m.to&&isOcc(r))).sort((a,b)=>b.date.localeCompare(a.date));
-  const loadedHistory=uniqueRecords((S.records||[]).filter(r=>r.empId===selectedId&&isOcc(r)));
-  const byType={}; history.forEach(r=>byType[r.type]=(byType[r.type]||0)+(occurrenceNumber(r.occurrence)||0));
-  const sourceCounts={}; history.forEach(r=>sourceCounts[r.occurrenceSource||"Unknown"]=(sourceCounts[r.occurrenceSource||"Unknown"]||0)+(occurrenceNumber(r.occurrence)||0));
-  return `<div class="section-title"><button class="btn ghost sm" id="overviewBack">&#8249; All reps</button><h2>${esc(selected.name)} · Occurrence Overview</h2><span class="small muted">As of ${fmt(asOf)}</span></div>
-    <div class="card mb"><div class="row"><div><b>${esc(selected.title||"Representative")}</b><div class="small muted">${esc(selected.dept)} · Supervisor: ${esc(selected.supervisor)}</div></div><div class="right"><span class="badge ${data.lv?data.lv.cls:"ok"}">${data.lv?data.lv.name:"Clear"}</span></div></div></div>
-    <div class="grid kpis mb">${kpi(data.periodOcc,"Selected-period occurrences","var(--red)","")}${kpi(data.rolling90,"Rolling 90-day occurrences","var(--orange)","")}${kpi(loadedHistory.reduce((n,r)=>n+(occurrenceNumber(r.occurrence)||0),0),"Loaded history total","var(--purple)","")}${kpi(ossUsed(selectedId,asOf)+`/${OSS_LIMIT}`,"OSS used · 12 months","var(--teal)","")}</div>
-    <div class="grid two mb"><div class="card"><h3>Occurrence type summary</h3>${Object.keys(byType).length?`<div class="tbl-wrap"><table><tbody>${Object.entries(byType).sort((a,b)=>b[1]-a[1]).map(([type,n])=>`<tr><td>${pill(type)}</td><td><b>${n}</b></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No occurrences loaded.</div>`}</div>
-    <div class="card"><h3>Occurrence source</h3>${Object.keys(sourceCounts).length?`<div class="tbl-wrap"><table><tbody>${Object.entries(sourceCounts).map(([source,n])=>`<tr><td>${esc(source)}</td><td><b>${n}</b></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No occurrence sources loaded.</div>`}</div></div>
-    <div class="section-title"><h2>Occurrence Records ${fmt(m.from)} → ${fmt(m.to)} (${history.length})</h2><span class="small muted">Current date and employee filters applied. Cancelled and waived records are excluded.</span></div>
-    <div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Type</th><th>Occurrence</th><th>Source</th><th>90-day total as of record</th><th>Level</th><th>Notes</th><th></th></tr></thead><tbody>
-      ${history.map(r=>{const n=occCount(selectedId,r.date),lv=level(n);return `<tr data-rec="${esc(r.rid)}"><td>${fmt(r.date)}</td><td>${pill(r.type)}</td><td><b>${occurrenceNumber(r.occurrence)||0}</b></td><td><span class="badge">${esc(r.occurrenceSource||"Unknown")}</span></td><td>${n}</td><td>${lv?`<span class="badge ${lv.cls}">${lv.name}</span>`:`<span class="badge ok">Clear</span>`}</td><td class="small">${esc(r.wfNotes||r.attendanceNotes||r.notes||"")}</td><td><button class="btn ghost sm" data-rec-edit="${esc(r.rid)}">Edit</button></td></tr>`;}).join("")||`<tr class="norow"><td colspan="8" class="empty">No occurrence records are loaded for this rep.</td></tr>`}
-    </tbody></table></div>`;
+  const rows=m.emps.map(e=>{const groups=countedOccurrenceRecords(e.id,m.from,m.to);return {e,groups,n:groups.length};}).sort((a,b)=>b.n-a.n||a.e.name.localeCompare(b.e.name));
+  return `<div class="section-title"><h2>Occurrence Overview</h2><span class="small muted">Current calendar month · grouped consecutive qualifying dates count as one occurrence.</span></div>
+  <div class="grid kpis mb">${kpi(rows.reduce((n,x)=>n+x.n,0),"Grouped monthly occurrences","var(--red)","")}${kpi(rows.filter(x=>x.n).length,"Reps with occurrences","var(--orange)","")}</div>
+  <div class="card tbl-wrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Monthly occurrences</th><th>Grouped dates</th></tr></thead><tbody>${rows.map(x=>`<tr data-emp="${esc(x.e.id)}"><td><b>${esc(x.e.name)}</b></td><td>${esc(x.e.dept)}</td><td><b>${x.n}</b></td><td>${x.groups.length?x.groups.map(g=>`<span class="badge ${g.group.grouped?'warn':''}" title="${esc(g.group.label)}">${g.group.grouped?'Grouped: ':''}${g.group.dates.map(fmt).join(' → ')}</span>`).join(' '):'—'}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function pendingOccurrenceReviews(){
+  const m=metrics(), seen=new Set(), out=[];
+  uniqueRecords(m.recs).forEach(r=>{ const d=occurrenceDecision(r); if(d.status!=="review") return; const key=r.requestId||r.dvId||r.rid; if(seen.has(key))return; seen.add(key); out.push({r,d}); });
+  m.emps.forEach(e=>occurrenceGroups(e.id,m.from,m.to).filter(g=>g.needsReview).forEach(g=>out.push({r:(S.records||[]).find(r=>r.empId===e.id&&r.date===g.dates[0]),d:{status:"review",reason:`${g.dates.length} consecutive non-excused days · grouping/return documentation review`},group:g})));
+  return out;
+}
+function doctorBannerDismissed(key){try{return localStorage.getItem(`wf.drnote.dismissed.${key}`)==='1';}catch(e){return false;}}
+function dismissDoctorBanner(key){try{localStorage.setItem(`wf.drnote.dismissed.${key}`,'1');}catch(e){} render();}
+function renderOccurrenceReview(){
+ const items=pendingOccurrenceReviews();
+ const banners=items.filter(x=>x.group&&x.group.dates.length>3&&!doctorBannerDismissed(x.group.id));
+ return `${banners.map(x=>`<div class="card mb" style="border-left:4px solid var(--amber);background:#fff7ed"><div class="row"><b>Return documentation may be required</b><span class="small">${esc(emp(x.r.empId)?.name||x.r.empId)} has ${x.group.dates.length} consecutive non-pre-approved absence days (${fmt(x.group.dates[0])} → ${fmt(x.group.dates[x.group.dates.length-1])}). A doctor's note may be required before return.</span><button class="btn ghost sm right" data-dismiss-dr="${esc(x.group.id)}">Dismiss permanently</button></div></div>`).join('')}<div class="section-title"><h2>Pending Occurrence Reviews (${items.length})</h2><span class="small muted">Discretionary or ambiguous requests stay here until reviewed.</span></div><div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Leave type</th><th>Reason</th><th>Group</th></tr></thead><tbody>${items.map(x=>`<tr data-rec="${esc(x.r.rid)}"><td>${fmt(x.r.requestStartDate||x.r.date)}</td><td><b>${esc(emp(x.r.empId)?.name||x.r.empId)}</b></td><td>${pill(x.r.type)}</td><td>${esc(x.d.reason)}</td><td>${x.group?`<span class="badge warn">${x.group.dates.length} consecutive days</span>`:'Discretionary'}</td></tr>`).join('')||`<tr class="norow"><td colspan="5" class="empty">No pending occurrence reviews for this calendar month.</td></tr>`}</tbody></table></div>`;
 }
 function renderTeam(){
   const m=metrics();
@@ -1729,8 +1767,8 @@ function renderTeam(){
       manager: e.manager, 
       recordsCount: rs.length, 
       occurrences: occ,
-      rolling90: n90,
-      rollingLevel: lv,
+      monthlyOccurrenceCount: n90,
+      monthlyLevel: lv,
       oss: ossUsed(e.id,m.to), 
       perfect, 
       status: e.status
@@ -1757,8 +1795,8 @@ function renderTeam(){
     <th data-team-sort="occurrences">Occurrences ${arrow("occurrences")}</th>
     <th data-team-sort="oss">OSS used ${arrow("oss")}</th>
   </tr></thead><tbody>
-  ${teamRows.map(({e,recordsCount,occurrences,rolling90,rollingLevel,oss})=>`<tr data-emp="${esc(e.id)}">
-    <td><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>${esc(e.name)}</b><span class="badge ${rollingLevel?rollingLevel.cls:"ok"}" title="Rolling 90-day occurrence count through ${fmt(m.to)}">${rolling90} occ. / 90d</span></div><div class="small muted">${esc(e.id)}</div></td>
+  ${teamRows.map(({e,recordsCount,occurrences,monthlyOccurrenceCount,monthlyLevel,oss})=>`<tr data-emp="${esc(e.id)}">
+    <td><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>${esc(e.name)}</b><span class="badge ${monthlyLevel?monthlyLevel.cls:"ok"}" title="Calendar-month grouped occurrence count through ${fmt(m.to)}">${monthlyOccurrenceCount} occ. / month</span></div><div class="small muted">${esc(e.id)}</div></td>
     <td>${esc(e.dept)}</td><td>${esc(e.supervisor)}</td><td>${esc(e.manager)}</td>
     <td>${recordsCount}</td><td>${occurrences}</td>
     <td>${oss}/${OSS_LIMIT}</td>
@@ -2344,7 +2382,7 @@ function empModal(id){
     <p class="small">${esc(e.title)} · ${esc(e.dept)} · ${esc(e.location)}<br>
     Supervisor: <b>${esc(e.supervisor)}</b> · Manager: <b>${esc(e.manager)}</b></p>
     <p class="row small">
-      <span class="badge ${lv?lv.cls:"ok"}">${lv?lv.name:"Clear"} — ${n90} occ. / 90d</span>
+      <span class="badge ${lv?lv.cls:"ok"}">${lv?lv.name:"Clear"} — ${n90} occ. / month</span>
       <span class="badge">OSS ${ossUsed(id,t)}/${OSS_LIMIT}</span>
     </p>
     <h3 style="font-size:13px" class="mt">Records &amp; Occurrences ${fmt(f)} → ${fmt(t)} (${rs.length})</h3>
@@ -2363,6 +2401,7 @@ function render(){
   switch(UI.tab){
     case "dashboard": v.innerHTML=renderDashboard(); drawCharts(); break;
     case "occurrenceOverview": v.innerHTML=renderOccurrenceOverview(); break;
+    case "occurrenceReview": v.innerHTML=renderOccurrenceReview(); break;
     case "calendar":  v.innerHTML=renderCalendar(); break;
     case "team":      v.innerHTML=renderTeam(); break;
     case "makeup":    v.innerHTML=renderMakeup(); break;
@@ -2419,7 +2458,8 @@ function bindView(){
     render();
   });
 
-  bindRecordButtons(v);
+  v.querySelectorAll("[data-dismiss-dr]").forEach(b=>b.onclick=e=>{e.stopPropagation();dismissDoctorBanner(b.dataset.dismissDr);});
+    bindRecordButtons(v);
   v.querySelectorAll("[data-mu-act]").forEach(b=>b.onclick=e=>{e.stopPropagation();
     const act=b.dataset.muAct, id=b.dataset.id;
     if(act==="edit") makeupModal(id);
