@@ -876,7 +876,7 @@ async function pullFromDataverse(silent = false) {
         dateSource:attendance?.startDate ? "CSR Attendance" : "Time Off Request Date",
         requestId:normalizeMatchId(r.cr714_id) || dvId || baseRid,
         attendanceMatched:!!attendance, attendanceId:attendance?.attendanceId || "",
-        attendanceLeaveType:attendance?.leaveType || "", attendanceNotes:attendance?.notes || "",
+        attendanceLeaveType:attendance?.leaveType || "", attendanceNotes:attendance?.notes || "", attendanceOccurrence:attendance ? occurrenceNumber(attendance.occurrence) : null,
         requestStartDate: attendance?.startDate || dates[0] || d, requestEndDate: attendance?.endDate || dates[dates.length-1] || d,
         submittedOn: r.createdon || "",
         waived:false, cancelled:isCancelled || cancelledDvIds.has(dvId), source:"dataverse" }));
@@ -1011,6 +1011,86 @@ async function deleteRecordFromDataverse(rid) {
   render();
   setSync("");
   toast("Record deleted from Dataverse permanently");
+}
+
+function attendanceDateTime(iso){ return strictCalendarDate(iso) ? `${iso}T12:00:00Z` : null; }
+function csrAttendancePayload(record, overrides={}){
+  const e=emp(overrides.empId || record.empId) || {};
+  const start=overrides.startDate || record.requestStartDate || record.date;
+  const end=overrides.endDate || record.requestEndDate || start;
+  const occ=occurrenceNumber(overrides.occurrence !== undefined ? overrides.occurrence : record.occurrence);
+  const requestId=normalizeMatchId(record.requestId) || normalizeMatchId(record.dvId) || String(record.rid||"");
+  return {
+    cr714_id: requestId,
+    cr714_employeename: overrides.employeeName || e.name || record.empId || "",
+    cr714_startdate: attendanceDateTime(start),
+    cr714_enddate: attendanceDateTime(end),
+    cr714_typeofleave: overrides.type || record.type || "",
+    cr714_occurrence: String(occ ?? 0),
+    cr714_notes: overrides.notes !== undefined ? overrides.notes : (record.attendanceNotes || record.wfNotes || record.notes || "")
+  };
+}
+async function dataverseWrite(table, method, id, payload){
+  const token=await getDataverseToken(); if(!token) throw new Error("Authentication missing");
+  const clean=Object.fromEntries(Object.entries(payload).filter(([,v])=>v!==null && v!==undefined));
+  const url=`${DATAVERSE_URL}/api/data/v9.2/${table}${id?`(${id})`:""}`;
+  const res=await fetch(url,{method,headers:{"Authorization":`Bearer ${token}`,"Content-Type":"application/json","Accept":"application/json","OData-MaxVersion":"4.0","OData-Version":"4.0","Prefer":"return=representation"},body:JSON.stringify(clean)});
+  if(!res.ok) throw new Error(`Dataverse ${method} failed [${res.status}]: ${await res.text()}`);
+  let body=null; try{body=await res.json();}catch(e){}
+  let entityId=id||""; const h=res.headers.get("OData-EntityId"); if(h){const m=h.match(/\(([^)]+)\)/);if(m)entityId=m[1];}
+  if(!entityId && body?.cr714_csrattendancetrackerid) entityId=body.cr714_csrattendancetrackerid;
+  return {id:entityId,body};
+}
+async function findExistingAttendance(record){
+  if(record.attendanceId) return record.attendanceId;
+  const token=await getDataverseToken(); if(!token) throw new Error("Authentication missing");
+  const start=record.requestStartDate||record.date, e=emp(record.empId)||{};
+  const requestId=normalizeMatchId(record.requestId);
+  const headers={"Authorization":`Bearer ${token}`,"Accept":"application/json","OData-MaxVersion":"4.0","OData-Version":"4.0"};
+  // First use the stable request ID written to cr714_id.
+  if(requestId){
+    const idEsc=requestId.replace(/'/g,"''");
+    const u=`${DATAVERSE_URL}/api/data/v9.2/${TABLE_ATTENDANCE}?$select=cr714_csrattendancetrackerid&$filter=${encodeURIComponent(`cr714_id eq '${idEsc}'`)}`;
+    const d=await fetchAllOData(u,headers); if(d.length) return d[0].cr714_csrattendancetrackerid||"";
+  }
+  // Historical Excel-fed records may not share IDs, so fall back to employee + start date.
+  if(e.name && strictCalendarDate(start)){
+    const nameEsc=e.name.replace(/'/g,"''");
+    const filter=`cr714_employeename eq '${nameEsc}' and cr714_startdate ge ${odataDateTimeStart(start)} and cr714_startdate le ${odataDateTimeEnd(start)}`;
+    const u=`${DATAVERSE_URL}/api/data/v9.2/${TABLE_ATTENDANCE}?$select=cr714_csrattendancetrackerid&$filter=${encodeURIComponent(filter)}`;
+    const d=await fetchAllOData(u,headers); if(d.length===1) return d[0].cr714_csrattendancetrackerid||"";
+  }
+  return "";
+}
+async function upsertCsrAttendance(record, overrides={}){
+  if(!record) throw new Error("Attendance source record missing");
+  const payload=csrAttendancePayload(record,overrides);
+  if(!payload.cr714_employeename || !payload.cr714_startdate || !payload.cr714_enddate) throw new Error("Employee, start date, and end date are required for CSR Attendance");
+  const existingId=await findExistingAttendance(record);
+  const result=existingId
+    ? await dataverseWrite(TABLE_ATTENDANCE,"PATCH",existingId,payload)
+    : await dataverseWrite(TABLE_ATTENDANCE,"POST","",payload);
+  const attendanceId=result.id||existingId;
+  const occ=occurrenceNumber(payload.cr714_occurrence) ?? 0;
+  const start=String(payload.cr714_startdate).slice(0,10), end=String(payload.cr714_enddate).slice(0,10);
+  // Keep every expanded row from the same Time Off request aligned until the authoritative refresh completes.
+  (S.records||[]).filter(x=>(record.dvId&&x.dvId===record.dvId)||x.requestId===record.requestId).forEach(x=>{
+    x.attendanceMatched=true; x.attendanceId=attendanceId; x.attendanceLeaveType=payload.cr714_typeofleave;
+    x.attendanceNotes=payload.cr714_notes; x.attendanceOccurrence=occ; x.occurrence=occ; x.occurrenceSource="CSR Attendance";
+    x.requestStartDate=start; x.requestEndDate=end; x.dateSource="CSR Attendance";
+  });
+  save();
+  return {created:!existingId,id:attendanceId};
+}
+async function syncPendingRecordToCsr(rid, overrides={}){
+  const record=S.records.find(x=>x.rid===rid); if(!record) throw new Error("Record not found");
+  showSyncCover("Updating CSR Attendance Tracker...","Saving attendance review");
+  try{
+    const result=await upsertCsrAttendance(record,overrides);
+    toast(result.created?"CSR Attendance record created":"CSR Attendance record updated");
+    await pullFromDataverse(true);
+    return result;
+  }finally{hideSyncCover();}
 }
 
 async function patchDataverseRecord(dvId, fields) {
@@ -1418,7 +1498,10 @@ function calendarDayDiff(startIso, createdOn) {
 function occurrenceDecision(r){
   if(!r || r.cancelled || r.waived || r.fmla) return {status:"ignored",reason:"Cancelled, waived, or excused"};
   if(r.type==="Call Out") return {status:"count",reason:"Call Out"};
-  if(r.type==="Short Shift") return {status:"count",reason:"Short Shift (Late/Leaving Early - No Make-Up)"};
+  if(r.type==="Short Shift") {
+    if(r.attendanceMatched && occurrenceNumber(r.attendanceOccurrence)===0) return {status:"ignored",reason:"CSR Attendance Tracker occurrence marker is 0"};
+    return {status:"count",reason:"Short Shift (Late/Leaving Early - No Make-Up)"};
+  }
   if(r.type==="PTO") {
     const days=calendarDayDiff(r.requestStartDate||r.date,r.submittedOn);
     if(days===null) return {status:"review",reason:"PTO notice cannot be verified"};
@@ -1750,8 +1833,41 @@ function dismissDoctorBanner(key){try{localStorage.setItem(`wf.drnote.dismissed.
 function renderOccurrenceReview(){
  const items=pendingOccurrenceReviews();
  const banners=items.filter(x=>x.group&&x.group.dates.length>3&&!doctorBannerDismissed(x.group.id));
- return `${banners.map(x=>`<div class="card mb" style="border-left:4px solid var(--amber);background:#fff7ed"><div class="row"><b>Return documentation may be required</b><span class="small">${esc(emp(x.r.empId)?.name||x.r.empId)} has ${x.group.dates.length} consecutive non-pre-approved absence days (${fmt(x.group.dates[0])} → ${fmt(x.group.dates[x.group.dates.length-1])}). A doctor's note may be required before return.</span><button class="btn ghost sm right" data-dismiss-dr="${esc(x.group.id)}">Dismiss permanently</button></div></div>`).join('')}<div class="section-title"><h2>Pending Occurrence Reviews (${items.length})</h2><span class="small muted">Discretionary or ambiguous requests stay here until reviewed.</span></div><div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Leave type</th><th>Reason</th><th>Group</th></tr></thead><tbody>${items.map(x=>`<tr data-rec="${esc(x.r.rid)}"><td>${fmt(x.r.requestStartDate||x.r.date)}</td><td><b>${esc(emp(x.r.empId)?.name||x.r.empId)}</b></td><td>${pill(x.r.type)}</td><td>${esc(x.d.reason)}</td><td>${x.group?`<span class="badge warn">${x.group.dates.length} consecutive days</span>`:'Discretionary'}</td></tr>`).join('')||`<tr class="norow"><td colspan="5" class="empty">No pending occurrence reviews for this calendar month.</td></tr>`}</tbody></table></div>`;
+ return `${banners.map(x=>`<div class="card mb" style="border-left:4px solid var(--amber);background:#fff7ed"><div class="row"><b>Return documentation may be required</b><span class="small">${esc(emp(x.r.empId)?.name||x.r.empId)} has ${x.group.dates.length} consecutive non-pre-approved absence days (${fmt(x.group.dates[0])} → ${fmt(x.group.dates[x.group.dates.length-1])}). A doctor's note may be required before return.</span><button class="btn ghost sm right" data-dismiss-dr="${esc(x.group.id)}">Dismiss permanently</button></div></div>`).join('')}<div class="section-title"><h2>Pending Occurrence Reviews (${items.length})</h2><span class="small muted">Discretionary or ambiguous requests stay here until reviewed.</span></div><div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Leave type</th><th>Reason</th><th>Group</th><th>CSR Sync</th></tr></thead><tbody>${items.map(x=>`<tr data-pending-review="${esc(x.r.rid)}" style="cursor:pointer" title="Click to review all row data"><td>${fmt(x.r.requestStartDate||x.r.date)}</td><td><b>${esc(emp(x.r.empId)?.name||x.r.empId)}</b></td><td>${pill(x.r.type)}</td><td>${esc(x.d.reason)}</td><td>${x.group?`<span class="badge warn">${x.group.dates.length} consecutive days</span>`:'Discretionary'}</td><td>${x.r.attendanceMatched?`<span class="badge ok">Matched</span>`:`<span class="badge warn">Needs CSR record</span>`}</td></tr>`).join('')||`<tr class="norow"><td colspan="6" class="empty">No pending occurrence reviews for this calendar month.</td></tr>`}</tbody></table></div>`;
 }
+function pendingReviewDetailModal(rid){
+  const item=pendingOccurrenceReviews().find(x=>x.r.rid===rid); if(!item) return;
+  const r=item.r, e=emp(r.empId)||{}, group=item.group;
+  const start=r.requestStartDate||r.date, end=r.requestEndDate||start;
+  const occ=r.attendanceMatched ? (occurrenceNumber(r.attendanceOccurrence)??0) : (occurrenceNumber(r.occurrence)??0);
+  const fields=[
+    ["Employee",e.name||r.empId],["Email",e.email||""],["Department",e.dept||""],["Supervisor",e.supervisor||""],["Manager",e.manager||""],
+    ["Request Created On",r.submittedOn||""],["CSR Attendance Matched",r.attendanceMatched?"Yes":"No"],["CSR Attendance ID",r.attendanceId||""],
+    ["Time Off Occurrence",r.occurrence??""],["Occurrence Source",r.occurrenceSource||""],["Date Source",r.dateSource||""],["Hours",r.hours??""],["Partial Shift",r.partialShift||""],
+    ["FMLA",r.fmla?"Yes":"No"],["Voicemail",r.voicemail?"Yes":"No"],["Cancelled",r.cancelled?"Yes":"No"],["Waived",r.waived?"Yes":"No"],
+    ["Request Notes",r.notes||""],["Workforce Notes",r.wfNotes||""],["Manager Notes",r.mgrNotes||""],["Request ID",r.requestId||""],["Dataverse ID",r.dvId||""],
+    ["Pending Review Reason",item.d.reason],["Potential Group",group?group.dates.join(" → "):""]
+  ];
+  const rows=fields.map(([label,value])=>`<tr><th style="width:220px;text-align:left">${esc(label)}</th><td>${value!==""&&value!==null&&value!==undefined?esc(String(value)):`<span class="badge warn">Missing</span>`}</td></tr>`).join("");
+  openModal(`<h2>Pending Occurrence Review</h2>
+    <div class="small muted mb">Review all source data, fill the CSR Attendance fields below, then save. This editor is available only on Pending Occurrence Reviews.</div>
+    <div class="mrow"><div><label>CSR Start Date</label><input type="date" id="prStart" value="${esc(start)}"></div><div><label>CSR End Date</label><input type="date" id="prEnd" value="${esc(end)}"></div></div>
+    <div class="mrow"><div><label>CSR Leave Type</label><input type="text" id="prType" value="${esc(r.attendanceLeaveType||r.type||"")}"></div><div><label>CSR Occurrence Marker</label><input type="number" min="0" step="0.5" id="prOcc" value="${occ}"></div></div>
+    <div class="mrow"><div style="flex-basis:100%"><label>CSR Attendance Notes</label><textarea id="prNotes" style="min-height:90px">${esc(r.attendanceNotes||r.wfNotes||r.notes||"")}</textarea></div></div>
+    <div class="tbl-wrap"><table><tbody>${rows}</tbody></table></div>
+    <div class="mfoot"><button class="btn" id="pendingSaveCsr">${r.attendanceMatched?"Update":"Create"} CSR Attendance</button><button class="btn ghost" id="pendingEditRecord">Edit Time Off request</button><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
+  const edit=$("#pendingEditRecord"); if(edit) edit.onclick=()=>{closeModal();recordModal(r.rid,start);};
+  const saveBtn=$("#pendingSaveCsr"); if(saveBtn) saveBtn.onclick=async()=>{
+    const startDate=$("#prStart").value, endDate=$("#prEnd").value, type=$("#prType").value.trim(), notes=$("#prNotes").value.trim();
+    const occurrence=Number($("#prOcc").value||0);
+    if(!strictCalendarDate(startDate)||!strictCalendarDate(endDate)||startDate>endDate) return toast("Valid CSR start/end dates are required");
+    if(!type) return toast("CSR leave type is required");
+    saveBtn.disabled=true;
+    try{await syncPendingRecordToCsr(r.rid,{startDate,endDate,type,notes,occurrence});closeModal();render();}
+    catch(err){console.error(err);toast("CSR Attendance save failed: "+err.message);saveBtn.disabled=false;}
+  };
+}
+
 function renderTeam(){
   const m=metrics();
   const teamRows=m.emps.map(e=>{
@@ -2415,6 +2531,45 @@ function bindRecordButtons(root){
   });
 }
 
+function tableCellSortValue(cell){
+  const raw=(cell?.dataset?.sortValue || cell?.textContent || "").trim();
+  if(!raw || raw==="—") return {kind:"text",value:""};
+  const numeric=raw.replace(/[$,%]/g,"").replace(/,/g,"").match(/^-?\d+(?:\.\d+)?$/);
+  if(numeric) return {kind:"number",value:Number(numeric[0])};
+  const dateMatch=raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if(dateMatch){const y=Number(dateMatch[3])<100?2000+Number(dateMatch[3]):Number(dateMatch[3]);return {kind:"number",value:Date.UTC(y,Number(dateMatch[1])-1,Number(dateMatch[2]))};}
+  return {kind:"text",value:raw.toLocaleLowerCase()};
+}
+function bindGenericTableSorting(root){
+  (root||document).querySelectorAll("table").forEach(table=>{
+    const tbody=table.tBodies?.[0], headerRow=table.tHead?.rows?.[0];
+    if(!tbody || !headerRow || tbody.rows.length<2) return;
+    [...headerRow.cells].forEach((th,index)=>{
+      if(th.hasAttribute("data-nosort") || th.querySelector("button,input,select")) return;
+      // Preserve tables already using the app's specialized sorting handlers.
+      if(th.hasAttribute("data-sort") || th.hasAttribute("data-team-sort")) return;
+      th.style.cursor="pointer";
+      th.title=th.title || "Click to sort";
+      th.setAttribute("aria-sort","none");
+      th.onclick=()=>{
+        const nextDir=th.dataset.genericSortDir==="asc"?"desc":"asc";
+        [...headerRow.cells].forEach(h=>{delete h.dataset.genericSortDir;h.setAttribute("aria-sort","none");const old=h.querySelector("[data-sort-arrow]");if(old)old.remove();});
+        th.dataset.genericSortDir=nextDir; th.setAttribute("aria-sort",nextDir==="asc"?"ascending":"descending");
+        const arrow=document.createElement("span");arrow.dataset.sortArrow="1";arrow.textContent=nextDir==="asc"?" ↑":" ↓";th.appendChild(arrow);
+        const rows=[...tbody.rows];
+        rows.sort((a,b)=>{
+          const av=tableCellSortValue(a.cells[index]), bv=tableCellSortValue(b.cells[index]);
+          let cmp;
+          if(av.kind==="number" && bv.kind==="number") cmp=av.value-bv.value;
+          else cmp=String(av.value).localeCompare(String(bv.value),undefined,{numeric:true,sensitivity:"base"});
+          return nextDir==="asc"?cmp:-cmp;
+        });
+        rows.forEach(r=>tbody.appendChild(r));
+      };
+    });
+  });
+}
+
 function bindView(){
   const v=$("#view");
   v.querySelectorAll("tr[data-emp]").forEach(tr=>tr.onclick=()=>empModal(tr.dataset.emp));
@@ -2459,6 +2614,8 @@ function bindView(){
   });
 
   v.querySelectorAll("[data-dismiss-dr]").forEach(b=>b.onclick=e=>{e.stopPropagation();dismissDoctorBanner(b.dataset.dismissDr);});
+  if(UI.tab==="occurrenceReview") v.querySelectorAll("[data-pending-review]").forEach(row=>row.onclick=e=>{ if(!e.target.closest("button,a,input,select")) pendingReviewDetailModal(row.dataset.pendingReview); });
+  bindGenericTableSorting(v);
     bindRecordButtons(v);
   v.querySelectorAll("[data-mu-act]").forEach(b=>b.onclick=e=>{e.stopPropagation();
     const act=b.dataset.muAct, id=b.dataset.id;
