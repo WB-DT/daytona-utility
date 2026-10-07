@@ -259,7 +259,7 @@ body.syncing{overflow:hidden}
     <h1>Workforce</h1>
     <span class="sync-dot" id="syncStatus"></span>
     <div class="spacer"></div>
-    <button class="btn ghost sm" id="syncBtn" title="Pull latest data from Dataverse">&#8635; Sync</button><button class="btn ghost" id="previewBackfillBtn" title="Preview confirmed missing CSR Attendance records without writing anything">Preview Backfill</button><button class="btn ghost" id="manualBackfillBtn" title="Scan current calendar period and create only confirmed missing CSR Attendance records">Backfill CSR</button>
+    <button class="btn ghost sm" id="syncBtn" title="Pull latest data from Dataverse">&#8635; Sync</button>
   </div>
   <nav id="nav"></nav>
 </header>
@@ -777,7 +777,8 @@ async function pullFromDataverse(silent = false, options = {}) {
       const name = String(e.cr714_employeename || "").trim();
       const id = email || `EMP-${name.replace(/\s+/g, '')}`;
       const dept = String(e["cr714_department@OData.Community.Display.V1.FormattedValue"] || e.cr714_department || "").trim();
-      const record = { id, name, email, dept: dept || "General", repName:name,
+      const resolvedEmail = email || emailFromEmployeeName(name);
+      const record = { id, name, email:resolvedEmail, emailSource:email?"Employee Information":"Derived from employee name", dept: dept || "General", repName:name,
         title:String(e["cr714_title@OData.Community.Display.V1.FormattedValue"] || e.cr714_title || e.cr714_jobtitle || "Representative"),
         supervisor:String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Supervisor"),
         manager:String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "Manager"),
@@ -1018,6 +1019,22 @@ async function deleteRecordFromDataverse(rid) {
 }
 
 function attendanceDateTime(iso){ return strictCalendarDate(iso) ? `${iso}T12:00:00Z` : null; }
+function emailFromEmployeeName(name){
+  const parts=String(name||"").trim().toLowerCase().replace(/[^a-z0-9' -]/g,"").split(/\s+/).filter(Boolean);
+  if(parts.length<2) return "";
+  const clean=x=>x.replace(/[^a-z0-9]/g,"");
+  return `${clean(parts[0])}.${clean(parts[parts.length-1])}@wbmason.com`;
+}
+function effectiveEmployeeEmail(e){ return String(e?.email||"").trim().toLowerCase() || emailFromEmployeeName(e?.name||""); }
+function csrRequiredMissing(r){
+  const e=emp(r.empId)||{}, missing=[];
+  if(!(e.name||r.empId)) missing.push("Employee");
+  if(!strictCalendarDate(r.requestStartDate||r.date)) missing.push("Start Date");
+  if(!strictCalendarDate(r.requestEndDate||r.requestStartDate||r.date)) missing.push("End Date");
+  if(!String(r.attendanceLeaveType||r.type||"").trim()) missing.push("Leave Type");
+  if(occurrenceNumber(r.attendanceMatched?r.attendanceOccurrence:r.occurrence)===null) missing.push("Occurrence Marker");
+  return missing;
+}
 function csrAttendancePayload(record, overrides={}){
   const e=emp(overrides.empId || record.empId) || {};
   const start=overrides.startDate || record.requestStartDate || record.date;
@@ -1090,8 +1107,11 @@ function automaticCsrBackfillDecision(r){
   if(!r || r.attendanceMatched) return {eligible:false,reason:"Already matched"};
   if(r.cancelled || r.waived || r.fmla) return {eligible:false,reason:"Cancelled, waived, or excused"};
   const occ=occurrenceNumber(r.occurrence);
-  if((r.type==="Call Out" || r.type==="Short Shift") && occ!==null && occ>0)
+  if((r.type==="Call Out" || r.type==="Short Shift") && occ!==null && occ>0){
+    const missing=csrRequiredMissing(r);
+    if(missing.length) return {eligible:false,reason:`Missing required CSR field${missing.length===1?"":"s"}: ${missing.join(", ")}`};
     return {eligible:true,reason:`Confirmed ${r.type} with occurrence ${occ}`};
+  }
   return {eligible:false,reason:"Requires review or is excluded"};
 }
 function backfillReviewRows(){
@@ -1964,28 +1984,35 @@ function pendingReviewDetailModal(rid){
   const r=item.r, e=emp(r.empId)||{}, group=item.group;
   const start=r.requestStartDate||r.date, end=r.requestEndDate||start;
   const occ=r.attendanceMatched ? (occurrenceNumber(r.attendanceOccurrence)??0) : (occurrenceNumber(r.occurrence)??0);
+  const email=effectiveEmployeeEmail(e), requiredMissing=csrRequiredMissing(r);
+  const show=(value,{optional=false,derived=false}={})=> value!==""&&value!==null&&value!==undefined
+    ? `${esc(String(value))}${derived?` <span class="badge">Auto-filled</span>`:""}`
+    : optional?`<span class="small muted">Optional / blank</span>`:`<span class="badge warn">Missing</span>`;
   const fields=[
-    ["Employee",e.name||r.empId],["Email",e.email||""],["Department",e.dept||""],["Supervisor",e.supervisor||""],["Manager",e.manager||""],
-    ["Request Created On",r.submittedOn||""],["CSR Attendance Matched",r.attendanceMatched?"Yes":"No"],["CSR Attendance ID",r.attendanceId||""],
-    ["Time Off Occurrence",r.occurrence??""],["Occurrence Source",r.occurrenceSource||""],["Date Source",r.dateSource||""],["Hours",r.hours??""],["Partial Shift",r.partialShift||""],
-    ["FMLA",r.fmla?"Yes":"No"],["Voicemail",r.voicemail?"Yes":"No"],["Cancelled",r.cancelled?"Yes":"No"],["Waived",r.waived?"Yes":"No"],
-    ["Request Notes",r.notes||""],["Workforce Notes",r.wfNotes||""],["Manager Notes",r.mgrNotes||""],["Request ID",r.requestId||""],["Dataverse ID",r.dvId||""],
-    ["Pending Review Reason",item.d.reason],["Potential Group",group?group.dates.join(" → "):""]
+    ["Employee",show(e.name||r.empId)],["Email",show(email,{derived:!e.email&&!!email})],["Department",show(e.dept)],["Supervisor",show(e.supervisor)],["Manager",show(e.manager)],
+    ["Request Created On",show(r.submittedOn)],["CSR Attendance Matched",show(r.attendanceMatched?"Yes":"No")],
+    ["CSR Attendance ID",r.attendanceMatched?show(r.attendanceId):`<span class="badge warn">Will be created when CSR record is added</span>`],
+    ["Time Off Occurrence",show(r.occurrence)],["Occurrence Source",show(r.occurrenceSource)],["Date Source",show(r.dateSource)],["Hours",show(r.hours)],
+    ["Partial Shift",show(r.partialShift,{optional:true})],["FMLA",show(r.fmla?"Yes":"No")],["Voicemail",show(r.voicemail?"Yes":"No")],["Cancelled",show(r.cancelled?"Yes":"No")],["Waived",show(r.waived?"Yes":"No")],
+    ["Request Notes",show(r.notes,{optional:true})],["Workforce Notes",show(r.wfNotes,{optional:true})],["Manager Notes",show(r.mgrNotes,{optional:true})],["Request ID",show(r.requestId)],["Dataverse ID",show(r.dvId)],
+    ["Pending Review Reason",show(item.d.reason)],["Potential Group",show(group?group.dates.join(" → "):"",{optional:true})]
   ];
-  const rows=fields.map(([label,value])=>`<tr><th style="width:220px;text-align:left">${esc(label)}</th><td>${value!==""&&value!==null&&value!==undefined?esc(String(value)):`<span class="badge warn">Missing</span>`}</td></tr>`).join("");
+  const rows=fields.map(([label,html])=>`<tr><th style="width:220px;text-align:left">${esc(label)}</th><td>${html}</td></tr>`).join("");
   openModal(`<h2>Pending Occurrence Review</h2>
-    <div class="small muted mb">Review all source data, fill the CSR Attendance fields below, then save. This editor is available only on Pending Occurrence Reviews.</div>
+    <div class="small muted mb">Fields that can be derived are prefilled. Partial Shift and Workforce Notes are optional. A missing CSR Attendance ID means the CSR record has not been created yet.</div>
+    ${requiredMissing.length?`<div class="card mb" style="border-left:4px solid var(--amber)"><b>Still required:</b> ${esc(requiredMissing.join(", "))}</div>`:""}
     <div class="mrow"><div><label>CSR Start Date</label><input type="date" id="prStart" value="${esc(start)}"></div><div><label>CSR End Date</label><input type="date" id="prEnd" value="${esc(end)}"></div></div>
     <div class="mrow"><div><label>CSR Leave Type</label><input type="text" id="prType" value="${esc(r.attendanceLeaveType||r.type||"")}"></div><div><label>CSR Occurrence Marker</label><input type="number" min="0" step="0.5" id="prOcc" value="${occ}"></div></div>
-    <div class="mrow"><div style="flex-basis:100%"><label>CSR Attendance Notes</label><textarea id="prNotes" style="min-height:90px">${esc(r.attendanceNotes||r.wfNotes||r.notes||"")}</textarea></div></div>
+    <div class="mrow"><div style="flex-basis:100%"><label>CSR Attendance Notes <span class="small muted">optional</span></label><textarea id="prNotes" style="min-height:90px">${esc(r.attendanceNotes||r.notes||"")}</textarea></div></div>
     <div class="tbl-wrap"><table><tbody>${rows}</tbody></table></div>
     <div class="mfoot"><button class="btn" id="pendingSaveCsr">${r.attendanceMatched?"Update":"Create"} CSR Attendance</button><button class="btn ghost" id="pendingEditRecord">Edit Time Off request</button><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
   const edit=$("#pendingEditRecord"); if(edit) edit.onclick=()=>{closeModal();recordModal(r.rid,start);};
   const saveBtn=$("#pendingSaveCsr"); if(saveBtn) saveBtn.onclick=async()=>{
     const startDate=$("#prStart").value, endDate=$("#prEnd").value, type=$("#prType").value.trim(), notes=$("#prNotes").value.trim();
-    const occurrence=Number($("#prOcc").value||0);
+    const occurrenceRaw=$("#prOcc").value, occurrence=occurrenceRaw===""?null:Number(occurrenceRaw);
     if(!strictCalendarDate(startDate)||!strictCalendarDate(endDate)||startDate>endDate) return toast("Valid CSR start/end dates are required");
     if(!type) return toast("CSR leave type is required");
+    if(occurrence===null||!Number.isFinite(occurrence)||occurrence<0) return toast("CSR occurrence marker is required");
     saveBtn.disabled=true;
     try{await syncPendingRecordToCsr(r.rid,{startDate,endDate,type,notes,occurrence});closeModal();render();}
     catch(err){console.error(err);toast("CSR Attendance save failed: "+err.message);saveBtn.disabled=false;}
@@ -2326,7 +2353,7 @@ function recordModal(rid,presetDate){
     <div class="mrow">
       <div><label for="mType">Type / Leave Type</label><select id="mType">${TYPE_NAMES.map(t=>`<option ${t===r.type?"selected":""}>${esc(t)}</option>`).join("")}</select></div>
       <div><label for="mHours">Hours</label><input type="number" id="mHours" step="0.25" min="0" value="${r.hours}"></div>
-      <div><label for="mPartial">Time Frame / Schedule Adjustment</label><input type="text" id="mPartial" placeholder="e.g. 12:30 PM - 5:00 PM" value="${esc(r.partialShift||"")}"></div>
+      <div><label for="mPartial">Time Frame / Schedule Adjustment <span class="small muted">optional</span></label><input type="text" id="mPartial" placeholder="e.g. 12:30 PM - 5:00 PM" value="${esc(r.partialShift||"")}"></div>
     </div>
 
     <div class="mrow">
@@ -2349,7 +2376,7 @@ function recordModal(rid,presetDate){
     
     <div><label for="mNotes">Notes</label><textarea id="mNotes" rows="2">${esc(r.notes)}</textarea></div>
     ${r.mgrNotes ? `<div class="mt small" style="padding:10px; background:var(--soft); border-radius:8px; border-left:3px solid var(--teal);"><b>Manager Notes:</b><br>${esc(r.mgrNotes).replace(/\n/g, '<br>')}</div>` : ""}
-    <div class="mt"><label for="mWfNotes">Workforce Notes</label><textarea id="mWfNotes" rows="2" placeholder="Enter workforce notes here...">${esc(r.wfNotes || "")}</textarea></div>
+    <div class="mt"><label for="mWfNotes">Workforce Notes <span class="small muted">optional backend note</span></label><textarea id="mWfNotes" rows="2" placeholder="Enter workforce notes here...">${esc(r.wfNotes || "")}</textarea></div>
 
     <div class="mfoot">
       ${rid?`<button class="btn ghost" id="mDel" style="margin-right:auto">Cancel request</button>`:`<span class="small muted right" style="margin-right:auto">Tip: for an occurrence type you can create a make-up agreement after saving.</span>`}
@@ -2778,8 +2805,6 @@ $("#filterBar").addEventListener("click",e=>{ if(e.target.id==="fClear"){
   Object.assign(UI,{preset:"month",anchor:today(),from:null,to:null,dept:"",repName:"",title:"",supervisor:"",manager:"",q:"",type:""}); render(); }});
 
 $("#syncBtn").onclick=()=>pullFromDataverse(false);
-$("#previewBackfillBtn").onclick=()=>previewCsrBackfill();
-$("#manualBackfillBtn").onclick=()=>manualCsrBackfill();
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
 
 render();
