@@ -1089,7 +1089,14 @@ function renderCalendar(){
   const [f,t]=range();
   const recs=filteredRecords(), byDate={};
   recs.forEach(r=>{(byDate[r.date]=byDate[r.date]||[]).push(r);});
+  
   const totalEmps = filteredEmployees().length || 0; 
+  const empIds = new Set(filteredEmployees().map(e => e.id));
+  
+  // Pull Make-Up shifts to display on the main calendar
+  const mus = uniqueMakeups((S.makeups||[]).filter(m => empIds.has(m.empId) && m.status !== "Cancelled" && m.status !== "Missed"));
+  const muByDate = {};
+  mus.forEach(m => { (muByDate[m.dateMissed] = muByDate[m.dateMissed] || []).push(m); });
 
   const head=`<div class="cal-head">
     <button class="btn ghost sm" id="calPrev">&#8249;</button>
@@ -1099,12 +1106,27 @@ function renderCalendar(){
     <button class="btn sm right" id="calAdd">+ Add record</button>
   </div>`;
 
+  // Custom visual row for Make-Up Shifts on the main calendar
+  const renderCalMuRow = (m) => {
+    const e = emp(m.empId) || {name: m.empId};
+    return `<div class="cal-row" onclick="makeupModal('${esc(m.mid)}')" style="cursor:pointer; border-left: 4px solid var(--purple); background: rgba(124, 58, 237, 0.06);" title="Make-Up Shift (Click to view)">
+      <div class="row-top">
+        <div style="font-weight: 600; font-size: 15px; min-width: 150px; color: var(--purple);">${esc(e.name)}</div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="badge" style="background:var(--purple); color:#fff;">Make-Up Shift</span>
+          <span class="badge ${m.status==='Completed'?'ok':m.status==='Approved'?'':'warn'}">${esc(m.status)}</span>
+        </div>
+        <div style="font-weight: 700; font-size: 13.5px; color: var(--purple); white-space: nowrap; margin-left: auto;">${hoursToHHMM(m.hoursOwed)}h</div>
+      </div>
+      ${m.scheduleSegments && m.scheduleSegments[0] ? `<div class="small" style="color: var(--purple); margin-top: 4px; font-weight: 600;">Scheduled: ${m.scheduleSegments[0].start} -${m.scheduleSegments[0].end}</div>` : ""}
+    </div>`;
+  };
+
   if(UI.preset==="week" || (UI.preset==="adjusted" && addDays(f,10)>t && addDays(f,1)<=t)){
     let days = []; 
     let baseDate = parseISO(f);
     let dayOfWeek = baseDate.getDay();
     
-    // Fix calendar start day: if Sunday (0), go forward 1 to Monday; else go back to Monday
     let diffToMonday = dayOfWeek === 0 ? 1 : 1 - dayOfWeek;
     baseDate.setDate(baseDate.getDate() + diffToMonday);
     
@@ -1118,27 +1140,30 @@ function renderCalendar(){
       UI.selectedWeekDay = days.includes(today()) ? today() : days[0];
     }
 
-    // A full 0-6 array ensures JavaScript's .getDay() index maps perfectly (fixes UNDEFINED)
     const dows = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const selDay = UI.selectedWeekDay;
     const allRs = byDate[selDay]||[];
     const presentCount = allRs.filter(r => r.type === "Present").length;
     
-    // Sort exceptions newest-on-top based on submission time (not by leave type)
     const occurrenceRs = allRs.filter(r => r.type !== "Present").sort((a,b) => getRecordTimestamp(b) - getRecordTimestamp(a));
+    const dayMus = muByDate[selDay] || []; // Get Make-Up Shifts for selected day
 
     const weekGridHtml = `<div class="cal-grid" style="grid-template-columns: repeat(5, 1fr); margin-bottom: 20px;">
       ${days.map(ds => {
         const dObj = parseISO(ds);
         const dowName = dows[dObj.getDay()];
         const rs = byDate[ds]||[];
+        const dMus = muByDate[ds]||[];
         const isSelected = ds === selDay;
         const isToday = ds === today();
         const agg = calendarTypeSummary(rs);
 
         return `<div class="cal-cell ${isSelected ? "today" : ""}" data-select-day="${ds}" style="min-height: 80px; cursor: pointer; ${isSelected ? 'border-width: 2px; border-color: var(--brand); background: var(--soft);' : ''}">
           <div class="row"><div class="small muted" style="text-transform: uppercase;">${dowName}</div><div class="d">${dObj.getDate()}</div></div>
-          <div class="cal-mini">${Object.entries(agg).map(([ty,summary])=>calendarDot(ty,summary)).join("")}</div>
+          <div class="cal-mini">
+            ${Object.entries(agg).map(([ty,summary])=>calendarDot(ty,summary)).join("")}
+            ${dMus.length ? `<span class="dot" title="Scheduled Make-Ups: ${dMus.length}" style="background:#fff; color:var(--purple); border:1.5px solid var(--purple); font-weight:800;">${dMus.length} MU</span>` : ""}
+          </div>
         </div>`;
       }).join("")}
     </div>`;
@@ -1158,24 +1183,31 @@ function renderCalendar(){
     const daySectionHtml = `<div class="day-block card">
       <div class="row">
         <b>${formattedSelectedTitle}</b>
-        <span class="small muted">${presentCount}/${totalEmps} present · ${uniqueOccurrenceRs.length} record${uniqueOccurrenceRs.length===1?"":"s"}</span>
+        <span class="small muted">${presentCount}/${totalEmps} present · ${uniqueOccurrenceRs.length} record${uniqueOccurrenceRs.length===1?"":"s"} · ${dayMus.length} make-ups</span>
         <button class="btn ghost sm right" data-add-day="${selDay}">+ Add</button>
       </div>
-      ${uniqueOccurrenceRs.length ? `<div class="mt" style="display:flex; flex-direction: column; gap:8px;">${uniqueOccurrenceRs.map(r => rowRecord(r, true)).join("")}</div>` : `<div class="small muted mt">No exception records for this day.</div>`}
+      ${uniqueOccurrenceRs.length || dayMus.length ? `<div class="mt" style="display:flex; flex-direction: column; gap:8px;">
+        ${dayMus.map(m => renderCalMuRow(m)).join("")}
+        ${uniqueOccurrenceRs.map(r => rowRecord(r, true)).join("")}
+      </div>` : `<div class="small muted mt">No exception records or make-up shifts for this day.</div>`}
     </div>`;
 
     return head + weekGridHtml + daySectionHtml;
   }
-  
+
   if(UI.preset==="day"){
     let d = f;
     const allRs = byDate[d]||[];
+    const dayMus = muByDate[d]||[];
     const presentCount = allRs.filter(r => r.type === "Present").length;
-    // Sort exceptions newest-on-top based on submission time
     const rs=allRs.filter(r => r.type !== "Present").sort((a,b) => getRecordTimestamp(b) - getRecordTimestamp(a));
-    return head+`<div class="day-block card"><div class="row"><b>${fmtShort(d)}</b><span class="small muted">${presentCount}/${totalEmps} present · ${rs.length} record${rs.length===1?"":"s"}</span>
+    
+    return head+`<div class="day-block card"><div class="row"><b>${fmtShort(d)}</b><span class="small muted">${presentCount}/${totalEmps} present · ${rs.length} record${rs.length===1?"":"s"} · ${dayMus.length} make-ups</span>
       <button class="btn ghost sm right" data-add-day="${d}">+ Add</button></div>
-      ${rs.length? `<div class="mt" style="display:flex; flex-direction:column; gap:8px;">${rs.map(r=>rowRecord(r,true)).join("")}</div>`:`<div class="small muted mt">No records.</div>`}
+      ${rs.length || dayMus.length ? `<div class="mt" style="display:flex; flex-direction:column; gap:8px;">
+        ${dayMus.map(m => renderCalMuRow(m)).join("")}
+        ${rs.map(r=>rowRecord(r,true)).join("")}
+      </div>`:`<div class="small muted mt">No records or make-ups.</div>`}
     </div>`;
   }
 
@@ -1191,7 +1223,7 @@ function renderCalendar(){
     for(let i=0;i<lead;i++) cells+=`<div></div>`;
     
     for(let day=1;day<=last.getDate();day++){
-      const ds=isoDate(new Date(y,mo,day)), rs=byDate[ds]||[];
+      const ds=isoDate(new Date(y,mo,day)), rs=byDate[ds]||[], dMus = muByDate[ds]||[];
       const presentCount = rs.filter(r => r.type === "Present").length;
       const agg={}; 
       rs.forEach(r=>{ 
@@ -1202,10 +1234,13 @@ function renderCalendar(){
       
       cells+=`<div class="cal-cell ${dim?"dim":""} ${isToday?"today":""}" data-day="${ds}">
         <div class="row"><div class="d">${day}</div><div class="right muted" style="font-size:10.5px; font-weight:600;">${presentCount}/${totalEmps}</div></div>
-        <div class="cal-mini">${Object.entries(agg).map(([ty,n])=> {
-          const tObj = TYPES[ty] || { color: "var(--muted)", abbr: ty.slice(0,2).toUpperCase() };
-          return `<span class="dot" title="${esc(ty)}:${n}" style="background:${tObj.color}">${n>1?n:tObj.abbr}</span>`;
-        }).join("")}</div>
+        <div class="cal-mini">
+          ${Object.entries(agg).map(([ty,n])=> {
+            const tObj = TYPES[ty] || { color: "var(--muted)", abbr: ty.slice(0,2).toUpperCase() };
+            return `<span class="dot" title="${esc(ty)}:${n}" style="background:${tObj.color}">${n>1?n:tObj.abbr}</span>`;
+          }).join("")}
+          ${dMus.length ? `<span class="dot" title="Make-Up Shifts: ${dMus.length}" style="background:#fff; color:var(--purple); border:1.5px solid var(--purple); font-weight:800;">${dMus.length} MU</span>` : ""}
+        </div>
       </div>`;
     }
     return `<div class="mb"><h3 class="mt" style="font-size:15px">${m0.toLocaleDateString(undefined,{month:"long",year:"numeric"})}</h3>
@@ -2230,37 +2265,34 @@ function dayModal(ds){
   const rs = filteredRecords(ds, ds)
     .filter(r => r.type !== "Present")
     .sort((a,b) => getRecordTimestamp(b) - getRecordTimestamp(a));
+    
+  const ids = new Set(filteredEmployees().map(e=>e.id));
+  const dayMus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.dateMissed === ds && m.status !== "Cancelled" && m.status !== "Missed"));
   
+  const renderCalMuRow = (m) => {
+    const e = emp(m.empId) || {name: m.empId};
+    return `<div class="cal-row" onclick="makeupModal('${esc(m.mid)}')" style="cursor:pointer; border-left: 4px solid var(--purple); background: rgba(124, 58, 237, 0.06);" title="Make-Up Shift (Click to view)">
+      <div class="row-top">
+        <div style="font-weight: 600; font-size: 15px; min-width: 150px; color: var(--purple);">${esc(e.name)}</div>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="badge" style="background:var(--purple); color:#fff;">Make-Up Shift</span>
+          <span class="badge ${m.status==='Completed'?'ok':m.status==='Approved'?'':'warn'}">${esc(m.status)}</span>
+        </div>
+        <div style="font-weight: 700; font-size: 13.5px; color: var(--purple); white-space: nowrap; margin-left: auto;">${hoursToHHMM(m.hoursOwed)}h</div>
+      </div>
+      ${m.scheduleSegments && m.scheduleSegments[0] ? `<div class="small" style="color: var(--purple); margin-top: 4px; font-weight: 600;">Scheduled: ${m.scheduleSegments[0].start} -${m.scheduleSegments[0].end}</div>` : ""}
+    </div>`;
+  };
+
   openModal(`<h2>${fmtShort(ds)}</h2>
-    ${rs.length?`<div class="tbl-wrap"><table><tbody>${rs.map(r=>rowRecord(r,true)).join("")}</tbody></table></div>`:`<div class="empty">No occurrence records match the current filters for this day.</div>`}
+    ${rs.length || dayMus.length ? `<div class="tbl-wrap" style="display:flex; flex-direction:column; gap:8px;">
+      ${dayMus.map(m => renderCalMuRow(m)).join("")}
+      ${rs.map(r=>rowRecord(r,true)).join("")}
+    </div>` : `<div class="empty">No occurrence records or make-up shifts for this day.</div>`}
     <div class="mfoot"><button class="btn" id="dAdd">+ Add record</button><button class="btn ghost" onclick="closeModal()">Close</button></div>`);
     
   $("#dAdd").onclick=()=>recordModal(null,ds);
   bindRecordButtons($("#modalHost"));
-}
-
-function muDayModal(ds){
-  const ids = new Set(filteredEmployees().map(e=>e.id));
-  const dayMus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.dateMissed === ds && (!UI.muFilter || m.status === UI.muFilter)));
-  
-  openModal(`<h2>Make-Up Shifts: ${fmtShort(ds)}</h2>
-    ${dayMus.length ? `<div class="tbl-wrap"><table><tbody>${dayMus.map(muRow).join("")}</tbody></table></div>` : `<div class="empty">No make-up shifts scheduled for this day.</div>`}
-    <div class="mfoot">
-      <button class="btn" id="muDayAdd">+ New agreement</button>
-      <button class="btn ghost" onclick="closeModal()">Close</button>
-    </div>`);
-    
-  $("#muDayAdd").onclick = () => makeupModal(null, { date: ds });
-  
-  const mh = $("#modalHost");
-  mh.querySelectorAll("[data-mu-act]").forEach(b=>{
-    b.onclick = e => {
-      e.stopPropagation();
-      const act = b.dataset.muAct, id = b.dataset.id;
-      if(act === "edit") { closeModal(); makeupModal(id); }
-      else { setMuStatus(id, act === "approve" ? "Approved" : act === "complete" ? "Completed" : "Missed"); closeModal(); }
-    };
-  });
 }
   
 function empModal(id){
