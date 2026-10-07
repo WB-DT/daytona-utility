@@ -1019,6 +1019,21 @@ async function deleteRecordFromDataverse(rid) {
 }
 
 function attendanceDateTime(iso){ return strictCalendarDate(iso) ? `${iso}T12:00:00Z` : null; }
+const AUTO_FILL_LOG_KEY="wf.autoFillLog.v1";
+function getAutoFillLog(){try{return JSON.parse(localStorage.getItem(AUTO_FILL_LOG_KEY)||"[]");}catch(e){return [];}}
+function logAutoFill({record,field,fromValue="",toValue,source}){
+  if(toValue===undefined||toValue===null||String(toValue)==="") return;
+  const requestId=record?.requestId||record?.dvId||record?.rid||"";
+  const key=[requestId,field,String(toValue),source].join("|");
+  const log=getAutoFillLog(); if(log.some(x=>x.key===key)) return;
+  log.unshift({key,at:new Date().toISOString(),requestId,employee:emp(record?.empId)?.name||record?.empId||"",field,fromValue:String(fromValue??""),toValue:String(toValue),source:String(source||"")});
+  try{localStorage.setItem(AUTO_FILL_LOG_KEY,JSON.stringify(log.slice(0,500)));}catch(e){}
+}
+function clearAutoFillLog(){try{localStorage.removeItem(AUTO_FILL_LOG_KEY);}catch(e){} render();}
+function renderAutoFillLog(){
+  const log=getAutoFillLog();
+  return `<div class="card mb"><div class="row"><div><h3 style="margin:0">Auto-Fill Log</h3><div class="small muted">Fields derived or completed automatically on this device. Most recent first.</div></div>${log.length?`<button class="btn ghost sm right" id="clearAutoFillLog">Clear Log</button>`:""}</div>${log.length?`<div class="tbl-wrap mt" style="max-height:260px;overflow:auto"><table><thead><tr><th>Time</th><th>Employee</th><th>Request ID</th><th>Field</th><th>Filled Value</th><th>Source</th></tr></thead><tbody>${log.map(x=>`<tr><td class="small">${esc(new Date(x.at).toLocaleString())}</td><td>${esc(x.employee)}</td><td>${esc(x.requestId)}</td><td>${esc(x.field)}</td><td>${esc(x.toValue)}</td><td class="small">${esc(x.source)}</td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No auto-filled fields recorded yet.</div>`}</div>`;
+}
 function emailFromEmployeeName(name){
   const parts=String(name||"").trim().toLowerCase().replace(/[^a-z0-9' -]/g,"").split(/\s+/).filter(Boolean);
   if(parts.length<2) return "";
@@ -1153,6 +1168,11 @@ async function runAutomaticCsrBackfill({refreshAfter=true,notify=false}={}){
           record.attendanceMatched=true; record.attendanceId=existingId; result.matched++; continue;
         }
         const payload=csrAttendancePayload(record);
+        logAutoFill({record,field:"CSR Employee",toValue:payload.cr714_employeename,source:"Employee Information"});
+        logAutoFill({record,field:"CSR Start Date",toValue:String(payload.cr714_startdate||"").slice(0,10),source:"Time Off request date"});
+        logAutoFill({record,field:"CSR End Date",toValue:String(payload.cr714_enddate||"").slice(0,10),source:"Time Off request date"});
+        logAutoFill({record,field:"CSR Leave Type",toValue:payload.cr714_typeofleave,source:"Time Off leave type"});
+        logAutoFill({record,field:"CSR Occurrence Marker",toValue:payload.cr714_occurrence,source:"Confirmed Time Off occurrence"});
         const written=await dataverseWrite(TABLE_ATTENDANCE,"POST","",payload);
         record.attendanceMatched=true; record.attendanceId=written.id||"";
         record.attendanceLeaveType=payload.cr714_typeofleave; record.attendanceNotes=payload.cr714_notes;
@@ -1977,7 +1997,7 @@ function dismissDoctorBanner(key){try{localStorage.setItem(`wf.drnote.dismissed.
 function renderOccurrenceReview(){
  const items=pendingOccurrenceReviews();
  const banners=items.filter(x=>x.group&&x.group.dates.length>3&&!doctorBannerDismissed(x.group.id));
- return `${banners.map(x=>`<div class="card mb" style="border-left:4px solid var(--amber);background:#fff7ed"><div class="row"><b>Return documentation may be required</b><span class="small">${esc(emp(x.r.empId)?.name||x.r.empId)} has ${x.group.dates.length} consecutive non-pre-approved absence days (${fmt(x.group.dates[0])} → ${fmt(x.group.dates[x.group.dates.length-1])}). A doctor's note may be required before return.</span><button class="btn ghost sm right" data-dismiss-dr="${esc(x.group.id)}">Dismiss permanently</button></div></div>`).join('')}<div class="section-title"><h2>Pending Occurrence Reviews (${items.length})</h2><span class="small muted">Confirmed missing Call Out/Short Shift occurrences are backfilled automatically. Discretionary or ambiguous requests stay here until reviewed.</span></div><div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Leave type</th><th>Reason</th><th>Group</th><th>CSR Sync</th></tr></thead><tbody>${items.map(x=>`<tr data-pending-review="${esc(x.r.rid)}" style="cursor:pointer" title="Click to review all row data"><td>${fmt(x.r.requestStartDate||x.r.date)}</td><td><b>${esc(emp(x.r.empId)?.name||x.r.empId)}</b></td><td>${pill(x.r.type)}</td><td>${esc(x.d.reason)}</td><td>${x.group?`<span class="badge warn">${x.group.dates.length} consecutive days</span>`:'Discretionary'}</td><td>${x.r.attendanceMatched?`<span class="badge ok">Matched</span>`:`<span class="badge warn">Needs CSR record</span>`}</td></tr>`).join('')||`<tr class="norow"><td colspan="6" class="empty">No pending occurrence reviews for this calendar month.</td></tr>`}</tbody></table></div>`;
+ return `${renderAutoFillLog()}${banners.map(x=>`<div class="card mb" style="border-left:4px solid var(--amber);background:#fff7ed"><div class="row"><b>Return documentation may be required</b><span class="small">${esc(emp(x.r.empId)?.name||x.r.empId)} has ${x.group.dates.length} consecutive non-pre-approved absence days (${fmt(x.group.dates[0])} → ${fmt(x.group.dates[x.group.dates.length-1])}). A doctor's note may be required before return.</span><button class="btn ghost sm right" data-dismiss-dr="${esc(x.group.id)}">Dismiss permanently</button></div></div>`).join('')}<div class="section-title"><h2>Pending Occurrence Reviews (${items.length})</h2><span class="small muted">Confirmed missing Call Out/Short Shift occurrences are backfilled automatically. Discretionary or ambiguous requests stay here until reviewed.</span></div><div class="card tbl-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Leave type</th><th>Reason</th><th>Group</th><th>CSR Sync</th></tr></thead><tbody>${items.map(x=>`<tr data-pending-review="${esc(x.r.rid)}" style="cursor:pointer" title="Click to review all row data"><td>${fmt(x.r.requestStartDate||x.r.date)}</td><td><b>${esc(emp(x.r.empId)?.name||x.r.empId)}</b></td><td>${pill(x.r.type)}</td><td>${esc(x.d.reason)}</td><td>${x.group?`<span class="badge warn">${x.group.dates.length} consecutive days</span>`:'Discretionary'}</td><td>${x.r.attendanceMatched?`<span class="badge ok">Matched</span>`:`<span class="badge warn">Needs CSR record</span>`}</td></tr>`).join('')||`<tr class="norow"><td colspan="6" class="empty">No pending occurrence reviews for this calendar month.</td></tr>`}</tbody></table></div>`;
 }
 function pendingReviewDetailModal(rid){
   const item=pendingOccurrenceReviews().find(x=>x.r.rid===rid); if(!item) return;
@@ -2765,6 +2785,7 @@ function bindView(){
   });
 
   v.querySelectorAll("[data-dismiss-dr]").forEach(b=>b.onclick=e=>{e.stopPropagation();dismissDoctorBanner(b.dataset.dismissDr);});
+  const clearLog=$("#clearAutoFillLog"); if(clearLog) clearLog.onclick=clearAutoFillLog;
   if(UI.tab==="occurrenceReview") v.querySelectorAll("[data-pending-review]").forEach(row=>row.onclick=e=>{ if(!e.target.closest("button,a,input,select")) pendingReviewDetailModal(row.dataset.pendingReview); });
   bindGenericTableSorting(v);
     bindRecordButtons(v);
