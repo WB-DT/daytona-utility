@@ -43,7 +43,13 @@ nav button.on{color:var(--brand);border-bottom-color:var(--brand)}
 .fgroup{min-width:0}
 .chip-clear{border:none;background:var(--soft);color:var(--brand);border-radius:8px;padding:7px 11px;cursor:pointer;font-size:13px;font-weight:600}
 
-main{max-width:1240px;margin:0 auto;padding:16px}
+main{max-width:1440px;margin:0 auto;padding:16px}
+.cal-layout{display:flex;gap:16px;align-items:flex-start}
+.cal-layout .week-board{flex:1;min-width:0}
+.loa-sidebar{width:260px;min-width:260px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:12px;display:flex;flex-direction:column;gap:8px}
+@media(max-width:1200px){.cal-layout{flex-direction:column}.loa-sidebar{width:100%;min-width:100%}}
+.loa-card{background:var(--bg);border:1px solid var(--line);border-left:3.5px solid var(--indigo);border-radius:8px;padding:8px 10px;cursor:pointer;display:flex;flex-direction:column;gap:4px}
+.loa-card:hover{border-color:var(--indigo)}
 .grid{display:grid;gap:12px}
 .kpis{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px}
@@ -154,6 +160,7 @@ canvas{max-height:280px}
 @media (max-width: 1100px) {
   .week-board { grid-template-columns: repeat(5, 240px); }
 }
+  
 .col-day {
   background: var(--card);
   border: 1px solid var(--line);
@@ -1182,7 +1189,6 @@ function renderCalendar(){
   const totalEmps = filteredEmployees().length || 0; 
   const empIds = new Set(filteredEmployees().map(e => e.id));
   
-  // Pull Make-Up shifts to display on the calendar
   const mus = uniqueMakeups((S.makeups||[]).filter(m => empIds.has(m.empId) && m.status !== "Cancelled" && m.status !== "Missed"));
   const muByDate = {};
   mus.forEach(m => { (muByDate[m.dateMissed] = muByDate[m.dateMissed] || []).push(m); });
@@ -1195,7 +1201,7 @@ function renderCalendar(){
     <button class="btn sm right" id="calAdd">+ Add record</button>
   </div>`;
 
-  // 5-Column Week View (Monday - Friday)
+  // 5-Column Week View (Monday - Friday) with LOA Sidebar
   if(UI.preset==="week" || (UI.preset==="adjusted" && addDays(f,10)>t && addDays(f,1)<=t)){
     let days = []; 
     let baseDate = parseISO(f);
@@ -1210,14 +1216,69 @@ function renderCalendar(){
       cur = addDays(cur, 1);
     }
 
+    const weekStart = days[0];
+    const weekEnd = days[4];
     const dows = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+    // 1. Group active LOAs overlapping this week
+    const allLoaRecords = (S.records || []).filter(r => 
+      empIds.has(r.empId) && 
+      r.type === "LOA" && 
+      !r.cancelled &&
+      r.date >= addDays(weekStart, -90) && 
+      r.date <= addDays(weekEnd, 90)
+    );
+
+    const loaByGroup = new Map();
+    allLoaRecords.forEach(r => {
+      const groupKey = r.requestId || r.dvId || r.empId;
+      if (!loaByGroup.has(groupKey)) {
+        loaByGroup.set(groupKey, {
+          rep: emp(r.empId) || { name: r.empId },
+          rid: r.rid,
+          minDate: r.date,
+          maxDate: r.date,
+          hours: r.hours,
+          wfNotes: r.wfNotes
+        });
+      } else {
+        const item = loaByGroup.get(groupKey);
+        if (r.date < item.minDate) item.minDate = r.date;
+        if (r.date > item.maxDate) item.maxDate = r.date;
+      }
+    });
+
+    const activeLoasThisWeek = Array.from(loaByGroup.values()).filter(l => 
+      l.minDate <= weekEnd && l.maxDate >= weekStart
+    );
+
+    const loaSidebarHtml = `
+      <div class="loa-sidebar">
+        <div class="row" style="justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line); padding-bottom: 8px;">
+          <div style="font-size: 13px; font-weight: 700; color: var(--indigo); text-transform: uppercase;">Leave of Absence (${activeLoasThisWeek.length})</div>
+        </div>
+        ${activeLoasThisWeek.length ? activeLoasThisWeek.map(l => `
+          <div class="loa-card" data-rec="${esc(l.rid)}" title="Click to view LOA details">
+            <div class="row" style="justify-content: space-between; align-items: flex-start;">
+              <span class="cal-card-name" style="color: var(--indigo);">${esc(l.rep.name)}</span>
+              <span class="badge" style="background: var(--indigo); color: #fff; font-size: 9.5px; padding: 1px 5px;">LOA</span>
+            </div>
+            <div class="cal-card-time" style="font-size: 11.5px; color: var(--muted); margin-top: 2px;">
+              ${fmt(l.minDate)} →${fmt(l.maxDate)}
+            </div>
+            ${l.wfNotes ? `<div class="small muted" style="font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${esc(l.wfNotes)}</div>` : ""}
+          </div>
+        `).join("") : `<div class="empty" style="padding: 16px 4px; font-size: 12px;">No active LOAs this week</div>`}
+      </div>
+    `;
+
+    // 2. Render Monday - Friday columns (excluding LOA cards)
     const boardColsHtml = days.map(ds => {
       const dObj = parseISO(ds);
       const dowName = dows[dObj.getDay()];
       const isToday = ds === today();
       const dayRecs = (byDate[ds] || [])
-        .filter(r => r.type !== "Present")
+        .filter(r => r.type !== "Present" && r.type !== "LOA")
         .sort((a,b) => getRecordTimestamp(b) - getRecordTimestamp(a));
       
       const seenDvIds = new Set();
@@ -1230,15 +1291,14 @@ function renderCalendar(){
       });
 
       const dayMus = muByDate[ds] || [];
-      // Find employees who have an absence/time-off exception (excluding Shift Trades, Cancellations, or Make-Ups)
+      const dayAllRecs = (byDate[ds] || []);
       const absentEmpIds = new Set(
-        uniqueDayRecs
+        dayAllRecs
           .filter(r => !r.cancelled && !["Present", "Shift Trade", "Cancellation"].includes(r.type))
           .map(r => r.empId)
       );
       const presentCount = Math.max(0, totalEmps - absentEmpIds.size);
 
-      // Render compact Make-Up shifts: Name -> Timeframe -> Pill/Status
       const muCardsHtml = dayMus.map(m => {
         const e = emp(m.empId) || {name: m.empId};
         const timeFrame = m.scheduleSegments && m.scheduleSegments[0] 
@@ -1257,7 +1317,6 @@ function renderCalendar(){
         </div>`;
       }).join("");
 
-      // Render regular records: Name -> Timeframe -> Pill + FMLA/VM
       const recCardsHtml = uniqueDayRecs.map(r => {
         const e = emp(r.empId) || {name: r.empId};
         const shiftDisplay = extractShiftHours(r);
@@ -1305,7 +1364,7 @@ function renderCalendar(){
       </div>`;
     }).join("");
 
-    return head + `<div class="week-board mt">${boardColsHtml}</div>`;
+    return head + `<div class="cal-layout mt"><div class="week-board">${boardColsHtml}</div>${loaSidebarHtml}</div>`;
   }
 
   // Day View
