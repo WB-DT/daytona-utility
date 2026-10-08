@@ -840,19 +840,21 @@ async function pullFromDataverse(silent = false) {
         || dateMatches.find(x => x.hasOccurrence)
         || dateMatches[0]
         || null;
-      const authoritativeDates = attendance?.startDate
-        ? (() => {
-            const start = attendance.startDate;
-            const end = attendance.endDate || start;
-            const values = [];
-            let cursor = parseISO(start), target = parseISO(end);
-            while (cursor <= target && values.length < 370) {
-              values.push(isoDate(cursor));
-              cursor.setDate(cursor.getDate() + 1);
-            }
-            return values;
-          })()
-        : timeOffDates;
+      const authoritativeDates = (timeOffDates && timeOffDates.length > 1)
+        ? timeOffDates
+        : (attendance?.startDate
+            ? (() => {
+                const start = attendance.startDate;
+                const end = attendance.endDate || start;
+                const values = [];
+                let cursor = parseISO(start), target = parseISO(end);
+                while (cursor <= target && values.length < 370) {
+                  values.push(isoDate(cursor));
+                  cursor.setDate(cursor.getDate() + 1);
+                }
+                return values;
+              })()
+            : timeOffDates);
       const dates = authoritativeDates.filter(d => d >= syncFrom && d <= rangeTo);
       if (!dates.length) return;
       const timeOcc = occurrenceNumber(r.cr714_occurrence);
@@ -2118,30 +2120,74 @@ function recordModal(rid,presetDate){
     if (rid) {
       const targetRec = S.records.find(x => x.rid === rid);
       if (targetRec) {
-        const formattedReqDates = dFrom === dTo ? dFrom : `${dFrom} - ${dTo}`;
-        Object.assign(targetRec, { 
-          date: dFrom, 
-          dateTo: dTo,
-          empId, 
-          type, 
-          hours, 
-          notes, 
-          wfNotes, 
-          partialShift, 
-          fmla, 
-          voicemail, 
-          occurrence 
-        });
-        if (targetRec.dvId) {
-          await patchDataverseRecord(targetRec.dvId, {
-            cr714_requestdates: formattedReqDates,
-            cr714_fmla: fmla,
-            cr714_voicemail: voicemail,
-            cr714_occurrence: occurrence,
-            cr714_wfnotes: wfNotes,
-            cr714_ptohoursrequested: hours,
-            cr714_hoursofpartialshift: partialShift
+        showSyncCover("Updating record in Dataverse...");
+        try {
+          const toUSDate = (iso) => {
+            const [y, m, d] = iso.split("-");
+            return `${m}/${d}/${y}`;
+          };
+          const formattedReqDates = dFrom === dTo 
+            ? toUSDate(dFrom) 
+            : `${toUSDate(dFrom)} - ${toUSDate(dTo)}`;
+
+          // 1. Send update to Dataverse
+          if (targetRec.dvId) {
+            await patchDataverseRecord(targetRec.dvId, {
+              cr714_requestdates: formattedReqDates,
+              cr714_leavetype: type,
+              cr714_requestnotes: notes,
+              cr714_wfnotes: wfNotes,
+              cr714_occurrence: occurrence,
+              cr714_ptohoursrequested: hours,
+              cr714_hoursofpartialshift: partialShift,
+              cr714_fmla: fmla,
+              cr714_voicemail: voicemail
+            });
+          }
+
+          // 2. Remove previous split days belonging to this request
+          const baseKey = targetRec.dvId || (targetRec.rid.includes('-') ? targetRec.rid.split('-')[0] : targetRec.rid);
+          S.records = S.records.filter(r => {
+            if (targetRec.dvId && r.dvId === targetRec.dvId) return false;
+            if (!targetRec.dvId && (r.rid === baseKey || r.rid.startsWith(baseKey + '-'))) return false;
+            return true;
           });
+
+          // 3. Re-create cards locally for every day in the new range
+          let cur = parseISO(dFrom);
+          const end = parseISO(dTo);
+          let idx = 0;
+          while (cur <= end) {
+            const curDateStr = isoDate(cur);
+            S.records.push({
+              rid: `${baseKey}-${idx}`,
+              dvId: targetRec.dvId || "",
+              requestId: targetRec.requestId || "",
+              date: curDateStr,
+              empId,
+              type,
+              hours,
+              notes,
+              wfNotes,
+              mgrNotes: targetRec.mgrNotes || "",
+              partialShift,
+              submittedOn: targetRec.submittedOn || new Date().toISOString(),
+              source: targetRec.source || "dataverse",
+              waived: targetRec.waived || false,
+              cancelled: targetRec.cancelled || false,
+              fmla,
+              voicemail,
+              occurrence: idx === 0 ? occurrence : 0
+            });
+            cur.setDate(cur.getDate() + 1);
+            idx++;
+          }
+          toast("Record updated and date range applied");
+        } catch (err) {
+          console.error("Update failed:", err);
+          toast("Failed to update record: " + err.message);
+        } finally {
+          hideSyncCover();
         }
       }
     } else {
