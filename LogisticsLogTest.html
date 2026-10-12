@@ -1549,17 +1549,15 @@ function range(){
 
 function canonicalRecordType(r){
   if(!r)return "Present";
-  // Visible attendance badging is exclusively the Time Off table's
-  // cr714_leavetype value. CSR cr714_typeofleave is never consulted.
-  if(r.calendarTypeSource!=="cr714_leavetype"||!r.dvId)return "Present";
-  return mapLeaveType(r.rawLeaveType);
+  if(r.type && TYPES[r.type]) return r.type;
+  if(r.rawLeaveType) return mapLeaveType(r.rawLeaveType);
+  return r.type || "Absent";
 }
 function normalizeRecordType(r){const type=canonicalRecordType(r);return type===r.type?r:{...r,type};}
 function calendarRecordWinnerCompare(a,b){
+  if (!a || !b) return 0;
   const at=getRecordTimestamp(a),bt=getRecordTimestamp(b);
   if(at!==bt)return at-bt;
-  // Stable source-record tie-break. This makes results independent of API
-  // paging or response order when migrated timestamps are identical.
   return String(a.dvId||a.rid||"").localeCompare(String(b.dvId||b.rid||""));
 }
 function calendarRecords(records){
@@ -3072,7 +3070,7 @@ function normalizePersonName(v){return String(v||"").trim().toLowerCase().replac
 function leadershipIndex(){const m=new Map(),add=(name,role)=>{const k=normalizePersonName(name);if(!k)return;const set=m.get(k)||new Set();set.add(role);m.set(k,set);};(S.employees||[]).forEach(e=>{add(e.supervisor,"Supervisor");if(e.srManager&&!/^\d+$/.test(String(e.srManager)))add(e.srManager,"SR Manager");const t=String(e.title||"").toLowerCase();if(/\bsr\.?\s*manager\b|\bsenior manager\b/.test(t))add(e.name,"SR Manager");else if(/\bmanager\b/.test(t))add(e.name,"Manager");else if(/\bsupervisor\b/.test(t))add(e.name,"Supervisor");});return m;}
 function emailLine(r){const e=emp(r.empId)||{name:r.empId},name=e.name||r.empId,bucket=scheduleEmailBucket(r);const timed=["Short Shift","Shift Trade","Extended Shift","Adjusted Shift","Night Manager"].includes(bucket);return {name,text:`${name}${timed?emailTimeDetail(r):""}`};}
 function displayTimeRange(r){let raw="";if(r.type==="Shift Trade"&&r.shiftTrade)raw=String(r.shiftTrade).trim();else if(r.partialShift)raw=String(r.partialShift).trim();else{const notes=[r.notes,r.wfNotes,r.mgrNotes].filter(Boolean).join(" ");const m=notes.match(/(\d{1,2}:\d{2}\s*(?:AM|PM))\s*[–-]\s*(\d{1,2}:\d{2}\s*(?:AM|PM))/i);if(m)raw=`${m[1]} - ${m[2]}`;}if(!raw)return "";if(/^\s*\d+(?:\.\d+)?\s*h(?:r|rs|our|ours)?\s*$/i.test(raw))return "";return raw.replace(/\s+[–-]\s+/g," to ");}
-function emailTimeDetail(r){const raw=displayTimeRange(r);if(!raw)return "";const context=[r.notes,r.wfNotes,r.mgrNotes,r.lunch].filter(Boolean).join(" ").toLowerCase();const oss=/\boss\b/.test(context)||String(r.shiftTrade||"").toLowerCase().includes("oss");const noLunch=/\bno\s+lunch\b|\bwithout\s+lunch\b|\bskip(?:ping)?\s+lunch\b/.test(context);if(r.type==="Short Shift"){const m=raw.match(/to\s+(.+)$/i);return m?` (Leaving @ ${m[1]})`:` (${raw})`;}return ` (${raw}${noLunch?", no lunch":""}${oss?" - OSS":""})`;}
+function emailTimeDetail(r){const raw=displayTimeRange(r);if(!raw)return "";const context=[r.notes,r.wfNotes,r.mgrNotes,r?.lunch||""].filter(Boolean).join(" ").toLowerCase();const oss=/\boss\b/.test(context)||String(r.shiftTrade||"").toLowerCase().includes("oss");const noLunch=/\bno\s+lunch\b|\bwithout\s+lunch\b|\bskip(?:ping)?\s+lunch\b/.test(context);
 function scheduleEmailBucket(r){if(r.type!=="Schedule Adjustment")return r.type;const e=emp(r.empId)||{},text=[r.notes,r.wfNotes,r.mgrNotes,r.partialShift,r.shiftTrade,e.title].filter(Boolean).join(" ").toLowerCase();if(/night\s*shift.*manager|manager.*coverage|night.*coverage/.test(text))return "Night Manager";if(/extended\s*shift|extension|extended/.test(text))return "Extended Shift";return "Adjusted Shift";}
 function attendanceEmailModel(date=today()){const recs=consolidatedDisplayRecords((S.records||[]).filter(r=>r.date===date&&!r.cancelled)).map(normalizeRecordType);const itemsFor=bucket=>{const seen=new Set();return recs.filter(r=>scheduleEmailBucket(r)===bucket).map(emailLine).filter(x=>{const k=normalizePersonName(x.name);if(!k||seen.has(k))return false;seen.add(k);return true;});};return [
  {heading:"The following people have called out today",items:itemsFor("Call Out")},
@@ -3226,15 +3224,20 @@ function render(){
   if (dedupeResult.removedRecords || dedupeResult.removedMakeups) save();
   renderNav(); renderFilters(); setSync("");
   const v=$("#view");
-  switch(UI.tab){
-    case "dashboard": v.innerHTML=renderDashboard(); drawCharts(); break;
-    case "occurrenceOverview": v.innerHTML=renderOccurrenceOverview(); break;
-    case "calendar":  v.innerHTML=renderCalendar(); break;
-    case "team":      v.innerHTML=renderTeam(); break;
-    case "csrAttendance": v.innerHTML=renderCsrAttendance(); break;
-    case "employeeData": v.innerHTML=renderEmployeeData(); hydrateEmployeeDataFrame(); break;
-    case "makeup":    v.innerHTML=renderMakeup(); break;
-    case "email":     v.innerHTML=renderEmail(); break;
+  try {
+    switch(UI.tab){
+      case "dashboard": v.innerHTML=renderDashboard(); drawCharts(); break;
+      case "occurrenceOverview": v.innerHTML=renderOccurrenceOverview(); break;
+      case "calendar":  v.innerHTML=renderCalendar(); break;
+      case "team":      v.innerHTML=renderTeam(); break;
+      case "csrAttendance": v.innerHTML=renderCsrAttendance(); break;
+      case "employeeData": v.innerHTML=renderEmployeeData(); hydrateEmployeeDataFrame(); break;
+      case "makeup":    v.innerHTML=renderMakeup(); break;
+      case "email":     v.innerHTML=renderEmail(); break;
+    }
+  } catch(err) {
+    console.error("Tab render failed:", err);
+    v.innerHTML = `<div class="card empty"><h2 style="color:var(--red)">Render Error</h2><p>${esc(err.message)}</p><button class="btn sm" onclick="location.reload()">Reload</button></div>`;
   }
   bindView();
 }
