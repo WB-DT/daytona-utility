@@ -1114,7 +1114,8 @@ async function pullFromDataverse(silent = false, options = {}) {
   const hasHistory = !!(S.settings?.initialHistorySyncComplete && (S.records||[]).length);
   const incremental = options.full === true ? false : hasHistory;
   const syncFrom = incremental ? todayIso : historyFrom;
-  const syncTo = todayIso;
+  const forwardHorizon = addDays(todayIso, 60);
+  const syncTo = rangeTo > forwardHorizon ? rangeTo : forwardHorizon;
   const priorRecords = incremental ? [...(S.records||[])] : [];
   const priorMakeups = incremental ? [...(S.makeups||[])] : [];
   const priorCsrRows = incremental ? [...(S.csrAttendanceRows||[])] : [];
@@ -1562,13 +1563,10 @@ function calendarRecordWinnerCompare(a,b){
   return String(a.dvId||a.rid||"").localeCompare(String(b.dvId||b.rid||""));
 }
 function calendarRecords(records){
-  // Admit only active Time Off form records with a raw cr714_leavetype.
-  // CSR rows, cancellation actions, Present rows, and make-up repayment
-  // sessions never create attendance badges.
   const eligible=(records||[])
-    .filter(r=>r.dvId&&r.calendarTypeSource==="cr714_leavetype"&&String(r.rawLeaveType||"").trim())
-    .map(r=>({...r,type:mapLeaveType(r.rawLeaveType)}))
-    .filter(r=>!r.cancelled&&r.type!=="Cancellation"&&r.type!=="Present");
+    .filter(r => (r.dvId || r.rid) && !r.cancelled)
+    .map(r => ({ ...r, type: r.rawLeaveType ? mapLeaveType(r.rawLeaveType) : (r.type || "Absent") }))
+    .filter(r => r.type !== "Cancellation" && r.type !== "Present");
 
   // Phantom duplicate rule: collapse only repeated copies of the exact same
   // Time Off Dataverse request on the same parsed date. Distinct Time Off IDs
@@ -1618,9 +1616,21 @@ function renderCalendar(){
   const totalEmps = filteredEmployees().length || 0; 
   const empIds = new Set(filteredEmployees().map(e => e.id));
   
-  // Make-up agreements are intentionally excluded from the attendance calendar.
-  // They remain available in the dedicated Make-Up Time view only.
   const muByDate = {};
+  mus.forEach(m => {
+    if (m.scheduleSegments && m.scheduleSegments.length > 0) {
+      m.scheduleSegments.forEach(seg => {
+        if (seg.date) {
+          (muByDate[seg.date] = muByDate[seg.date] || []).push({
+            ...m,
+            activeSegment: seg
+          });
+        }
+      });
+    } else if (m.dateMissed) {
+      (muByDate[m.dateMissed] = muByDate[m.dateMissed] || []).push(m);
+    }
+  });
 
   const head=`<div class="cal-head">
     <button class="btn ghost sm" id="calPrev">&#8249;</button>
@@ -1671,7 +1681,7 @@ function renderCalendar(){
         })
         .sort((a,b) => (emp(a.empId)?.name || "").localeCompare(emp(b.empId)?.name || ""));
 
-      const dayMus = [];
+      const dayMus = muByDate[ds] || [];
       const absentEmpIds = new Set(
         allDayRecords
           .filter(r => !r.cancelled && !["Present", "Shift Trade", "Cancellation"].includes(r.type))
