@@ -2366,12 +2366,10 @@ function renderTeam(){
 function muRow(m){
   const e=emp(m.empId)||{name:m.empId};
   const isCancelled = m.status === "Cancelled";
-  const stCls={Scheduled:"warn",Pending:"warn",Completed:"ok",Cancelled:"muted"}[m.status]||"warn";
-  const overdue=!isCancelled&&m.status!=="Completed"&&m.dueDate<today();
-  const rawNotes = getRelevantMakeUpNotes(m.notes, m.dateMissed);
-  const segmentsMsg = m.scheduleSegments?.length > 1 && m.completedSegments?.length > 0 && m.status !== "Completed"
-    ? `<span class="badge" style="background:var(--soft); color:var(--purple)">${m.completedSegments.length}/${m.scheduleSegments.length} done</span>`
-    : "";
+  const stCls={Pending:"warn",Approved:"",Completed:"ok",Missed:"bad",Cancelled:"muted"}[m.status];
+  const overdue=!isCancelled&&m.status!=="Completed"&&m.status!=="Missed"&&m.dueDate<today();
+  const targetDate = m.activeSegment ? m.activeSegment.date : m.dateMissed;
+  const rawNotes = getRelevantMakeUpNotes(m.notes, targetDate);
   
   return `<div class="cal-row ${isCancelled ? 'cancelled' : ''}" style="margin-bottom: 12px;">
     <div class="row-top" style="justify-content: space-between; align-items: flex-start;">
@@ -2380,7 +2378,7 @@ function muRow(m){
         <div class="small muted">${esc(m.email || m.empId)}</div>
         <div class="row small mt" style="gap: 12px; align-items: center;">
           <span><b>Missed:</b> ${fmt(m.dateMissed)}</span>
-          <span><b>Owed:</b> ${hoursToHHMM(m.hoursOwed)}</span>
+          <span>${m.activeSegment ? `<b>Scheduled:</b> ${m.activeSegment.start} - ${m.activeSegment.end}` : `<b>Owed:</b> ${hoursToHHMM(m.hoursOwed)}h`}</span>
           <span class="row" style="gap: 4px;">
             <span class="badge ${stCls}">${esc(m.status)}</span>
             ${segmentsMsg}${overdue?`<span class="badge bad">overdue</span>`:""}
@@ -2411,8 +2409,18 @@ function renderMakeup(){
   
   const byDate = {};
   mus.forEach(m => {
-    const d = m.dateMissed;
-    if (d) (byDate[d] = byDate[d] || []).push(m);
+    if (m.scheduleSegments && m.scheduleSegments.length > 0) {
+      m.scheduleSegments.forEach(seg => {
+        if (seg.date) {
+          (byDate[seg.date] = byDate[seg.date] || []).push({
+            ...m,
+            activeSegment: seg
+          });
+        }
+      });
+    } else if (m.dateMissed) {
+      (byDate[m.dateMissed] = byDate[m.dateMissed] || []).push(m);
+    }
   });
 
   const counts = MU_STATUS.map(s => uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && (m.status === s || (s === "Scheduled" && m.status === "Pending")))).length);
@@ -3041,27 +3049,30 @@ function dayModal(ds){
     .sort((a,b) => getRecordTimestamp(b) - getRecordTimestamp(a));
     
   const ids = new Set(filteredEmployees().map(e=>e.id));
-  const dayMus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.dateMissed === ds && m.status !== "Cancelled"));
+  const baseMus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.status !== "Cancelled" && m.status !== "Missed"));
+  const dayMus = [];
+  baseMus.forEach(m => {
+      if (m.scheduleSegments && m.scheduleSegments.length > 0) {
+          m.scheduleSegments.forEach(seg => {
+              if (seg.date === ds) dayMus.push({ ...m, activeSegment: seg });
+          });
+      } else if (m.dateMissed === ds) {
+          dayMus.push(m);
+      }
+  });
   
   const renderCalMuRow = (m) => {
     const e = emp(m.empId) || {name: m.empId};
-    const activeSegment = m.scheduleSegments?.find(s => s.date === ds);
-    let segStatus = m.status;
-    if (activeSegment && m.completedSegments && m.scheduleSegments) {
-      const idx = m.scheduleSegments.indexOf(activeSegment);
-      segStatus = m.completedSegments.includes(idx) ? "Completed" : "Scheduled";
-    }
-
     return `<div class="cal-row" onclick="makeupModal('${esc(m.mid)}')" style="cursor:pointer; border-left: 4px solid var(--purple); background: rgba(124, 58, 237, 0.06);" title="Make-Up Shift (Click to view)">
       <div class="row-top">
         <div style="font-weight: 600; font-size: 15px; min-width: 150px; color: var(--purple);">${esc(e.name)}</div>
         <div style="display: flex; align-items: center; gap: 8px;">
           <span class="badge" style="background:var(--purple); color:#fff;">Make-Up Shift</span>
-          <span class="badge ${segStatus==='Completed'?'ok':'warn'}">${esc(segStatus)}</span>
+          <span class="badge ${m.status==='Completed'?'ok':m.status==='Approved'?'':'warn'}">${esc(m.status)}</span>
         </div>
         <div style="font-weight: 700; font-size: 13.5px; color: var(--purple); white-space: nowrap; margin-left: auto;">${hoursToHHMM(m.hoursOwed)}h</div>
       </div>
-      ${activeSegment ? `<div class="small" style="color: var(--purple); margin-top: 4px; font-weight: 600;">Scheduled: ${to12Hour(activeSegment.start)} -${to12Hour(activeSegment.end)}</div>` : ""}
+      ${m.activeSegment ? `<div class="small" style="color: var(--purple); margin-top: 4px; font-weight: 600;">Scheduled: ${m.activeSegment.start} -${m.activeSegment.end}</div>` : (m.scheduleSegments && m.scheduleSegments[0] ? `<div class="small" style="color: var(--purple); margin-top: 4px; font-weight: 600;">Scheduled: ${m.scheduleSegments[0].start} -${m.scheduleSegments[0].end}</div>` : "")}
     </div>`;
   };
 
