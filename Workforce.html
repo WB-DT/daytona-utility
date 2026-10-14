@@ -97,10 +97,8 @@ tbody tr.norow:hover{background:none;cursor:default}
 .cal-list .day-block{margin-bottom:14px}
 
 .mu-chip{display:block;background:var(--purple);color:#fff;font-size:11px;font-weight:600;padding:2px 6px;border-radius:4px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.mu-chip.Pending{background:#d97706}
-.mu-chip.Approved{background:var(--purple)}
+.mu-chip.Pending, .mu-chip.Scheduled{background:var(--purple)}
 .mu-chip.Completed{background:var(--green)}
-.mu-chip.Missed{background:var(--red)}
 
 /* Modal sizing update */
 .overlay{position:fixed;inset:0;background:rgba(10,15,30,.65);z-index:90;display:grid;place-items:center;padding:24px;backdrop-filter:blur(2px)}
@@ -1497,7 +1495,7 @@ const LADDER = [[6,"Termination Eligible","bad"],[5,"Final","bad"],[4,"Written",
 const OSS_LIMIT = 2;
 const OCC_WINDOW_DAYS = 90;
 const ORG_FIELDS = [["dept","Department"],["repName","Reps"],["supervisor","Supervisor"],["manager","Manager"]];
-const MU_STATUS = ["Pending","Approved","Completed","Missed"];
+const MU_STATUS = ["Scheduled", "Completed"];
 
 const TABS = [["dashboard","Dashboard"],["occurrenceOverview","Occurrence Overview"],["calendar","Calendar"],["team","Team & Records"],["csrAttendance","CSR Attendance Tracker"],["employeeData","Employee Data"],["makeup","Make-Up Time"],["email","Attendance Email"]];
 
@@ -1936,7 +1934,7 @@ function metrics(){
   const denom = c["Present"] + Object.keys(c).filter(k => k !== "Present" && k !== "Make up Time").reduce((acc, k) => acc + c[k], 0);
   const rate = denom ? Math.round(100 * c["Present"] / denom) : null;
   
-  return {c, occ, perfect, rate, filteredHours, filteredHoursByType, mus, muDone, muPending:mus.filter(m=>m.status==="Pending").length, emps, recs, from:f, to:t};
+  return {c, occ, perfect, rate, filteredHours, filteredHoursByType, mus, muDone, muPending:mus.filter(m=>m.status!=="Completed").length, emps, recs, from:f, to:t};
 }
 
 function renderNav(){
@@ -2003,8 +2001,7 @@ function kpiModal(cat, title) {
     }
     html += `<div class="tbl-wrap"><table><thead><tr><th>Employee</th><th>Department</th><th>Supervisor</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   } else if (cat === "Make-Ups Pending" || cat === "Make-Up Completion") {
-    const status = cat === "Make-Ups Pending" ? "Pending" : "Completed";
-    let mus = m.mus.filter(x => x.status === status);
+    let mus = m.mus.filter(x => cat === "Make-Ups Pending" ? x.status !== "Completed" : x.status === "Completed");
     
     const seenDvIds = new Set();
     mus = mus.filter(mu => {
@@ -2040,7 +2037,7 @@ function kpiModal(cat, title) {
       e.stopPropagation();
       const act=b.dataset.muAct, id=b.dataset.id;
       if(act==="edit") { makeupModal(id); }
-      else { setMuStatus(id, act==="approve"?"Approved":act==="complete"?"Completed":"Missed"); backModal(); }
+      else { setMuStatus(id, act==="complete"?"Completed":"Scheduled"); backModal(); }
     });
   } else {
     bindRecordButtons(mh);
@@ -2355,9 +2352,8 @@ function renderTeam(){
 function muRow(m){
   const e=emp(m.empId)||{name:m.empId};
   const isCancelled = m.status === "Cancelled";
-  const stCls={Pending:"warn",Approved:"",Completed:"ok",Missed:"bad",Cancelled:"muted"}[m.status];
-  const overdue=!isCancelled&&m.status!=="Completed"&&m.status!=="Missed"&&m.dueDate<today();
-  const rawNotes = getRelevantMakeUpNotes(m.notes, m.dateMissed);
+  const stCls={Scheduled:"warn",Pending:"warn",Completed:"ok",Cancelled:"muted"}[m.status]||"warn";
+  const overdue=!isCancelled&&m.status!=="Completed"&&m.dueDate<today();
   
   return `<div class="cal-row ${isCancelled ? 'cancelled' : ''}" style="margin-bottom: 12px;">
     <div class="row-top" style="justify-content: space-between; align-items: flex-start;">
@@ -2384,8 +2380,7 @@ function muRow(m){
 
 function muActions(m){
   let b="";
-  if(m.status==="Pending")  b+=`<button class="btn sm" data-mu-act="approve" data-id="${esc(m.mid)}">Approve</button> `;
-  if(m.status==="Approved") b+=`<button class="btn sm" data-mu-act="complete" data-id="${esc(m.mid)}">Complete</button> <button class="btn danger sm" data-mu-act="miss" data-id="${esc(m.mid)}">Missed</button> `;
+  if(m.status!=="Completed" && m.status!=="Cancelled") b+=`<button class="btn sm" data-mu-act="complete" data-id="${esc(m.mid)}">Complete</button> `;
   b+=`<button class="btn ghost sm" data-mu-act="edit" data-id="${esc(m.mid)}">Edit</button>`;
   return `<div class="row" style="gap:4px">${b}</div>`;
 }
@@ -2401,13 +2396,13 @@ function renderMakeup(){
     if (d) (byDate[d] = byDate[d] || []).push(m);
   });
 
-  const counts = MU_STATUS.map(s => uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.status === s)).length);
+  const counts = MU_STATUS.map(s => uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && (m.status === s || (s === "Scheduled" && m.status === "Pending")))).length);
 
   const head = `<div class="section-title">
     <h2>Make-Up Time Calendar</h2>
     <select id="muFilter">${["",...MU_STATUS].map(s=>`<option ${UI.muFilter===s?"selected":""} value="${esc(s)}">${esc(s||"All statuses")}</option>`).join("")}</select>
     <button class="btn sm" id="muNew">+ New agreement</button>
-    <span class="small muted right">Pending ${counts[0]} · Approved ${counts[1]} · Completed ${counts[2]} · Missed ${counts[3]}</span>
+    <span class="small muted right">Scheduled ${counts[0]} · Completed ${counts[1]}</span>
   </div>
   <div class="card small mb" style="border-left:4px solid var(--purple)">
     An <b>OSS</b> (Out / Short-Shift) lets an agent make up missed time instead of taking an occurrence or losing pay —
@@ -2503,9 +2498,9 @@ function setMuStatus(mid,status){
     const r=S.records.find(r=>r.rid===m.rid)||S.records.find(r=>r.empId===m.empId&&r.date===m.dateMissed&&TYPES[r.type].occ);
     if(r){ r.waived=true; m.rid=r.rid; }
     toast("Make-up completed — occurrence waived");
-  } else if(status==="Missed"){
+  } else if(status==="Scheduled" || status==="Pending"){
     const r=S.records.find(r=>r.rid===m.rid); if(r) r.waived=false;
-    toast("Marked missed — occurrence stands");
+    toast("Marked scheduled — occurrence stands");
   } else toast("Agreement "+status.toLowerCase());
   save(); render();
 }
@@ -2914,7 +2909,7 @@ function makeupModal(mid,fromRec){
   UI.savedScroll = { body: bEl ? bEl.scrollTop : 0, tbl: tEl ? tEl.scrollTop : 0 };
   const m=mid? S.makeups.find(x=>x.mid===mid)
     : {empId:fromRec?.empId||S.employees[0]?.id, rid:fromRec?.rid||"", dateMissed:fromRec?.date||today(),
-       hoursOwed:fromRec?(8-(fromRec.hours||0)||fromRec.hours||4):4, dueDate:addDays(today(),14), status:"Pending", oss:true, notes:""};
+       hoursOwed:fromRec?(8-(fromRec.hours||0)||fromRec.hours||4):4, dueDate:addDays(today(),14), status:"Scheduled", oss:true, notes:""};
   const used=ossUsed(m.empId);
   openModal(`<h2>${mid?"Edit":"New"} make-up agreement</h2>
     <div class="mrow">
@@ -2926,7 +2921,7 @@ function makeupModal(mid,fromRec){
       <div><label>Due by</label><input type="date" id="uDue" value="${esc(m.dueDate)}"></div>
     </div>
     <div class="mrow">
-      <div><label>Status</label><select id="uStatus">${MU_STATUS.map(s=>`<option ${s===m.status?"selected":""}>${esc(s)}</option>`).join("")}</select></div>
+      <div><label>Completion</label><label class="row" style="font-size:14.5px;font-weight:600;cursor:pointer;padding-top:8px;"><input type="checkbox" id="uCompleted" ${m.status==="Completed"?"checked":""} style="width:auto;cursor:pointer;transform:scale(1.2);"> Completed</label></div>
       <div><label>Counts as OSS</label><select id="uOss"><option value="1" ${m.oss?"selected":""}>Yes — use an OSS</option><option value="0" ${m.oss?"":"selected"}>No</option></select>
       <div class="small muted" id="uOssNote">This employee has used ${used}/${OSS_LIMIT} OSS in the last 12 months.</div></div>
     </div>
@@ -2975,7 +2970,7 @@ function makeupModal(mid,fromRec){
       dateMissed: $("#uMissed").value,
       hoursOwed: hoursVal,
       dueDate: $("#uDue").value,
-      status: $("#uStatus").value,
+      status: $("#uCompleted").checked ? "Completed" : "Scheduled",
       oss,
       completedDate: m.completedDate || "",
       notes: $("#uNotes").value.trim()
@@ -2994,7 +2989,7 @@ function dayModal(ds){
     .sort((a,b) => getRecordTimestamp(b) - getRecordTimestamp(a));
     
   const ids = new Set(filteredEmployees().map(e=>e.id));
-  const dayMus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.dateMissed === ds && m.status !== "Cancelled" && m.status !== "Missed"));
+  const dayMus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.dateMissed === ds && m.status !== "Cancelled"));
   
   const renderCalMuRow = (m) => {
     const e = emp(m.empId) || {name: m.empId};
@@ -3323,7 +3318,7 @@ function bindView(){
   v.querySelectorAll("[data-mu-act]").forEach(b=>b.onclick=e=>{e.stopPropagation();
     const act=b.dataset.muAct, id=b.dataset.id;
     if(act==="edit") makeupModal(id);
-    else setMuStatus(id, act==="approve" ? "Approved" : act==="complete" ? "Completed" : "Missed");});
+    else setMuStatus(id, act==="complete" ? "Completed" : "Scheduled");});
   v.querySelectorAll("tr[data-mu]").forEach(tr=>tr.onclick=()=>{ makeupModal(tr.dataset.mu); });
   v.querySelectorAll("th[data-sort]").forEach(th=>th.onclick=()=>{
     const k=th.dataset.sort; UI.sortDir=UI.sortKey===k?-UI.sortDir:-1; UI.sortKey=k; render();});
