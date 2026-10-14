@@ -1689,14 +1689,20 @@ function renderCalendar(){
       // Make-Up cards (Top)
       const muCardsHtml = dayMus.map(m => {
         const e = emp(m.empId) || {name: m.empId};
-        const timeFrame = m.scheduleSegments && m.scheduleSegments[0] 
-          ? `${m.scheduleSegments[0].start} - ${m.scheduleSegments[0].end}` 
+        const timeFrame = m.activeSegment 
+          ? `${to12Hour(m.activeSegment.start)} - ${to12Hour(m.activeSegment.end)}` 
           : `${hoursToHHMM(m.hoursOwed)}h`;
+
+        let segStatus = m.status;
+        if (m.activeSegment && m.completedSegments && m.scheduleSegments) {
+          const idx = m.scheduleSegments.indexOf(m.activeSegment);
+          segStatus = m.completedSegments.includes(idx) ? "Completed" : "Scheduled";
+        }
 
         return `<div class="cal-card mu-card" onclick="makeupModal('${esc(m.mid)}')" title="Click to view Make-Up details">
           <div class="row" style="justify-content:space-between; align-items:flex-start; gap:6px;">
             <span class="cal-card-name" style="color:var(--purple);">${esc(e.name)}</span>
-            <span class="badge ${m.status==='Completed'?'ok':m.status==='Approved'?'':'warn'}" style="font-size:9.5px; padding:1px 5px;">${esc(m.status)}</span>
+            <span class="badge ${segStatus==='Completed'?'ok':'warn'}" style="font-size:9.5px; padding:1px 5px;">${esc(segStatus)}</span>
           </div>
           <div class="cal-card-time">${esc(timeFrame)}</div>
           <div class="cal-card-badges">
@@ -2354,6 +2360,10 @@ function muRow(m){
   const isCancelled = m.status === "Cancelled";
   const stCls={Scheduled:"warn",Pending:"warn",Completed:"ok",Cancelled:"muted"}[m.status]||"warn";
   const overdue=!isCancelled&&m.status!=="Completed"&&m.dueDate<today();
+  const rawNotes = getRelevantMakeUpNotes(m.notes, m.dateMissed);
+  const segmentsMsg = m.scheduleSegments?.length > 1 && m.completedSegments?.length > 0 && m.status !== "Completed"
+    ? `<span class="badge" style="background:var(--soft); color:var(--purple)">${m.completedSegments.length}/${m.scheduleSegments.length} done</span>`
+    : "";
   
   return `<div class="cal-row ${isCancelled ? 'cancelled' : ''}" style="margin-bottom: 12px;">
     <div class="row-top" style="justify-content: space-between; align-items: flex-start;">
@@ -2365,6 +2375,7 @@ function muRow(m){
           <span><b>Owed:</b> ${hoursToHHMM(m.hoursOwed)}</span>
           <span class="row" style="gap: 4px;">
             <span class="badge ${stCls}">${esc(m.status)}</span>
+            ${segmentsMsg}${overdue?`<span class="badge bad">overdue</span>`:""}
             ${overdue?`<span class="badge bad">overdue</span>`:""}
             ${m.oss?`<span class="badge">OSS</span>`:""}
           </span>
@@ -2494,11 +2505,14 @@ function renderMakeup(){
 function setMuStatus(mid,status){
   const m=S.makeups.find(x=>x.mid===mid); if(!m) return;
   m.status=status;
-  if(status==="Completed"){ m.completedDate=today();
+  if(status==="Completed"){ 
+    m.completedDate=today();
+    if (m.scheduleSegments) m.completedSegments = m.scheduleSegments.map((_, i) => i);
     const r=S.records.find(r=>r.rid===m.rid)||S.records.find(r=>r.empId===m.empId&&r.date===m.dateMissed&&TYPES[r.type].occ);
     if(r){ r.waived=true; m.rid=r.rid; }
     toast("Make-up completed — occurrence waived");
   } else if(status==="Scheduled" || status==="Pending"){
+    m.completedSegments = [];
     const r=S.records.find(r=>r.rid===m.rid); if(r) r.waived=false;
     toast("Marked scheduled — occurrence stands");
   } else toast("Agreement "+status.toLowerCase());
@@ -2909,8 +2923,18 @@ function makeupModal(mid,fromRec){
   UI.savedScroll = { body: bEl ? bEl.scrollTop : 0, tbl: tEl ? tEl.scrollTop : 0 };
   const m=mid? S.makeups.find(x=>x.mid===mid)
     : {empId:fromRec?.empId||S.employees[0]?.id, rid:fromRec?.rid||"", dateMissed:fromRec?.date||today(),
-       hoursOwed:fromRec?(8-(fromRec.hours||0)||fromRec.hours||4):4, dueDate:addDays(today(),14), status:"Scheduled", oss:true, notes:""};
+       hoursOwed:fromRec?(8-(fromRec.hours||0)||fromRec.hours||4):4, dueDate:addDays(today(),14), status:"Scheduled", oss:true, notes:"", completedSegments: []};
   const used=ossUsed(m.empId);
+
+  let segmentsHtml = "";
+  if (m.scheduleSegments && m.scheduleSegments.length > 0) {
+      segmentsHtml = `<div style="grid-column: 1 / -1; margin-top: 4px;"><label>Segment Completion</label><div style="display:flex; flex-direction:column; gap:6px; margin-top:4px; padding:12px; background:var(--soft); border-radius:8px; border:1px solid var(--line);">` +
+      m.scheduleSegments.map((seg, idx) => {
+          const isChecked = m.completedSegments && m.completedSegments.includes(idx);
+          return `<label class="row" style="font-size:13.5px; font-weight:600; cursor:pointer;"><input type="checkbox" data-seg-idx="${idx}" class="mu-seg-cb" ${isChecked ? "checked" : ""} style="width:auto; cursor:pointer; transform:scale(1.2);"> ${seg.displayDate}:${to12Hour(seg.start)} - ${to12Hour(seg.end)} (${formatDuration(seg.duration)})</label>`;
+      }).join("") + `</div></div>`;
+  }
+
   openModal(`<h2>${mid?"Edit":"New"} make-up agreement</h2>
     <div class="mrow">
       <div><label>Employee</label>${empSelect("uEmp",m.empId)}</div>
@@ -2920,8 +2944,9 @@ function makeupModal(mid,fromRec){
       <div><label>Hours owed (HH:mm)</label><input type="text" id="uHours" value="${hoursToHHMM(m.hoursOwed)}"></div>
       <div><label>Due by</label><input type="date" id="uDue" value="${esc(m.dueDate)}"></div>
     </div>
+    ${segmentsHtml}
     <div class="mrow">
-      <div><label>Completion</label><label class="row" style="font-size:14.5px;font-weight:600;cursor:pointer;padding-top:8px;"><input type="checkbox" id="uCompleted" ${m.status==="Completed"?"checked":""} style="width:auto;cursor:pointer;transform:scale(1.2);"> Completed</label></div>
+      ${!m.scheduleSegments?.length ? `<div><label>Completion</label><label class="row" style="font-size:14.5px;font-weight:600;cursor:pointer;padding-top:8px;"><input type="checkbox" id="uCompleted" ${m.status==="Completed"?"checked":""} style="width:auto;cursor:pointer;transform:scale(1.2);"> Completed</label></div>` : ""}
       <div><label>Counts as OSS</label><select id="uOss"><option value="1" ${m.oss?"selected":""}>Yes — use an OSS</option><option value="0" ${m.oss?"":"selected"}>No</option></select>
       <div class="small muted" id="uOssNote">This employee has used ${used}/${OSS_LIMIT} OSS in the last 12 months.</div></div>
     </div>
@@ -2963,6 +2988,17 @@ function makeupModal(mid,fromRec){
       hoursVal = parseFloat(hoursInput) || 0;
     }
 
+    let completedSegments = [];
+    let newStatus = "Scheduled";
+    if (m.scheduleSegments && m.scheduleSegments.length > 0) {
+        document.querySelectorAll(".mu-seg-cb").forEach(cb => {
+            if (cb.checked) completedSegments.push(parseInt(cb.dataset.segIdx, 10));
+        });
+        if (completedSegments.length === m.scheduleSegments.length) newStatus = "Completed";
+    } else {
+        if (document.getElementById("uCompleted") && document.getElementById("uCompleted").checked) newStatus = "Completed";
+    }
+
     const v={
       mid: mid || uid("m"),
       empId,
@@ -2970,9 +3006,11 @@ function makeupModal(mid,fromRec){
       dateMissed: $("#uMissed").value,
       hoursOwed: hoursVal,
       dueDate: $("#uDue").value,
-      status: $("#uCompleted").checked ? "Completed" : "Scheduled",
+      status: newStatus,
+      completedSegments,
       oss,
       completedDate: m.completedDate || "",
+      scheduleSegments: m.scheduleSegments || [],
       notes: $("#uNotes").value.trim()
     };
     if(mid) Object.assign(S.makeups.find(x=>x.mid===mid),v); else S.makeups.push(v);
@@ -2993,16 +3031,23 @@ function dayModal(ds){
   
   const renderCalMuRow = (m) => {
     const e = emp(m.empId) || {name: m.empId};
+    const activeSegment = m.scheduleSegments?.find(s => s.date === ds);
+    let segStatus = m.status;
+    if (activeSegment && m.completedSegments && m.scheduleSegments) {
+      const idx = m.scheduleSegments.indexOf(activeSegment);
+      segStatus = m.completedSegments.includes(idx) ? "Completed" : "Scheduled";
+    }
+
     return `<div class="cal-row" onclick="makeupModal('${esc(m.mid)}')" style="cursor:pointer; border-left: 4px solid var(--purple); background: rgba(124, 58, 237, 0.06);" title="Make-Up Shift (Click to view)">
       <div class="row-top">
         <div style="font-weight: 600; font-size: 15px; min-width: 150px; color: var(--purple);">${esc(e.name)}</div>
         <div style="display: flex; align-items: center; gap: 8px;">
           <span class="badge" style="background:var(--purple); color:#fff;">Make-Up Shift</span>
-          <span class="badge ${m.status==='Completed'?'ok':m.status==='Approved'?'':'warn'}">${esc(m.status)}</span>
+          <span class="badge ${segStatus==='Completed'?'ok':'warn'}">${esc(segStatus)}</span>
         </div>
         <div style="font-weight: 700; font-size: 13.5px; color: var(--purple); white-space: nowrap; margin-left: auto;">${hoursToHHMM(m.hoursOwed)}h</div>
       </div>
-      ${m.scheduleSegments && m.scheduleSegments[0] ? `<div class="small" style="color: var(--purple); margin-top: 4px; font-weight: 600;">Scheduled: ${m.scheduleSegments[0].start} -${m.scheduleSegments[0].end}</div>` : ""}
+      ${activeSegment ? `<div class="small" style="color: var(--purple); margin-top: 4px; font-weight: 600;">Scheduled: ${to12Hour(activeSegment.start)} -${to12Hour(activeSegment.end)}</div>` : ""}
     </div>`;
   };
 
