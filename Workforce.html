@@ -1032,8 +1032,10 @@ function makeupDedupeKey(m) {
 }
 function uniqueRecords(items) { return uniqueBy(items, recordDedupeKey); }
 function displayRecordKey(r){
-  if (r.dvId) return `dv:${r.dvId}|${r.date}`;
-  if (r.requestId) return `req:${r.requestId}|${r.date}`;
+  // Exception: Never merge Make-Up Time so individual bad requests can be clicked and cancelled.
+  if (r.type === "Make up Time") return `mu:${r.dvId||r.rid}|${r.date}`;
+  
+  // Standard rule: Merge overlapping requests (like Wayne's multi-day edits) into a single clean row
   const partial=String(r.partialShift||r.shiftTrade||"").trim().toLowerCase().replace(/\s+/g," ");
   return [r.empId,r.date,r.type,partial].map(v=>String(v??"").trim().toLowerCase()).join("|");
 }
@@ -1279,7 +1281,7 @@ async function pullFromDataverse(silent = false, options = {}) {
     const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_department","cr714_title","cr714_jobtitle","cr714_managerassigned","cr714_srmanager","cr714_location","cr714_status","cr714_loopnumber","cr714_shiftselection","cr714_breakselection","cr714_startdate","statecode"].join(",");
     const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_starttime","cr714_completiontime","cr714_startdate","cr714_enddate","cr714_id","cr714_name","cr714_email","cr714_department","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_managerapproval","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade","cr714_csrattendancetracker"].join(",");
     const empUrl = `${api}/${TABLE_EMPLOYEES}?$select=${empSelect}&$filter=statecode eq 0`;
-    const operationalIdFilter = `(startswith(cr714_id,'M') or startswith(cr714_id,'A'))`;
+    const operationalIdFilter = `(cr714_id eq null or startswith(cr714_id,'M') or startswith(cr714_id,'A'))`;
     const lookbackIso = addDays(todayIso, -7);
     const todayModifiedFilter = `modifiedon ge ${odataDateTimeStart(lookbackIso)}`;
     const timeFilter = incremental ? `${operationalIdFilter} and (${todayModifiedFilter})` : operationalIdFilter;
@@ -1701,41 +1703,11 @@ function calendarRecordWinnerCompare(a,b){
   return String(a.dvId||a.rid||"").localeCompare(String(b.dvId||b.rid||""));
 }
 function calendarRecords(records){
-  // Calendar attendance cards must come only from active Time Off form rows.
-  // CSR Attendance, Present, cancellation-action, and make-up rows are rendered
-  // through their own paths and must not be admitted as Time Off calendar items.
-  const eligible=(records||[])
+  return (records||[])
     .filter(r=>r.dvId&&r.calendarTypeSource==="cr714_leavetype"&&String(r.rawLeaveType||"").trim())
     .map(r=>({...r,type:mapLeaveType(r.rawLeaveType)}))
-    .filter(r=>!r.cancelled&&r.type!=="Cancellation"&&r.type!=="Present");
-
-  // Phantom duplicate rule: collapse overlapping requests (e.g., multiple distinct
-  // submissions for the exact same PTO day) so they don't clutter the calendar.
-  const latestBySourceDay=new Map();
-  eligible.forEach(r=>{
-    const partial=String(r.partialShift||r.shiftTrade||"").trim().toLowerCase().replace(/\s+/g," ");
-    // Exception: Never merge "Make up Time" so Lori can manually cancel duplicates!
-    const key = r.type === "Make up Time" ? (r.dvId || r.rid) : `${r.empId}|${r.date}|${r.type}|${partial}`;
-    const current=latestBySourceDay.get(key);
-    if(!current||calendarRecordWinnerCompare(r,current)>0)latestBySourceDay.set(key,r);
-  });
-
-  const sourceDayCounts=new Map();
-  eligible.forEach(r=>{
-    const partial=String(r.partialShift||r.shiftTrade||"").trim().toLowerCase().replace(/\s+/g," ");
-    const key = r.type === "Make up Time" ? (r.dvId || r.rid) : `${r.empId}|${r.date}|${r.type}|${partial}`;
-    sourceDayCounts.set(key,(sourceDayCounts.get(key)||0)+1);
-  });
-  return [...latestBySourceDay.values()]
-    .sort((a,b)=>String(a.date).localeCompare(String(b.date))
-      || String(a.empId).localeCompare(String(b.empId))
-      || getRecordTimestamp(a)-getRecordTimestamp(b)
-      || String(a.dvId).localeCompare(String(b.dvId)))
-    .map(r=>{
-       const partial=String(r.partialShift||r.shiftTrade||"").trim().toLowerCase().replace(/\s+/g," ");
-       const key = r.type === "Make up Time" ? (r.dvId || r.rid) : `${r.empId}|${r.date}|${r.type}|${partial}`;
-       return {...r,_phantomDuplicatesSuppressed:Math.max(0,(sourceDayCounts.get(key)||1)-1)};
-    });
+    .filter(r=>!r.cancelled&&r.type!=="Cancellation"&&r.type!=="Present")
+    .sort((a,b)=>String(a.date).localeCompare(String(b.date)) || getRecordTimestamp(a)-getRecordTimestamp(b));
 }
 function calendarTypeSummary(records) {
   const byType = {};
