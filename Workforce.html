@@ -886,6 +886,16 @@ async function backfillBlankAuthoritativeDates(rows){
   return results;
 }
 
+function format24Hour(timeStr) {
+  if(!timeStr) return "";
+  const match = timeStr.trim().match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+  if(!match) return timeStr;
+  let h = parseInt(match[1], 10), m = match[2], ampm = (match[3]||"").toUpperCase();
+  if(ampm==="PM" && h<12) h+=12;
+  if(ampm==="AM" && h===12) h=0;
+  return `${String(h).padStart(2,'0')}:${m}`;
+}
+
 function mapLeaveType(val) {
   const raw=String(val||"").trim();
   if(!raw)return "Present";
@@ -1653,8 +1663,9 @@ async function patchDataverseRecord(dvId,fields){
   if(fields.cr714_fmla!==undefined)payload.cr714_fmla=!!fields.cr714_fmla;
   if(fields.cr714_voicemail!==undefined)payload.cr714_voicemail=!!fields.cr714_voicemail;
   if(fields.cr714_completed!==undefined)payload.cr714_completed=!!fields.cr714_completed;
-  if(fields.cr714_occurrence!==undefined)payload.cr714_occurrence=String(occurrenceNumber(fields.cr714_occurrence)||0);
+  if(fields.cr714_occurrence!==undefined)payload.cr714_occurrence=occurrenceNumber(fields.cr714_occurrence)||0;
   if(fields.cr714_cancelledrequest!==undefined)payload.cr714_cancelledrequest=!!fields.cr714_cancelledrequest;
+  if(fields.cr714_makeuptime!==undefined)payload.cr714_makeuptime=fields.cr714_makeuptime;
   if(fields.cr714_wfnotes!==undefined)payload.cr714_wfnotes=fields.cr714_wfnotes;
   if(fields.cr714_ptohoursrequested!==undefined)payload.cr714_ptohoursrequested=String(fields.cr714_ptohoursrequested);
   if(fields.cr714_hoursofpartialshift!==undefined)payload.cr714_hoursofpartialshift=fields.cr714_hoursofpartialshift;
@@ -3207,14 +3218,27 @@ function makeupModal(mid,fromRec){
   const parentRecord = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId);
   const currentOcc = parentRecord && parentRecord.occurrence !== undefined ? parentRecord.occurrence : 0;
 
-  let segmentsHtml = "";
-  if (m.scheduleSegments && m.scheduleSegments.length > 0) {
-      segmentsHtml = `<div style="grid-column: 1 / -1; margin-top: 4px;"><label>Segment Completion</label><div style="display:flex; flex-direction:column; gap:6px; margin-top:4px; padding:12px; background:var(--soft); border-radius:8px; border:1px solid var(--line);">` +
-      m.scheduleSegments.map((seg, idx) => {
-          const isChecked = m.completedSegments && m.completedSegments.includes(idx);
-          return `<label class="row" style="font-size:13.5px; font-weight:600; cursor:pointer;"><input type="checkbox" data-seg-idx="${idx}" class="mu-seg-cb" ${isChecked ? "checked" : ""} style="width:auto; cursor:pointer; transform:scale(1.2);"> ${seg.displayDate}:${to12Hour(seg.start)} - ${to12Hour(seg.end)} (${formatDuration(seg.duration)})</label>`;
-      }).join("") + `</div></div>`;
-  }
+  const cleanNotes = String(m.notes || "").split('\n').filter(line => !line.startsWith("Schedule:")).join('\n').trim();
+
+  let segmentsHtml = `
+    <div style="grid-column: 1 / -1; margin-top: 4px;">
+        <div class="row" style="justify-content:space-between; align-items:center;">
+            <label style="margin:0;">Make-Up Shifts</label>
+            <button class="btn ghost sm" id="uAddShift" style="padding:2px 8px; font-size:11px;">+ Add Shift</button>
+        </div>
+        <div id="uShiftsContainer" style="display:flex; flex-direction:column; gap:6px; margin-top:6px; padding:12px; background:var(--soft); border-radius:8px; border:1px solid var(--line);">
+            ${m.scheduleSegments?.length ? m.scheduleSegments.map((seg, idx) => {
+                const isChecked = m.completedSegments && m.completedSegments.includes(idx);
+                return \`<div class="row mu-shift-row" style="gap:8px;">
+                    <input type="checkbox" class="mu-seg-cb" \${isChecked ? "checked" : ""} title="Mark completed" style="width:18px;height:18px;margin:0;cursor:pointer;">
+                    <input type="date" class="mu-seg-date" value="\${esc(seg.date)}" style="flex:1;padding:6px;font-size:12px;">
+                    <input type="time" class="mu-seg-start" value="\${format24Hour(seg.start)}" style="flex:1;padding:6px;font-size:12px;">
+                    <input type="time" class="mu-seg-end" value="\${format24Hour(seg.end)}" style="flex:1;padding:6px;font-size:12px;">
+                    <button class="btn ghost sm danger mu-seg-del" style="padding:4px 8px;" title="Remove shift">×</button>
+                </div>\`;
+            }).join("") : \`<div class="small muted text-center empty-shifts">No shifts scheduled</div>\`}
+        </div>
+    </div>`;
 
   openModal(`<h2>${mid?"Edit":"New"} make-up agreement</h2>
     <div class="mrow">
@@ -3226,8 +3250,7 @@ function makeupModal(mid,fromRec){
       <div><label>Due by</label><input type="date" id="uDue" value="${esc(m.dueDate)}"></div>
     </div>
     ${segmentsHtml}
-    <div class="mrow">
-      ${!m.scheduleSegments?.length ? `<div><label>Completion</label><label class="row" style="font-size:14.5px;font-weight:600;cursor:pointer;padding-top:8px;"><input type="checkbox" id="uCompleted" ${m.status==="Completed"?"checked":""} style="width:auto;cursor:pointer;transform:scale(1.2);"> Completed</label></div>` : ""}
+    <div class="mrow" style="margin-top:10px;">
       <div><label>Counts as OSS</label><select id="uOss"><option value="1" ${m.oss?"selected":""}>Yes — use an OSS</option><option value="0" ${m.oss?"":"selected"}>No</option></select>
       <div class="small muted" id="uOssNote">This employee has used ${used}/${OSS_LIMIT} OSS in the last 12 months.</div></div>
       <div><label>Occurrences (Updates original record)</label>
@@ -3238,7 +3261,7 @@ function makeupModal(mid,fromRec){
         </div>
       </div>
     </div>
-    <div><label>Notes</label><textarea id="uNotes" rows="6">${esc(m.notes)}</textarea></div>
+    <div><label>Notes</label><textarea id="uNotes" rows="4">${esc(cleanNotes)}</textarea></div>
     <div class="mfoot">
       ${mid?`<button class="btn danger" id="uDel" style="margin-right:auto">Delete from Dataverse</button>`:""}
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
@@ -3263,6 +3286,26 @@ function makeupModal(mid,fromRec){
     };
   }
 
+  $("#uAddShift").onclick = (e) => {
+    e.preventDefault();
+    const container = $("#uShiftsContainer");
+    const empty = container.querySelector(".empty-shifts");
+    if(empty) empty.remove();
+    const div = document.createElement("div");
+    div.className = "row mu-shift-row";
+    div.style = "gap:8px;";
+    div.innerHTML = `
+        <input type="checkbox" class="mu-seg-cb" title="Mark completed" style="width:18px;height:18px;margin:0;cursor:pointer;">
+        <input type="date" class="mu-seg-date" style="flex:1;padding:6px;font-size:12px;">
+        <input type="time" class="mu-seg-start" style="flex:1;padding:6px;font-size:12px;">
+        <input type="time" class="mu-seg-end" style="flex:1;padding:6px;font-size:12px;">
+        <button class="btn ghost sm danger mu-seg-del" style="padding:4px 8px;" title="Remove shift">×</button>
+    `;
+    div.querySelector(".mu-seg-del").onclick = () => div.remove();
+    container.appendChild(div);
+  };
+  document.querySelectorAll(".mu-seg-del").forEach(btn => btn.onclick = (e) => e.target.closest(".mu-shift-row").remove());
+
   $("#uOccMinus").onclick = (e) => { e.preventDefault(); const inp = $("#uOcc"); inp.value = Math.max(0, parseInt(inp.value || 0, 10) - 1); };
   $("#uOccPlus").onclick = (e) => { e.preventDefault(); const inp = $("#uOcc"); inp.value = Math.max(0, parseInt(inp.value || 0, 10) + 1); };
 
@@ -3280,18 +3323,57 @@ function makeupModal(mid,fromRec){
     }
 
     let completedSegments = [];
+    let scheduleSegments = [];
+    let makeUpParts = [];
+    
+    document.querySelectorAll(".mu-shift-row").forEach((row, idx) => {
+        const dVal = row.querySelector(".mu-seg-date").value;
+        const sVal = row.querySelector(".mu-seg-start").value;
+        const eVal = row.querySelector(".mu-seg-end").value;
+        const cb = row.querySelector(".mu-seg-cb").checked;
+        if(dVal && sVal && eVal) {
+            const dateObj = parseISO(dVal);
+            const usDate = `${String(dateObj.getMonth()+1).padStart(2,'0')}/${String(dateObj.getDate()).padStart(2,'0')}/${dateObj.getFullYear()}`;
+            
+            const fmt12 = (t24) => {
+                let [h, mn] = t24.split(':').map(Number);
+                const ampm = h >= 12 ? 'PM' : 'AM';
+                h = h % 12 || 12;
+                return `${h}:${String(mn).padStart(2,'0')} ${ampm}`;
+            };
+            const s12 = fmt12(sVal), e12 = fmt12(eVal);
+            
+            const sMin = parseInt(sVal.split(':')[0])*60 + parseInt(sVal.split(':')[1]);
+            const eMin = parseInt(eVal.split(':')[0])*60 + parseInt(eVal.split(':')[1]);
+            let diff = eMin - sMin;
+            if (diff < 0) diff += 1440;
+            const hrs = Math.floor(diff/60);
+            const mins = diff % 60;
+            const durHHMM = `${hrs}:${String(mins).padStart(2,'0')}`;
+            
+            scheduleSegments.push({
+                date: dVal, displayDate: usDate, start: s12, end: e12, duration: durHHMM, hours: Math.round((diff/60)*100)/100
+            });
+            makeUpParts.push(`${usDate} - ${s12} - ${e12} - ${durHHMM}`);
+            if (cb) completedSegments.push(idx);
+        }
+    });
+
     let newStatus = "Scheduled";
-    if (m.scheduleSegments && m.scheduleSegments.length > 0) {
-        document.querySelectorAll(".mu-seg-cb").forEach(cb => {
-            if (cb.checked) completedSegments.push(parseInt(cb.dataset.segIdx, 10));
-        });
-        if (completedSegments.length === m.scheduleSegments.length) newStatus = "Completed";
+    if (scheduleSegments.length > 0) {
+        if (completedSegments.length === scheduleSegments.length) newStatus = "Completed";
     } else {
         if (document.getElementById("uCompleted") && document.getElementById("uCompleted").checked) newStatus = "Completed";
     }
 
     const occurrence = parseInt($("#uOcc").value, 10) || 0;
     const newCompleted = newStatus === "Completed";
+    const makeUpString = makeUpParts.join(", ");
+    const repNotes = $("#uNotes").value.trim();
+    const combinedNotes = [
+      ...scheduleSegments.map(segment => `Schedule: ${segment.displayDate} - ${segment.start} - ${segment.end} (${formatDuration(segment.duration)})`),
+      repNotes ? `Rep Notes: ${repNotes}` : null
+    ].filter(Boolean).join("\n");
 
     const v={
       mid: mid || uid("m"),
@@ -3304,8 +3386,8 @@ function makeupModal(mid,fromRec){
       completedSegments,
       oss,
       completedDate: m.completedDate || "",
-      scheduleSegments: m.scheduleSegments || [],
-      notes: $("#uNotes").value.trim(),
+      scheduleSegments,
+      notes: combinedNotes,
       submittedOn: m.submittedOn || new Date().toISOString()
     };
     if(mid) Object.assign(S.makeups.find(x=>x.mid===mid),v); else S.makeups.push(v);
@@ -3313,7 +3395,8 @@ function makeupModal(mid,fromRec){
     if (m.dvId) {
         patchDataverseRecord(m.dvId, { 
             cr714_completed: newCompleted,
-            cr714_occurrence: String(occurrence) 
+            cr714_occurrence: occurrence,
+            cr714_makeuptime: makeUpString
         }).catch(e => console.warn("Make-up patch failed:", e));
         
         const pRec = S.records.find(r => r.dvId === m.dvId);
