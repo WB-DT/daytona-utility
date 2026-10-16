@@ -1082,7 +1082,21 @@ function consolidatedDisplayRecords(items) {
 }
 function uniqueMakeups(items) { return Array.isArray(items) ? [...items] : []; }
 function recalculateAfterDedupe() {
-  // Kept as a compatibility hook for existing callers, but it must never remove data.
+  const tdy = today();
+  (S.makeups || []).forEach(m => {
+    if (m.status === "Scheduled" || m.status === "Pending") {
+      if (m.scheduleSegments && m.scheduleSegments.length > 0) {
+        const lastSeg = m.scheduleSegments.slice().sort((a,b) => b.date.localeCompare(a.date))[0];
+        if (lastSeg && lastSeg.date < tdy) m.status = "Missed";
+      } else if (m.dueDate < tdy) {
+        m.status = "Missed";
+      }
+    }
+    if (m.status === "Completed") {
+      const r = (S.records || []).find(r => r.rid === m.rid) || (S.records || []).find(r => r.empId === m.empId && r.date === m.dateMissed && TYPES[r.type]?.occ);
+      if (r) { r.waived = true; m.rid = r.rid; }
+    }
+  });
   return { removedRecords:0, removedMakeups:0 };
 }
 
@@ -1401,8 +1415,13 @@ async function pullFromDataverse(silent = false, options = {}) {
     // Independent same-day submissions remain visible because they do not satisfy all keys.
     const preparedTimeRows=(timeRows||[]).map(row=>{
       const choice=chooseTimeOffNativeDates(row);
-      const dates=choice.dates||[];
-      return {row,choice,dates,start:dates[0]||choice.start||"",end:dates[dates.length-1]||choice.end||"",type:mapLeaveType(row.cr714_leavetype),hours:Number(parseHours(row,mapLeaveType(row.cr714_leavetype)))||0};
+      let dates=choice.dates||[];
+      const type=mapLeaveType(row.cr714_leavetype);
+      if (type === "Make up Time") {
+        const subDate = (row.createdon || new Date().toISOString()).split('T')[0];
+        dates = [subDate];
+      }
+      return {row,choice,dates,start:dates[0]||choice.start||"",end:dates[dates.length-1]||choice.end||"",type,hours:Number(parseHours(row,type))||0};
     });
     const familyKey=item=>[
       String(item.row.cr714_email||item.row.cr714_name||"").trim().toLowerCase(),
@@ -1826,7 +1845,7 @@ function renderCalendar(){
   // A repayment session belongs on its scheduled work date, even when that
   // date is outside the period containing the original missed shift.
   const mus = uniqueMakeups((S.makeups||[]).filter(m =>
-    empIds.has(m.empId) && m.status !== "Cancelled" && m.status !== "Missed"
+    empIds.has(m.empId) && m.status !== "Cancelled"
   ));
 
   const muByDate = {};
@@ -3359,7 +3378,7 @@ function makeupModal(mid,fromRec){
         }
     });
 
-    let newStatus = "Scheduled";
+    let newStatus = (m.status === "Missed" || m.status === "Cancelled") ? m.status : "Scheduled";
     if (scheduleSegments.length > 0) {
         if (completedSegments.length === scheduleSegments.length) newStatus = "Completed";
     } else {
@@ -3419,7 +3438,7 @@ function dayModal(ds){
     .sort((a,b) => getRecordTimestamp(b) - getRecordTimestamp(a));
     
   const ids = new Set(filteredEmployees().map(e=>e.id));
-  const baseMus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.status !== "Cancelled" && m.status !== "Missed"));
+  const baseMus = uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && m.status !== "Cancelled"));
   const dayMus = [];
   baseMus.forEach(m => {
       if (m.scheduleSegments && m.scheduleSegments.length > 0) {
