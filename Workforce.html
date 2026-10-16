@@ -1461,6 +1461,7 @@ async function pullFromDataverse(silent = false, options = {}) {
       const familyDvIds=[...new Set(familyRows.map(x=>x.row.cr714_timeoff_2id).filter(Boolean))];
       const familyRequestIds=[...new Set(familyRows.map(x=>x.row.cr714_id||x.row.cr714_autoid).filter(Boolean))];
       const isCancelled = r.cr714_cancelledrequest === 1 || r.cr714_cancelledrequest === true || String(r.cr714_cancelledrequest).toLowerCase() === "true";
+      const isCompleted = r.cr714_completed === 1 || r.cr714_completed === true || String(r.cr714_completed).toLowerCase() === "true";
       dates.forEach((d, idx) => newRecords.push({ rid:`${baseRid}-${idx}`, dvId, familyDvIds, familyRequestIds, overlapFamilySize:familyDvIds.length, date:d, empId:matchedEmp.id, type:mappedType,
         hours:allocatedHoursForDay(idx),
         requestHoursTotal:requestHours, allocatedHoursTotal, workingDayCount, hoursWorked, hoursOwed,
@@ -1474,7 +1475,7 @@ async function pullFromDataverse(silent = false, options = {}) {
         attendanceMatched:!!attendance, attendanceId:attendance?.attendanceId || "",
         attendanceLeaveType:attendance?.leaveType || "", attendanceNotes:attendance?.notes || "", csrAttendanceTracker:r.cr714_csrattendancetracker || (attendance?.rawRow ? csrAttendanceSnapshot(attendance.rawRow) : ""), rawLeaveType:String(r.cr714_leavetype||""), calendarTypeSource:"cr714_leavetype",
         submittedOn: r.createdon || new Date().toISOString(),
-        waived:false, cancelled:isCancelled || cancelledDvIds.has(dvId), source:"dataverse" }));
+        waived:false, cancelled:isCancelled || cancelledDvIds.has(dvId), completed:isCompleted, source:"dataverse" }));
 
       if (r.cr714_makeuptime || String(r.cr714_leavetype || "").toLowerCase().includes("make up")) {
         const rawMu = String(r.cr714_makeuptime || "");
@@ -1651,6 +1652,7 @@ async function patchDataverseRecord(dvId,fields){
   const payload={};
   if(fields.cr714_fmla!==undefined)payload.cr714_fmla=!!fields.cr714_fmla;
   if(fields.cr714_voicemail!==undefined)payload.cr714_voicemail=!!fields.cr714_voicemail;
+  if(fields.cr714_completed!==undefined)payload.cr714_completed=!!fields.cr714_completed;
   if(fields.cr714_occurrence!==undefined)payload.cr714_occurrence=String(occurrenceNumber(fields.cr714_occurrence)||0);
   if(fields.cr714_cancelledrequest!==undefined)payload.cr714_cancelledrequest=!!fields.cr714_cancelledrequest;
   if(fields.cr714_wfnotes!==undefined)payload.cr714_wfnotes=fields.cr714_wfnotes;
@@ -2985,6 +2987,9 @@ function recordModal(rid,presetDate){
         <label class="row" style="font-size:13.5px;font-weight:600;cursor:pointer;padding-bottom:10px;">
           <input type="checkbox" id="mVoicemail" ${r.voicemail?"checked":""} style="width:auto;cursor:pointer;"> Voicemail
         </label>
+        <label class="row" style="font-size:13.5px;font-weight:600;cursor:pointer;padding-bottom:10px;">
+          <input type="checkbox" id="mCompleted" ${r.completed?"checked":""} style="width:auto;cursor:pointer;"> Completed
+        </label>
       </div>
     </div>
     
@@ -3033,6 +3038,7 @@ function recordModal(rid,presetDate){
     const partialShift = $("#mPartial").value.trim();
     const fmla = $("#mFmla").checked;
     const voicemail = $("#mVoicemail").checked;
+    const completed = $("#mCompleted").checked;
     const occurrence = parseInt($("#mOcc").value, 10) || 0;
 
     if (rid) {
@@ -3053,7 +3059,7 @@ function recordModal(rid,presetDate){
             const usFrom = toUSDate(dFrom);
             const usTo = toUSDate(dTo);
             const snapshotRow={cr714_csrattendancetrackerid:targetRec.attendanceId||targetRec.dvId,cr714_id:targetRec.requestId||"",createdon:targetRec.submittedOn||targetRec.createdon||"",cr714_employeename:emp(empId)?.name||"",cr714_startdate:usFrom,cr714_enddate:usTo,cr714_typeofleave:type,cr714_notes:notes||wfNotes,cr714_occurrence:occurrence};
-            await patchDataverseRecord(targetRec.dvId,{cr714_startdate:usFrom,cr714_enddate:usTo,cr714_leavetype:type,cr714_requestnotes:notes,cr714_wfnotes:wfNotes,cr714_occurrence:occurrence,cr714_ptohoursrequested:hours,cr714_hoursofpartialshift:partialShift,cr714_fmla:fmla,cr714_voicemail:voicemail,cr714_csrattendancetracker:csrAttendanceSnapshot(snapshotRow)});
+            await patchDataverseRecord(targetRec.dvId,{cr714_startdate:usFrom,cr714_enddate:usTo,cr714_leavetype:type,cr714_requestnotes:notes,cr714_wfnotes:wfNotes,cr714_occurrence:occurrence,cr714_ptohoursrequested:hours,cr714_hoursofpartialshift:partialShift,cr714_fmla:fmla,cr714_voicemail:voicemail,cr714_completed:completed,cr714_csrattendancetracker:csrAttendanceSnapshot(snapshotRow)});
             const localSnapshot=(S.csrAttendanceRows||[]).find(x=>String(x._timeOffId||"")===String(targetRec.dvId||"")||normalizeMatchId(x.cr714_id)===normalizeMatchId(targetRec.requestId));
             if(localSnapshot)Object.assign(localSnapshot,snapshotRow,{_timeOffId:targetRec.dvId,_snapshotSource:true});
           }else if(targetRec.attendanceId){
@@ -3065,7 +3071,7 @@ function recordModal(rid,presetDate){
           // Replace only the complete family for the clicked request. A single-day
           // request remains isolated because family matching uses its unique Dataverse ID,
           // then request ID, and never employee/date matching.
-          const familyUpdate=replaceCalendarRequestFamily(targetRec,{startDate:dFrom,endDate:dTo,empId,type,hours,notes,wfNotes,partialShift,fmla,voicemail,occurrence});
+          const familyUpdate=replaceCalendarRequestFamily(targetRec,{startDate:dFrom,endDate:dTo,empId,type,hours,notes,wfNotes,partialShift,fmla,voicemail,completed,occurrence});
           toast(`Request updated across ${familyUpdate.updatedDays} calendar day${familyUpdate.updatedDays===1?"":"s"}`);
         } catch (err) {
           console.error("Update failed:", err);
@@ -3189,6 +3195,9 @@ function makeupModal(mid,fromRec){
        hoursOwed:fromRec?(8-(fromRec.hours||0)||fromRec.hours||4):4, dueDate:addDays(today(),14), status:"Scheduled", oss:true, notes:"", completedSegments: []};
   const used=ossUsed(m.empId);
 
+  const parentRecord = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId);
+  const currentOcc = parentRecord && parentRecord.occurrence !== undefined ? parentRecord.occurrence : 0;
+
   let segmentsHtml = "";
   if (m.scheduleSegments && m.scheduleSegments.length > 0) {
       segmentsHtml = `<div style="grid-column: 1 / -1; margin-top: 4px;"><label>Segment Completion</label><div style="display:flex; flex-direction:column; gap:6px; margin-top:4px; padding:12px; background:var(--soft); border-radius:8px; border:1px solid var(--line);">` +
@@ -3212,6 +3221,13 @@ function makeupModal(mid,fromRec){
       ${!m.scheduleSegments?.length ? `<div><label>Completion</label><label class="row" style="font-size:14.5px;font-weight:600;cursor:pointer;padding-top:8px;"><input type="checkbox" id="uCompleted" ${m.status==="Completed"?"checked":""} style="width:auto;cursor:pointer;transform:scale(1.2);"> Completed</label></div>` : ""}
       <div><label>Counts as OSS</label><select id="uOss"><option value="1" ${m.oss?"selected":""}>Yes — use an OSS</option><option value="0" ${m.oss?"":"selected"}>No</option></select>
       <div class="small muted" id="uOssNote">This employee has used ${used}/${OSS_LIMIT} OSS in the last 12 months.</div></div>
+      <div><label>Occurrences (Updates original record)</label>
+        <div class="row" style="gap:4px">
+          <button class="btn ghost sm" id="uOccMinus" style="padding:4px 10px; font-size:16px;">-</button>
+          <input type="number" id="uOcc" value="${currentOcc}" style="width:70px; text-align:center" step="1" min="0">
+          <button class="btn ghost sm" id="uOccPlus" style="padding:4px 10px; font-size:16px;">+</button>
+        </div>
+      </div>
     </div>
     <div><label>Notes</label><textarea id="uNotes" rows="6">${esc(m.notes)}</textarea></div>
     <div class="mfoot">
@@ -3238,6 +3254,9 @@ function makeupModal(mid,fromRec){
     };
   }
 
+  $("#uOccMinus").onclick = (e) => { e.preventDefault(); const inp = $("#uOcc"); inp.value = Math.max(0, parseInt(inp.value || 0, 10) - 1); };
+  $("#uOccPlus").onclick = (e) => { e.preventDefault(); const inp = $("#uOcc"); inp.value = Math.max(0, parseInt(inp.value || 0, 10) + 1); };
+
   $("#uSave").onclick=()=>{
     const oss=$("#uOss").value==="1", empId=$("#uEmp").value;
     if(oss && !mid && ossUsed(empId)>=OSS_LIMIT) return toast(`OSS limit reached (${OSS_LIMIT}/12 mo) for this employee`);
@@ -3262,6 +3281,9 @@ function makeupModal(mid,fromRec){
         if (document.getElementById("uCompleted") && document.getElementById("uCompleted").checked) newStatus = "Completed";
     }
 
+    const occurrence = parseInt($("#uOcc").value, 10) || 0;
+    const newCompleted = newStatus === "Completed";
+
     const v={
       mid: mid || uid("m"),
       empId,
@@ -3274,9 +3296,24 @@ function makeupModal(mid,fromRec){
       oss,
       completedDate: m.completedDate || "",
       scheduleSegments: m.scheduleSegments || [],
-      notes: $("#uNotes").value.trim()
+      notes: $("#uNotes").value.trim(),
+      submittedOn: m.submittedOn || new Date().toISOString()
     };
     if(mid) Object.assign(S.makeups.find(x=>x.mid===mid),v); else S.makeups.push(v);
+
+    if (m.dvId) {
+        patchDataverseRecord(m.dvId, { 
+            cr714_completed: newCompleted,
+            cr714_occurrence: String(occurrence) 
+        }).catch(e => console.warn("Make-up patch failed:", e));
+        
+        const pRec = S.records.find(r => r.dvId === m.dvId);
+        if (pRec) { 
+            pRec.occurrence = occurrence; 
+            pRec.completed = newCompleted; 
+        }
+    }
+
     if(v.status==="Completed") setMuStatus(v.mid,"Completed"); else { save(); render(); }
     backModal(); 
     toast("Agreement saved");
