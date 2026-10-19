@@ -1017,8 +1017,6 @@ function parseMakeUpSegments(value) {
   const raw = String(value || "").replace(/\r/g, "\n").trim();
   if (!raw) return [];
   const segments = [];
-  // Entries are normally comma/newline separated. Times may or may not have
-  // spaces around their internal hyphen, e.g. 7:30 AM-8:00 AM.
   const entryRx = /(\d{1,2}\/\d{1,2}\/\d{4})\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d+(?::\d{1,2})?|\d*\.\d+)/gi;
   let match;
   while ((match = entryRx.exec(raw)) !== null) {
@@ -2618,26 +2616,20 @@ function muRow(m){
   
   let segStatus = m.status;
   const tdy = today();
-  if (m.activeSegment && m.completedSegments && m.scheduleSegments) {
-    const idx = m.scheduleSegments.indexOf(m.activeSegment);
-    if (m.completedSegments.includes(idx)) {
-      segStatus = "Completed";
-    } else if (m.activeSegment.date < tdy) {
-      segStatus = "Missed";
-    } else {
-      segStatus = "Scheduled";
+  
+  // Auto-miss logic: If the final shift date passes and it's not marked Completed, flag it Missed
+  if (segStatus === "Scheduled" || segStatus === "Pending") {
+    let deadline = m.dueDate;
+    if (m.scheduleSegments && m.scheduleSegments.length > 0) {
+        deadline = m.scheduleSegments.slice().sort((a,b) => b.date.localeCompare(a.date))[0].date;
     }
-  } else if (segStatus === "Scheduled" || segStatus === "Pending") {
-    if (m.dueDate < tdy) segStatus = "Missed";
+    if (deadline < tdy) segStatus = "Missed";
   }
 
   const stCls={Scheduled:"warn",Pending:"warn",Completed:"ok",Cancelled:"muted",Missed:"bad"}[segStatus]||"warn";
   const overdue=!isCancelled&&m.status!=="Completed"&&m.dueDate<tdy;
   const rawNotes = getRelevantMakeUpNotes(m.notes, m.activeSegment ? m.activeSegment.date : m.dateMissed);
-  const segmentsMsg = m.scheduleSegments?.length > 1 && m.completedSegments?.length > 0 && m.status !== "Completed"
-    ? `<span class="badge" style="background:var(--soft); color:var(--purple)">${m.completedSegments.length}/${m.scheduleSegments.length} done</span>`
-    : "";
-
+  
   const dateLabel = m.activeSegment ? `<b>Scheduled:</b> ${fmt(m.activeSegment.date)} (${to12Hour(m.activeSegment.start)} - ${to12Hour(m.activeSegment.end)})` : `<b>Missed:</b> ${fmt(m.dateMissed)}`;
   const timeOwed = m.activeSegment ? formatDuration(m.activeSegment.duration) : `${hoursToHHMM(m.hoursOwed)}h`;
 
@@ -2651,7 +2643,6 @@ function muRow(m){
           <span><b>Owed:</b> ${timeOwed}</span>
           <span class="row" style="gap: 4px;">
             <span class="badge ${stCls}">${esc(segStatus)}</span>
-            ${segmentsMsg}
             ${overdue?`<span class="badge bad">overdue</span>`:""}
             ${m.oss?`<span class="badge">OSS</span>`:""}
           </span>
@@ -3250,25 +3241,20 @@ function makeupModal(mid,fromRec){
 
   const cleanNotes = String(m.notes || "").split('\n').filter(line => !line.startsWith("Schedule:")).join('\n').trim();
 
-  let segmentsHtml = `
-    <div style="grid-column: 1 / -1; margin-top: 4px;">
-        <div class="row" style="justify-content:space-between; align-items:center;">
-            <label style="margin:0;">Make-Up Shifts</label>
-            <button class="btn ghost sm" id="uAddShift" style="padding:2px 8px; font-size:11px;">+ Add Shift</button>
-        </div>
-        <div id="uShiftsContainer" style="display:flex; flex-direction:column; gap:6px; margin-top:6px; padding:12px; background:var(--soft); border-radius:8px; border:1px solid var(--line);">
-            ${m.scheduleSegments?.length ? m.scheduleSegments.map((seg, idx) => {
-                const isChecked = m.completedSegments && m.completedSegments.includes(idx);
-                return `<div class="row mu-shift-row" style="gap:8px;">
-                    <input type="checkbox" class="mu-seg-cb" ${isChecked ? "checked" : ""} title="Mark completed" style="width:18px;height:18px;margin:0;cursor:pointer;">
-                    <input type="date" class="mu-seg-date" value="${esc(seg.date)}" style="flex:1;padding:6px;font-size:12px;">
-                    <input type="time" class="mu-seg-start" value="${format24Hour(seg.start)}" style="flex:1;padding:6px;font-size:12px;">
-                    <input type="time" class="mu-seg-end" value="${format24Hour(seg.end)}" style="flex:1;padding:6px;font-size:12px;">
-                    <button class="btn ghost sm danger mu-seg-del" style="padding:4px 8px;" title="Remove shift">×</button>
-                </div>`;
-            }).join("") : `<div class="small muted text-center empty-shifts">No shifts scheduled</div>`}
-        </div>
-    </div>`;
+  // Read-only shifts display
+  let segmentsHtml = "";
+  if (m.scheduleSegments && m.scheduleSegments.length > 0) {
+      segmentsHtml = `<div style="grid-column: 1 / -1; margin-top: 4px;">
+          <label>Scheduled Make-Up Shifts</label>
+          <div style="display:flex; flex-direction:column; gap:6px; margin-top:4px; padding:12px; background:var(--soft); border-radius:8px; border:1px solid var(--line);">
+              ${m.scheduleSegments.map(seg => {
+                  return `<div class="row" style="font-size:13.5px; font-weight:600; color:var(--ink);">
+                      • ${esc(seg.displayDate)} :${to12Hour(seg.start)} - ${to12Hour(seg.end)} (${formatDuration(seg.duration)})
+                  </div>`;
+              }).join("")}
+          </div>
+      </div>`;
+  }
 
   openModal(`<h2>${mid?"Edit":"New"} make-up agreement</h2>
     <div class="mrow">
@@ -3281,14 +3267,24 @@ function makeupModal(mid,fromRec){
     </div>
     ${segmentsHtml}
     <div class="mrow" style="margin-top:10px;">
-      <div><label>Counts as OSS</label><select id="uOss"><option value="1" ${m.oss?"selected":""}>Yes — use an OSS</option><option value="0" ${m.oss?"":"selected"}>No</option></select>
-      <div class="small muted" id="uOssNote">This employee has used ${used}/${OSS_LIMIT} OSS in the last 12 months.</div></div>
+      <div><label>Request Status</label>
+        <select id="uStatus">
+          <option value="Scheduled" ${m.status==="Scheduled"||m.status==="Pending"?"selected":""}>Scheduled</option>
+          <option value="Completed" ${m.status==="Completed"?"selected":""}>Completed</option>
+          <option value="Missed" ${m.status==="Missed"?"selected":""}>Missed</option>
+        </select>
+      </div>
+      <div><label>Counts as OSS</label>
+        <select id="uOss"><option value="1" ${m.oss?"selected":""}>Yes — use an OSS</option><option value="0" ${m.oss?"":"selected"}>No</option></select>
+        <div class="small muted" id="uOssNote">This employee has used ${used}/${OSS_LIMIT} OSS in the last 12 months.</div>
+      </div>
       <div><label>Occurrences (Updates original record)</label>
         <div class="row" style="gap:4px">
           <button class="btn ghost sm" id="uOccMinus" style="padding:4px 10px; font-size:16px;">-</button>
           <input type="number" id="uOcc" value="${currentOcc}" style="width:70px; text-align:center" step="1" min="0">
           <button class="btn ghost sm" id="uOccPlus" style="padding:4px 10px; font-size:16px;">+</button>
         </div>
+        <div class="small muted mt" style="margin-top:2px;">Updates original request</div>
       </div>
     </div>
     <div><label>Notes</label><textarea id="uNotes" rows="4">${esc(cleanNotes)}</textarea></div>
@@ -3316,26 +3312,6 @@ function makeupModal(mid,fromRec){
     };
   }
 
-  $("#uAddShift").onclick = (e) => {
-    e.preventDefault();
-    const container = $("#uShiftsContainer");
-    const empty = container.querySelector(".empty-shifts");
-    if(empty) empty.remove();
-    const div = document.createElement("div");
-    div.className = "row mu-shift-row";
-    div.style = "gap:8px;";
-    div.innerHTML = `
-        <input type="checkbox" class="mu-seg-cb" title="Mark completed" style="width:18px;height:18px;margin:0;cursor:pointer;">
-        <input type="date" class="mu-seg-date" style="flex:1;padding:6px;font-size:12px;">
-        <input type="time" class="mu-seg-start" style="flex:1;padding:6px;font-size:12px;">
-        <input type="time" class="mu-seg-end" style="flex:1;padding:6px;font-size:12px;">
-        <button class="btn ghost sm danger mu-seg-del" style="padding:4px 8px;" title="Remove shift">×</button>
-    `;
-    div.querySelector(".mu-seg-del").onclick = () => div.remove();
-    container.appendChild(div);
-  };
-  document.querySelectorAll(".mu-seg-del").forEach(btn => btn.onclick = (e) => e.target.closest(".mu-shift-row").remove());
-
   $("#uOccMinus").onclick = (e) => { e.preventDefault(); const inp = $("#uOcc"); inp.value = Math.max(0, parseInt(inp.value || 0, 10) - 1); };
   $("#uOccPlus").onclick = (e) => { e.preventDefault(); const inp = $("#uOcc"); inp.value = Math.max(0, parseInt(inp.value || 0, 10) + 1); };
 
@@ -3352,54 +3328,12 @@ function makeupModal(mid,fromRec){
       hoursVal = parseFloat(hoursInput) || 0;
     }
 
-    let completedSegments = [];
-    let scheduleSegments = [];
-    let makeUpParts = [];
-    
-    document.querySelectorAll(".mu-shift-row").forEach((row, idx) => {
-        const dVal = row.querySelector(".mu-seg-date").value;
-        const sVal = row.querySelector(".mu-seg-start").value;
-        const eVal = row.querySelector(".mu-seg-end").value;
-        const cb = row.querySelector(".mu-seg-cb").checked;
-        if(dVal && sVal && eVal) {
-            const dateObj = parseISO(dVal);
-            const usDate = `${String(dateObj.getMonth()+1).padStart(2,'0')}/${String(dateObj.getDate()).padStart(2,'0')}/${dateObj.getFullYear()}`;
-            
-            const fmt12 = (t24) => {
-                let [h, mn] = t24.split(':').map(Number);
-                const ampm = h >= 12 ? 'PM' : 'AM';
-                h = h % 12 || 12;
-                return `${h}:${String(mn).padStart(2,'0')} ${ampm}`;
-            };
-            const s12 = fmt12(sVal), e12 = fmt12(eVal);
-            
-            const sMin = parseInt(sVal.split(':')[0])*60 + parseInt(sVal.split(':')[1]);
-            const eMin = parseInt(eVal.split(':')[0])*60 + parseInt(eVal.split(':')[1]);
-            let diff = eMin - sMin;
-            if (diff < 0) diff += 1440;
-            const hrs = Math.floor(diff/60);
-            const mins = diff % 60;
-            const durHHMM = `${hrs}:${String(mins).padStart(2,'0')}`;
-            
-            scheduleSegments.push({
-                date: dVal, displayDate: usDate, start: s12, end: e12, duration: durHHMM, hours: Math.round((diff/60)*100)/100
-            });
-            makeUpParts.push(`${usDate} - ${s12} - ${e12} - ${durHHMM}`);
-            if (cb) completedSegments.push(idx);
-        }
-    });
-
-    let newStatus = (m.status === "Missed" || m.status === "Cancelled") ? m.status : "Scheduled";
-    if (scheduleSegments.length > 0) {
-        if (completedSegments.length === scheduleSegments.length) newStatus = "Completed";
-    } else {
-        if (document.getElementById("uCompleted") && document.getElementById("uCompleted").checked) newStatus = "Completed";
-    }
-
-    const occurrence = parseInt($("#uOcc").value, 10) || 0;
+    const newStatus = $("#uStatus").value;
     const newCompleted = newStatus === "Completed";
-    const makeUpString = makeUpParts.join(", ");
+    const occurrence = parseInt($("#uOcc").value, 10) || 0;
     const repNotes = $("#uNotes").value.trim();
+    const scheduleSegments = m.scheduleSegments || [];
+    
     const combinedNotes = [
       ...scheduleSegments.map(segment => `Schedule: ${segment.displayDate} - ${segment.start} - ${segment.end} (${formatDuration(segment.duration)})`),
       repNotes ? `Rep Notes: ${repNotes}` : null
@@ -3413,9 +3347,9 @@ function makeupModal(mid,fromRec){
       hoursOwed: hoursVal,
       dueDate: $("#uDue").value,
       status: newStatus,
-      completedSegments,
+      completedSegments: newCompleted ? scheduleSegments.map((_, i) => i) : [],
       oss,
-      completedDate: m.completedDate || "",
+      completedDate: newCompleted ? today() : "",
       scheduleSegments,
       notes: combinedNotes,
       submittedOn: m.submittedOn || new Date().toISOString()
@@ -3425,18 +3359,18 @@ function makeupModal(mid,fromRec){
     if (m.dvId) {
         patchDataverseRecord(m.dvId, { 
             cr714_completed: newCompleted,
-            cr714_occurrence: occurrence,
-            cr714_makeuptime: makeUpString
+            cr714_occurrence: String(occurrence),
+            cr714_makeupdisposition: newStatus
         }).catch(e => console.warn("Make-up patch failed:", e));
         
         const pRec = S.records.find(r => r.dvId === m.dvId);
         if (pRec) { 
             pRec.occurrence = occurrence; 
-            pRec.completed = newCompleted; 
+            pRec.completed = newCompleted;
         }
     }
 
-    if(v.status==="Completed") setMuStatus(v.mid,"Completed"); else { save(); render(); }
+    if(newCompleted) setMuStatus(v.mid,"Completed"); else { save(); render(); }
     backModal(); 
     toast("Agreement saved");
   };
