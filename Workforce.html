@@ -1154,8 +1154,6 @@ function csrToTimeOffPayload(row,employee){
     cr714_name:String(row.cr714_employeename||employee?.name||""),
     cr714_email:String(employee?.email||""),
     cr714_department:String(employee?.dept||""),
-    
-    
     cr714_leavetype:String(row.cr714_typeofleave||""),
     cr714_requestnotes:String(row.cr714_notes||""),
     cr714_occurrence:String(occurrenceNumber(row.cr714_occurrence)??0),
@@ -1223,8 +1221,6 @@ async function reconcileCsrIntoTimeOff(timeRows,attendanceRows,empMapByName,head
         const rows=byEmployeeDate.get(key)||[];rows.push(target);byEmployeeDate.set(key,rows);
       }else{
         const existingTracker=String(target.cr714_csrattendancetracker??"").trim();
-        // Background reconciliation is blank-only. Existing snapshots are preserved
-        // until the linked CSR Attendance row is deliberately saved.
         if(!existingTracker){
           const trackerPayload={cr714_csrattendancetracker:payload.cr714_csrattendancetracker};
           await dataversePatch(TABLE_TIMEOFF,target.cr714_timeoff_2id,trackerPayload,"Time Off CSR tracker backfill");
@@ -1338,7 +1334,7 @@ async function pullFromDataverse(silent = false, options = {}) {
     };
     const api = `${DATAVERSE_URL}/api/data/v9.2`;
     const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_department","cr714_title","cr714_jobtitle","cr714_managerassigned","cr714_srmanager","cr714_location","cr714_status","cr714_loopnumber","cr714_shiftselection","cr714_breakselection","cr714_startdate","statecode"].join(",");
-    const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_starttime","cr714_completiontime","cr714_startdate","cr714_enddate","cr714_requestdates","cr714_id","cr714_name","cr714_email","cr714_department","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_managerapproval","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade","cr714_csrattendancetracker"].join(",");
+    const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_starttime","cr714_completiontime","cr714_startdate","cr714_enddate","cr714_requestdates","cr714_id","cr714_name","cr714_email","cr714_department","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_managerapproval","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade","cr714_csrattendancetracker","cr714_makeupdisposition"].join(",");
     const empUrl = `${api}/${TABLE_EMPLOYEES}?$select=${empSelect}&$filter=statecode eq 0`;
     const operationalIdFilter = `(cr714_id eq null or startswith(cr714_id,'M') or startswith(cr714_id,'A'))`;
     const lookbackIso = addDays(todayIso, -7);
@@ -1356,8 +1352,6 @@ async function pullFromDataverse(silent = false, options = {}) {
     updateSyncCover("Filling blank authoritative start/end dates before loading the view...");
     const dateBackfill=await backfillBlankAuthoritativeDates(timeRows);
     if(dateBackfill.updated>0){
-      // Re-read the source after PATCH so every view is built from Dataverse-confirmed
-      // authoritative dates, not from optimistic local mutations.
       updateSyncCover(`Verifying ${dateBackfill.updated} updated date row(s) in Dataverse...`);
       timeRows=operationalTimeRows(await fetchAllOData(timeUrl,headers));
       const patchedIds=new Set(dateBackfill.updatedIds);
@@ -1399,10 +1393,7 @@ async function pullFromDataverse(silent = false, options = {}) {
       const email=String(record.email||"").trim().toLowerCase(),name=String(record.name||"").trim().toLowerCase();
       if(email)empMapByEmail.set(email,record);if(name)empMapByName.set(name,record);
     });
-    // Index CSR Attendance by ID and by employee/date. The legacy IDs do not overlap
-    // the Time Off IDs, so employee/date is the required fallback mapping.
-    // CSR Attendance tab is derived only from cr714_csrattendancetracker snapshots.
-    // The separate CSR Attendance table is no longer queried, merged, or synchronized.
+    
     const snapshotRows=csrRowsFromTimeOffSnapshots(timeRows);
     if(incremental){
       const touchedTimeOffIds=new Set((timeRows||[]).map(row=>String(row.cr714_timeoff_2id||"")).filter(Boolean));
@@ -1415,14 +1406,11 @@ async function pullFromDataverse(silent = false, options = {}) {
       if(item.requestId)attendanceById.set(item.requestId,item);
       if(item.employeeName&&item.date){const key=`${item.employeeName.toUpperCase()}|${item.date}`;(attendanceByEmployeeDate.get(key)||attendanceByEmployeeDate.set(key,[]).get(key)).push(item);}
     });
-    // Tracker backfill is intentionally deferred until after the primary records render.
-    // The background worker performs its own blank-only Time Off lookup and never creates rows.
+    
     const cancelledDvIds = new Set((S.records || []).filter(r => r.cancelled).flatMap(r => r.familyDvIds||[r.dvId]).filter(Boolean));
     const newRecords = [], newMakeups = [];
     const overlapAudit=[];
-    // Targeted overlap-family rule: suppress only contained one-day migration rows when
-    // a same-employee, same-type, same-created-second, same-total-hours parent spans them.
-    // Independent same-day submissions remain visible because they do not satisfy all keys.
+    
     const preparedTimeRows=(timeRows||[]).map(row=>{
       const choice=chooseTimeOffNativeDates(row);
       let dates=choice.dates||[];
@@ -1472,15 +1460,15 @@ async function pullFromDataverse(silent = false, options = {}) {
         || dateMatches.find(x => x.hasOccurrence)
         || dateMatches[0]
         || null;
-      // Parsed Time Off form dates are authoritative for calendar placement.
+      
       const authoritativeDates = timeOffDates;
       const dates = authoritativeDates.filter(d => d >= historyFrom && d <= syncTo);
       if (!dates.length) return;
       const timeOcc = occurrenceNumber(r.cr714_occurrence);
-      // CSR Attendance is authoritative when populated; otherwise use Time Off.
+      
       const finalOccurrence = attendance?.hasOccurrence ? attendance.occurrence : (timeOcc ?? 0);
       const occurrenceSource = attendance?.hasOccurrence ? "CSR Attendance" : (timeOcc !== null ? "Time Off" : "None");
-      const mappedType = mapLeaveType(r.cr714_leavetype); // Calendar type for Time Off rows is authoritative from cr714_leavetype.
+      const mappedType = mapLeaveType(r.cr714_leavetype); 
       const requestHours = parseHours(r,mappedType), muHours = parseMakeUpHours(r);
       const hoursWorked = formHoursWorked(r), hoursOwed = formHoursOwed(r);
       const workingDayCount = Math.max(1, dates.length);
@@ -1561,9 +1549,8 @@ async function pullFromDataverse(silent = false, options = {}) {
             });
         }
       }
-    // CSR Attendance is reference-only. It confirms historical occurrence values
-    // for a matched Time Off form row, but never creates another visible record,
-    // calendar badge, hour value, or KPI row.
+    });
+    
     updateSyncCover("Applying occurrence rules and preparing the dashboard...");
     S.employees.sort((a,b)=>(a.name||"").localeCompare(b.name||""));
     if (incremental) {
@@ -1594,7 +1581,7 @@ async function pullFromDataverse(silent = false, options = {}) {
     S.settings.cacheDate = today();
     save(); render();
     updateSyncStatusIndicator();
-    // Yield to the browser so the app is interactive before approved blank tracker PATCH operations begin.
+    
     setTimeout(()=>fillBlankCsrTrackerSnapshotsInBackground({api,timeSelect,headers,incremental,todayIso}),0);
     if (!silent) toast(incremental
       ? `Refreshed today's changes · ${timeRows.length} Time Off row(s) checked · ${dateBackfill.updated} date row(s) patched and refreshed`
@@ -1711,6 +1698,7 @@ async function patchDataverseRecord(dvId,fields){
   if(fields.cr714_occurrence!==undefined)payload.cr714_occurrence=String(occurrenceNumber(fields.cr714_occurrence)||0);
   if(fields.cr714_cancelledrequest!==undefined)payload.cr714_cancelledrequest=fields.cr714_cancelledrequest ? "true" : "false";
   if(fields.cr714_makeuptime!==undefined)payload.cr714_makeuptime=fields.cr714_makeuptime;
+  if(fields.cr714_makeupdisposition!==undefined)payload.cr714_makeupdisposition=fields.cr714_makeupdisposition;
   if(fields.cr714_wfnotes!==undefined)payload.cr714_wfnotes=fields.cr714_wfnotes;
   if(fields.cr714_ptohoursrequested!==undefined)payload.cr714_ptohoursrequested=String(fields.cr714_ptohoursrequested);
   if(fields.cr714_hoursofpartialshift!==undefined)payload.cr714_hoursofpartialshift=fields.cr714_hoursofpartialshift;
@@ -1790,7 +1778,7 @@ function uid(p){ return p+Math.random().toString(36).slice(2,9)+Date.now().toStr
 function today(){ return isoDate(new Date()); }
 function isWeekend(isoStr) {
   const day = parseISO(isoStr).getDay();
-  return day === 0 || day === 6; // 0 is Sunday, 6 is Saturday
+  return day === 0 || day === 6; 
 }
 function isoDate(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
 function parseISO(s){ const [y,m,d]=s.split("-").map(Number); return new Date(y,m-1,d); }
@@ -1833,8 +1821,6 @@ function calendarRecordWinnerCompare(a,b){
 }
 function calendarRecords(records){
   return (records||[])
-    // Calendar eligibility is based on a valid authoritative date, not on dvId or a
-    // specific mapping-source marker. This allows newly loaded same-day rows to show.
     .filter(r=>validCalendarIso(String(r?.date||"")))
     .map(r=>({...r,type:mapLeaveType(r.rawLeaveType||r.type)}))
     .filter(r=>!r.cancelled&&r.type!=="Cancellation"&&r.type!=="Present")
@@ -1868,8 +1854,7 @@ function renderCalendar(){
   
   const totalEmps = filteredEmployees().length || 0;
   const empIds = new Set(filteredEmployees().map(e => e.id));
-  // A repayment session belongs on its scheduled work date, even when that
-  // date is outside the period containing the original missed shift.
+
   const mus = uniqueMakeups((S.makeups||[]).filter(m =>
     empIds.has(m.empId) && m.status !== "Cancelled"
   ));
@@ -1890,7 +1875,6 @@ function renderCalendar(){
     <button class="btn sm right" id="calAdd">+ Add record</button>
   </div>`;
 
-  // 5-Column Week View (Monday - Friday)
   if(UI.preset==="week" || (UI.preset==="adjusted" && addDays(f,10)>t && addDays(f,1)<=t)){
     let days = []; 
     let baseDate = parseISO(f);
@@ -1913,14 +1897,12 @@ function renderCalendar(){
       const isToday = ds === today();
       const allDayRecords = calendarRecords(byDate[ds] || []);
 
-      // Separate LOA from standard records
       const standardDayRecs = allDayRecords
         .filter(r => r.type !== "Present" && r.type !== "LOA")
         .sort((a,b) => getRecordTimestamp(b) - getRecordTimestamp(a));
       
       const uniqueDayRecs=calendarRecords(standardDayRecs);
 
-      // Deduplicate LOA so each employee appears at most once per day
       const seenLoaEmps = new Set();
       const loaRecs = allDayRecords
         .filter(r => canonicalRecordType(r) === "LOA" && !r.cancelled)
@@ -1939,7 +1921,6 @@ function renderCalendar(){
       );
       const presentCount = Math.max(0, totalEmps - absentEmpIds.size);
 
-      // Make-Up cards (Top)
       const muCardsHtml = dayMus.map(m => {
         const e = emp(m.empId) || {name: m.empId};
         const timeFrame = m.activeSegment 
@@ -1947,10 +1928,6 @@ function renderCalendar(){
           : `${hoursToHHMM(m.hoursOwed)}h`;
 
         let segStatus = m.status;
-        if (m.activeSegment && m.completedSegments && m.scheduleSegments) {
-          const idx = m.scheduleSegments.indexOf(m.activeSegment);
-          segStatus = m.completedSegments.includes(idx) ? "Completed" : "Scheduled";
-        }
 
         return `<div class="cal-card mu-card" onclick="makeupModal('${esc(m.mid)}')" title="Click to view Make-Up details">
           <div class="row" style="justify-content:space-between; align-items:flex-start; gap:6px;">
@@ -1964,7 +1941,6 @@ function renderCalendar(){
         </div>`;
       }).join("");
 
-      // Standard exception cards (Middle)
       const recCardsHtml = uniqueDayRecs.map(r => {
         const e = emp(r.empId) || {name: r.empId};
         const shiftDisplay = extractShiftHours(r);
@@ -1993,7 +1969,6 @@ function renderCalendar(){
         </div>`;
       }).join("");
 
-      // Deduplicated LOA cards (Bottom)
       const loaCardsHtml = loaRecs.map(r => {
         const e = emp(r.empId) || {name: r.empId};
         const noteText = r.notes || r.wfNotes || "Leave of Absence";
@@ -2053,7 +2028,6 @@ function renderCalendar(){
     </div>`;
   }
 
-  // Month & Annual Grid Views
   const months=[]; let d=parseISO(f); d.setDate(1);
   while(isoDate(d)<=t){ months.push(new Date(d)); d.setMonth(d.getMonth()+1); }
   const dows=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
@@ -2143,7 +2117,6 @@ function groupConsecutiveOccurrenceDates(days,maxDays=3){
   return groups;
 }
 function occurrenceGroups(empId,from,to){
-  // Build the policy-defined occurrence first. Display filters must not rewrite history.
   const source=occurrenceSourceRecords(empId,from,to);
   const eligible=source.filter(isOccurrenceEligible);
   const dateGroups=groupConsecutiveOccurrenceDates(eligible.flatMap(r=>expandOccurrenceDates(r,from,to)),3);
@@ -2153,7 +2126,6 @@ function occurrenceGroups(empId,from,to){
     const grouped=dates.length>1;
     return {id:`${empId}:${dates[0]}`,dates,grouped,records,activeRecords,hasWaived:records.some(r=>r.waived),hasCancelled:records.some(r=>r.cancelled),visualClass:grouped?"occurrence-group-rainbow":"occurrence-single-green",label:grouped?`Grouped period · ${dates.length} consecutive days`:"Single occurrence"};
   });
-  // Type is a visibility filter applied after the actual group has been constructed.
   if(UI.type)groups=groups.filter(g=>g.activeRecords.some(r=>canonicalRecordType(r)===UI.type));
   return groups;
 }
@@ -2178,13 +2150,11 @@ function metrics(){
   const empIdsForOcc=new Set(recs.map(r=>r.empId));
   empIdsForOcc.forEach(id=>{occ+=groupedOccurrenceCount(id,f,t);});
 
-  // Calculate default Present count for weekdays only
   let days=[]; for(let d=f; d<=t; d=addDays(d,1)) { if(!isWeekend(d)) days.push(d); }
   let totalPossibleWorkDays = days.length * emps.length;
   let loggedNonPresent = recs.filter(r => r.type !== "Present").length;
   let explicitPresent = recs.filter(r => r.type === "Present").length;
   
-  // Default remaining unlogged days/reps as Present
   c["Present"] = explicitPresent + Math.max(0, totalPossibleWorkDays - (explicitPresent + loggedNonPresent));
 
   const filteredHours = Math.round(recs.filter(r=>!r.cancelled).reduce((sum,r)=>sum+(Number(r.hours)||0),0)*100)/100;
@@ -2729,7 +2699,7 @@ function renderMakeup(){
           <div class="cal-mini" style="flex-direction:column; gap:2px;">
             ${dMus.slice(0,2).map(m=>{
               const e = emp(m.empId) || {name: m.empId};
-              const firstName = esc(e.name.span ? e.name : e.name.split(' ')[0]);
+              const firstName = esc(e.name.includes(' ') ? e.name.split(' ')[0] : e.name);
               const timeStr = formatChipTime(m.notes) || hoursToHHMM(m.hoursOwed);
               return `<div class="mu-chip ${esc(m.status)}" title="${esc(e.name)}: ${timeStr}" style="font-size:9px; padding:1px 4px;">${firstName}</div>`;
             }).join("")}
