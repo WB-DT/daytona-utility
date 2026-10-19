@@ -1017,7 +1017,7 @@ function parseMakeUpSegments(value) {
   const raw = String(value || "").replace(/\r/g, "\n").trim();
   if (!raw) return [];
   const segments = [];
-  const entryRx = /(\d{1,2}\/\d{1,2}\/\d{4})\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d+(?::\d{1,2})?|\d*\.\d+)/gi;
+  const entryRx = /(\d{1,2}\/\d{1,2}\/\d{4})\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d+(?::\d{1,2})?|\d*\.\d+)(?:\s*-\s*\[(.*?)\])?/gi;
   let match;
   while ((match = entryRx.exec(raw)) !== null) {
     const [mmRaw, ddRaw, yyyy] = match[1].split("/");
@@ -1036,7 +1036,8 @@ function parseMakeUpSegments(value) {
       start: match[2].trim(),
       end: match[3].trim(),
       duration,
-      hours: Math.round(hours * 100) / 100
+      hours: Math.round(hours * 100) / 100,
+      status: match[5] ? match[5].trim() : "Scheduled"
     });
   }
   return segments;
@@ -1094,16 +1095,17 @@ function recalculateAfterDedupe() {
   const tdy = today();
   (S.makeups || []).forEach(m => {
     if (m.status === "Scheduled" || m.status === "Pending") {
-      if (m.scheduleSegments && m.scheduleSegments.length > 0) {
-        const lastSeg = m.scheduleSegments.slice().sort((a,b) => b.date.localeCompare(a.date))[0];
-        if (lastSeg && lastSeg.date < tdy) m.status = "Missed";
-      } else if (m.dueDate < tdy) {
-        m.status = "Missed";
-      }
+      const targetDate = m.activeSegment ? m.activeSegment.date : m.dueDate;
+      if (targetDate < tdy) m.status = "Missed";
     }
     if (m.status === "Completed") {
       const r = (S.records || []).find(r => r.rid === m.rid) || (S.records || []).find(r => r.empId === m.empId && r.date === m.dateMissed && TYPES[r.type]?.occ);
-      if (r) { r.waived = true; m.rid = r.rid; }
+      
+      const allDone = m.scheduleSegments && m.scheduleSegments.length 
+          ? m.scheduleSegments.every(s => s.status === "Completed")
+          : true;
+          
+      if (allDone && r) { r.waived = true; m.rid = r.rid; }
     }
   });
   return { removedRecords:0, removedMakeups:0 };
@@ -1518,32 +1520,48 @@ async function pullFromDataverse(silent = false, options = {}) {
       if (r.cr714_makeuptime || String(r.cr714_leavetype || "").toLowerCase().includes("make up")) {
         const rawMu = String(r.cr714_makeuptime || "");
         const scheduleSegments = parseMakeUpSegments(rawMu);
-        // One Time Off submission is one make-up agreement. The schedule can
-        // contain several work sessions, but those sessions must not become
-        // duplicate agreements in the employee modal, OSS count, or KPIs.
         const missedDate = dates[0];
-        const scheduledHours = scheduleSegments.reduce((sum, segment) => sum + (Number(segment.hours) || 0), 0);
-        const notes = [
-          ...scheduleSegments.map(segment => `Schedule: ${segment.displayDate} - ${to12Hour(segment.start)} - ${to12Hour(segment.end)} (${formatDuration(segment.duration)})`),
-          !scheduleSegments.length && rawMu ? `Unparsed schedule: ${rawMu}` : null,
-          repNotes ? `Rep Notes: ${repNotes}` : null
-        ].filter(Boolean).join("\n");
-        newMakeups.push({
-          mid: String(baseRid),
-          dvId,
-          empId: matchedEmp.id,
-          rid: `${baseRid}-0`,
-          dateMissed: missedDate,
-          hoursOwed: Math.round((scheduledHours || muHours) * 100) / 100,
-          dueDate: addDays(missedDate, 7),
-          status: isCancelled ? "Cancelled" : (r.cr714_completed ? "Completed" : "Scheduled"),
-          oss: true,
-          completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
-          scheduleSegments,
-          notes: notes || fullNotes
-        });
-      }
-    });
+        const repNotes = String(r.cr714_requestnotes || "").trim();
+
+        if (scheduleSegments.length > 0) {
+            scheduleSegments.forEach((seg, sIdx) => {
+                newMakeups.push({
+                  mid: `${baseRid}-seg${sIdx}`,
+                  parentMid: String(baseRid),
+                  dvId,
+                  empId: matchedEmp.id,
+                  rid: `${baseRid}-0`,
+                  dateMissed: missedDate,
+                  hoursOwed: seg.hours,
+                  dueDate: addDays(missedDate, 7),
+                  status: isCancelled ? "Cancelled" : (seg.status || "Scheduled"),
+                  oss: true,
+                  completedDate: seg.status === "Completed" ? (r.cr714_completed ? isoDate(new Date(r.createdon)) : "") : "",
+                  scheduleSegments,
+                  segIndex: sIdx,
+                  activeSegment: seg,
+                  notes: repNotes
+                });
+            });
+        } else {
+            newMakeups.push({
+              mid: String(baseRid),
+              parentMid: String(baseRid),
+              dvId,
+              empId: matchedEmp.id,
+              rid: `${baseRid}-0`,
+              dateMissed: missedDate,
+              hoursOwed: Math.round((muHours) * 100) / 100,
+              dueDate: addDays(missedDate, 7),
+              status: isCancelled ? "Cancelled" : (r.cr714_makeupdisposition || (r.cr714_completed ? "Completed" : "Scheduled")),
+              oss: true,
+              completedDate: r.cr714_completed ? isoDate(new Date(r.createdon)) : "",
+              scheduleSegments: [],
+              activeSegment: null,
+              notes: repNotes || fullNotes
+            });
+        }
+      });
     // CSR Attendance is reference-only. It confirms historical occurrence values
     // for a matched Time Off form row, but never creates another visible record,
     // calendar badge, hour value, or KPI row.
@@ -1859,22 +1877,9 @@ function renderCalendar(){
 
   const muByDate = {};
   mus.forEach(m => {
-    const segments = Array.isArray(m.scheduleSegments) ? m.scheduleSegments : [];
-    if (segments.length > 0) {
-      segments.forEach(seg => {
-        const scheduledDate = seg && seg.date;
-        if (validCalendarIso(scheduledDate) && scheduledDate >= f && scheduledDate <= t) {
-          (muByDate[scheduledDate] = muByDate[scheduledDate] || []).push({
-            ...m,
-            activeSegment: seg
-          });
-        }
-      });
-    } else {
-      const fallbackDate = m.dateMissed;
-      if (validCalendarIso(fallbackDate) && fallbackDate >= f && fallbackDate <= t) {
-        (muByDate[fallbackDate] = muByDate[fallbackDate] || []).push(m);
-      }
+    const targetDate = m.activeSegment ? m.activeSegment.date : m.dateMissed;
+    if (validCalendarIso(targetDate) && targetDate >= f && targetDate <= t) {
+      (muByDate[targetDate] = muByDate[targetDate] || []).push(m);
     }
   });
 
@@ -2613,25 +2618,20 @@ function renderTeam(){
 function muRow(m){
   const e=emp(m.empId)||{name:m.empId};
   const isCancelled = m.status === "Cancelled";
-  
-  let segStatus = m.status;
+  const segStatus = m.status;
   const tdy = today();
-  
-  // Auto-miss logic: If the final shift date passes and it's not marked Completed, flag it Missed
-  if (segStatus === "Scheduled" || segStatus === "Pending") {
-    let deadline = m.dueDate;
-    if (m.scheduleSegments && m.scheduleSegments.length > 0) {
-        deadline = m.scheduleSegments.slice().sort((a,b) => b.date.localeCompare(a.date))[0].date;
-    }
-    if (deadline < tdy) segStatus = "Missed";
-  }
 
   const stCls={Scheduled:"warn",Pending:"warn",Completed:"ok",Cancelled:"muted",Missed:"bad"}[segStatus]||"warn";
-  const overdue=!isCancelled&&m.status!=="Completed"&&m.dueDate<tdy;
+  const overdue=!isCancelled&&m.status!=="Completed"&&((m.activeSegment?m.activeSegment.date:m.dueDate)<tdy);
   const rawNotes = getRelevantMakeUpNotes(m.notes, m.activeSegment ? m.activeSegment.date : m.dateMissed);
   
-  const dateLabel = m.activeSegment ? `<b>Scheduled:</b> ${fmt(m.activeSegment.date)} (${to12Hour(m.activeSegment.start)} - ${to12Hour(m.activeSegment.end)})` : `<b>Missed:</b> ${fmt(m.dateMissed)}`;
-  const timeOwed = m.activeSegment ? formatDuration(m.activeSegment.duration) : `${hoursToHHMM(m.hoursOwed)}h`;
+  const dateLabel = m.activeSegment ? `<b>Scheduled:</b> ${fmt(m.activeSegment.date)} (${m.activeSegment.start} - ${m.activeSegment.end})` : `<b>Missed:</b> ${fmt(m.dateMissed)}`;
+  const timeOwed = m.activeSegment ? m.activeSegment.duration : `${hoursToHHMM(m.hoursOwed)}h`;
+
+  let multMsg = "";
+  if (m.scheduleSegments && m.scheduleSegments.length > 1 && m.activeSegment) {
+      multMsg = `<div class="small muted" style="margin-top:2px;">Shift ${m.segIndex + 1} of ${m.scheduleSegments.length}</div>`;
+  }
 
   return `<div class="cal-row ${isCancelled ? 'cancelled' : ''}" style="margin-bottom: 12px;">
     <div class="row-top" style="justify-content: space-between; align-items: flex-start;">
@@ -2647,6 +2647,7 @@ function muRow(m){
             ${m.oss?`<span class="badge">OSS</span>`:""}
           </span>
         </div>
+        ${multMsg}
       </div>
       <div class="row" style="gap: 6px;">
         ${muActions(m, segStatus)}
@@ -2670,18 +2671,8 @@ function renderMakeup(){
   
   const byDate = {};
   mus.forEach(m => {
-    if (m.scheduleSegments && m.scheduleSegments.length > 0) {
-      m.scheduleSegments.forEach(seg => {
-        if (seg.date) {
-          (byDate[seg.date] = byDate[seg.date] || []).push({
-            ...m,
-            activeSegment: seg
-          });
-        }
-      });
-    } else if (m.dateMissed) {
-      (byDate[m.dateMissed] = byDate[m.dateMissed] || []).push(m);
-    }
+    const targetDate = m.activeSegment ? m.activeSegment.date : m.dateMissed;
+    (byDate[targetDate] = byDate[targetDate] || []).push(m);
   });
   
   const counts = MU_STATUS.map(s => uniqueMakeups((S.makeups||[]).filter(m => ids.has(m.empId) && (m.status === s || (s === "Scheduled" && m.status === "Pending")))).length);
@@ -2782,17 +2773,25 @@ function renderMakeup(){
 function setMuStatus(mid,status){
   const m=S.makeups.find(x=>x.mid===mid); if(!m) return;
   m.status=status;
+  if (m.activeSegment) m.activeSegment.status = status;
   if(status==="Completed"){ 
     m.completedDate=today();
-    if (m.scheduleSegments) m.completedSegments = m.scheduleSegments.map((_, i) => i);
-    const r=S.records.find(r=>r.rid===m.rid)||S.records.find(r=>r.empId===m.empId&&r.date===m.dateMissed&&TYPES[r.type].occ);
-    if(r){ r.waived=true; m.rid=r.rid; }
-    toast("Make-up completed — occurrence waived");
+    
+    const allDone = m.scheduleSegments && m.scheduleSegments.length 
+        ? m.scheduleSegments.every(s => s.status === "Completed")
+        : true;
+
+    if (allDone) {
+        const r=S.records.find(r=>r.rid===m.rid)||S.records.find(r=>r.empId===m.empId&&r.date===m.dateMissed&&TYPES[r.type]?.occ);
+        if(r){ r.waived=true; m.rid=r.rid; }
+        toast("All shifts completed — occurrence waived");
+    } else {
+        toast("Shift completed");
+    }
   } else if(status==="Scheduled" || status==="Pending"){
-    m.completedSegments = [];
     const r=S.records.find(r=>r.rid===m.rid); if(r) r.waived=false;
     toast("Marked scheduled — occurrence stands");
-  } else toast("Agreement "+status.toLowerCase());
+  } else toast("Shift "+status.toLowerCase());
   save(); render();
 }
 
@@ -3233,41 +3232,31 @@ function makeupModal(mid,fromRec){
   UI.savedScroll = { body: bEl ? bEl.scrollTop : 0, tbl: tEl ? tEl.scrollTop : 0 };
   const m=mid? S.makeups.find(x=>x.mid===mid)
     : {empId:fromRec?.empId||S.employees[0]?.id, rid:fromRec?.rid||"", dateMissed:fromRec?.date||today(),
-       hoursOwed:fromRec?(8-(fromRec.hours||0)||fromRec.hours||4):4, dueDate:addDays(today(),14), status:"Scheduled", oss:true, notes:"", completedSegments: []};
+       hoursOwed:fromRec?(8-(fromRec.hours||0)||fromRec.hours||4):4, dueDate:addDays(today(),14), status:"Scheduled", oss:true, notes:"", scheduleSegments: []};
   const used=ossUsed(m.empId);
 
   const parentRecord = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId);
   const currentOcc = parentRecord && parentRecord.occurrence !== undefined ? parentRecord.occurrence : 0;
 
   const cleanNotes = String(m.notes || "").split('\n').filter(line => !line.startsWith("Schedule:")).join('\n').trim();
-
-  // Read-only shifts display
-  let segmentsHtml = "";
-  if (m.scheduleSegments && m.scheduleSegments.length > 0) {
-      segmentsHtml = `<div style="grid-column: 1 / -1; margin-top: 4px;">
-          <label>Scheduled Make-Up Shifts</label>
-          <div style="display:flex; flex-direction:column; gap:6px; margin-top:4px; padding:12px; background:var(--soft); border-radius:8px; border:1px solid var(--line);">
-              ${m.scheduleSegments.map(seg => {
-                  return `<div class="row" style="font-size:13.5px; font-weight:600; color:var(--ink);">
-                      • ${esc(seg.displayDate)} :${to12Hour(seg.start)} - ${to12Hour(seg.end)} (${formatDuration(seg.duration)})
-                  </div>`;
-              }).join("")}
-          </div>
-      </div>`;
+  
+  let shiftInfo = "";
+  if (m.activeSegment) {
+      shiftInfo = `<div class="card mb occurrence-group-rainbow" style="padding:12px;"><b>Shift ${m.segIndex + 1} of ${m.scheduleSegments.length}</b><div class="small mt">Date: ${m.activeSegment.displayDate}<br>Time: ${m.activeSegment.start} - ${m.activeSegment.end} (${m.activeSegment.duration})</div></div>`;
   }
 
-  openModal(`<h2>${mid?"Edit":"New"} make-up agreement</h2>
+  openModal(`<h2>${mid?"Edit Make-Up Shift":"New Make-Up Agreement"}</h2>
+    ${shiftInfo}
     <div class="mrow">
       <div><label>Employee</label>${empSelect("uEmp",m.empId)}</div>
-      <div><label>Date missed</label><input type="date" id="uMissed" value="${esc(m.dateMissed)}"></div>
+      <div><label>Date missed</label><input type="date" id="uMissed" value="${esc(m.dateMissed)}" ${m.activeSegment?"disabled":""}></div>
     </div>
     <div class="mrow">
-      <div><label>Hours owed (HH:mm)</label><input type="text" id="uHours" value="${hoursToHHMM(m.hoursOwed)}"></div>
-      <div><label>Due by</label><input type="date" id="uDue" value="${esc(m.dueDate)}"></div>
+      <div><label>Hours owed for this shift</label><input type="text" id="uHours" value="${m.activeSegment ? m.activeSegment.hours : hoursToHHMM(m.hoursOwed)}" ${m.activeSegment?"disabled":""}></div>
+      <div><label>Due by</label><input type="date" id="uDue" value="${m.activeSegment ? esc(m.activeSegment.date) : esc(m.dueDate)}" ${m.activeSegment?"disabled":""}></div>
     </div>
-    ${segmentsHtml}
     <div class="mrow" style="margin-top:10px;">
-      <div><label>Request Status</label>
+      <div><label>Shift Status</label>
         <select id="uStatus">
           <option value="Scheduled" ${m.status==="Scheduled"||m.status==="Pending"?"selected":""}>Scheduled</option>
           <option value="Completed" ${m.status==="Completed"?"selected":""}>Completed</option>
@@ -3278,20 +3267,19 @@ function makeupModal(mid,fromRec){
         <select id="uOss"><option value="1" ${m.oss?"selected":""}>Yes — use an OSS</option><option value="0" ${m.oss?"":"selected"}>No</option></select>
         <div class="small muted" id="uOssNote">This employee has used ${used}/${OSS_LIMIT} OSS in the last 12 months.</div>
       </div>
-      <div><label>Occurrences (Updates original record)</label>
+      <div><label>Occurrences (Updates original request)</label>
         <div class="row" style="gap:4px">
           <button class="btn ghost sm" id="uOccMinus" style="padding:4px 10px; font-size:16px;">-</button>
           <input type="number" id="uOcc" value="${currentOcc}" style="width:70px; text-align:center" step="1" min="0">
           <button class="btn ghost sm" id="uOccPlus" style="padding:4px 10px; font-size:16px;">+</button>
         </div>
-        <div class="small muted mt" style="margin-top:2px;">Updates original request</div>
       </div>
     </div>
     <div><label>Notes</label><textarea id="uNotes" rows="4">${esc(cleanNotes)}</textarea></div>
     <div class="mfoot">
       ${mid?`<button class="btn danger" id="uDel" style="margin-right:auto">Delete from Dataverse</button>`:""}
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn" id="uSave">Save</button>
+      <button class="btn" id="uSave">Save Shift</button>
     </div>`);
 
   if(mid) {
@@ -3299,15 +3287,13 @@ function makeupModal(mid,fromRec){
     $("#uDel").textContent = isCancelled ? "Restore request" : "Cancel request";
     $("#uDel").className = "btn ghost";
     $("#uDel").onclick = () => {
-      const parentRecord = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId);
-      if (parentRecord) {
-        toggleCancelRecord(parentRecord.rid);
+      const pRec = S.records.find(r => r.rid === m.rid || r.dvId === m.dvId);
+      if (pRec) {
+        toggleCancelRecord(pRec.rid);
       } else {
         m.status = isCancelled ? "Pending" : "Cancelled";
-        save();
-        backModal();
-        render();
-        toast(isCancelled ? "Agreement restored" : "Agreement cancelled");
+        save(); backModal(); render();
+        toast(isCancelled ? "Shift restored" : "Shift cancelled");
       }
     };
   }
@@ -3320,59 +3306,58 @@ function makeupModal(mid,fromRec){
     if(oss && !mid && ossUsed(empId)>=OSS_LIMIT) return toast(`OSS limit reached (${OSS_LIMIT}/12 mo) for this employee`);
     
     let hoursInput = $("#uHours").value.trim();
-    let hoursVal = 0;
-    if (hoursInput.includes(':')) {
-      const [h, mPart] = hoursInput.split(':').map(Number);
-      hoursVal = (h || 0) + ((mPart || 0) / 60);
-    } else {
-      hoursVal = parseFloat(hoursInput) || 0;
-    }
+    let hoursVal = parseFloat(hoursInput) || 0;
 
     const newStatus = $("#uStatus").value;
-    const newCompleted = newStatus === "Completed";
     const occurrence = parseInt($("#uOcc").value, 10) || 0;
     const repNotes = $("#uNotes").value.trim();
-    const scheduleSegments = m.scheduleSegments || [];
-    
-    const combinedNotes = [
-      ...scheduleSegments.map(segment => `Schedule: ${segment.displayDate} - ${segment.start} - ${segment.end} (${formatDuration(segment.duration)})`),
-      repNotes ? `Rep Notes: ${repNotes}` : null
-    ].filter(Boolean).join("\n");
 
-    const v={
-      mid: mid || uid("m"),
-      empId,
-      rid: m.rid || "",
-      dateMissed: $("#uMissed").value,
-      hoursOwed: hoursVal,
-      dueDate: $("#uDue").value,
-      status: newStatus,
-      completedSegments: newCompleted ? scheduleSegments.map((_, i) => i) : [],
-      oss,
-      completedDate: newCompleted ? today() : "",
-      scheduleSegments,
-      notes: combinedNotes,
-      submittedOn: m.submittedOn || new Date().toISOString()
-    };
-    if(mid) Object.assign(S.makeups.find(x=>x.mid===mid),v); else S.makeups.push(v);
+    m.status = newStatus;
+    m.oss = oss;
+    m.notes = repNotes;
+
+    let makeUpString = "";
+    let masterStatus = newStatus;
+    
+    if (m.activeSegment && m.scheduleSegments) {
+        // Update this specific segment inside the array
+        m.activeSegment.status = newStatus;
+        m.scheduleSegments[m.segIndex].status = newStatus;
+
+        // Rebuild Dataverse string
+        makeUpString = m.scheduleSegments.map(s => `${s.displayDate} - ${s.start} - ${s.end} - ${s.duration} - [${s.status}]`).join(", ");
+        
+        // Calculate master status for the parent record
+        const allCompleted = m.scheduleSegments.every(s => s.status === "Completed");
+        const anyMissed = m.scheduleSegments.some(s => s.status === "Missed");
+        if (allCompleted) masterStatus = "Completed";
+        else if (anyMissed) masterStatus = "Missed";
+        else masterStatus = "Scheduled";
+        
+        // Synchronize other local makeups that share this schedule
+        S.makeups.filter(x => x.parentMid === m.parentMid).forEach(sibling => {
+            sibling.scheduleSegments = m.scheduleSegments;
+        });
+    }
 
     if (m.dvId) {
         patchDataverseRecord(m.dvId, { 
-            cr714_completed: newCompleted,
+            cr714_completed: masterStatus === "Completed",
             cr714_occurrence: String(occurrence),
-            cr714_makeupdisposition: newStatus
+            cr714_makeuptime: makeUpString,
+            cr714_makeupdisposition: masterStatus
         }).catch(e => console.warn("Make-up patch failed:", e));
         
         const pRec = S.records.find(r => r.dvId === m.dvId);
         if (pRec) { 
             pRec.occurrence = occurrence; 
-            pRec.completed = newCompleted;
+            pRec.completed = masterStatus === "Completed";
         }
     }
 
-    if(newCompleted) setMuStatus(v.mid,"Completed"); else { save(); render(); }
+    if(newStatus==="Completed") setMuStatus(m.mid,"Completed"); else { save(); render(); }
     backModal(); 
-    toast("Agreement saved");
+    toast("Shift saved");
   };
 }
   
