@@ -1118,13 +1118,30 @@ function recalculateAfterDedupe() {
       const targetDate = m.activeSegment ? m.activeSegment.date : m.dueDate;
       if (targetDate < tdy) m.status = "Missed";
     }
+
     if (m.status === "Completed") {
-      const r = (S.records || []).find(r => r.rid === m.rid) || (S.records || []).find(r => r.empId === m.empId && r.date === m.dateMissed && TYPES[r.type]?.occ);
-      
       const siblings = (S.makeups || []).filter(sib => sib.parentMid === m.parentMid);
       const allDone = siblings.length ? siblings.every(s => s.status === "Completed") : true;
 
-      if (allDone && r) { r.waived = true; m.rid = r.rid; }
+      // 1. Mark the Make-Up Time record itself as completed
+      const muRecord = (S.records || []).find(r => r.rid === m.rid && r.type === "Make up Time");
+      if (allDone && muRecord) {
+        muRecord.completed = true;
+      }
+
+      // 2. Only waive true attendance penalty records on the date missed (never Schedule Adjustments or Make-Up Time)
+      const penaltyRecord = (S.records || []).find(r => 
+        r.empId === m.empId && 
+        r.date === m.dateMissed && 
+        r.type !== "Make up Time" && 
+        r.type !== "Schedule Adjustment" && 
+        r.type !== "Present" &&
+        (TYPES[r.type]?.occ || r.occurrence > 0)
+      );
+
+      if (allDone && penaltyRecord) {
+        penaltyRecord.waived = true;
+      }
     }
   });
   return { removedRecords:0, removedMakeups:0 };
@@ -3068,6 +3085,7 @@ function setMuStatus(mid,status){
   const m=S.makeups.find(x=>x.mid===mid); if(!m) return;
   m.status=status;
   if (m.activeSegment) m.activeSegment.status = status;
+
   if(status==="Completed"){ 
     m.completedDate=today();
     
@@ -3077,17 +3095,38 @@ function setMuStatus(mid,status){
         : true;
 
     if (allDone) {
-        const r=S.records.find(r=>r.rid===m.rid)||S.records.find(r=>r.empId===m.empId&&r.date===m.dateMissed&&TYPES[r.type]?.occ);
-        if(r){ r.waived=true; m.rid=r.rid; }
-        toast("All shifts completed — occurrence waived");
+        // Mark the make-up record completed
+        const muRec = S.records.find(r => r.rid === m.rid && r.type === "Make up Time");
+        if (muRec) muRec.completed = true;
+
+        // Waive any matching penalty record (excluding Schedule Adjustments and Make-Up Time)
+        const penaltyRec = S.records.find(r => 
+          r.empId === m.empId && 
+          r.date === m.dateMissed && 
+          r.type !== "Make up Time" && 
+          r.type !== "Schedule Adjustment" && 
+          (TYPES[r.type]?.occ || r.occurrence > 0)
+        );
+        if(penaltyRec) penaltyRec.waived = true;
+
+        toast("All shifts completed");
     } else {
         toast("Shift completed");
     }
   } else if(status==="Scheduled" || status==="Pending"){
-    const r=S.records.find(r=>r.rid===m.rid); if(r) r.waived=false;
-    toast("Marked scheduled — occurrence stands");
-  } else toast("Shift "+status.toLowerCase());
-  save(); render();
+    const muRec = S.records.find(r => r.rid === m.rid && r.type === "Make up Time");
+    if (muRec) muRec.completed = false;
+
+    const penaltyRec = S.records.find(r => r.empId === m.empId && r.date === m.dateMissed && (TYPES[r.type]?.occ || r.occurrence > 0));
+    if(penaltyRec) penaltyRec.waived = false;
+
+    toast("Marked scheduled");
+  } else {
+    toast("Shift " + status.toLowerCase());
+  }
+
+  save(); 
+  render();
 }
 
 function getRecordTimestamp(r) {
@@ -3115,10 +3154,11 @@ function occurrenceDisplayForRecord(r){const g=occurrenceGroupForRecord(r);if(!g
 function rowRecord(r, slim){
   const e=emp(r.empId)||{name:r.empId};
   
-  // Keep waived and cancelled badges next to the type pill at the top
+  // Show "Completed" on Make-Up Time cards when finished; show "waived" on penalty records
   const topBadges = [
-    r.waived?`<span class="badge ok" title="Occurrence waived via completed make-up">waived</span>`:null,
-    r.cancelled?`<span class="badge bad" title="Cancelled request">Cancelled</span>`:null
+    (r.type === "Make up Time" && r.completed) ? `<span class="badge ok" title="All make-up shifts completed">Completed</span>` : null,
+    (r.type !== "Make up Time" && r.waived) ? `<span class="badge ok" title="Occurrence waived via completed make-up">waived</span>` : null,
+    r.cancelled ? `<span class="badge bad" title="Cancelled request">Cancelled</span>` : null
   ].filter(Boolean).join(" ");
 
   const shiftDisplay = extractShiftHours(r);
