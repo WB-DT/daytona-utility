@@ -1111,11 +1111,30 @@ function consolidatedDisplayRecords(items) {
   return (Array.isArray(items) ? items : []).map(r => ({...r, _variants:[r]}));
 }
 function uniqueMakeups(items) { return Array.isArray(items) ? [...items] : []; }
+function extractGroupWithTag(wfNotes) {
+  const m = String(wfNotes || "").match(/\[GroupWith:(\d{4}-\d{2}-\d{2})\]/i);
+  return m ? m[1] : "";
+}
+function stripGroupWithTag(wfNotes) {
+  return String(wfNotes || "").replace(/\s*\[GroupWith:\d{4}-\d{2}-\d{2}\]/gi, "").trim();
+}
+function injectGroupWithTag(wfNotes, groupDate) {
+  const clean = stripGroupWithTag(wfNotes);
+  if (!groupDate) return clean;
+  return clean ? `${clean}\n[GroupWith:${groupDate}]` : `[GroupWith:${groupDate}]`;
+}
+
 function recalculateAfterDedupe() {
   const tdy = today();
 
-  // 1. Clear any legacy "waived" flags so Tardies/Call Outs/Schedule Adjustments are never tagged
-  (S.records || []).forEach(r => { r.waived = false; });
+  // 1. Clear legacy "waived" flags and extract any saved manual group tags from wfNotes
+  (S.records || []).forEach(r => {
+    r.waived = false;
+    const rawWf = r.rawWorkforceBody || r.wfNotes || "";
+    const extracted = extractGroupWithTag(rawWf);
+    if (extracted && !r.groupWithDate) r.groupWithDate = extracted;
+    if (r.wfNotes) r.wfNotes = stripGroupWithTag(r.wfNotes);
+  });
 
   // 2. Auto-miss past-due scheduled make-up shifts
   (S.makeups || []).forEach(m => {
@@ -2455,21 +2474,88 @@ function groupConsecutiveOccurrenceDates(days,maxDays=3){
   return groups;
 }
 function occurrenceGroups(empId,from,to){
-  const source=occurrenceSourceRecords(empId,from,to);
-  const eligible=source.filter(isOccurrenceEligible);
-  const dateGroups=groupConsecutiveOccurrenceDates(eligible.flatMap(r=>expandOccurrenceDates(r,from,to)),3);
-  let groups=dateGroups.map(dates=>{
-    const records=source.filter(r=>dates.some(d=>recordOverlapsRange(r,d,d)));
-    const activeRecords=records.filter(isOccurrenceEligible);
-    const grouped=dates.length>1;
-    return {id:`${empId}:${dates[0]}`,dates,grouped,records,activeRecords,hasWaived:records.some(r=>r.waived),hasCancelled:records.some(r=>r.cancelled),visualClass:grouped?"occurrence-group-rainbow":"occurrence-single-green",label:grouped?`Grouped period · ${dates.length} consecutive days`:"Single occurrence"};
+  const allowedEmployees = new Set(filteredEmployees().map(e => e.id));
+  if (!allowedEmployees.has(empId)) return [];
+
+  // Pull all active records for this employee so links across the 7-day window resolve cleanly
+  const allEmpRecords = consolidatedDisplayRecords((S.records || [])
+    .filter(r => r.empId === empId && !r.cancelled && !r.waived && !r.fmla && canonicalRecordType(r) !== "Present")
+    .map(normalizeRecordType));
+
+  const linkedTargetDates = new Set(allEmpRecords.map(r => r.groupWithDate).filter(Boolean));
+  const participating = allEmpRecords.filter(r =>
+    isOccurrenceEligible(r) ||
+    !!r.groupWithDate ||
+    linkedTargetDates.has(r.date)
+  );
+
+  // Connect dates that have been manually linked via the Group Occurrence dropdown
+  const parentDate = new Map();
+  const findRoot = d => {
+    if (!parentDate.has(d)) parentDate.set(d, d);
+    let root = parentDate.get(d);
+    while (root !== parentDate.get(root)) root = parentDate.get(root);
+    let cur = d;
+    while (cur !== root) {
+      const nxt = parentDate.get(cur);
+      parentDate.set(cur, root);
+      cur = nxt;
+    }
+    return root;
+  };
+  const unionDates = (a, b) => {
+    if (!a || !b) return;
+    const ra = findRoot(a), rb = findRoot(b);
+    if (ra !== rb) {
+      if (ra < rb) parentDate.set(rb, ra);
+      else parentDate.set(ra, rb);
+    }
+  };
+
+  participating.forEach(r => {
+    findRoot(r.date);
+    if (r.groupWithDate) {
+      findRoot(r.groupWithDate);
+      unionDates(r.date, r.groupWithDate);
+    }
   });
-  if(UI.type)groups=groups.filter(g=>g.activeRecords.some(r=>canonicalRecordType(r)===UI.type));
+
+  const buckets = new Map();
+  participating.forEach(r => {
+    const root = findRoot(r.date);
+    if (!buckets.has(root)) buckets.set(root, new Set());
+    buckets.get(root).add(r.date);
+    if (r.groupWithDate) buckets.get(root).add(r.groupWithDate);
+  });
+
+  let groups = [];
+  buckets.forEach(dateSet => {
+    const dates = [...dateSet].sort();
+    if (!dates.some(d => d >= from && d <= to)) return;
+    const records = allEmpRecords.filter(r => dates.includes(r.date));
+    const hasActiveOcc = records.some(r => isOccurrenceEligible(r) || !!r.groupWithDate);
+    if (!hasActiveOcc) return;
+    const grouped = dates.length > 1;
+    groups.push({
+      id: `${empId}:${dates[0]}`,
+      dates,
+      grouped,
+      records,
+      activeRecords: records,
+      hasWaived: false,
+      hasCancelled: false,
+      visualClass: grouped ? "occurrence-group-rainbow" : "occurrence-single-green",
+      label: grouped ? `Grouped occurrence · ${dates.length} days` : "Single occurrence"
+    });
+  });
+
+  groups.sort((a, b) => a.dates[0].localeCompare(b.dates[0]));
+  if (UI.type) groups = groups.filter(g => g.records.some(r => canonicalRecordType(r) === UI.type));
   return groups;
 }
 function groupedOccurrenceCount(empId,from,to){return occurrenceGroups(empId,from,to).length;}
 function occurrenceGroupForDate(empId,date,from,to){return occurrenceGroups(empId,from,to).find(g=>g.dates.includes(date))||null;}
-function occurrenceGroupBadge(group){if(!group)return `<span class="small muted">No occurrence</span>`;return group.grouped?`<span class="occurrence-group-mark">Grouped period · ${group.dates.length} consecutive days · 1 occurrence</span>`:`<span class="occurrence-single-mark">Single occurrence</span>`;}
+function occurrenceGroupBadge(group){if(!group)return `<span class="small muted">No occurrence</span>`;return group.grouped?`<span class="occurrence-group-mark">Grouped occurrence · ${group.dates.length} days · 1 occurrence</span>`:`<span class="occurrence-single-mark">Single occurrence</span>`;}
 function occCount(empId,asOf){const to=asOf||today(),from=addDays(to,-OCC_WINDOW_DAYS+1);return groupedOccurrenceCount(empId,from,to);}
 
 function level(n){ for(const [k,name,cls] of LADDER) if(n>=k) return {name,cls}; return null; }
@@ -2790,17 +2876,18 @@ function occurrenceOverviewRows(empId,from,to){
 function occurrenceGroupLineRows(r,g,n,lv){
   const dates=g?.dates?.length?g.dates:[r.date];
   return dates.map((date,index)=>{
-    const isFirst=index===0,source=isFirst?(r.occurrenceSource||"Unknown"):"Same group";
-    const notes=isFirst?(r.wfNotes||r.attendanceNotes||r.notes||""):"Continues the occurrence shown above";
+    const dayRec = (g?.records || []).find(x => x.date === date) || r;
+    const isFirst=index===0,source=isFirst?(dayRec.occurrenceSource||"Unknown"):"Grouped";
+    const notes=dayRec.wfNotes||dayRec.attendanceNotes||dayRec.notes||"";
     return `<div class="occ-group-line" data-group-date="${esc(date)}">
       <div class="occ-group-cell occ-group-date"><span class="occ-group-index">${index+1}</span>${fmt(date)}</div>
-      <div class="occ-group-cell">${isFirst?pill(canonicalRecordType(r)):`<span class="small muted">${esc(canonicalRecordType(r))}</span>`}</div>
-      <div class="occ-group-cell"><b>${isFirst?1:0}</b><div class="small muted">${isFirst?"group count":"same occurrence"}</div></div>
+      <div class="occ-group-cell">${pill(canonicalRecordType(dayRec))}</div>
+      <div class="occ-group-cell"><b>${isFirst?1:0}</b><div class="small muted">${isFirst?"group count":"grouped"}</div></div>
       <div class="occ-group-cell"><span class="badge">${esc(source)}</span></div>
       <div class="occ-group-cell"><b>${n}</b></div>
       <div class="occ-group-cell">${lv?`<span class="badge ${lv.cls}">${lv.name}</span>`:`<span class="badge ok">Clear</span>`}</div>
       <div class="occ-group-cell small occ-notes">${esc(notes)}</div>
-      <div class="occ-group-cell occ-edit">${isFirst?`<button class="btn ghost sm" data-rec-edit="${esc(r.rid)}">Edit</button>`:""}</div>
+      <div class="occ-group-cell occ-edit"><button class="btn ghost sm" data-rec-edit="${esc(dayRec.rid)}">Edit</button></div>
     </div>`;
   }).join("");
 }
@@ -3147,7 +3234,7 @@ function formatSubmittedTime(isoStr) {
 }
 
 function occurrenceViewModel(empId,from="2025-01-01",to=today()){return occurrenceGroups(empId,from,to).map(g=>({...g,count:1,dateLabel:g.dates.map(fmt).join(" → "),badgeHtml:occurrenceGroupBadge(g)}));}
-function occurrenceGroupForRecord(r){if(!r||!isOcc(r)||!r.empId||!r.date)return null;return occurrenceViewModel(r.empId).find(g=>g.dates.includes(r.date))||null;}
+function occurrenceGroupForRecord(r){if(!r||r.cancelled||r.waived||!r.empId||!r.date)return null;return occurrenceViewModel(r.empId,"2025-01-01",addDays(today(),365)).find(g=>g.dates.includes(r.date))||null;}
 function occurrenceDisplayForRecord(r){const g=occurrenceGroupForRecord(r);if(!g)return "";const isStart=g.dates[0]===r.date;return `<div class="small mt"><span class="badge ${g.grouped?"warn":"bad"}">${esc(g.label)}</span><div class="muted">${g.dates.map(fmt).join(" → ")} · ${isStart?"counts as 1 occurrence":"same occurrence group · +0"}</div></div>`;}
 function rowRecord(r, slim){
   const e=emp(r.empId)||{name:r.empId};
@@ -3306,11 +3393,13 @@ function replaceCalendarRequestFamily(target,changes){
     familySourceRows:(changes.familySourceRows||target.familySourceRows||source.familySourceRows||[]).map(row=>({...row})),
     rawRequestBody:changes.rawRequestBody??source.rawRequestBody??changes.notes??"",
     rawWorkforceBody:changes.rawWorkforceBody??source.rawWorkforceBody??changes.wfNotes??"",
+    groupWithDate:idx===0?(changes.groupWithDate!==undefined?changes.groupWithDate:(target.groupWithDate||source.groupWithDate||"")):"",
     overlapFamilySize:(changes.familyDvIds||target.familyDvIds||source.familyDvIds||[target.dvId].filter(Boolean)).length,
     empId:changes.empId,type:changes.type,
     hours:(idx===workDates.length-1?totalCents-baseCents*(workDates.length-1):baseCents)/100,
     requestHoursTotal:Number(changes.hours)||0,allocatedHoursTotal:Number(changes.hours)||0,workingDayCount:workDates.length,
-    notes:changes.notes,wfNotes:changes.wfNotes,partialShift:changes.partialShift,fmla:!!changes.fmla,voicemail:!!changes.voicemail,
+    notes:changes.notes,wfNotes:stripGroupWithTag(changes.wfNotes),partialShift:changes.partialShift,fmla:!!changes.fmla,voicemail:!!changes.voicemail,
+    completed:changes.completed!==undefined?!!changes.completed:!!source.completed,
     occurrence:idx===0?(Number(changes.occurrence)||0):0,
     sourceStartDate:changes.startDate,sourceEndDate:changes.endDate,requestStartDate:changes.startDate,requestEndDate:changes.endDate,
     parsedDisplayRange:[...workDates],dateSource:"manual edit: synchronized request range",dateConfidence:"high",
@@ -3320,6 +3409,34 @@ function replaceCalendarRequestFamily(target,changes){
   (S.makeups||[]).filter(m=>(target.dvId&&m.dvId===target.dvId)||(target.requestId&&String(m.requestId||"")===String(target.requestId))).forEach(m=>{m.empId=changes.empId;m.dateMissed=workDates[0];m.rid=replacements[0].rid;});
   return {updatedDays:replacements.length,removedDays:family.length,dates:workDates};
 }
+
+function buildRecentGroupOptions(empId, refDate, currentRid, selectedGroupDate) {
+  const baseDate = validCalendarIso(refDate) ? refDate : today();
+  const minDate = addDays(baseDate, -7);
+  const maxDate = addDays(baseDate, 7);
+
+  const byDate = new Map();
+  (S.records || []).forEach(rec => {
+    if (rec.empId !== empId || rec.cancelled || rec.rid === currentRid) return;
+    const t = canonicalRecordType(rec);
+    if (t === "Present" || t === "Cancellation") return;
+    if (!validCalendarIso(rec.date)) return;
+    const inWindow = (rec.date >= minDate && rec.date <= maxDate && rec.date !== baseDate) || rec.date === selectedGroupDate;
+    if (!inWindow) return;
+    if (!byDate.has(rec.date)) byDate.set(rec.date, rec);
+  });
+
+  const candidates = [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date));
+  if (!candidates.length) {
+    return `<option value="">— No submissions in last 7 days —</option>`;
+  }
+  return `<option value="">— None (Single occurrence) —</option>` + candidates.map(rec => {
+    const t = canonicalRecordType(rec);
+    const hrs = rec.hours ? ` (${rec.hours}h)` : "";
+    return `<option value="${esc(rec.date)}" ${rec.date === selectedGroupDate ? "selected" : ""}>${fmt(rec.date)} — ${esc(t)}${esc(hrs)}</option>`;
+  }).join("");
+}
+
 function recordModal(rid,presetDate){
   const bEl = document.querySelector(".modal-window-body"), tEl = document.querySelector("#modalHost .tbl-wrap");
   UI.savedScroll = { body: bEl ? bEl.scrollTop : 0, tbl: tEl ? tEl.scrollTop : 0 };
@@ -3333,13 +3450,16 @@ function recordModal(rid,presetDate){
     fmla: false,
     voicemail: false,
     partialShift: "",
-    occurrence: 0
+    occurrence: 0,
+    groupWithDate: ""
   };
   
-  // Default to 0 for new records; preserve existing record weight if editing
   const currentOcc = r.occurrence !== undefined && r.occurrence !== null ? r.occurrence : 0;
-  const modalGroup=rid&&isOcc(r)?occurrenceGroupForDate(r.empId,r.date,addDays(r.date,-2),addDays(r.date,2)):null;
-  const groupContext=modalGroup?`<div class="card mb occurrence-group-rainbow"><b>Occurrence grouping</b><div class="small mt">${esc(modalGroup.label)}: ${modalGroup.dates.map(fmt).join(" → ")}. This group counts as <b>1 occurrence</b>. A maximum of <b>3 consecutive days</b> can share one occurrence.</div></div>`:"";
+  const reverseLinked = rid ? (S.records || []).find(x => x.empId === r.empId && !x.cancelled && x.groupWithDate === r.date) : null;
+  const initialGroupDate = r.groupWithDate || reverseLinked?.date || "";
+
+  const modalGroup = rid ? occurrenceGroupForRecord(r) : null;
+  const groupContext = modalGroup?.grouped ? `<div class="card mb occurrence-group-rainbow"><b>Occurrence grouping</b><div class="small mt">${esc(modalGroup.label)}: ${modalGroup.dates.map(fmt).join(" → ")}. This manual group counts as <b>1 occurrence</b>.</div></div>` : "";
 
   const requestLabel=requestPrefixLabel(r.requestId);
   const submittedContext=rid?`<div class="small muted" style="margin-top:-4px;margin-bottom:14px;"><b style="color:var(--ink);">Submitted:</b> ${esc(formatSubmittedDateTime(r.submittedOn||r.createdon))}</div>`:"";
@@ -3358,11 +3478,18 @@ function recordModal(rid,presetDate){
     </div>
 
     <div class="mrow">
-      <div><label>Occurrences</label>
+      <div>
+        <label>Occurrences</label>
         <div class="row" style="gap:4px">
           <button class="btn ghost sm" id="occMinus" style="padding:4px 10px; font-size:16px;">-</button>
           <input type="number" id="mOcc" value="${currentOcc}" style="width:70px; text-align:center" step="1" min="0">
           <button class="btn ghost sm" id="occPlus" style="padding:4px 10px; font-size:16px;">+</button>
+        </div>
+        <div style="margin-top:10px;">
+          <label for="mGroupOcc">Group Occurrence (Last 7 Days)</label>
+          <select id="mGroupOcc">
+            ${buildRecentGroupOptions(r.empId, r.requestStartDate || r.sourceStartDate || r.date, r.rid, initialGroupDate)}
+          </select>
         </div>
       </div>
       <div style="display:flex; align-items:flex-end; gap:16px;">
@@ -3381,12 +3508,20 @@ function recordModal(rid,presetDate){
     <div><label>Hours summary</label><div class="card" style="padding:10px 12px;margin-bottom:8px"><b>Hours for this day:</b> ${esc(hoursToHHMM(Number(r.hours)||0))}<br><b>Total request hours:</b> ${esc(hoursToHHMM(Number(r.requestHoursTotal??r.allocatedHoursTotal??r.hours)||0))}</div></div>
     <div><label for="mNotes">Notes</label><textarea id="mNotes" rows="2">${esc(r.notes)}</textarea></div>
     ${r.mgrNotes ? `<div class="mt small" style="padding:10px; background:var(--soft); border-radius:8px; border-left:3px solid var(--teal);"><b>Manager Notes:</b><br>${esc(r.mgrNotes).replace(/\n/g, '<br>')}</div>` : ""}
-    <div class="mt"><label for="mWfNotes">Workforce Notes</label><textarea id="mWfNotes" rows="2" placeholder="Enter workforce notes here...">${esc(r.wfNotes || "")}</textarea></div>
+    <div class="mt"><label for="mWfNotes">Workforce Notes</label><textarea id="mWfNotes" rows="2" placeholder="Enter workforce notes here...">${esc(stripGroupWithTag(r.wfNotes || ""))}</textarea></div>
 
     <div class="mfoot">
       ${rid?`<button class="btn ghost" id="mDel" style="margin-right:auto">Cancel request</button>`:`<span class="small muted right" style="margin-right:auto">Tip: for an occurrence type you can create a make-up agreement after saving.</span>`}
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
       <button class="btn" id="mSave">Save</button></div>`);
+
+  const refreshGroupDropdown = () => {
+    const sel = $("#mGroupOcc");
+    if (!sel) return;
+    sel.innerHTML = buildRecentGroupOptions($("#mEmp").value, $("#mDate").value, r.rid, sel.value);
+  };
+  $("#mEmp").addEventListener("change", refreshGroupDropdown);
+  $("#mDate").addEventListener("change", refreshGroupDropdown);
 
   if (rid) {
     const targetRec = S.records.find(x => x.rid === rid);
@@ -3419,7 +3554,9 @@ function recordModal(rid,presetDate){
     const type = $("#mType").value;
     const hours = parseFloat($("#mHours").value)||0;
     const notes = $("#mNotes").value.trim();
-    const wfNotes = $("#mWfNotes").value.trim();
+    const cleanWfNotes = stripGroupWithTag($("#mWfNotes").value.trim());
+    const groupWithDate = $("#mGroupOcc") ? $("#mGroupOcc").value : "";
+    const wfNotesForDv = injectGroupWithTag(cleanWfNotes, groupWithDate);
     const partialShift = $("#mPartial").value.trim();
     const fmla = $("#mFmla").checked;
     const voicemail = $("#mVoicemail").checked;
@@ -3435,29 +3572,33 @@ function recordModal(rid,presetDate){
             const [y, m, d] = iso.split("-");
             return `${m}/${d}/${y}`;
           };
-          const formattedReqDates = dFrom === dTo 
-            ? toUSDate(dFrom) 
-            : `${toUSDate(dFrom)} - ${toUSDate(dTo)}`;
 
-          // 1. Send update to Dataverse
+          // If another record was pointing to this record and the user cleared the group, clear that sibling too
+          if (!groupWithDate && reverseLinked && reverseLinked.groupWithDate === targetRec.date) {
+            reverseLinked.groupWithDate = "";
+            const cleanedSiblingWf = stripGroupWithTag(reverseLinked.rawWorkforceBody || reverseLinked.wfNotes || "");
+            reverseLinked.rawWorkforceBody = cleanedSiblingWf;
+            reverseLinked.wfNotes = cleanedSiblingWf;
+            if (reverseLinked.dvId) {
+              await patchDataverseRecord(reverseLinked.dvId, { cr714_wfnotes: cleanedSiblingWf });
+            }
+          }
+
           if(targetRec.dvId){
             const usFrom = toUSDate(dFrom);
             const usTo = toUSDate(dTo);
-            const snapshotRow={cr714_csrattendancetrackerid:targetRec.attendanceId||targetRec.dvId,cr714_id:targetRec.requestId||"",createdon:targetRec.submittedOn||targetRec.createdon||"",cr714_employeename:emp(empId)?.name||"",cr714_startdate:usFrom,cr714_enddate:usTo,cr714_typeofleave:type,cr714_notes:notes||wfNotes,cr714_occurrence:occurrence};
-            await patchDataverseRecord(targetRec.dvId,{cr714_startdate:usFrom,cr714_enddate:usTo,cr714_leavetype:type,cr714_requestnotes:notes,cr714_wfnotes:wfNotes,cr714_occurrence:occurrence,cr714_ptohoursrequested:hours,cr714_hoursofpartialshift:partialShift,cr714_fmla:fmla,cr714_voicemail:voicemail,cr714_completed:completed,cr714_csrattendancetracker:csrAttendanceSnapshot(snapshotRow)});
+            const snapshotRow={cr714_csrattendancetrackerid:targetRec.attendanceId||targetRec.dvId,cr714_id:targetRec.requestId||"",createdon:targetRec.submittedOn||targetRec.createdon||"",cr714_employeename:emp(empId)?.name||"",cr714_startdate:usFrom,cr714_enddate:usTo,cr714_typeofleave:type,cr714_notes:notes||cleanWfNotes,cr714_occurrence:occurrence};
+            await patchDataverseRecord(targetRec.dvId,{cr714_startdate:usFrom,cr714_enddate:usTo,cr714_leavetype:type,cr714_requestnotes:notes,cr714_wfnotes:wfNotesForDv,cr714_occurrence:occurrence,cr714_ptohoursrequested:hours,cr714_hoursofpartialshift:partialShift,cr714_fmla:fmla,cr714_voicemail:voicemail,cr714_completed:completed,cr714_csrattendancetracker:csrAttendanceSnapshot(snapshotRow)});
             const localSnapshot=(S.csrAttendanceRows||[]).find(x=>String(x._timeOffId||"")===String(targetRec.dvId||"")||normalizeMatchId(x.cr714_id)===normalizeMatchId(targetRec.requestId));
             if(localSnapshot)Object.assign(localSnapshot,snapshotRow,{_timeOffId:targetRec.dvId,_snapshotSource:true});
           }else if(targetRec.attendanceId){
-            await patchCsrAttendanceRecord(targetRec.attendanceId,{startDate:dFrom,endDate:dTo,type,notes:notes||wfNotes,occurrence,requestId:targetRec.requestId,employeeName:emp(empId)?.name||""});
+            await patchCsrAttendanceRecord(targetRec.attendanceId,{startDate:dFrom,endDate:dTo,type,notes:notes||cleanWfNotes,occurrence,requestId:targetRec.requestId,employeeName:emp(empId)?.name||""});
           }else{
             throw new Error("This calendar row has no Dataverse Time Off ID or CSR Attendance ID and cannot be updated safely.");
           }
 
-          // Replace only the complete family for the clicked request. A single-day
-          // request remains isolated because family matching uses its unique Dataverse ID,
-          // then request ID, and never employee/date matching.
-          const familyUpdate=replaceCalendarRequestFamily(targetRec,{startDate:dFrom,endDate:dTo,empId,type,hours,notes,wfNotes,partialShift,fmla,voicemail,completed,occurrence});
-          toast(`Request updated across ${familyUpdate.updatedDays} calendar day${familyUpdate.updatedDays===1?"":"s"}`);
+          const familyUpdate=replaceCalendarRequestFamily(targetRec,{startDate:dFrom,endDate:dTo,empId,type,hours,notes,wfNotes:cleanWfNotes,rawWorkforceBody:wfNotesForDv,groupWithDate,partialShift,fmla,voicemail,completed,occurrence});
+          toast(groupWithDate ? `Grouped with ${fmt(groupWithDate)}` : `Request updated across ${familyUpdate.updatedDays} calendar day${familyUpdate.updatedDays===1?"":"s"}`);
         } catch (err) {
           console.error("Update failed:", err);
           if (err.message.includes("404")) {
@@ -3500,10 +3641,9 @@ function recordModal(rid,presetDate){
             cr714_email: selectedEmp ? selectedEmp.email : "",
             cr714_startdate: usDateStr,
             cr714_enddate: usDateStr,
-            
             cr714_leavetype: type,
             cr714_requestnotes: notes,
-            cr714_wfnotes: wfNotes,
+            cr714_wfnotes: wfNotesForDv,
             cr714_occurrence: String(occurrence),
             cr714_ptohoursrequested: String(hours),
             cr714_hoursofpartialshift: partialShift,
@@ -3543,7 +3683,9 @@ function recordModal(rid,presetDate){
             type, 
             hours, 
             notes, 
-            wfNotes,
+            wfNotes: cleanWfNotes,
+            rawWorkforceBody: wfNotesForDv,
+            groupWithDate,
             partialShift,
             submittedOn: new Date().toISOString(),
             source: "dataverse",
