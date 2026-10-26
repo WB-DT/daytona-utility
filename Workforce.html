@@ -1315,7 +1315,7 @@ async function pullFromDataverse(silent = false, options = {}) {
       "Prefer": 'odata.include-annotations="OData.Community.Display.V1.FormattedValue",odata.maxpagesize=5000'
     };
     const api = `${DATAVERSE_URL}/api/data/v9.2`;
-    const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_department","cr714_title","cr714_jobtitle","cr714_supervisors","cr714_managerassigned","cr714_srmanager","cr714_location","cr714_status","cr714_loopnumber","cr714_shiftselection","cr714_breakselection","cr714_startdate","statecode"].join(",");
+    const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_department","cr714_title","cr714_jobtitle","cr714_supervisors","cr714_managerassigned","cr714_srmanager","cr714_parent","cr714_srmanagerflag","cr714_managerflag","cr714_location","cr714_status","cr714_loopnumber","cr714_shiftselection","cr714_breakselection","cr714_startdate","statecode"].join(",");
     const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_starttime","cr714_completiontime","cr714_startdate","cr714_enddate","cr714_requestdates","cr714_id","cr714_name","cr714_email","cr714_department","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_managerapproval","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade","cr714_csrattendancetracker","cr714_makeupdisposition"].join(",");
     const empUrl = `${api}/${TABLE_EMPLOYEES}?$select=${empSelect}&$filter=statecode eq 0`;
     const operationalIdFilter = `(cr714_id eq null or startswith(cr714_id,'M') or startswith(cr714_id,'A'))`;
@@ -1325,7 +1325,7 @@ async function pullFromDataverse(silent = false, options = {}) {
     const timeUrl = `${api}/${TABLE_TIMEOFF}?$select=${timeSelect}&$filter=${encodeURIComponent(timeFilter)}&$orderby=modifiedon desc`;
     updateSyncCover(incremental ? "Pulling today's Time Off changes..." : "Pulling Time Off history...");
     const [allEmps,initialTimeRows]=await Promise.all([
-      incremental?Promise.resolve([]):fetchAllOData(empUrl,headers),
+      fetchAllOData(empUrl,headers),
       fetchAllOData(timeUrl,headers)
     ]);
     const operationalTimeRows=rows=>(rows||[]).filter(row=>{const id=String(row?.cr714_id||"").trim().toUpperCase();return id.startsWith("M")||id.startsWith("A");});
@@ -1340,8 +1340,11 @@ async function pullFromDataverse(silent = false, options = {}) {
       dateBackfill.verified=timeRows.filter(row=>patchedIds.has(String(row.cr714_timeoff_2id||"").replace(/[{}]/g,"").toLowerCase())&&appDateOnly(row.cr714_startdate)&&appDateOnly(row.cr714_enddate)).length;
     }else dateBackfill.verified=0;
 
-    const employeeSourceRows = incremental ? [] : allEmps;
-    const activeEmps = employeeSourceRows.filter(e => {
+    const cleanOrgVal = (row, col) => {
+      const val = String(row?.[`${col}@OData.Community.Display.V1.FormattedValue`] ?? row?.[col] ?? "").trim();
+      return (!val || /^[\d,\s]+$/.test(val)) ? "" : val;
+    };
+    const activeEmps = (allEmps || []).filter(e => {
       const status = String(e["cr714_status@OData.Community.Display.V1.FormattedValue"] || e.cr714_status || "").toLowerCase().trim();
       return !(status && (status.includes("term") || status.includes("inact") || status.includes("resign") || status.includes("former") || status.includes("depart")));
     });
@@ -1355,25 +1358,51 @@ async function pullFromDataverse(silent = false, options = {}) {
       const name = String(e.cr714_employeename || "").trim().toLowerCase();
       return email ? `email:${email}` : (name ? `name:${name}` : "");
     });
+    const directorRow = activeEmps.find(x => /\bdirector\b/i.test(`${cleanOrgVal(x, "cr714_title")} ${cleanOrgVal(x, "cr714_jobtitle")}`));
+    const directorLabel = directorRow ? String(directorRow.cr714_employeename || "Director").trim() : "Director";
+
     const empMapByEmail = new Map(), empMapByName = new Map();
-    if (!incremental) S.employees = targetEmps.map(e => {
+    S.employees = targetEmps.map(e => {
       const email = String(e.cr714_emailaddress || "").trim().toLowerCase();
       const name = String(e.cr714_employeename || "").trim();
       const id = email || `EMP-${name.replace(/\s+/g, '')}`;
-      const dept = String(e["cr714_department@OData.Community.Display.V1.FormattedValue"] || e.cr714_department || "").trim();
-      const record = { id, name, email, dept: dept || "General", repName:name,
-        title:String(e["cr714_title@OData.Community.Display.V1.FormattedValue"] || e.cr714_title || e.cr714_jobtitle || "Representative"),
-        supervisor:String(e["cr714_supervisors@OData.Community.Display.V1.FormattedValue"] || e.cr714_supervisors || "—"),
-        manager:String(e["cr714_managerassigned@OData.Community.Display.V1.FormattedValue"] || e.cr714_managerassigned || "—"),
-        srManager:String(e["cr714_srmanager@OData.Community.Display.V1.FormattedValue"] || e.cr714_srmanager || ""), location:String(e["cr714_location@OData.Community.Display.V1.FormattedValue"] || e.cr714_location || "Daytona"),
-        status:String(e["cr714_status@OData.Community.Display.V1.FormattedValue"] || e.cr714_status || "Active"), loopNumber:e.cr714_loopnumber || "", shift:String(e["cr714_shiftselection@OData.Community.Display.V1.FormattedValue"] || e.cr714_shiftselection || ""), breakTime:String(e["cr714_breakselection@OData.Community.Display.V1.FormattedValue"] || e.cr714_breakselection || ""), startDate:e.cr714_startdate || "" };
+      const dept = cleanOrgVal(e, "cr714_department") || "General";
+      const title = cleanOrgVal(e, "cr714_title") || cleanOrgVal(e, "cr714_jobtitle") || "Representative";
+      const titleCheck = `${cleanOrgVal(e, "cr714_title")} ${cleanOrgVal(e, "cr714_jobtitle")}`.toLowerCase();
+
+      const isSrMgr = /\bsr\.?\s*manager\b|\bsenior\s*manager\b/i.test(titleCheck) || e.cr714_srmanagerflag === true || e.cr714_srmanagerflag === 1;
+      const isMgr = !isSrMgr && (/\bmanager\b/i.test(titleCheck) || e.cr714_managerflag === true || e.cr714_managerflag === 1);
+
+      const notSelf = v => (v && v.toLowerCase() !== name.toLowerCase()) ? v : "";
+      const supVal = notSelf(cleanOrgVal(e, "cr714_supervisors"));
+      const mgrVal = notSelf(cleanOrgVal(e, "cr714_managerassigned"));
+      const srMgrVal = notSelf(cleanOrgVal(e, "cr714_srmanager"));
+      const parentVal = notSelf(cleanOrgVal(e, "cr714_parent"));
+
+      let supervisor = "—";
+      let manager = "—";
+      if (isSrMgr) {
+        supervisor = supVal || parentVal || directorLabel;
+        manager = parentVal || directorLabel;
+      } else if (isMgr) {
+        supervisor = srMgrVal || supVal || mgrVal || "—";
+        manager = srMgrVal || mgrVal || "—";
+      } else {
+        supervisor = supVal || mgrVal || srMgrVal || "—";
+        manager = mgrVal || srMgrVal || "—";
+      }
+
+      const record = { id, name, email, dept, repName:name, title, supervisor, manager,
+        srManager: srMgrVal || cleanOrgVal(e, "cr714_srmanager"),
+        location: cleanOrgVal(e, "cr714_location") || "Daytona",
+        status: cleanOrgVal(e, "cr714_status") || "Active",
+        loopNumber: e.cr714_loopnumber || "",
+        shift: cleanOrgVal(e, "cr714_shiftselection"),
+        breakTime: cleanOrgVal(e, "cr714_breakselection"),
+        startDate: e.cr714_startdate || "" };
       if (email) empMapByEmail.set(email, record);
       if (name) empMapByName.set(name.toLowerCase(), record);
       return record;
-    });
-    if (incremental) (S.employees||[]).forEach(record => {
-      const email=String(record.email||"").trim().toLowerCase(),name=String(record.name||"").trim().toLowerCase();
-      if(email)empMapByEmail.set(email,record);if(name)empMapByName.set(name,record);
     });
     
     const snapshotRows=csrRowsFromTimeOffSnapshots(timeRows);
