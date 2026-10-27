@@ -2262,11 +2262,14 @@ async function moveCalendarRecord(rid,targetDate){
   if(target.cancelled)throw new Error("Cancelled requests must be restored before they can be moved.");
   if(!target.dvId)throw new Error("This request has no linked Dataverse Time Off row and cannot be moved safely.");
   const family=calendarRequestFamily(target);
-  const sourceStart=target.requestStartDate||target.sourceStartDate||family.map(r=>r.date).filter(validCalendarIso).sort()[0]||target.date;
-  const sourceEnd=target.requestEndDate||target.sourceEndDate||family.map(r=>r.date).filter(validCalendarIso).sort().slice(-1)[0]||sourceStart;
+  const isSingleDayCard = family.length <= 1 || canonicalRecordType(target) === "Make up Time";
+  const sourceStart = isSingleDayCard ? target.date : (target.requestStartDate||target.sourceStartDate||family.map(r=>r.date).filter(validCalendarIso).sort()[0]||target.date);
+  const sourceEnd = isSingleDayCard ? target.date : (target.requestEndDate||target.sourceEndDate||family.map(r=>r.date).filter(validCalendarIso).sort().slice(-1)[0]||sourceStart);
   const delta=calendarDateDelta(target.date,targetDate);
-  const newStart=shiftIsoDate(sourceStart,delta),newEnd=shiftIsoDate(sourceEnd,delta);
-  if(isWeekend(newStart)||isWeekend(newEnd))throw new Error("Calendar cards can only be moved to Monday through Friday.");
+  let newStart=shiftIsoDate(sourceStart,delta),newEnd=shiftIsoDate(sourceEnd,delta);
+  while(isWeekend(newStart)) newStart = addDays(newStart, 1);
+  if(newEnd < newStart) newEnd = newStart;
+  while(isWeekend(newEnd)) newEnd = addDays(newEnd, 1);
   const toUs=iso=>{const [y,m,d]=iso.split("-");return `${m}/${d}/${y}`;};
   const requestDates=newStart===newEnd?toUs(newStart):`${toUs(newStart)} - ${toUs(newEnd)}`;
   const familyDvIds=[...new Set([...(target.familyDvIds||[]),...family.flatMap(r=>r.familyDvIds||[]),...family.map(r=>r.dvId),target.dvId].filter(Boolean))];
@@ -2475,19 +2478,15 @@ function bindCalendarDragAndDrop(root){
       card.classList.remove("dragging");
       root.querySelectorAll(".calendar-drop-target").forEach(x=>x.classList.remove("calendar-drop-target"));
       document.body.classList.remove("calendar-dragging");
-      setTimeout(()=> { didDrag = false; calendarDragState = null; }, 50);
+      setTimeout(()=> { didDrag = false; calendarDragState = null; }, 80);
     });
     card.addEventListener("click",event=>{
       if(didDrag){
         event.preventDefault();
         event.stopImmediatePropagation();
         didDrag = false;
-        return;
       }
-      if(card.dataset.rec){
-        recordModal(card.dataset.rec);
-      }
-    });
+    }, true);
   });
   root.querySelectorAll("[data-calendar-drop-date]").forEach(zone=>{
     zone.addEventListener("dragover",event=>{if(!calendarDragState)return;event.preventDefault();event.dataTransfer.dropEffect="move";zone.classList.add("calendar-drop-target");});
@@ -3740,7 +3739,7 @@ function recordModal(rid,presetDate){
             const usFrom = toUSDate(dFrom);
             const usTo = toUSDate(dTo);
             const snapshotRow={cr714_csrattendancetrackerid:targetRec.attendanceId||targetRec.dvId,cr714_id:targetRec.requestId||"",createdon:targetRec.submittedOn||targetRec.createdon||"",cr714_employeename:emp(empId)?.name||"",cr714_startdate:usFrom,cr714_enddate:usTo,cr714_typeofleave:type,cr714_notes:notes||cleanWfNotes,cr714_occurrence:occurrence};
-            await patchDataverseRecord(targetRec.dvId,{cr714_startdate:usFrom,cr714_enddate:usTo,cr714_leavetype:type,cr714_requestnotes:notes,cr714_wfnotes:wfNotesForDv,cr714_occurrence:occurrence,cr714_ptohoursrequested:hours,cr714_hoursofpartialshift:partialShift,cr714_fmla:fmla,cr714_voicemail:voicemail,cr714_completed:completed,cr714_csrattendancetracker:csrAttendanceSnapshot(snapshotRow)});
+            await patchDataverseRecord(targetRec.dvId,{cr714_startdate:usFrom,cr714_enddate:usTo,cr714_leavetype:type,cr714_requestnotes:notes,cr714_wfnotes:wfNotesForDv,cr714_occurrence:occurrence,cr714_ptohoursrequested:hours,cr714_hoursofpartialshift:partialShift,cr714_shifttrade:shiftTrade,cr714_fmla:fmla,cr714_voicemail:voicemail,cr714_completed:completed,cr714_csrattendancetracker:csrAttendanceSnapshot(snapshotRow)});
             const localSnapshot=(S.csrAttendanceRows||[]).find(x=>String(x._timeOffId||"")===String(targetRec.dvId||"")||normalizeMatchId(x.cr714_id)===normalizeMatchId(targetRec.requestId));
             if(localSnapshot)Object.assign(localSnapshot,snapshotRow,{_timeOffId:targetRec.dvId,_snapshotSource:true});
           }else if(targetRec.attendanceId){
@@ -3749,7 +3748,7 @@ function recordModal(rid,presetDate){
             throw new Error("This calendar row has no Dataverse Time Off ID or CSR Attendance ID and cannot be updated safely.");
           }
 
-          const familyUpdate=replaceCalendarRequestFamily(targetRec,{startDate:dFrom,endDate:dTo,empId,type,hours,notes,wfNotes:cleanWfNotes,rawWorkforceBody:wfNotesForDv,groupWithDate,partialShift,fmla,voicemail,completed,occurrence});
+          const familyUpdate=replaceCalendarRequestFamily(targetRec,{startDate:dFrom,endDate:dTo,empId,type,hours,notes,wfNotes:cleanWfNotes,rawWorkforceBody:wfNotesForDv,groupWithDate,partialShift,shiftTrade,fmla,voicemail,completed,occurrence});
           toast(groupWithDate ? `Grouped with ${fmt(groupWithDate)}` : `Request updated across ${familyUpdate.updatedDays} calendar day${familyUpdate.updatedDays===1?"":"s"}`);
         } catch (err) {
           console.error("Update failed:", err);
@@ -3792,6 +3791,7 @@ function recordModal(rid,presetDate){
             cr714_occurrence: String(occurrence),
             cr714_ptohoursrequested: String(hours),
             cr714_hoursofpartialshift: partialShift,
+            cr714_shifttrade: shiftTrade,
             cr714_fmla: fmla ? "true" : "false",
             cr714_voicemail: voicemail ? "true" : "false"
           };
@@ -3832,6 +3832,7 @@ function recordModal(rid,presetDate){
             rawWorkforceBody: wfNotesForDv,
             groupWithDate,
             partialShift,
+            shiftTrade,
             submittedOn: new Date().toISOString(),
             source: "dataverse",
             requestStartDate:curDateStr, requestEndDate:curDateStr, sourceStartDate:curDateStr, sourceEndDate:curDateStr, parsedDisplayRange:[curDateStr],
