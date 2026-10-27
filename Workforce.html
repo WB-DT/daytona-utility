@@ -1315,9 +1315,8 @@ async function pullFromDataverse(silent = false, options = {}) {
       "Prefer": 'odata.include-annotations="OData.Community.Display.V1.FormattedValue",odata.maxpagesize=5000'
     };
     const api = `${DATAVERSE_URL}/api/data/v9.2`;
-    const empSelect = ["cr714_emailaddress","cr714_employeename","cr714_department","cr714_title","cr714_jobtitle","cr714_supervisors","cr714_managerassigned","cr714_srmanager","cr714_parent","cr714_srmanagerflag","cr714_managerflag","cr714_location","cr714_status","cr714_loopnumber","cr714_shiftselection","cr714_breakselection","cr714_startdate","statecode"].join(",");
     const timeSelect = ["cr714_timeoff_2id","createdon","modifiedon","cr714_starttime","cr714_completiontime","cr714_startdate","cr714_enddate","cr714_requestdates","cr714_id","cr714_name","cr714_email","cr714_department","cr714_leavetype","cr714_requestnotes","cr714_approvalnotes","cr714_managerapproval","cr714_occurrence","cr714_completed","cr714_cancelledrequest","cr714_ptohoursrequested","cr714_hoursofpartialshift","cr714_makeuptime","cr714_autoid","cr714_lunch","cr714_voicemail","cr714_fmla","cr714_wfnotes","cr714_shifttrade","cr714_csrattendancetracker","cr714_makeupdisposition"].join(",");
-    const empUrl = `${api}/${TABLE_EMPLOYEES}?$select=${empSelect}&$filter=statecode eq 0`;
+    const empUrl = `${api}/${TABLE_EMPLOYEES}?$filter=statecode eq 0`;
     const operationalIdFilter = `(cr714_id eq null or startswith(cr714_id,'M') or startswith(cr714_id,'A'))`;
     const lookbackIso = addDays(todayIso, -7);
     const todayModifiedFilter = `modifiedon ge ${odataDateTimeStart(lookbackIso)}`;
@@ -1341,9 +1340,29 @@ async function pullFromDataverse(silent = false, options = {}) {
     }else dateBackfill.verified=0;
 
     const cleanOrgVal = (row, col) => {
-      const val = String(row?.[`${col}@OData.Community.Display.V1.FormattedValue`] ?? row?.[col] ?? "").trim();
-      return (!val || /^[\d,\s]+$/.test(val)) ? "" : val;
+      const fmt = row?.[`${col}@OData.Community.Display.V1.FormattedValue`];
+      const raw = row?.[col];
+      const val = String(fmt ?? raw ?? "").trim();
+      if (!val || /^[\d,\s;-]+$/.test(val)) return "";
+      if (/^(none|n\/a|na|null|undefined|\(blank\)|—|-)$/i.test(val)) return "";
+      return val;
     };
+    const normOrgName = s => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const hasRoleFlag = (row, ...cols) => cols.some(col => {
+      const raw = row?.[col];
+      const fmt = row?.[`${col}@OData.Community.Display.V1.FormattedValue`];
+      for (const v of [fmt, raw]) {
+        if (v === true || v === 1) return true;
+        const s = String(v ?? "").trim().toLowerCase();
+        if (["true", "yes", "y", "1"].includes(s)) return true;
+      }
+      return false;
+    });
+    const hasAnySupervisorFlag = row => {
+      if (hasRoleFlag(row, "cr714_supervisorflag", "cr714_supervisorsflag", "cr714_issupervisor")) return true;
+      return Object.keys(row || {}).some(k => /supervisor.*flag|flag.*supervisor/i.test(k) && hasRoleFlag(row, k));
+    };
+
     const activeEmps = (allEmps || []).filter(e => {
       const status = String(e["cr714_status@OData.Community.Display.V1.FormattedValue"] || e.cr714_status || "").toLowerCase().trim();
       return !(status && (status.includes("term") || status.includes("inact") || status.includes("resign") || status.includes("former") || status.includes("depart")));
@@ -1358,39 +1377,103 @@ async function pullFromDataverse(silent = false, options = {}) {
       const name = String(e.cr714_employeename || "").trim().toLowerCase();
       return email ? `email:${email}` : (name ? `name:${name}` : "");
     });
-    const directorRow = activeEmps.find(x => /\bdirector\b/i.test(`${cleanOrgVal(x, "cr714_title")} ${cleanOrgVal(x, "cr714_jobtitle")}`));
+
+    const directorRow = activeEmps.find(x => /\bdirector\b/i.test(`${cleanOrgVal(x, "cr714_title")} ${cleanOrgVal(x, "cr714_jobtitle")}`) || hasRoleFlag(x, "cr714_directorflag"));
     const directorLabel = directorRow ? String(directorRow.cr714_employeename || "Director").trim() : "Director";
+
+    // Cross-record lookup maps so Supervisors/Managers with blank fields on their own rows still resolve their upper management
+    const knownSupervisors = new Set(), knownManagers = new Set(), knownSrManagers = new Set();
+    const supToMgr = new Map(), supToSrMgr = new Map(), mgrToSrMgr = new Map(), deptToSrMgr = new Map();
+    activeEmps.forEach(row => {
+      const rName = normOrgName(row.cr714_employeename);
+      const rDept = normOrgName(cleanOrgVal(row, "cr714_department"));
+      const rSup = cleanOrgVal(row, "cr714_supervisors");
+      const rMgr = cleanOrgVal(row, "cr714_managerassigned");
+      const rSr = cleanOrgVal(row, "cr714_srmanager");
+
+      const supList = rSup ? rSup.split(/[;,]/).map(s => s.trim()).filter(Boolean) : [];
+      supList.forEach(s => {
+        const ns = normOrgName(s);
+        if (ns && ns !== rName) knownSupervisors.add(ns);
+        if (ns && rMgr && normOrgName(rMgr) !== ns) supToMgr.set(ns, rMgr);
+        if (ns && rSr && normOrgName(rSr) !== ns) supToSrMgr.set(ns, rSr);
+      });
+      if (rMgr && normOrgName(rMgr) !== rName) {
+        knownManagers.add(normOrgName(rMgr));
+        if (rSr && normOrgName(rSr) !== normOrgName(rMgr)) mgrToSrMgr.set(normOrgName(rMgr), rSr);
+      }
+      if (rSr && normOrgName(rSr) !== rName) {
+        knownSrManagers.add(normOrgName(rSr));
+        if (rDept) deptToSrMgr.set(rDept, rSr);
+      }
+    });
+    const singleSrManagerFallback = knownSrManagers.size === 1
+      ? (activeEmps.find(x => knownSrManagers.has(normOrgName(x.cr714_employeename)))?.cr714_employeename || "")
+      : "";
 
     const empMapByEmail = new Map(), empMapByName = new Map();
     S.employees = targetEmps.map(e => {
       const email = String(e.cr714_emailaddress || "").trim().toLowerCase();
       const name = String(e.cr714_employeename || "").trim();
+      const nName = normOrgName(name);
       const id = email || `EMP-${name.replace(/\s+/g, '')}`;
       const dept = cleanOrgVal(e, "cr714_department") || "General";
       const title = cleanOrgVal(e, "cr714_title") || cleanOrgVal(e, "cr714_jobtitle") || "Representative";
       const titleCheck = `${cleanOrgVal(e, "cr714_title")} ${cleanOrgVal(e, "cr714_jobtitle")}`.toLowerCase();
 
-      const isSrMgr = /\bsr\.?\s*manager\b|\bsenior\s*manager\b/i.test(titleCheck) || e.cr714_srmanagerflag === true || e.cr714_srmanagerflag === 1;
-      const isMgr = !isSrMgr && (/\bmanager\b/i.test(titleCheck) || e.cr714_managerflag === true || e.cr714_managerflag === 1);
+      // Identify role using flags, titles, and org-roster assignments
+      const isDirector = /\bdirector\b/i.test(titleCheck) || hasRoleFlag(e, "cr714_directorflag");
+      const isSrMgr = !isDirector && (hasRoleFlag(e, "cr714_srmanagerflag", "cr714_seniormanagerflag") || /\bsr\.?\s*manager\b|\bsenior\s*manager\b/i.test(titleCheck) || knownSrManagers.has(nName));
+      const isMgr = !isDirector && !isSrMgr && (hasRoleFlag(e, "cr714_managerflag") || /\bmanager\b/i.test(titleCheck) || knownManagers.has(nName));
+      const isSup = !isDirector && !isSrMgr && !isMgr && (hasAnySupervisorFlag(e) || /\bsupervisor\b/i.test(titleCheck) || knownSupervisors.has(nName));
 
-      const notSelf = v => (v && v.toLowerCase() !== name.toLowerCase()) ? v : "";
+      const notSelf = v => {
+        if (!v) return "";
+        const parts = String(v).split(/[;,]/).map(p => p.trim()).filter(Boolean);
+        return parts.filter(p => normOrgName(p) !== nName).join(", ");
+      };
       const supVal = notSelf(cleanOrgVal(e, "cr714_supervisors"));
       const mgrVal = notSelf(cleanOrgVal(e, "cr714_managerassigned"));
       const srMgrVal = notSelf(cleanOrgVal(e, "cr714_srmanager"));
-      const parentVal = notSelf(cleanOrgVal(e, "cr714_parent"));
 
-      let supervisor = "—";
-      let manager = "—";
-      if (isSrMgr) {
-        supervisor = supVal || parentVal || directorLabel;
-        manager = parentVal || directorLabel;
+      // Build deduplicated chain of management levels strictly above this person's role
+      const uniqueChain = items => {
+        const seen = new Set([nName]);
+        const out = [];
+        items.forEach(item => {
+          const clean = String(item || "").trim();
+          const k = normOrgName(clean);
+          if (clean && !seen.has(k)) {
+            seen.add(k);
+            out.push(clean);
+          }
+        });
+        return out;
+      };
+
+      let chain = [];
+      if (isDirector) {
+        chain = [];
+      } else if (isSrMgr) {
+        // Sr. Manager -> just the Director
+        chain = uniqueChain([directorLabel]);
       } else if (isMgr) {
-        supervisor = srMgrVal || supVal || mgrVal || "—";
-        manager = srMgrVal || mgrVal || "—";
+        // Manager -> Sr. Manager and Director
+        const effSrMgr = srMgrVal || mgrToSrMgr.get(nName) || deptToSrMgr.get(normOrgName(dept)) || singleSrManagerFallback;
+        chain = uniqueChain([effSrMgr, directorLabel]);
+      } else if (isSup) {
+        // Supervisor -> Manager and Sr. Manager
+        const effMgr = mgrVal || supToMgr.get(nName);
+        const effSrMgr = srMgrVal || supToSrMgr.get(nName) || (effMgr ? mgrToSrMgr.get(normOrgName(effMgr)) : "") || deptToSrMgr.get(normOrgName(dept)) || singleSrManagerFallback;
+        chain = uniqueChain([effMgr, effSrMgr, directorLabel]);
       } else {
-        supervisor = supVal || mgrVal || srMgrVal || "—";
-        manager = mgrVal || srMgrVal || "—";
+        // Rep -> Supervisor, Manager, Sr. Manager, Director (automatically shifts up if a column is blank)
+        const effSrMgr = srMgrVal || (mgrVal ? mgrToSrMgr.get(normOrgName(mgrVal)) : "") || (supVal ? supToSrMgr.get(normOrgName(supVal)) : "") || deptToSrMgr.get(normOrgName(dept)) || singleSrManagerFallback;
+        chain = uniqueChain([supVal, mgrVal, effSrMgr, directorLabel]);
       }
+
+      const supervisor = chain[0] || "—";
+      const manager = chain[1] || "—";
 
       const record = { id, name, email, dept, repName:name, title, supervisor, manager,
         srManager: srMgrVal || cleanOrgVal(e, "cr714_srmanager"),
