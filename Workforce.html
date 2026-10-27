@@ -1378,18 +1378,20 @@ async function pullFromDataverse(silent = false, options = {}) {
       return email ? `email:${email}` : (name ? `name:${name}` : "");
     });
 
-    const directorRow = activeEmps.find(x => /\bdirector\b/i.test(`${cleanOrgVal(x, "cr714_title")} ${cleanOrgVal(x, "cr714_jobtitle")}`) || hasRoleFlag(x, "cr714_directorflag"));
-    const directorLabel = directorRow ? String(directorRow.cr714_employeename || "Director").trim() : "Director";
-
-    // Cross-record lookup maps so Supervisors/Managers with blank fields on their own rows still resolve their upper management
+    // Cross-record lookup maps so if a column is blank on someone's row, we can still resolve their upper management chain
     const knownSupervisors = new Set(), knownManagers = new Set(), knownSrManagers = new Set();
-    const supToMgr = new Map(), supToSrMgr = new Map(), mgrToSrMgr = new Map(), deptToSrMgr = new Map();
+    const supToMgr = new Map(), supToSrMgr = new Map(), mgrToSrMgr = new Map(), deptToSrMgr = new Map(), srMgrToDir = new Map();
+    let globalDirectorFallback = "";
+
     activeEmps.forEach(row => {
       const rName = normOrgName(row.cr714_employeename);
       const rDept = normOrgName(cleanOrgVal(row, "cr714_department"));
       const rSup = cleanOrgVal(row, "cr714_supervisors");
       const rMgr = cleanOrgVal(row, "cr714_managerassigned");
       const rSr = cleanOrgVal(row, "cr714_srmanager");
+      const rDir = cleanOrgVal(row, "cr714_director");
+
+      if (rDir && !globalDirectorFallback) globalDirectorFallback = rDir;
 
       const supList = rSup ? rSup.split(/[;,]/).map(s => s.trim()).filter(Boolean) : [];
       supList.forEach(s => {
@@ -1405,10 +1407,16 @@ async function pullFromDataverse(silent = false, options = {}) {
       if (rSr && normOrgName(rSr) !== rName) {
         knownSrManagers.add(normOrgName(rSr));
         if (rDept) deptToSrMgr.set(rDept, rSr);
+        if (rDir && normOrgName(rDir) !== normOrgName(rSr)) srMgrToDir.set(normOrgName(rSr), rDir);
       }
     });
+
+    if (!globalDirectorFallback) {
+      const directorRow = activeEmps.find(x => /\bdirector\b/i.test(`${cleanOrgVal(x, "cr714_title")} ${cleanOrgVal(x, "cr714_jobtitle")}`) || hasRoleFlag(x, "cr714_directorflag"));
+      if (directorRow) globalDirectorFallback = String(directorRow.cr714_employeename || "").trim();
+    }
     const singleSrManagerFallback = knownSrManagers.size === 1
-      ? (activeEmps.find(x => knownSrManagers.has(normOrgName(x.cr714_employeename)))?.cr714_employeename || "")
+      ? (activeEmps.find(x => knownSrManagers.has(normOrgName(x.cr714_employeename)))?.cr714_employeename || [...knownSrManagers][0] || "")
       : "";
 
     const empMapByEmail = new Map(), empMapByName = new Map();
@@ -1421,7 +1429,7 @@ async function pullFromDataverse(silent = false, options = {}) {
       const title = cleanOrgVal(e, "cr714_title") || cleanOrgVal(e, "cr714_jobtitle") || "Representative";
       const titleCheck = `${cleanOrgVal(e, "cr714_title")} ${cleanOrgVal(e, "cr714_jobtitle")}`.toLowerCase();
 
-      // Identify role using flags, titles, and org-roster assignments
+      // Determine role via flags, titles, and org-roster appearances
       const isDirector = /\bdirector\b/i.test(titleCheck) || hasRoleFlag(e, "cr714_directorflag");
       const isSrMgr = !isDirector && (hasRoleFlag(e, "cr714_srmanagerflag", "cr714_seniormanagerflag") || /\bsr\.?\s*manager\b|\bsenior\s*manager\b/i.test(titleCheck) || knownSrManagers.has(nName));
       const isMgr = !isDirector && !isSrMgr && (hasRoleFlag(e, "cr714_managerflag") || /\bmanager\b/i.test(titleCheck) || knownManagers.has(nName));
@@ -1435,8 +1443,13 @@ async function pullFromDataverse(silent = false, options = {}) {
       const supVal = notSelf(cleanOrgVal(e, "cr714_supervisors"));
       const mgrVal = notSelf(cleanOrgVal(e, "cr714_managerassigned"));
       const srMgrVal = notSelf(cleanOrgVal(e, "cr714_srmanager"));
+      const dirVal = notSelf(cleanOrgVal(e, "cr714_director"));
 
-      // Build deduplicated chain of management levels strictly above this person's role
+      const effMgr = mgrVal || supToMgr.get(nName) || "";
+      const effSrMgr = srMgrVal || mgrToSrMgr.get(nName) || supToSrMgr.get(nName) || (effMgr ? mgrToSrMgr.get(normOrgName(effMgr)) : "") || deptToSrMgr.get(normOrgName(dept)) || singleSrManagerFallback || "";
+      const effDir = dirVal || (effSrMgr ? srMgrToDir.get(normOrgName(effSrMgr)) : "") || globalDirectorFallback || "";
+
+      // Build deduplicated chain strictly above this employee's role
       const uniqueChain = items => {
         const seen = new Set([nName]);
         const out = [];
@@ -1456,27 +1469,24 @@ async function pullFromDataverse(silent = false, options = {}) {
         chain = [];
       } else if (isSrMgr) {
         // Sr. Manager -> just the Director
-        chain = uniqueChain([directorLabel]);
+        chain = uniqueChain([effDir]);
       } else if (isMgr) {
         // Manager -> Sr. Manager and Director
-        const effSrMgr = srMgrVal || mgrToSrMgr.get(nName) || deptToSrMgr.get(normOrgName(dept)) || singleSrManagerFallback;
-        chain = uniqueChain([effSrMgr, directorLabel]);
+        chain = uniqueChain([effSrMgr, effDir]);
       } else if (isSup) {
-        // Supervisor -> Manager and Sr. Manager
-        const effMgr = mgrVal || supToMgr.get(nName);
-        const effSrMgr = srMgrVal || supToSrMgr.get(nName) || (effMgr ? mgrToSrMgr.get(normOrgName(effMgr)) : "") || deptToSrMgr.get(normOrgName(dept)) || singleSrManagerFallback;
-        chain = uniqueChain([effMgr, effSrMgr, directorLabel]);
+        // Supervisor -> Manager and Sr. Manager (falls back up to Director if one is missing)
+        chain = uniqueChain([effMgr, effSrMgr, effDir]);
       } else {
-        // Rep -> Supervisor, Manager, Sr. Manager, Director (automatically shifts up if a column is blank)
-        const effSrMgr = srMgrVal || (mgrVal ? mgrToSrMgr.get(normOrgName(mgrVal)) : "") || (supVal ? supToSrMgr.get(normOrgName(supVal)) : "") || deptToSrMgr.get(normOrgName(dept)) || singleSrManagerFallback;
-        chain = uniqueChain([supVal, mgrVal, effSrMgr, directorLabel]);
+        // Rep -> Supervisor, Manager, Sr. Manager, Director (shifts up automatically if any level is blank)
+        chain = uniqueChain([supVal, effMgr, effSrMgr, effDir]);
       }
 
       const supervisor = chain[0] || "—";
       const manager = chain[1] || "—";
 
       const record = { id, name, email, dept, repName:name, title, supervisor, manager,
-        srManager: srMgrVal || cleanOrgVal(e, "cr714_srmanager"),
+        srManager: effSrMgr,
+        director: effDir,
         location: cleanOrgVal(e, "cr714_location") || "Daytona",
         status: cleanOrgVal(e, "cr714_status") || "Active",
         loopNumber: e.cr714_loopnumber || "",
@@ -1810,6 +1820,7 @@ async function patchDataverseRecord(dvId,fields){
   if(fields.cr714_wfnotes!==undefined)payload.cr714_wfnotes=fields.cr714_wfnotes;
   if(fields.cr714_ptohoursrequested!==undefined)payload.cr714_ptohoursrequested=String(fields.cr714_ptohoursrequested);
   if(fields.cr714_hoursofpartialshift!==undefined)payload.cr714_hoursofpartialshift=fields.cr714_hoursofpartialshift;
+  if(fields.cr714_shifttrade!==undefined)payload.cr714_shifttrade=fields.cr714_shifttrade;
   if(fields.cr714_startdate!==undefined)payload.cr714_startdate=fields.cr714_startdate||null;
   if(fields.cr714_enddate!==undefined)payload.cr714_enddate=fields.cr714_enddate||null;
   if(fields.cr714_leavetype!==undefined)payload.cr714_leavetype=fields.cr714_leavetype;
@@ -3488,7 +3499,7 @@ function replaceCalendarRequestFamily(target,changes){
     empId:changes.empId,type:changes.type,
     hours:(idx===workDates.length-1?totalCents-baseCents*(workDates.length-1):baseCents)/100,
     requestHoursTotal:Number(changes.hours)||0,allocatedHoursTotal:Number(changes.hours)||0,workingDayCount:workDates.length,
-    notes:changes.notes,wfNotes:stripGroupWithTag(changes.wfNotes),partialShift:changes.partialShift,fmla:!!changes.fmla,voicemail:!!changes.voicemail,
+    notes:changes.notes,wfNotes:stripGroupWithTag(changes.wfNotes),partialShift:changes.partialShift,shiftTrade:changes.shiftTrade!==undefined?changes.shiftTrade:(target.shiftTrade||source.shiftTrade||""),fmla:!!changes.fmla,voicemail:!!changes.voicemail,
     completed:changes.completed!==undefined?!!changes.completed:!!source.completed,
     occurrence:idx===0?(Number(changes.occurrence)||0):0,
     sourceStartDate:changes.startDate,sourceEndDate:changes.endDate,requestStartDate:changes.startDate,requestEndDate:changes.endDate,
@@ -3527,6 +3538,24 @@ function buildRecentGroupOptions(empId, refDate, currentRid, selectedGroupDate) 
   }).join("");
 }
 
+function buildShiftTradeSelect(currentVal) {
+  const cur = String(currentVal || "").trim();
+  const shifts = [
+    "First (7:30-4:30)",
+    "Second (8:00-5:00)",
+    "Third (8:30-5:30)",
+    "Fourth (9:00-6:00)",
+    "Fifth (10:00-7:00)",
+    "Sixth (12:00-9:00)"
+  ];
+  // Include currentVal if it's a custom value not in the preset list
+  const allShifts = [...new Set([...(cur && !shifts.includes(cur) ? [cur] : []), ...shifts])];
+  return `<select id="mShiftTrade">
+    <option value="">— Select Shift Trade —</option>
+    ${allShifts.map(s => `<option value="${esc(s)}" ${s === cur ? "selected" : ""}>${esc(s)}</option>`).join("")}
+  </select>`;
+}
+
 function recordModal(rid,presetDate){
   const bEl = document.querySelector(".modal-window-body"), tEl = document.querySelector("#modalHost .tbl-wrap");
   UI.savedScroll = { body: bEl ? bEl.scrollTop : 0, tbl: tEl ? tEl.scrollTop : 0 };
@@ -3540,6 +3569,7 @@ function recordModal(rid,presetDate){
     fmla: false,
     voicemail: false,
     partialShift: "",
+    shiftTrade: "",
     occurrence: 0,
     groupWithDate: ""
   };
@@ -3547,6 +3577,7 @@ function recordModal(rid,presetDate){
   const currentOcc = r.occurrence !== undefined && r.occurrence !== null ? r.occurrence : 0;
   const reverseLinked = rid ? (S.records || []).find(x => x.empId === r.empId && !x.cancelled && x.groupWithDate === r.date) : null;
   const initialGroupDate = r.groupWithDate || reverseLinked?.date || "";
+  const isShiftTrade = canonicalRecordType(r) === "Shift Trade";
 
   const modalGroup = rid ? occurrenceGroupForRecord(r) : null;
   const groupContext = modalGroup?.grouped ? `<div class="card mb occurrence-group-rainbow"><b>Occurrence grouping</b><div class="small mt">${esc(modalGroup.label)}: ${modalGroup.dates.map(fmt).join(" → ")}. This manual group counts as <b>1 occurrence</b>.</div></div>` : "";
@@ -3564,7 +3595,8 @@ function recordModal(rid,presetDate){
     <div class="mrow">
       <div><label for="mType">Type / Leave Type</label><select id="mType">${TYPE_NAMES.map(t=>`<option ${t===r.type?"selected":""}>${esc(t)}</option>`).join("")}</select></div>
       <div><label for="mHours">Total request hours</label><input type="number" id="mHours" step="0.25" min="0" value="${r.requestHoursTotal ?? r.allocatedHoursTotal ?? r.hours}"></div>
-      <div><label for="mPartial">Time Frame / Schedule Adjustment</label><input type="text" id="mPartial" placeholder="e.g. 12:30 PM - 5:00 PM" value="${esc(r.partialShift||"")}"></div>
+      <div id="mShiftTradeWrap" style="display:${isShiftTrade ? "block" : "none"};"><label for="mShiftTrade">Shift Trade</label><select id="mShiftTrade">${buildShiftTradeOptions(r.shiftTrade)}</select></div>
+      <div id="mPartialWrap" style="display:${isShiftTrade ? "none" : "block"};"><label for="mPartial">Time Frame / Schedule Adjustment</label><input type="text" id="mPartial" placeholder="e.g. 12:30 PM - 5:00 PM" value="${esc(r.partialShift||"")}"></div>
     </div>
 
     <div class="mrow">
@@ -3612,6 +3644,13 @@ function recordModal(rid,presetDate){
   };
   $("#mEmp").addEventListener("change", refreshGroupDropdown);
   $("#mDate").addEventListener("change", refreshGroupDropdown);
+  $("#mType").addEventListener("change", () => {
+    const st = $("#mType").value === "Shift Trade";
+    const stWrap = $("#mShiftTradeWrap");
+    const ptWrap = $("#mPartialWrap");
+    if (stWrap) stWrap.style.display = st ? "block" : "none";
+    if (ptWrap) ptWrap.style.display = st ? "none" : "block";
+  });
 
   if (rid) {
     const targetRec = S.records.find(x => x.rid === rid);
@@ -3648,6 +3687,7 @@ function recordModal(rid,presetDate){
     const groupWithDate = $("#mGroupOcc") ? $("#mGroupOcc").value : "";
     const wfNotesForDv = injectGroupWithTag(cleanWfNotes, groupWithDate);
     const partialShift = $("#mPartial").value.trim();
+    const shiftTrade = type === "Shift Trade" ? ($("#mShiftTrade")?.value || "").trim() : "";
     const fmla = $("#mFmla").checked;
     const voicemail = $("#mVoicemail").checked;
     const completed = $("#mCompleted").checked;
