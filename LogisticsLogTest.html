@@ -1577,11 +1577,34 @@ async function pullFromDataverse(silent = false, options = {}) {
       const hoursWorked = formHoursWorked(r), hoursOwed = formHoursOwed(r);
       const workingDayCount = Math.max(1, dates.length);
       const allocatedHoursTotal = requestHours;
+
+      // Extract per-date specific hours from request notes if present (e.g. PTO stamped breakdown)
+      const dailyHoursMap = new Map();
+      const noteLines = String(r.cr714_requestnotes || "").split("\n");
+      noteLines.forEach(line => {
+        const m = line.match(/(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(?:.*?-)?\s*(\d{1,2}:\d{2}|\d+(?:\.\d+)?h?)/i);
+        if (m) {
+          const iso = `${m[3]}-${m[1]}-${m[2]}`;
+          const hStr = m[4];
+          let hVal = 8.0;
+          if (hStr.includes(":")) {
+            const [hh, mm] = hStr.split(":").map(Number);
+            hVal = (hh || 0) + ((mm || 0) / 60);
+          } else {
+            hVal = parseFloat(hStr) || 8.0;
+          }
+          dailyHoursMap.set(iso, hVal);
+        }
+      });
+
       const allocatedTotalCents = Math.round(allocatedHoursTotal * 100);
       const baseWorkingDayCents = Math.floor(allocatedTotalCents / workingDayCount);
-      const allocatedHoursForDay = idx => (idx === workingDayCount - 1
-        ? allocatedTotalCents - (baseWorkingDayCents * (workingDayCount - 1))
-        : baseWorkingDayCents) / 100;
+      const allocatedHoursForDay = (d, idx) => {
+        if (dailyHoursMap.has(d)) return dailyHoursMap.get(d);
+        return (idx === workingDayCount - 1
+          ? allocatedTotalCents - (baseWorkingDayCents * (workingDayCount - 1))
+          : baseWorkingDayCents) / 100;
+      };
       const repNotes = String(r.cr714_requestnotes || "").trim();
       const wfNotesVal = String(r.cr714_wfnotes || "").trim();
       const mgrNotesVal = String(r.cr714_approvalnotes || "").trim();
@@ -1604,7 +1627,7 @@ async function pullFromDataverse(silent = false, options = {}) {
       const isCancelled = r.cr714_cancelledrequest === 1 || r.cr714_cancelledrequest === true || String(r.cr714_cancelledrequest).toLowerCase() === "true";
       const isCompleted = r.cr714_completed === 1 || r.cr714_completed === true || String(r.cr714_completed).toLowerCase() === "true";
       dates.forEach((d, idx) => newRecords.push({ rid:`${baseRid}-${idx}`, dvId, familyDvIds, familyRequestIds, familySourceRows, rawRequestBody:r.cr714_requestnotes??"", rawWorkforceBody:r.cr714_wfnotes??"", overlapFamilySize:familyDvIds.length, date:d, empId:matchedEmp.id, type:mappedType,
-        hours:allocatedHoursForDay(idx),
+        hours:allocatedHoursForDay(d, idx),
         requestHoursTotal:requestHours, allocatedHoursTotal, workingDayCount, hoursWorked, hoursOwed,
         sourceStartDate:requestDateChoice.start,sourceEndDate:requestDateChoice.end,requestStartDate:requestDateChoice.start,requestEndDate:requestDateChoice.end,parsedDisplayRange:[...dates],notes:fullNotes, wfNotes:wfNotesVal, mgrNotes:mgrNotesVal,
         shiftTrade: r.cr714_shifttrade || "",
