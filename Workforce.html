@@ -1573,16 +1573,17 @@ async function pullFromDataverse(silent = false, options = {}) {
       const finalOccurrence = attendance?.hasOccurrence ? attendance.occurrence : (timeOcc ?? 0);
       const occurrenceSource = attendance?.hasOccurrence ? "CSR Attendance" : (timeOcc !== null ? "Time Off" : "None");
       const mappedType = mapLeaveType(r.cr714_leavetype); 
-      const requestHours = parseHours(r,mappedType), muHours = parseMakeUpHours(r);
+      const mappedType = mapLeaveType(r.cr714_leavetype); 
+      let requestHours = parseHours(r,mappedType);
+      const muHours = parseMakeUpHours(r);
       const hoursWorked = formHoursWorked(r), hoursOwed = formHoursOwed(r);
       const workingDayCount = Math.max(1, dates.length);
-      const allocatedHoursTotal = requestHours;
 
-      // Extract per-date specific hours from request notes if present (matching duration at the end of the line)
+      // Extract per-date specific hours from request notes if present
       const dailyHoursMap = new Map();
       const noteLines = String(r.cr714_requestnotes || "").split("\n");
       noteLines.forEach(line => {
-        const m = line.match(/(\d{2})\/(\d{2})\/(\d{4})\s*-\s*.*?-\s*(\d{2}):(\d{2})\s*$/i);
+        const m = line.match(/(\d{2})\/(\d{2})\/(\d{4})\s*-\s*.*?-\s*(\d{1,2}):(\d{2})\s*$/i);
         if (m) {
           const iso = `${m[3]}-${m[1]}-${m[2]}`;
           const hh = parseInt(m[4], 10) || 0;
@@ -1592,10 +1593,22 @@ async function pullFromDataverse(silent = false, options = {}) {
           const mDec = line.match(/(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(?:.*?-)?\s*(\d+(?:\.\d+)?)h?\s*$/i);
           if (mDec) {
             const iso = `${mDec[3]}-${mDec[1]}-${mDec[2]}`;
-            dailyHoursMap.set(iso, parseFloat(mDec[3]) || 8.0);
+            dailyHoursMap.set(iso, parseFloat(mDec[4]) || 8.0);
           }
         }
       });
+
+      // Catch skipped days in multi-day PTO ranges and fill them with 8.0 hours
+      let allocatedHoursTotal = requestHours;
+      if (mappedType === "PTO" && dailyHoursMap.size > 0 && dates.length > dailyHoursMap.size) {
+        let correctedTotal = 0;
+        dates.forEach(d => {
+          if (!dailyHoursMap.has(d)) dailyHoursMap.set(d, 8.0);
+          correctedTotal += dailyHoursMap.get(d);
+        });
+        requestHours = correctedTotal;
+        allocatedHoursTotal = correctedTotal;
+      }
 
       const allocatedTotalCents = Math.round(allocatedHoursTotal * 100);
       const baseWorkingDayCents = Math.floor(allocatedTotalCents / workingDayCount);
