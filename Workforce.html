@@ -214,6 +214,30 @@ canvas{max-height:280px}
   border-left: 3.5px solid var(--purple);
   background: rgba(124, 58, 237, 0.05);
 }
+.cal-card.note-card {
+  background: var(--bg);
+  border: 1px solid #fde047;
+  border-left: 4px solid #fde047;
+  box-shadow: 0 0 10px rgba(234, 179, 8, 0.25);
+}
+.cal-card.note-card .cal-card-time {
+  color: var(--muted);
+  font-weight: 500;
+  font-style: italic;
+  white-space: pre-wrap;
+  font-size: 11px;
+  line-height: 1.4;
+  margin-top: 2px;
+}
+.cal-card.night-mgr-card {
+  background: var(--bg);
+  border: 1px solid #818cf8;
+  border-left: 4px solid #818cf8;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.3);
+}
+.cal-card.night-mgr-card .cal-card-time {
+  color: var(--muted);
+}
 .cal-card-name {
   font-weight: 650;
   font-size: 13.5px;
@@ -877,7 +901,9 @@ function mapLeaveType(val) {
   if(/\b(jury|bereavement)\b/.test(s))return "Jury Duty / Bereavement";
   if(/\b(shift trade|shift swap)\b/.test(s))return "Shift Trade";
   if(/\b(make up|makeup)\b/.test(s))return "Make up Time";
-  if(/\b(schedule adjustment|adjusted|adjsuted|extended shift|extended lunch|night manager|oss)\b/.test(s))return "Schedule Adjustment";
+  if(/\b(night shift manager|night manager)\b/.test(s))return "Night Shift Manager";
+  if(/\b(misc|note|misc\/note)\b/.test(s))return "Misc/Note";
+  if(/\b(schedule adjustment|adjusted|adjsuted|extended shift|extended lunch|oss)\b/.test(s))return "Schedule Adjustment";
   if(/\b(cancel|cancelled|canceled|cancellation)\b/.test(s))return "Cancellation";
   if(/\b(pto|planned time off|vacation|personal time)\b/.test(s))return "PTO";
   if(/\b(call out|callout|absent|sick)\b/.test(s))return "Call Out";
@@ -968,7 +994,8 @@ function parseMakeUpSegments(value) {
   const raw = String(value || "").replace(/\r/g, "\n").trim();
   if (!raw) return [];
   const segments = [];
-  const entryRx = /(\d{1,2}\/\d{1,2}\/\d{4})\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?)\s*-\s*(\d+(?::\d{1,2})?|\d*\.\d+)(?:\s*-\s*\[(.*?)\])?/gi;
+  // Forgiving regex that correctly reads "11:00 AM-12:00 PM" with or without spaces
+  const entryRx = /(\d{1,2}\/\d{1,2}\/\d{4})\s*-\s*([^-]+?)\s*-\s*([^-]+?)\s*-\s*(\d+(?::\d{1,2})?|\d*\.\d+)[^,\[]*?(?:\[([^\]]+)\])?/gi;
   let match;
   while ((match = entryRx.exec(raw)) !== null) {
     const [mmRaw, ddRaw, yyyy] = match[1].split("/");
@@ -1597,9 +1624,9 @@ async function pullFromDataverse(silent = false, options = {}) {
         }
       });
 
-      // Catch skipped days in multi-day PTO ranges and fill them with 8.0 hours
+      // Catch skipped days in multi-day PTO ranges and inject 8.0 hours
       let allocatedHoursTotal = requestHours;
-      if (mappedType === "PTO" && dailyHoursMap.size > 0 && dates.length > dailyHoursMap.size) {
+      if (mappedType === "PTO" && dates.length > 1 && dailyHoursMap.size > 0 && dates.length > dailyHoursMap.size) {
         let correctedTotal = 0;
         dates.forEach(d => {
           if (!dailyHoursMap.has(d)) dailyHoursMap.set(d, 8.0);
@@ -1607,8 +1634,11 @@ async function pullFromDataverse(silent = false, options = {}) {
         });
         requestHours = correctedTotal;
         allocatedHoursTotal = correctedTotal;
+      } else if (mappedType === "PTO" && dates.length > 1 && dailyHoursMap.size === 0) {
+        // If the rep typed completely custom notes and the regex missed everything, fallback to 8 hours per day
+        allocatedHoursTotal = dates.length * 8.0;
+        requestHours = allocatedHoursTotal;
       }
-
       const allocatedTotalCents = Math.round(allocatedHoursTotal * 100);
       const baseWorkingDayCents = Math.floor(allocatedTotalCents / workingDayCount);
       const allocatedHoursForDay = (d, idx) => {
@@ -1886,8 +1916,10 @@ async function patchCsrAttendanceRecord(attendanceId,fields){
 }
 
 const TYPES = {
-  "Present":                        {occ:0, color:"var(--green)",  abbr:"P"},
-  "PTO":                            {occ:0, color:"var(--teal)",   abbr:"PTO"},
+  "Present":                         {occ:0, color:"var(--green)",  abbr:"P"},
+  "Misc/Note":                       {occ:0, color:"#eab308",       abbr:"NOTE"},
+  "Night Shift Manager":             {occ:0, color:"#1e293b",       abbr:"NM"},
+  "PTO":                             {occ:0, color:"var(--teal)",   abbr:"PTO"},
   "Shift Trade":                    {occ:0, color:"var(--blue)",   abbr:"ST"},
   "Make up Time":                   {occ:0, color:"var(--purple)", abbr:"MU"},
   "Schedule Adjustment":            {occ:0, color:"var(--indigo)", abbr:"SA"},
@@ -2083,11 +2115,23 @@ function renderCalendar(){
       const isToday = ds === today();
       const allDayRecords = calendarRecords(byDate[ds] || []);
 
-      const standardDayRecs = allDayRecords
+      const getSortPriority = (r) => {
+        const t = canonicalRecordType(r);
+        if (t === "Misc/Note") return 1;
+        if (t === "Night Shift Manager") return 2;
+        if (t === "PTO") return 3; // Keep PTO directly beneath notes
+        return 4;
+      };
+
+      // Sort priority items to the top, then chronologically ascending so older requests stay high
+      const uniqueDayRecs = allDayRecords
         .filter(r => r.type !== "Present" && r.type !== "LOA")
-        .sort((a,b) => getRecordTimestamp(b) - getRecordTimestamp(a));
-      
-      const uniqueDayRecs=calendarRecords(standardDayRecs);
+        .sort((a,b) => {
+          const pA = getSortPriority(a);
+          const pB = getSortPriority(b);
+          if (pA !== pB) return pA - pB;
+          return getRecordTimestamp(a) - getRecordTimestamp(b);
+        });
 
       const seenLoaEmps = new Set();
       const loaRecs = allDayRecords
@@ -2129,7 +2173,8 @@ function renderCalendar(){
 
       const recCardsHtml = uniqueDayRecs.map(r => {
         const e = emp(r.empId) || {name: r.empId};
-        const shiftDisplay = extractShiftHours(r);
+        const type = canonicalRecordType(r);
+        const shiftDisplay = type === "Misc/Note" ? (r.wfNotes || r.notes || "No note attached") : extractShiftHours(r);
         const subTime = formatSubmittedTime(r.submittedOn || r.createdon);
         const isMuCompleted = canonicalRecordType(r) === "Make up Time" && r.completed;
         const topBadges = [
@@ -2144,14 +2189,28 @@ function renderCalendar(){
           r.voucher ? `<span class="badge" style="background:var(--green); color:#fff; font-size:9.5px; padding:1px 5px;">Voucher</span>` : null
         ].filter(Boolean).join(" ");
 
-        return `<div class="cal-card ${r.cancelled ? 'cancelled' : ''}" draggable="true" data-drag-kind="record" data-drag-id="${esc(r.rid)}" data-drag-date="${esc(ds)}" data-rec="${esc(r.rid)}" title="Drag to move this request, or click to view or edit details">
+        let extraClass = "";
+        let nameStyle = "";
+        let pillHtml = pill(type);
+        
+        if (type === "Misc/Note") {
+          extraClass = "note-card";
+          nameStyle = "color: #92400e; font-style: italic;";
+          pillHtml = `<span class="badge" style="background:#ca8a04; color:#fff; font-size:9.5px; padding:2px 5px;">Misc / Note</span>`;
+        } else if (type === "Night Shift Manager") {
+          extraClass = "night-mgr-card";
+          nameStyle = "color: var(--ink); font-weight: 750;";
+          pillHtml = `<span class="badge" style="background:#475569; color:#fff; font-size:9.5px; padding:2px 5px;"><i class="fa-solid fa-moon"></i> Night Mgr</span>`;
+        }
+
+        return `<div class="cal-card ${r.cancelled ? 'cancelled' : ''} ${extraClass}" draggable="true" data-drag-kind="record" data-drag-id="${esc(r.rid)}" data-drag-date="${esc(ds)}" data-rec="${esc(r.rid)}" title="Drag to move this request, or click to view or edit details">
           <div class="row" style="justify-content:space-between; align-items:flex-start; gap:6px;">
-            <span class="cal-card-name">${esc(e.name)}</span>
+            <span class="cal-card-name" style="${nameStyle}">${esc(e.name)}</span>
             ${topBadges ? `<span style="display:flex; gap:3px;">${topBadges}</span>` : ""}
           </div>
           <div class="cal-card-time">${esc(shiftDisplay)}</div>
           <div class="cal-card-badges">
-            ${pill(canonicalRecordType(r))}
+            ${pillHtml}
             ${bottomTags}
             ${subTime ? `<span style="margin-left:auto; font-size:10px; color:var(--muted); font-weight:600;">Sub: ${esc(subTime)}</span>` : ""}
           </div>
@@ -3763,6 +3822,14 @@ function recordModal(rid,presetDate){
     if (stWrap) stWrap.style.display = st ? "block" : "none";
     if (ptWrap) ptWrap.style.display = st ? "none" : "block";
     if (muSec) muSec.style.display = mu ? "block" : "none";
+    
+    // Automatically zero out hours if switching to a Note or Night Manager
+    if (val === "Misc/Note" || val === "Night Shift Manager") {
+      const mHours = $("#mHours");
+      if (mHours && parseFloat(mHours.value) === 8) {
+        mHours.value = 0;
+      }
+    }
   });
 
   const partialInput = $("#mPartial");
