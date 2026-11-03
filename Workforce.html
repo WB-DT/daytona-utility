@@ -2080,8 +2080,37 @@ async function hydrateStateCache({deferRender=false}={}){let cached=null;try{cac
 function save(){const snapshot={cacheDate:today(),savedAt:new Date().toISOString(),data:S};stateDbPut(snapshot).then(()=>{try{localStorage.removeItem(LEGACY_STATE_KEY);}catch(e){}}).catch(e=>{console.error("IndexedDB state save failed",e);toast("Local cache save failed. Dataverse data is still available after sync.");});}
 let UI = { tab:"dashboard", preset:"week", anchor:isoDate(new Date()), from:null, to:null,
            dept:"", repName:"", title:"", supervisor:"", manager:"", q:"", type:"",
-           sortKey:"submittedOn", sortDir:1, muFilter:"", teamSortKey:"name", teamSortDir:1 };
+           sortKey:"submittedOn", sortDir:1, muFilter:"", teamSortKey:"name", teamSortDir:1, 
+           simulateManager: false };
 let charts = [];
+
+function isAppAdmin() {
+  const a = msalAccount;
+  if (!a) return false;
+  const email = String(a.username || "").toLowerCase();
+  const name = String(a.name || "").toLowerCase();
+  return ["anslee.laroche@wbmason.com", "john.diaz@wbmason.com", "taylor.whitaker@wbmason.com", "lori.rendt@wbmason.com"].includes(email) || 
+         ["anslee laroche", "john diaz", "taylor whitaker", "lori rendt"].some(n => name.includes(n));
+}
+
+function isManagerView() {
+  if (UI.simulateManager) return true;
+  if (isAppAdmin()) return false; // Admins always get full access unless simulating
+  
+  const a = msalAccount;
+  if (!a) return false;
+  const email = String(a.username || "").toLowerCase();
+  const name = String(a.name || "").toLowerCase();
+  
+  const me = (S.employees || []).find(e => String(e.email).toLowerCase() === email || String(e.name).toLowerCase() === name);
+  if (me && /\b(manager|supervisor|director)\b/i.test(me.title)) return true;
+  
+  return (S.employees || []).some(e => 
+    (e.manager && e.manager.toLowerCase() === name) || 
+    (e.supervisor && e.supervisor.toLowerCase() === name) || 
+    (e.srManager && e.srManager.toLowerCase() === name)
+  );
+}
 const $ = s=>document.querySelector(s);
 const esc = s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function uid(p){ return p+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-4); }
@@ -2713,6 +2742,7 @@ async function handleCalendarDrop(kind,id,sourceDate,targetDate){
   finally{hideSyncCover();calendarDragState=null;document.body.classList.remove("calendar-dragging");}
 }
 function bindCalendarDragAndDrop(root){
+  if (isManagerView()) return; // Lock out drag-and-drop entirely
   root.querySelectorAll('.cal-card[draggable="true"]').forEach(card=>{
     let didDrag = false;
     card.addEventListener("dragstart",event=>{
@@ -2926,7 +2956,12 @@ function metrics(){
 }
 
 function renderNav(){
-  $("#nav").innerHTML = TABS.map(([k,l])=>`<button class="${UI.tab===k?"on":""}" data-tab="${k}">${l}</button>`).join("");
+  const isMgr = isManagerView();
+  let visibleTabs = TABS;
+  if (isMgr) {
+    visibleTabs = TABS.filter(([k]) => k === "calendar" || k === "pending");
+  }
+  $("#nav").innerHTML = visibleTabs.map(([k,l])=>`<button class="${UI.tab===k?"on":""}" data-tab="${k}">${l}</button>`).join("");
 }
   
 function opts(list,cur){ return `<option value="">All</option>`+list.map(v=>`<option ${v===cur?"selected":""} value="${esc(v)}">${esc(v)}</option>`).join(""); }
@@ -4954,8 +4989,57 @@ function hydrateEmployeeDataFrame(){
 function render(){
   const dedupeResult = recalculateAfterDedupe();
   if (dedupeResult.removedRecords || dedupeResult.removedMakeups) save();
+  
+  // Create or update the Admin Manager Toggle
+  if (isAppAdmin()) {
+    let tBtn = document.getElementById("adminManagerToggle");
+    if (!tBtn) {
+      tBtn = document.createElement("button");
+      tBtn.id = "adminManagerToggle";
+      tBtn.className = "btn ghost sm";
+      tBtn.style.marginRight = "8px";
+      tBtn.onclick = () => {
+        UI.simulateManager = !UI.simulateManager;
+        if (UI.simulateManager && !["calendar", "pending"].includes(UI.tab)) UI.tab = "calendar";
+        render();
+      };
+      const syncBtn = document.getElementById("syncBtn");
+      if (syncBtn && syncBtn.parentNode) syncBtn.parentNode.insertBefore(tBtn, syncBtn);
+    }
+    tBtn.innerHTML = `<i class="fa-solid fa-user-tie"></i> Mgr View: ${UI.simulateManager ? 'ON' : 'OFF'}`;
+    tBtn.style.color = UI.simulateManager ? "var(--orange)" : "";
+  }
+
+  // Force tab safety on re-renders
+  if (isManagerView() && !["calendar", "pending"].includes(UI.tab)) UI.tab = "calendar";
+  
   renderNav(); renderFilters(); setSync("");
   document.body.classList.toggle("employee-data-active",UI.tab==="employeeData");
+  
+  // Apply a global lock CSS class if it's a manager
+  document.body.classList.toggle("manager-view-lock", isManagerView());
+  let lockStyles = document.getElementById("mgrLockStyles");
+  if (!lockStyles) {
+    lockStyles = document.createElement("style");
+    lockStyles.id = "mgrLockStyles";
+    lockStyles.innerHTML = `
+      body.manager-view-lock #calAdd, 
+      body.manager-view-lock [data-add-day], 
+      body.manager-view-lock #recNew, 
+      body.manager-view-lock #mSave, 
+      body.manager-view-lock #mDel,
+      body.manager-view-lock #add-makeup-shift-btn,
+      body.manager-view-lock .remove-makeup-btn,
+      body.manager-view-lock #occMinus,
+      body.manager-view-lock #occPlus { display: none !important; }
+      body.manager-view-lock .modal input,
+      body.manager-view-lock .modal select,
+      body.manager-view-lock .modal textarea { pointer-events: none; opacity: 0.8; }
+      body.manager-view-lock .cal-card { pointer-events: none; }
+    `;
+    document.head.appendChild(lockStyles);
+  }
+
   const v=$("#view");
   try {
     switch(UI.tab){
