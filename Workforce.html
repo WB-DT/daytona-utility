@@ -3921,7 +3921,59 @@ function buildShiftTradeSelect(currentVal) {
     ${allShifts.map(s => `<option value="${esc(s)}" ${s === cur ? "selected" : ""}>${esc(s)}</option>`).join("")}
   </select>`;
 }
+  
+async function sendApprovalEmail(targetRec, statusVal, mgrNote) {
+  // Find the rep's email address
+  const employee = emp(targetRec.empId);
+  const toEmail = employee?.email || targetRec.cr714_email;
+  if (!toEmail) throw new Error("No email address found for this representative.");
 
+  // Set up dynamic styling based on approval or denial
+  const isApproved = statusVal.toLowerCase().includes("approve");
+  const color = isApproved ? "#16a34a" : "#dc2626";
+  const shortStatus = isApproved ? "Approved" : "Denied";
+  const dates = targetRec.requestDatesRaw || targetRec.parsedDisplayRange?.map(fmt).join(" - ") || fmt(targetRec.date);
+  const type = targetRec.rawLeaveType || targetRec.type || "Time Off";
+  const firstName = employee?.name ? employee.name.split(" ")[0] : "Team Member";
+
+  // Build a clean, responsive HTML email matching your app's UI
+  const htmlBody = `
+  <div style="font-family: 'Segoe UI', Arial, sans-serif; color: #172033; max-width: 600px; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden;">
+    <div style="background: ${color}; color: #fff; padding: 16px 20px;">
+      <h2 style="margin: 0; font-size: 20px;">Time Off Request ${shortStatus}</h2>
+    </div>
+    <div style="padding: 20px; background: #fff;">
+      <p style="margin-top: 0; font-size: 15px;">Hi ${esc(firstName)},</p>
+      <p style="font-size: 15px;">Your <strong>${esc(type)}</strong> request for <strong>${esc(dates)}</strong> has been reviewed.</p>
+      <div style="margin: 16px 0; padding: 14px 16px; background: #f8fafc; border-left: 4px solid ${color}; border-radius: 4px;">
+        <div style="margin-bottom: 6px; font-size: 14px;"><strong>Status:</strong> <span style="color: ${color}; font-weight: 700;">${esc(statusVal)}</span></div>
+        ${mgrNote ? `<div style="font-size: 14px;"><strong>Manager Notes:</strong><br><span style="white-space: pre-wrap; color: #475569;">${esc(mgrNote)}</span></div>` : ""}
+      </div>
+      <p style="margin-bottom: 0; color: #64748b; font-size: 13px;">Thank you,<br>Your Leadership Team</p>
+    </div>
+  </div>`;
+
+  // Fetch the mail token and dispatch via Graph API
+  const token = await window.getToken("https://graph.microsoft.com/Mail.Send");
+  const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      message: {
+        subject: `Time Off Request Update: ${shortStatus}`,
+        body: { contentType: "HTML", content: htmlBody },
+        toRecipients: [{ emailAddress: { address: toEmail } }]
+      },
+      saveToSentItems: true
+    })
+  });
+
+  if (!res.ok) throw new Error(`Outlook send failed: ${await res.text()}`);
+}
+  
 function recordModal(rid,presetDate){
   const bEl = document.querySelector(".modal-window-body"), tEl = document.querySelector("#modalHost .tbl-wrap");
   UI.savedScroll = { body: bEl ? bEl.scrollTop : 0, tbl: tEl ? tEl.scrollTop : 0 };
@@ -4164,12 +4216,22 @@ function recordModal(rid,presetDate){
 
          await patchDataverseRecord(patchId, payload);
          
+         // Try to send the email (wrapped in its own try/catch so a mail error doesn't break the UI save)
+         let emailSentText = "";
+         try {
+           await sendApprovalEmail(targetRec, statusVal, newMgrNote);
+           emailSentText = " and email sent";
+         } catch (emailErr) {
+           console.error("🛑 Email Send Error:", emailErr);
+           emailSentText = ", but email failed to send";
+         }
+         
          // Update local state instantly
          targetRec.managerApproval = statusVal;
          targetRec.mgrNotes = newMgrNote;
-         toast(`Request marked as ${statusVal}`);
+         toast(`Request marked as ${statusVal}${emailSentText}`);
          save(); backModal(); hideSyncCover(); render();
-       } catch(e) { 
+       } catch(e) {
          console.error("🛑 Approval Patch Error:", e);
          toast("Error: " + e.message); 
          hideSyncCover(); 
