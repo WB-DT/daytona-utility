@@ -2981,23 +2981,35 @@ function occCount(empId,asOf){const to=asOf||today(),from=addDays(to,-OCC_WINDOW
 
 function level(n){ for(const [k,name,cls] of LADDER) if(n>=k) return {name,cls}; return null; }
 
-function ossUsed(empId, asOf){
-  const from = addDays(asOf||today(), -365);
+function ossUsed(empId, fromDate, toDate){
+  // Use the explicitly passed dates, or fall back to the dashboard's selected date range
+  const [defaultFrom, defaultTo] = range();
+  const from = fromDate || defaultFrom;
+  const to = toDate || defaultTo;
   
+  // 1. Make-Up Shifts: Count ONLY if the OSS box is checked, ignoring Cancelled. 
+  // (We MUST count Missed, Pending, Scheduled, and Completed so they don't get the OSS back!)
+  const validMus = (S.makeups || []).filter(m => {
+    if (m.empId !== empId || !m.oss || m.status === "Cancelled") return false;
+    const targetDate = m.activeSegment ? m.activeSegment.date : m.dateMissed;
+    return targetDate >= from && targetDate <= to;
+  });
+  
+  // Group by the parent ID so 1 request with 4 shifts = exactly 1 OSS
+  const uniqueMuParents = new Set(validMus.map(m => m.parentMid || m.dvId || m.mid));
+  
+  // 2. Standard Requests: Count if OSS checkbox is checked (e.g., a Call Out).
+  // We ignore "Make up Time" records here because we already counted them properly above!
   const validRecs = (S.records || []).filter(r => {
-    if (r.empId !== empId || r.cancelled || r.date < from) return false;
-    
-    // Count it if they explicitly checked the OSS box, OR if it's a Make-Up Time request
-    if (r.oss || canonicalRecordType(r) === "Make up Time") {
-        return true;
-    }
+    if (r.empId !== empId || r.cancelled || r.date < from || r.date > to) return false;
+    if (r.oss || canonicalRecordType(r) === "Make up Time") return true;
     return false;
   });
   
-  // Group by the parent Dataverse ID or Request ID so multi-day requests/shifts only count as exactly 1 OSS
-  const uniqueParents = new Set(validRecs.map(r => r.dvId || r.requestId || (r.rid ? r.rid.split('-')[0] : Math.random())));
+  // Group by parent ID so multi-day standard requests = exactly 1 OSS
+  const uniqueRecParents = new Set(validRecs.map(r => r.dvId || r.requestId || (r.rid ? r.rid.split('-')[0] : Math.random())));
   
-  return uniqueParents.size;
+  return uniqueMuParents.size + uniqueRecParents.size;
 }
 
 function metrics(){
@@ -3384,7 +3396,7 @@ function renderOccurrenceOverview(){
   const sourceCounts={}; history.forEach(r=>{const n=r._displayOccurrence??(isOcc(r)?1:0),k=r.occurrenceSource||"Unknown";sourceCounts[k]=(sourceCounts[k]||0)+n;});
   return `<div class="section-title"><button class="btn ghost sm" id="overviewBack">&#8249; All reps</button><h2>${esc(selected.name)} · Occurrence Overview</h2><span class="small muted">As of ${fmt(asOf)}</span></div>
     <div class="card mb"><div class="row"><div><b>${esc(selected.title||"Representative")}</b><div class="small muted">${esc(selected.dept)} · Supervisor: ${esc(selected.supervisor)}</div></div><div class="right"><span class="badge ${data.lv?data.lv.cls:"ok"}">${data.lv?data.lv.name:"Clear"}</span></div></div></div>
-    <div class="grid kpis mb">${kpi(data.periodOcc,"Selected-period occurrences","var(--red)","")}${kpi(data.rolling90,"Rolling 90-day occurrences","var(--orange)","")}${kpi(new Set(loadedHistory.map(r=>r.empId+"|"+r.date)).size,"Selected-range occurrence rows","var(--purple)","")}${kpi(ossUsed(selectedId,asOf)+`/${OSS_LIMIT}`,"OSS used · 12 months","var(--teal)","")}</div>
+    <div class="grid kpis mb">${kpi(data.periodOcc,"Selected-period occurrences","var(--red)","")}${kpi(data.rolling90,"Rolling 90-day occurrences","var(--orange)","")}${kpi(new Set(loadedHistory.map(r=>r.empId+"|"+r.date)).size,"Selected-range occurrence rows","var(--purple)","")}${kpi(ossUsed(selectedId,historyFrom,historyTo)+`/${OSS_LIMIT}`,"OSS used · Selected period","var(--teal)","")}</div>
     <div class="grid two mb"><div class="card"><h3>Occurrence type summary</h3>${Object.keys(byType).length?`<div class="tbl-wrap"><table><tbody>${Object.entries(byType).sort((a,b)=>b[1]-a[1]).map(([type,n])=>`<tr><td>${pill(type)}</td><td><b>${n}</b></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No occurrences loaded.</div>`}</div>
     <div class="card"><h3>Occurrence source</h3>${Object.keys(sourceCounts).length?`<div class="tbl-wrap"><table><tbody>${Object.entries(sourceCounts).map(([source,n])=>`<tr><td>${esc(source)}</td><td><b>${n}</b></td></tr>`).join("")}</tbody></table></div>`:`<div class="empty">No occurrence sources loaded.</div>`}</div></div>
     <div class="section-title"><h2>Occurrence Records (${history.length})</h2>${occurrenceFilterBadge(historyFrom,historyTo,history.length,"Selected-range occurrence table")}<span class="small muted">All occurrence groups in the selected period are shown. The rolling 90-day value above remains a separate corrective-action metric. All employee, organization, search, and type filters are applied.</span></div>
@@ -3409,8 +3421,8 @@ function renderTeam(){
       occurrences: occ,
       rolling90: n90,
       rollingLevel: lv,
-      oss: ossUsed(e.id,m.to), 
-      perfect, 
+        oss: ossUsed(e.id, m.from, m.to), 
+        perfect,
       status: e.status
     };
   });
@@ -4642,7 +4654,9 @@ function makeupModal(mid, fromRec) {
 
   if (!m) return toast("Make-up shift not found");
 
-  const used = ossUsed(m.empId);
+  // Pass the selected dashboard range so the modal matches the filters
+  const [f, t] = range();
+  const used = ossUsed(m.empId, f, t);
   const parentRecord = S.records.find(r => (m.dvId && r.dvId === m.dvId) || r.rid === m.rid);
   const currentOcc = parentRecord && parentRecord.occurrence !== undefined ? parentRecord.occurrence : 0;
   const cleanNotes = String(m.notes || "").split('\n').filter(line => !line.startsWith("Schedule:")).join('\n').trim();
@@ -4680,7 +4694,7 @@ function makeupModal(mid, fromRec) {
     <div class="mrow" style="margin-top:10px;">
       <div><label>Counts as OSS</label>
         <select id="uOss"><option value="1" ${m.oss ? "selected" : ""}>Yes — use an OSS</option><option value="0" ${m.oss ? "" : "selected"}>No</option></select>
-        <div class="small muted" id="uOssNote">This employee has used ${used}/${OSS_LIMIT} OSS in the last 12 months.</div>
+        <div class="small muted" id="uOssNote">This employee has used ${used}/${OSS_LIMIT} OSS in the selected period.</div>
       </div>
       <div><label>Occurrences (Updates original request)</label>
         <div class="row" style="gap:4px">
@@ -4855,9 +4869,9 @@ function empModal(id){
     <p class="small">${esc(e.title)} · ${esc(e.dept)} · ${esc(e.location)}<br>
     Supervisor: <b>${esc(e.supervisor)}</b> · Manager: <b>${esc(e.manager)}</b></p>
     <p class="row small">
-      <span class="badge ${lv?lv.cls:"ok"}" title="${fmt(dw.from)} to ${fmt(dw.to)}">${lv?lv.name:"Clear"} — ${n90} grouped occ. / filtered window</span>
-      <span class="badge">OSS ${ossUsed(id,t)}/${OSS_LIMIT}</span>
-    </p>
+        <span class="badge ${lv?lv.cls:"ok"}" title="${fmt(dw.from)} to ${fmt(dw.to)}">${lv?lv.name:"Clear"} — ${n90} grouped occ. / filtered window</span>
+        <span class="badge">OSS ${ossUsed(id, f, t)}/${OSS_LIMIT}</span>
+      </p>
     <h3 style="font-size:13px" class="mt">Records &amp; Occurrences ${fmt(f)} → ${fmt(t)} (${selectedOccurrenceRows.length} occurrence group${selectedOccurrenceRows.length===1?"":"s"} · ${rs.length} request row${rs.length===1?"":"s"})</h3>
     ${selectedOccurrenceRows.length?`<div class="card mb"><h3>Selected-range occurrence groups</h3><div class="tbl-wrap occurrence-table-wrap"><table class="occurrence-table"><thead><tr><th>Date group</th><th>Type</th><th>Occurrence</th><th>Source</th><th>90-day total</th><th>Level</th><th>Notes</th><th></th></tr></thead><tbody>${selectedOccurrenceRows.map(r=>renderOccurrenceOverviewRow(r,id,f,t)).join("")}</tbody></table></div></div>`:`<div class="small muted mb">No occurrence groups in this selected period.</div>`}
     ${rs.length?`<div class="card"><h3>All filtered request rows</h3><div class="tbl-wrap"><table><thead><tr><th>Date</th><th>Employee</th><th>Type / Time</th><th>Notes</th></tr></thead><tbody>${renderRecordTableRows(rs)}</tbody></table></div></div>`:`<div class="small muted">No request rows in this selected period.</div>`}
