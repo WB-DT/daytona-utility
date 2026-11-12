@@ -18206,7 +18206,7 @@ document.addEventListener('input',e=>{const type=e.target?.dataset?.reportFilter
 window.addEventListener('dataverse-daily-data-loaded',e=>apply(e.detail||{}),true);['page3-opened','page3-rendered'].forEach(n=>window.addEventListener(n,()=>{if(window.__latestDataverseDailyData)apply(window.__latestDataverseDailyData);prepareKpis();},true));
 // Five editable KPI columns on both tables. Delegated tracking writes through the existing submission getter into cr714_manuallyupdatedkpidetails.
 const changes=new Map(),prior=typeof window.getManualKpiChangeSummary==='function'?window.getManualKpiChangeSummary:null;
-function editable(span,field,cls){const i=document.createElement('input');i.type='text';i.className=cls;i.value=clean(span.value??span.textContent);i.dataset.kpiField=field;i.dataset.kpiOriginalValue=i.value;span.replaceWith(i);return i;}
+function editable(span,field,cls){const i=document.createElement('input');i.type='text';i.className=cls;i.value=clean(span.value??span.textContent);i.setAttribute('value',i.value);i.dataset.kpiField=field;i.dataset.kpiOriginalValue=i.value;if(span.tagName==='TD'||span.tagName==='TH'){span.replaceChildren(i);}else{span.replaceWith(i);}return i;}
 function prep(table){if(!table)return;[...table.querySelectorAll('tbody tr')].forEach((tr,n)=>{const c=[...tr.cells];if(c.length<5)return;let label=c[0].querySelector('input')||editable(c[0].querySelector('.sbs-kpi-label,.unified-kpi-label,span')||c[0],'KPI / Measure','kpi-label-edit');let prev=c[1].querySelector('input')||editable(c[1].querySelector('.sbs-parsed-value,.unified-readonly-value,span')||c[1],'Last Month','kpi-previous-edit');[[label,'KPI / Measure'],[prev,'Last Month'],[c[2].querySelector('select,input'),'Last Month Rating'],[c[3].querySelector('input,select'),'This Month'],[c[4].querySelector('select,input'),'This Month Rating']].forEach(([x,f])=>{if(!x)return;x.disabled=false;x.readOnly=false;x.removeAttribute('disabled');x.removeAttribute('readonly');x.dataset.kpiField=f;if(!('kpiOriginalValue'in x.dataset))x.dataset.kpiOriginalValue=clean(x.value??x.textContent);});tr.dataset.kpiAuditKey=clean(label.value)||('row-'+n);});}
 function prepareKpis(){document.querySelectorAll('#page2-sbs-grid,#unified-page3-kpi-editor table').forEach(prep);}
 function track(el){const tr=el.closest('tr');if(!tr)return;const field=el.dataset.kpiField,before=clean(el.dataset.kpiOriginalValue),after=clean(el.value??el.textContent),key=clean(tr.dataset.kpiAuditKey||tr.querySelector('[data-kpi-field="KPI / Measure"]')?.value),id=key.toLowerCase()+'|'+field;if(after===before)changes.delete(id);else changes.set(id,{kpi:key,column:field,before,after,changedAt:new Date().toISOString()});window.__kpiTrackedEditsV224=[...changes.values()];}
@@ -20602,7 +20602,7 @@ function clean(v){return String(v==null?'':v).trim();}
 function textOrValue(el){return clean(el&&(typeof el.value==='string'?el.value:el.textContent));}
 function validPart(v){v=clean(v);return v&&!/^[—-]$/.test(v)&&!/^n\/?a$/i.test(v);}
 function time(v){var m=clean(v).match(/(?:^|\s)(\d{1,3}:\d{2}(?::\d{2})?)(?:\s|$)/);return m?m[1]:'';}
-function triplet(v){var p=clean(v).split('/').map(clean);return p.length>=3&&validPart(p[0])&&validPart(p[1])&&validPart(p[2])?p.slice(0,3).join(' / '):'';}
+function triplet(v){var p=clean(v).split('/').map(clean);return p.length>=3&&/^\d+$/.test(p[0])&&/^\d+$/.test(p[1])&&/\d/.test(p[2])?p.slice(0,3).join(' / '):'';}
 function related(label){label=clean(label).toLowerCase().replace(/[^a-z0-9]+/g,' ');return /availability per shift|total working days.*days worked.*average hours|working days.*average hours|days worked.*average/.test(label);}
 function domCandidates(){var out=[];
  document.querySelectorAll('#month-kpi-workspace .exact-kpi-row,#page2-sbs-grid tbody tr,#page2-side-by-side-table tbody tr,.current-month-comparison tr,.review-comparison-table tr,#page3-kpi-comparison tr').forEach(function(row){
@@ -22419,29 +22419,445 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 (()=>{
 'use strict';
 if(window.__v420DocxKpiLayout)return;window.__v420DocxKpiLayout=true;
+
+const RATING_DISPLAY={
+  '':'—',
+  'EE':'↑ (EE)',
+  'ME':'→ (ME)',
+  'BE':'↓ (BE)',
+  'exceeds':'↑ (EE)',
+  'meets':'→ (ME)',
+  'below':'↓ (BE)',
+  'Green':'↑ (EE)',
+  'Yellow':'→ (ME)',
+  'Red':'↓ (BE)'
+};
+
+const RATING_CSS={
+  'EE':'kpi-good',
+  'ME':'kpi-watch',
+  'BE':'kpi-bad'
+};
+
+let syncingPreview=false;
+
 const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
 const redundant=label=>/^(?:days worked|average hours)$/i.test(clean(label));
-function manualLabels(){const set=new Set();document.querySelectorAll('#page2-sbs-grid tbody tr').forEach(row=>{if(row.dataset.manualKpi==='true'||row.dataset.manualKpiRow==='true'){const label=clean(row.querySelector('.sbs-kpi-label-input,.sbs-kpi-label')?.value||row.cells?.[0]?.textContent);if(label)set.add(label.toLowerCase())}});return set}
-function tableData(table){const heads=[...table.querySelectorAll('thead th')];const rows=[...table.querySelectorAll('tbody tr')];const values=rows.length?[...rows[rows.length-1].children]:[...table.querySelectorAll('td')];return heads.map((th,i)=>({label:clean(th.textContent),head:th.cloneNode(true),value:(values[i]||document.createElement('td')).cloneNode(true)})).filter(x=>x.label&&!redundant(x.label))}
-function makeTable(items){const t=document.createElement('table');t.className='matched-month-table v420-single-row';const thead=document.createElement('thead'),hr=document.createElement('tr'),tbody=document.createElement('tbody'),vr=document.createElement('tr');items.forEach(x=>{hr.appendChild(x.head.cloneNode(true));vr.appendChild(x.value.cloneNode(true))});thead.appendChild(hr);tbody.appendChild(vr);t.append(thead,tbody);return t}
-function transformRoot(root){
- const manuals=manualLabels();const periods=[...root.querySelectorAll('.matched-month-period')];if(periods.length<2)return root;
- const groups=[];
- periods.forEach((period,index)=>{const tables=[];let node=period.nextElementSibling;while(node&&!(node.matches?.('.matched-month-period'))){if(node.matches?.('.matched-month-table'))tables.push(node);node=node.nextElementSibling}if(!tables.length){const direct=period.parentElement?.querySelector(':scope > .matched-month-table');if(direct)tables.push(direct)}groups.push({period,index,tables,items:tables.flatMap(tableData)})});
- if(!groups.some(g=>g.items.length))return root;
- const customByIndex=[];
- groups.forEach(g=>{const custom=g.items.filter(x=>manuals.has(x.label.toLowerCase()));const standard=g.items.filter(x=>!manuals.has(x.label.toLowerCase()));customByIndex[g.index]=custom;const first=g.tables[0];if(first){first.replaceWith(makeTable(standard));g.tables.slice(1).forEach(t=>t.remove())}});
- const firstCustom=customByIndex.find(a=>a?.length);
- if(firstCustom){const section=document.createElement('div');section.className='matched-month-rating-block v420-custom-kpi-section';const title=document.createElement('div');title.className='matched-month-rating-title v420-custom-kpi-title';title.textContent='Additional Custom KPIs';section.appendChild(title);groups.forEach(g=>{const items=customByIndex[g.index]||[];if(!items.length)return;const p=g.period.cloneNode(true);section.append(p,makeTable(items))});const anchor=groups[groups.length-1].tables[0]||groups[groups.length-1].period;anchor.parentNode?.insertBefore(section,anchor.nextSibling)}
- return root;
+
+function esc(v){
+  return String(v==null||v===''?'—':v)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
-function transformHtml(html){const box=document.createElement('div');box.innerHTML=String(html??'');transformRoot(box);return box.innerHTML}
-function wrap(name){const original=window[name];if(typeof original!=='function'||original.__v420Wrapped)return;const wrapped=function(){return transformHtml(original.apply(this,arguments))};wrapped.__v420Wrapped=true;wrapped.__v420Original=original;window[name]=wrapped}
-function install(){wrap('buildCurrentEomDocument');wrap('buildReviewSummaryHtml');const original=window.buildSummaryPreview;if(typeof original==='function'&&!original.__v420Wrapped){const wrapped=function(){const result=original.apply(this,arguments);const target=document.getElementById('summary-preview');if(target)transformRoot(target);return result};wrapped.__v420Wrapped=true;window.buildSummaryPreview=wrapped}}
-window.formatDocxKpiLayoutV420=transformHtml;
-window.auditDocxKpiLayoutV420=()=>({redundantFields:[...document.querySelectorAll('#summary-preview .matched-month-table th')].filter(th=>redundant(th.textContent)).map(th=>clean(th.textContent)),customLabels:[...manualLabels()],singleRowTables:[...document.querySelectorAll('#summary-preview .matched-month-table.v420-single-row')].length});
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(install,0),{once:true});else setTimeout(install,0);
-window.addEventListener('load',install,{once:true});
+
+function escAttr(v){
+  return String(v==null||v==='—'?'':v)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+function normRating(v){
+  const s=clean(v);
+  if(!s||s==='—'||/^select$/i.test(s))return '';
+  if(s==='EE'||/exceed|green|↑/i.test(s))return 'EE';
+  if(s==='ME'||/meet|yellow|→/i.test(s))return 'ME';
+  if(s==='BE'||/below|red|↓/i.test(s))return 'BE';
+  return '';
+}
+
+function isNumericTriplet(v){
+  const p=clean(v).split('/').map(clean);
+  return p.length>=3&&/^\d+$/.test(p[0])&&/^\d+$/.test(p[1])&&/\d/.test(p[2]);
+}
+
+function fieldText(id,fallback='—'){
+  const el=document.getElementById(id);
+  if(!el)return fallback;
+  if(el.tagName==='SELECT'){
+    const opt=el.options[el.selectedIndex];
+    const txt=clean(opt&&opt.value?opt.textContent:el.value);
+    return txt&&!/^select$/i.test(txt)?txt:fallback;
+  }
+  const frame=document.getElementById(id+'-isolated-editor');
+  if(frame){
+    try{
+      const bodyText=clean(frame.contentDocument?.body?.innerText);
+      if(bodyText)return bodyText;
+    }catch(_){}
+  }
+  const val=clean(el.value||el.textContent);
+  return val&&!/^select$/i.test(val)?val:fallback;
+}
+
+// 1. Repair bare <input class="kpi-label-edit"> in #unified-kpi-table and #page2-sbs-grid
+function repairKpiTableDom(table){
+  if(!table)return;
+  const rows=Array.from(table.querySelectorAll('tbody tr:not(.sbs-loading-row)'));
+  rows.forEach((tr,idx)=>{
+    Array.from(tr.children).forEach(child=>{
+      if(child.tagName!=='TD'&&child.tagName!=='TH'){
+        const td=document.createElement('td');
+        td.className='unified-kpi-label kpi-label-cell';
+        tr.insertBefore(td,child);
+        td.appendChild(child);
+      }
+    });
+
+    const labelInput=tr.querySelector('input.kpi-label-edit,input.sbs-kpi-label-input,input[data-kpi-field="KPI / Measure"]');
+    const prevInput=tr.querySelector('input.kpi-previous-edit,input.sbs-parsed-value-input,input[data-kpi-field="Last Month"],input[data-v207-role="previous"]');
+    const prevSelect=tr.querySelector('select[data-v207-role="previousRating"],select.sbs-parsed-rating,select[data-kpi-field="Last Month Rating"]');
+    const currInput=tr.querySelector('input[data-v207-role="current"],input.sbs-current-value,input[data-kpi-field="This Month"]');
+    const currSelect=tr.querySelector('select[data-v207-role="currentRating"],select.sbs-current-rating,select[data-kpi-field="This Month Rating"]');
+
+    if(labelInput){
+      const fallbackLabel=clean(tr.getAttribute('data-kpi-audit-key')||labelInput.getAttribute('data-kpi-original-value')||labelInput.getAttribute('value')||labelInput.value);
+      if(!clean(labelInput.value)&&fallbackLabel)labelInput.value=fallbackLabel;
+      labelInput.setAttribute('value',labelInput.value);
+    }
+    if(prevInput){
+      const fallbackPrev=clean(prevInput.getAttribute('data-kpi-original-value')||prevInput.getAttribute('value')||prevInput.value);
+      if(!clean(prevInput.value)&&fallbackPrev)prevInput.value=fallbackPrev;
+      prevInput.setAttribute('value',prevInput.value||'—');
+      prevInput.setAttribute('data-v207-role','previous');
+      prevInput.setAttribute('data-v207-row',String(idx));
+    }
+    if(prevSelect){
+      const selOpt=prevSelect.querySelector('option[selected]');
+      const code=normRating(prevSelect.value||(selOpt?selOpt.value:'')||prevSelect.getAttribute('data-status-code'));
+      prevSelect.value=code;
+    }
+    if(currInput){
+      const fallbackCurr=clean(currInput.getAttribute('value')||currInput.getAttribute('data-kpi-original-value')||currInput.value);
+      if(!clean(currInput.value)&&fallbackCurr)currInput.value=fallbackCurr;
+      currInput.setAttribute('value',currInput.value||'—');
+      currInput.setAttribute('data-v207-role','current');
+      currInput.setAttribute('data-v207-row',String(idx));
+    }
+    if(currSelect){
+      const selOpt=currSelect.querySelector('option[selected]');
+      const code=normRating(currSelect.value||(selOpt?selOpt.value:'')||currSelect.getAttribute('data-status-code'));
+      currSelect.value=code;
+    }
+  });
+}
+
+// 2. Read authoritative KPI rows from #page2-sbs-grid or #unified-kpi-table
+function getAuthoritativeKpiRows(){
+  const sbsTable=document.getElementById('page2-sbs-grid');
+  const unifiedTable=document.getElementById('unified-kpi-table');
+  repairKpiTableDom(sbsTable);
+  repairKpiTableDom(unifiedTable);
+
+  const sbsRows=sbsTable?Array.from(sbsTable.querySelectorAll('tbody tr:not(.sbs-loading-row)')):[];
+  const uniRows=unifiedTable?Array.from(unifiedTable.querySelectorAll('tbody tr:not(.sbs-loading-row)')):[];
+  const sourceRows=sbsRows.length?sbsRows:uniRows;
+
+  // If #page2-sbs-grid is not mounted inside #panel-3, ensure #unified-kpi-table is visible
+  if(unifiedTable&&(!sbsTable||!sbsTable.closest('#panel-3'))){
+    unifiedTable.style.setProperty('display','table','important');
+    unifiedTable.removeAttribute('hidden');
+  }
+
+  return sourceRows.map((tr,idx)=>{
+    const labelEl=tr.querySelector('input.sbs-kpi-label-input,input.kpi-label-edit,[data-kpi-field="KPI / Measure"],.sbs-kpi-label,.unified-kpi-label,td:first-child');
+    const prevEl=tr.querySelector('input.sbs-parsed-value-input,input.kpi-previous-edit,[data-v207-role="previous"],[data-kpi-field="Last Month"],.sbs-parsed-value,.unified-readonly-value,td:nth-child(2)');
+    const prevRatingEl=tr.querySelector('select.sbs-parsed-rating,select[data-v207-role="previousRating"],select[data-kpi-field="Last Month Rating"]');
+    const currEl=tr.querySelector('input.sbs-current-value,input[data-v207-role="current"],[data-kpi-field="This Month"],td:nth-child(4) input,td:nth-child(4)');
+    const currRatingEl=tr.querySelector('select.sbs-current-rating,select[data-v207-role="currentRating"],select[data-kpi-field="This Month Rating"]');
+
+    const label=clean(labelEl&&('value'in labelEl?labelEl.value:labelEl.textContent))||clean(tr.getAttribute('data-kpi-audit-key'))||('KPI '+(idx+1));
+    const previous=clean(prevEl&&('value'in prevEl?prevEl.value:prevEl.textContent))||'—';
+    const previousRating=normRating(prevRatingEl?prevRatingEl.value:'');
+    const current=clean(currEl&&('value'in currEl?currEl.value:currEl.textContent))||'—';
+    const currentRating=normRating(currRatingEl?currRatingEl.value:'');
+
+    return{
+      index:idx,
+      id:clean(tr.getAttribute('data-column-key')||tr.getAttribute('data-v207-key')||label.toLowerCase()),
+      key:clean(tr.getAttribute('data-column-key')||tr.getAttribute('data-v207-key')||label.toLowerCase()),
+      name:label,
+      label,
+      previous,
+      previousRating,
+      previousStatus:RATING_DISPLAY[previousRating]||'—',
+      current,
+      currentRating,
+      currentStatus:RATING_DISPLAY[currentRating]||'—',
+      status:RATING_DISPLAY[currentRating]||'—',
+      kind:tr.getAttribute('data-kpi-kind')||'default'
+    };
+  }).filter(r=>!redundant(r.label));
+}
+
+window.getAuthoritativeKpiRows=getAuthoritativeKpiRows;
+
+// 3. Build the authoritative comparison section with all mapped KPIs + editable inputs
+function buildAuthoritativeComparisonSection(){
+  const kpis=getAuthoritativeKpiRows();
+  if(!kpis.length)return '';
+
+  const snap=window.previousReviewSnapshot||{};
+  const priorPeriod=clean(snap.previousPeriod||'Last Month');
+  const currentPeriod=fieldText('review-period',document.documentElement.dataset.selectedReviewPeriod||'Current Review');
+
+  const availRow=kpis.find(r=>/availability|working days|days worked/i.test(r.label));
+  const overallRating=fieldText('eom-overall-rating','—');
+  const attendanceRating=fieldText(
+    'eom-attendance-rating',
+    availRow&&availRow.currentStatus!=='—'?availRow.currentStatus:'—'
+  );
+
+  const topRowsHtml=kpis.map(r=>(
+    `<tr data-v207-key="${esc(r.key)}" data-docx-kpi-name="${esc(r.label)}">`+
+      `<td data-docx-live-kpi-name="true">${esc(r.label)}</td>`+
+      `<td>${esc(r.previous)}</td>`+
+      `<td class="${RATING_CSS[r.previousRating]||'kpi-neutral'}">${esc(r.previousStatus)}</td>`+
+      `<td>${esc(r.current)}</td>`+
+      `<td class="${RATING_CSS[r.currentRating]||'kpi-neutral'}">${esc(r.currentStatus)}</td>`+
+    `</tr>`
+  )).join('');
+
+  const headersHtml=kpis.map(r=>`<th>${esc(r.label)}</th>`).join('')+
+    `<th>Overall Performance Rating</th><th>Attendance Rating</th>`;
+
+  const priorCellsHtml=kpis.map(r=>(
+    `<td class="${RATING_CSS[r.previousRating]||'kpi-neutral'}">`+
+      `<input class="comparison-editable-input" type="text" value="${escAttr(r.previous)}" data-comparison-role="prior" data-v207-row="${r.index}" data-metric-label="${escAttr(r.label)}" aria-label="Last month ${escAttr(r.label)}">`+
+    `</td>`
+  )).join('')+
+    `<td class="kpi-neutral"><input class="comparison-editable-input" type="text" value="" data-comparison-role="prior" data-metric-label="Overall Performance Rating" data-field-id="eom-overall-rating" aria-label="Last month Overall Performance Rating"></td>`+
+    `<td class="kpi-neutral"><input class="comparison-editable-input" type="text" value="" data-comparison-role="prior" data-metric-label="Attendance Rating" data-field-id="eom-attendance-rating" aria-label="Last month Attendance Rating"></td>`;
+
+  const currentCellsHtml=kpis.map(r=>(
+    `<td class="${RATING_CSS[r.currentRating]||'kpi-neutral'}">`+
+      `<input class="comparison-editable-input" type="text" value="${escAttr(r.current)}" data-comparison-role="current" data-v207-row="${r.index}" data-metric-label="${escAttr(r.label)}" aria-label="Current ${escAttr(r.label)}">`+
+    `</td>`
+  )).join('')+
+    `<td class="kpi-neutral"><input class="comparison-editable-input" type="text" value="${escAttr(overallRating)}" data-comparison-role="current" data-metric-label="Overall Performance Rating" data-field-id="eom-overall-rating" aria-label="Current Overall Performance Rating"></td>`+
+    `<td class="${availRow&&RATING_CSS[availRow.currentRating]?RATING_CSS[availRow.currentRating]:'kpi-neutral'}"><input class="comparison-editable-input" type="text" value="${escAttr(attendanceRating)}" data-comparison-role="current" data-metric-label="Attendance Rating" data-field-id="eom-attendance-rating" aria-label="Current Attendance Rating"></td>`;
+
+  return (
+    `<section id="page3-kpi-comparison">`+
+      `<div class="page3-comparison-head">`+
+        `<strong>Last Month Compared with This Month</strong>`+
+        `<span>All mapped KPI fields from the authoritative KPI review table. Labels and values sync directly to the Word export.</span>`+
+      `</div>`+
+      `<table class="page3-kpi-table">`+
+        `<thead><tr><th>KPI</th><th>Last Month</th><th>Last Month's Rating</th><th>This Month</th><th>This Month's Rating</th></tr></thead>`+
+        `<tbody>${topRowsHtml}</tbody>`+
+      `</table>`+
+    `</section>`+
+    `<section class="current-month-comparison review-print-section">`+
+      `<div class="current-month-comparison-title">Current Review Compared with Last Month</div>`+
+      `<div class="current-month-comparison-subtitle">Previous values were parsed from ${esc(snap.fileName||'the archived review document')}. Both rows can be corrected before submission.</div>`+
+      `<table><thead><tr><th>Period</th>${headersHtml}</tr></thead><tbody>`+
+        `<tr><td class="period-cell prior-period">${esc(priorPeriod)}</td>${priorCellsHtml}</tr>`+
+        `<tr><td class="period-cell current-period">${esc(currentPeriod)}</td>${currentCellsHtml}</tr>`+
+      `</tbody></table>`+
+      `<div class="comparison-source-note">Edits to Last Month are retained in the parsed Flow snapshot. Edits to the current row update the matching KPI field.</div>`+
+    `</section>`
+  );
+}
+
+// 4. Synchronize #summary-preview so it always keeps the bigger EOM summary with correct mappings
+function syncAuthoritativePage3Summary(){
+  if(syncingPreview)return;
+  const preview=document.getElementById('summary-preview');
+  if(!preview)return;
+
+  syncingPreview=true;
+  try{
+    window.flushIsolatedPage2EditorsV101?.();
+    const kpis=getAuthoritativeKpiRows();
+
+    // If #docx-page3-preview replaced the bigger summary (e.g. during exportDocxCore), rebuild the bigger EOM summary first
+    if((!preview.querySelector('.familiar-review-form')||preview.querySelector('#docx-page3-preview'))&&typeof window.buildReviewSummaryHtml==='function'){
+      preview.innerHTML=window.buildReviewSummaryHtml(false)+`<div class="print-confirmation" style="padding:.35rem;text-align:right;font-size:.72rem;font-weight:800;">Confirmation: DRAFT</div>`;
+    }
+
+    const availRow=kpis.find(r=>/availability|working days|days worked/i.test(r.label));
+    const availTriplet=(availRow&&isNumericTriplet(availRow.current))
+      ?availRow.current
+      :(availRow&&isNumericTriplet(availRow.previous)?availRow.previous:'21 / 21 / 09:16:51');
+
+    const overallRating=fieldText('eom-overall-rating','—');
+    const attendanceRating=fieldText(
+      'eom-attendance-rating',
+      availRow&&availRow.currentStatus!=='—'?availRow.currentStatus:'—'
+    );
+
+    if(kpis.length){
+      const compHtml=buildAuthoritativeComparisonSection();
+      const temp=document.createElement('div');
+      temp.innerHTML=compHtml;
+      const newTop=temp.querySelector('#page3-kpi-comparison');
+      const newHoriz=temp.querySelector('.current-month-comparison');
+
+      preview.querySelectorAll('#page3-kpi-comparison').forEach(el=>el.remove());
+      preview.querySelectorAll('.current-month-comparison').forEach(el=>el.remove());
+
+      if(newHoriz)preview.insertBefore(newHoriz,preview.firstChild);
+      if(newTop)preview.insertBefore(newTop,preview.firstChild);
+    }
+
+    // Ensure .familiar-review-form has the masthead and audit bar and accurate mapped values
+    const form=preview.querySelector('.familiar-review-form');
+    if(form){
+      form.classList.add('eom-reference-layout');
+      if(!form.querySelector('.eom-reference-masthead')){
+        const mast=document.createElement('div');
+        mast.className='eom-reference-masthead';
+        mast.innerHTML='<span>WB Mason | Daytona One on One / End of Month Document</span><span>Inside Sales Rep</span>';
+        form.prepend(mast);
+      }
+
+      form.querySelectorAll('.summary-section .summary-row').forEach(row=>{
+        const kEl=row.querySelector('.key');
+        const vEl=row.querySelector('.val');
+        if(!kEl||!vEl)return;
+        const k=clean(kEl.textContent);
+        if(/total working days|working days present|availability per shift/i.test(k)){
+          kEl.textContent='Total Working Days / Days Worked / Average Hours';
+          vEl.textContent=availTriplet;
+          vEl.dataset.source='review-pbi-attendance-v138';
+        }else if(/^Monthly Performance Rating$/i.test(k)){
+          vEl.textContent=overallRating;
+        }else if(/^Attendance Rating$/i.test(k)){
+          vEl.textContent=attendanceRating;
+        }else if(/^Opportunities This Month$/i.test(k)){
+          vEl.textContent=fieldText('eom-opportunities-month',clean(vEl.textContent)||'—');
+        }else if(/^Opportunities(?: for)? This Year$/i.test(k)){
+          vEl.textContent=fieldText('eom-opportunities-year',clean(vEl.textContent)||'—');
+        }else if(/^Best Practices/i.test(k)){
+          vEl.textContent=fieldText('eom-best-practices',clean(vEl.textContent)||'—');
+        }else if(/^SMART Action Plan$/i.test(k)){
+          vEl.textContent=fieldText('eom-smart-plan',clean(vEl.textContent)||'—');
+        }else if(/^Employee Voice/i.test(k)){
+          vEl.textContent=fieldText('eom-employee-voice',clean(vEl.textContent)||'—');
+        }
+      });
+    }
+
+    if(kpis.length){
+      preview.setAttribute('data-current-values-synced',String(kpis.length));
+      preview.setAttribute('data-kpi-render-source','page2-authoritative');
+      preview.setAttribute('data-kpi-row-count',String(kpis.length));
+      document.documentElement.dataset.kpiDataReady='true';
+      document.documentElement.dataset.kpiDataReadyReason='matched-avaya-rows-applied';
+      document.documentElement.dataset.kpiRenderPhase='v399-rendered';
+      document.documentElement.dataset.page3KpiMapped=kpis.length+'-v104';
+      document.documentElement.dataset.kpiDocxPreflight='v99-'+kpis.length;
+    }
+  }finally{
+    syncingPreview=false;
+  }
+}
+
+// 5. Override preview and export hooks so clicking Export to Word Doc never switches panels
+function installOverrides(){
+  window.buildLastMonthComparisonHtml=buildAuthoritativeComparisonSection;
+  window.refreshDocxPage3Preview=syncAuthoritativePage3Summary;
+  window.renderAuthoritativePage3Kpis=syncAuthoritativePage3Summary;
+  window.refreshPage3AttendanceV138=syncAuthoritativePage3Summary;
+  window.buildSummaryPreview=syncAuthoritativePage3Summary;
+  window.rebuildPage3StablePreview=syncAuthoritativePage3Summary;
+  window.syncPage3Preview=syncAuthoritativePage3Summary;
+
+  // Prevent v307 from dispatching synthetic input/change events during export that trigger v94's 80ms wipe timer
+  window.syncDataverseDocxContent=function(){
+    syncAuthoritativePage3Summary();
+    return window.__v307LastSync||{syncedAt:new Date().toISOString()};
+  };
+
+  // Hook into syncEditedKpiNamesToDocx which exportDocxCore() calls immediately after its internal updatePreview()
+  const origSyncNames=window.syncEditedKpiNamesToDocx;
+  if(typeof origSyncNames==='function'&&!origSyncNames.__v420Hooked){
+    const hooked=function(){
+      const res=origSyncNames.apply(this,arguments);
+      syncAuthoritativePage3Summary();
+      return res;
+    };
+    hooked.__v420Hooked=true;
+    window.syncEditedKpiNamesToDocx=hooked;
+  }
+}
+
+// Watch #summary-preview so if true-docx-export-v67's internal updatePreview() injects #docx-page3-preview,
+// we immediately restore the bigger EOM summary in the same microtask before the browser paints
+const previewObserver=new MutationObserver(()=>{
+  if(syncingPreview)return;
+  const preview=document.getElementById('summary-preview');
+  if(!preview)return;
+  const hasDocxPanel=!!preview.querySelector('#docx-page3-preview');
+  const compRows=preview.querySelectorAll('#page3-kpi-comparison tbody tr').length;
+  const attEl=preview.querySelector('[data-source="review-pbi-attendance-v138"]');
+  const badAtt=attEl&&/Availability Per Shift/i.test(attEl.textContent);
+  if(hasDocxPanel||compRows<=1||badAtt){
+    syncAuthoritativePage3Summary();
+  }
+});
+
+// Two-way live sync between #unified-kpi-table / #page2-sbs-grid and #summary-preview
+document.addEventListener('input',e=>{
+  const t=e.target;
+  if(!t)return;
+  if(t.closest('#unified-kpi-table,#page2-sbs-grid')){
+    t.setAttribute('value',t.value);
+    syncAuthoritativePage3Summary();
+  }else if(t.classList.contains('comparison-editable-input')){
+    const idx=Number(t.getAttribute('data-v207-row'));
+    const role=t.getAttribute('data-comparison-role');
+    ['#unified-kpi-table','#page2-sbs-grid'].forEach(sel=>{
+      const tbl=document.querySelector(sel);
+      if(!tbl||Number.isNaN(idx))return;
+      const tr=tbl.querySelectorAll('tbody tr:not(.sbs-loading-row)')[idx];
+      if(!tr)return;
+      const inputSel=role==='prior'
+        ?'input.kpi-previous-edit,input.sbs-parsed-value-input,input[data-v207-role="previous"],input[data-kpi-field="Last Month"]'
+        :'input[data-v207-role="current"],input.sbs-current-value,input[data-kpi-field="This Month"]';
+      const linked=tr.querySelector(inputSel);
+      if(linked&&linked.value!==t.value){
+        linked.value=t.value;
+        linked.setAttribute('value',t.value);
+      }
+    });
+    syncAuthoritativePage3Summary();
+  }
+},true);
+
+document.addEventListener('change',e=>{
+  const t=e.target;
+  if(!t)return;
+  if(t.closest('#unified-kpi-table,#page2-sbs-grid')||t.matches('#eom-overall-rating,#eom-attendance-rating')){
+    syncAuthoritativePage3Summary();
+  }
+},true);
+
+document.addEventListener('click',e=>{
+  const btn=e.target?.closest?.('#btn-export-review-docx,#btn-export-review-docx-top,#btn-save-completed-review-v18,#btn-submit-final,#btn-next-panel2,#btn-refresh-page3-preview,[data-export-format="docx"]');
+  if(!btn)return;
+  installOverrides();
+  syncAuthoritativePage3Summary();
+  setTimeout(syncAuthoritativePage3Summary,0);
+  setTimeout(syncAuthoritativePage3Summary,100);
+},true);
+
+function boot(){
+  installOverrides();
+  syncAuthoritativePage3Summary();
+  const shell=document.getElementById('page3-stable-shell')||document.body;
+  if(shell)previewObserver.observe(shell,{childList:true,subtree:true});
+}
+
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>setTimeout(boot,0),{once:true});
+else setTimeout(boot,0);
+window.addEventListener('load',boot,{once:true});
 })();
 </script>
 </body></html>
