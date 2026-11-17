@@ -2323,35 +2323,42 @@ function renderCalendar(){
       const isToday = ds === today();
       const allDayRecords = calendarRecords(byDate[ds] || []);
 
-      const getSortPriority = (r) => {
-        const t = canonicalRecordType(r);
-        if (t === "Misc/Note") return 1;
-        if (t === "Night Shift Manager") return 2;
-        if (t === "PTO") return 3; // Keep PTO directly beneath notes
-        return 4;
-      };
-
       // Pull Global Events out so they can be injected into the header
       const globalEvents = allDayRecords.filter(r => canonicalRecordType(r) === "Global Event" && !r.cancelled);
 
-      // Sort priority items to the top, then chronologically ascending so older requests stay high
-      const uniqueDayRecs = allDayRecords
-        .filter(r => r.type !== "Present" && r.type !== "LOA" && r.type !== "Global Event")
+      // Deduplicate LOA per employee for the day, then include in the main chronological flow
+      const seenLoaEmps = new Set();
+      const filteredDayRecs = allDayRecords.filter(r => {
+        const t = canonicalRecordType(r);
+        if (t === "Present" || t === "Global Event") return false;
+        if (t === "LOA") {
+          if (r.cancelled || seenLoaEmps.has(r.empId)) return false;
+          seenLoaEmps.add(r.empId);
+        }
+        return true;
+      });
+
+      // 1. Night Shift Manager (Locked to top, sorted oldest to newest)
+      const nightMgrRecs = filteredDayRecs
+        .filter(r => canonicalRecordType(r) === "Night Shift Manager")
+        .sort((a,b) => getRecordTimestamp(a) - getRecordTimestamp(b));
+
+      // 2. Make up Time request cards + everything else except LOA (sorted oldest to newest)
+      const otherDayRecs = filteredDayRecs
+        .filter(r => {
+          const t = canonicalRecordType(r);
+          return t !== "Night Shift Manager" && t !== "LOA";
+        })
         .sort((a,b) => {
-          const pA = getSortPriority(a);
-          const pB = getSortPriority(b);
-          if (pA !== pB) return pA - pB;
+          const tA = canonicalRecordType(a) === "Make up Time" ? 1 : 2;
+          const tB = canonicalRecordType(b) === "Make up Time" ? 1 : 2;
+          if (tA !== tB) return tA - tB;
           return getRecordTimestamp(a) - getRecordTimestamp(b);
         });
 
-      const seenLoaEmps = new Set();
-      const loaRecs = allDayRecords
-        .filter(r => canonicalRecordType(r) === "LOA" && !r.cancelled)
-        .filter(r => {
-          if (seenLoaEmps.has(r.empId)) return false;
-          seenLoaEmps.add(r.empId);
-          return true;
-        })
+      // 3. LOA (Locked to the very bottom)
+      const loaRecs = filteredDayRecs
+        .filter(r => canonicalRecordType(r) === "LOA")
         .sort((a,b) => (emp(a.empId)?.name || "").localeCompare(emp(b.empId)?.name || ""));
 
       const dayMus = muByDate[ds] || [];
@@ -2382,13 +2389,29 @@ function renderCalendar(){
         </div>`;
       }).join("");
 
-      const recCardsHtml = uniqueDayRecs.map(r => {
+      const buildRecCard = r => {
         const e = emp(r.empId) || {name: r.empId};
         const type = canonicalRecordType(r);
-        const shiftDisplay = type === "Misc/Note" ? (r.wfNotes || r.notes || "No note attached") : extractShiftHours(r);
         const subTime = formatSubmittedTime(r.submittedOn || r.createdon);
         const subClock = formatSubmittedClock(r.submittedOn || r.createdon);
-        const isMuCompleted = canonicalRecordType(r) === "Make up Time" && r.completed;
+
+        // Render LOA style card in its proper chronological spot
+        if (type === "LOA") {
+          const noteText = r.notes || r.wfNotes || "Leave of Absence";
+          return `<div class="cal-card loa-card" draggable="true" data-drag-kind="record" data-drag-id="${esc(r.rid)}" data-drag-date="${esc(ds)}" data-rec="${esc(r.rid)}" title="Drag to move this request, or click to view LOA details">
+            <div class="row" style="justify-content:space-between; align-items:flex-start; gap:6px;">
+              <span class="cal-card-name" style="color:var(--indigo);">${esc(e.name)}</span>
+              <span class="badge" style="background:var(--indigo); color:#fff; font-size:9.5px; padding:1px 5px;">LOA</span>
+            </div>
+            <div class="cal-card-time" style="font-size:11.5px; color:var(--muted); display:flex; justify-content:space-between; align-items:flex-end;">
+              <span style="flex:1;">${esc(noteText)}</span>
+              ${subTime ? `<span style="font-size:10px; font-weight:600; white-space:nowrap; margin-left:6px;">Sub: ${esc(subTime)}</span>` : ""}
+            </div>
+          </div>`;
+        }
+
+        const shiftDisplay = type === "Misc/Note" ? (r.wfNotes || r.notes || "No note attached") : extractShiftHours(r);
+        const isMuCompleted = type === "Make up Time" && r.completed;
         
         // Check if it's pending (Not approved/denied, not a manual entry, not a Call Out)
         const isPending = !String(r.managerApproval||"").toLowerCase().includes("approve") && !String(r.managerApproval||"").toLowerCase().includes("denied") && !String(r.managerApproval||"").toLowerCase().includes("reject") && !String(r.requestId||"").toUpperCase().startsWith("M") && type !== "Call Out";
@@ -2417,13 +2440,18 @@ function renderCalendar(){
         } else if (type === "Night Shift Manager") {
           extraClass = "night-mgr-card";
           nameStyle = "color: var(--ink); font-weight: 750;";
-          pillHtml = `<span class="badge" style="background:#475569; color:#fff; font-size:9.5px; padding:2px 5px;"><i class="fa-solid fa-moon"></i> Night Mgr</span>`;
+          pillHtml = `<span class="badge" style="background:#475569; color:#fff; font-size:9.5px; padding:2px 5px;">Night Mgr</span>`;
         }
+
+        const nightMoonBadge = type === "Night Shift Manager" ? `<span style="display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:50%; background:#e0e7ff; color:#4f46e5; font-size:10px;" title="Night Shift Manager"><i class="fa-solid fa-moon"></i></span>` : "";
 
         return `<div class="cal-card ${r.cancelled ? 'cancelled' : ''} ${extraClass}" draggable="true" data-drag-kind="record" data-drag-id="${esc(r.rid)}" data-drag-date="${esc(ds)}" data-rec="${esc(r.rid)}" style="${isPending ? 'opacity: 0.65;' : ''}" title="Drag to move this request, or click to view or edit details">
           <div class="row" style="justify-content:space-between; align-items:flex-start; gap:6px;">
             <span class="cal-card-name" style="${nameStyle}">${esc(e.name)}</span>
-            ${topBadges ? `<span style="display:flex; gap:3px;">${topBadges}</span>` : ""}
+            <span style="display:flex; align-items:center; gap:4px; margin-left:auto;">
+              ${nightMoonBadge}
+              ${topBadges ? `<span style="display:flex; gap:3px;">${topBadges}</span>` : ""}
+            </span>
           </div>
           <div class="cal-card-time">${esc(shiftDisplay)}</div>
           <div class="cal-card-badges" style="align-items:flex-end;">
@@ -2434,26 +2462,13 @@ function renderCalendar(){
             ${subTime ? `<div style="text-align:right; font-size:9.5px; color:var(--muted); font-weight:650; line-height:1.2;"><div>Sub: ${esc(subTime)}</div><div>${esc(subClock)}</div></div>` : ""}
           </div>
         </div>`;
-      }).join("");
+      };
 
-      const loaCardsHtml = loaRecs.map(r => {
-        const e = emp(r.empId) || {name: r.empId};
-        const noteText = r.notes || r.wfNotes || "Leave of Absence";
-        const subTime = formatSubmittedTime(r.submittedOn || r.createdon);
+      const nightMgrHtml = nightMgrRecs.map(buildRecCard).join("");
+      const otherRecsHtml = otherDayRecs.map(buildRecCard).join("");
+      const loaHtml = loaRecs.map(buildRecCard).join("");
 
-        return `<div class="cal-card loa-card" draggable="true" data-drag-kind="record" data-drag-id="${esc(r.rid)}" data-drag-date="${esc(ds)}" data-rec="${esc(r.rid)}" title="Drag to move this request, or click to view LOA details">
-          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:6px;">
-            <span class="cal-card-name" style="color:var(--indigo);">${esc(e.name)}</span>
-            <span class="badge" style="background:var(--indigo); color:#fff; font-size:9.5px; padding:1px 5px;">LOA</span>
-          </div>
-          <div class="cal-card-time" style="font-size:11.5px; color:var(--muted); display:flex; justify-content:space-between; align-items:flex-end;">
-            <span style="flex:1;">${esc(noteText)}</span>
-            ${subTime ? `<span style="font-size:10px; font-weight:600; white-space:nowrap; margin-left:6px;">Sub: ${esc(subTime)}</span>` : ""}
-          </div>
-        </div>`;
-      }).join("");
-
-      const totalItems = uniqueDayRecs.length + dayMus.length + loaRecs.length;
+      const totalItems = filteredDayRecs.length + dayMus.length;
       const hasEntries = totalItems > 0;
 
       // Tucked-in compact version for the top row
@@ -2474,7 +2489,7 @@ function renderCalendar(){
           </div>
         </div>
         <div class="col-day-body" data-calendar-drop-date="${esc(ds)}" aria-label="Drop calendar cards on ${esc(fmt(ds))}">
-          ${hasEntries ? `${muCardsHtml}${recCardsHtml}${loaCardsHtml}` : `<div class="empty" style="padding:24px 6px; font-size:12px;">No requests</div>`}
+          ${hasEntries ? `${nightMgrHtml}${muCardsHtml}${otherRecsHtml}${loaHtml}` : `<div class="empty" style="padding:24px 6px; font-size:12px;">No requests</div>`}
         </div>
       </div>`;
     }).join("");
