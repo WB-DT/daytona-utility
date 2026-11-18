@@ -8301,6 +8301,22 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
             isAccountGuidResolving = true;
             accountGuidResolutionRecordId = resolutionRecordId;
             window.clearD365AltAddresses('Loading alternate addresses...');
+            // Capture the selected parent record and email state before the asynchronous D365 lookup begins.
+            // This prevents a late D365 response from overwriting the dataset email, a rep-entered email,
+            // or the email belonging to an account selected while the lookup was still running.
+            const selectedRecordAtD365Start = currentSelectedRecord;
+            const datasetEmailAtD365Start = String(
+                selectedRecordAtD365Start?.cr714_emailmost ||
+                selectedRecordAtD365Start?.cr714_emaillatest ||
+                selectedRecordAtD365Start?.cr714_email_latest ||
+                ''
+            ).trim();
+            const emailInputAtD365Start = document.getElementById('contact-email-most');
+            const emailValueAtD365Start = String(emailInputAtD365Start?.value || '').trim();
+            if (emailInputAtD365Start && datasetEmailAtD365Start) {
+                emailInputAtD365Start.value = datasetEmailAtD365Start;
+                selectedRecordAtD365Start.cr714_resolvedemailsource = 'Dataset';
+            }
             const d365Acct = await window.fetchD365Account(id);
             if (!d365Acct) window.clearD365AltAddresses('No matching D365 account was found.');
             if (d365Acct) {
@@ -8313,15 +8329,40 @@ const selectedTemplate = document.getElementById('email-template-dropdown')?.val
                 
                 let newName = pc.fullname || d365Acct.name;
                 let newPhone = window.formatPhone(pc.telephone1 || d365Acct.telephone1);
-                const datasetEmail = String(currentSelectedRecord.cr714_emailmost || currentSelectedRecord.cr714_emaillatest || currentSelectedRecord.cr714_email_latest || '').trim();
+                const datasetEmail = String(
+                    selectedRecordAtD365Start?.cr714_emailmost ||
+                    selectedRecordAtD365Start?.cr714_emaillatest ||
+                    selectedRecordAtD365Start?.cr714_email_latest ||
+                    ''
+                ).trim();
                 const dynamicsEmail = String(pc.emailaddress1 || d365Acct.emailaddress1 || '').trim();
-                const newEmail = datasetEmail || dynamicsEmail;
-                currentSelectedRecord.cr714_resolvedemailsource = datasetEmail ? 'Dataset' : (dynamicsEmail ? 'Dynamics' : 'Blank');
+                const emailInput = document.getElementById('contact-email-most');
+                const selectionStillCurrent = (
+                    resolutionSequence === accountGuidResolutionSequence &&
+                    String(currentRecordId) === resolutionRecordId &&
+                    currentSelectedRecord === selectedRecordAtD365Start
+                );
                 
-                if (newName && newName !== currentSelectedRecord.cr714_namemost) setVal('contact-name-most', newName);
-                if (newPhone && newPhone !== currentSelectedRecord.cr714_primaryphone) setVal('contact-phone-primary', newPhone);
-                // Parent dataset email wins; Dynamics fills only when all parent dataset email fields are blank.
-                setVal('contact-email-most', newEmail);
+                if (selectionStillCurrent) {
+                    if (newName && newName !== selectedRecordAtD365Start.cr714_namemost) setVal('contact-name-most', newName);
+                    if (newPhone && newPhone !== selectedRecordAtD365Start.cr714_primaryphone) setVal('contact-phone-primary', newPhone);
+
+                    // The parent dataset always wins. D365 may fill the field only when all parent
+                    // dataset email columns are blank and the rep has not typed a value while D365 loaded.
+                    if (datasetEmail) {
+                        if (emailInput) emailInput.value = datasetEmail;
+                        selectedRecordAtD365Start.cr714_resolvedemailsource = 'Dataset';
+                    } else {
+                        const currentInputEmail = String(emailInput?.value || '').trim();
+                        const repChangedEmailWhileLoading = currentInputEmail !== emailValueAtD365Start;
+                        if (!repChangedEmailWhileLoading && !currentInputEmail && dynamicsEmail) {
+                            emailInput.value = dynamicsEmail;
+                            selectedRecordAtD365Start.cr714_resolvedemailsource = 'Dynamics';
+                        } else {
+                            selectedRecordAtD365Start.cr714_resolvedemailsource = currentInputEmail ? 'Manual' : 'Blank';
+                        }
+                    }
+                }
                 
                 let d365Addr = [d365Acct.address1_line1, d365Acct.address1_city, d365Acct.address1_stateorprovince].filter(Boolean).join(', ');
                 document.getElementById('d365-address-display').innerText = d365Addr || currentSelectedRecord.cr714_billingaddress || '--';
@@ -8495,7 +8536,7 @@ window.populateForm = function(rec) {
         
         setVal('contact-name-most', rec.cr714_namemost || rec.cr714_namelatest); 
         setVal('contact-phone-primary', window.formatPhone(rec.cr714_primaryphone || rec.cr714_phone)); 
-        setVal('contact-email-most', rec.cr714_emailmost || rec.cr714_emaillatest); 
+        setVal('contact-email-most', rec.cr714_emailmost || rec.cr714_emaillatest || rec.cr714_email_latest); 
         setVal('last-order-date', rec.cr714_lastorderdate || '--');
         
         const alertContainer = document.getElementById('in-form-alerts'); 
@@ -15223,5 +15264,19 @@ img,svg,canvas,video,iframe,table{max-width:100%}
 #global-loader .ma-detail-grid b+span{display:block!important;margin:0!important;white-space:normal!important;overflow-wrap:anywhere!important}
 @media(max-width:700px){#global-loader .ma-response-card{grid-template-columns:1fr!important;gap:5px!important}#global-loader .ma-secure-pill{white-space:nowrap!important}}
 </style>
+<script id="act-break-resume-workspace">
+(function(){
+ const KEY='act.workspace.snapshot.v1',MAX_AGE=12*60*60*1000,BREAK_MS=5*60*1000;let hiddenAt=0,promptOpen=false;const $=id=>document.getElementById(id);
+ const read=()=>{try{return JSON.parse(sessionStorage.getItem(KEY)||'null')}catch(_){return null}};
+ const save=()=>{try{const filters={};document.querySelectorAll('input[id^="filter-"][type="checkbox"]').forEach(el=>filters[el.id]=!!el.checked);const actions=[...document.querySelectorAll('.filter-action-chk:checked')].map(el=>el.value),list=$('record-gallery-list'),snapshot={savedAt:Date.now(),accountId:String(window.currentRecordId||''),search:$('search-bar')?.value||'',sort:$('sort-dropdown')?.value||'company-asc',filters,actions,galleryScroll:list?.scrollTop||0};sessionStorage.setItem(KEY,JSON.stringify(snapshot));window.__actWorkspaceSnapshot=snapshot;return snapshot}catch(error){console.warn('ACT workspace snapshot failed',error);return null}};
+ const wait=async()=>{for(let i=0;i<80;i++){if(typeof window.filterAndSortGallery==='function'&&$('record-gallery-list'))return true;await new Promise(r=>setTimeout(r,100))}return false};
+ const apply=async snapshot=>{if(!snapshot)return false;await wait();if($('search-bar'))$('search-bar').value=snapshot.search||'';if($('sort-dropdown'))$('sort-dropdown').value=snapshot.sort||'company-asc';Object.entries(snapshot.filters||{}).forEach(([id,v])=>{const el=$(id);if(el)el.checked=!!v});document.querySelectorAll('.filter-action-chk').forEach(el=>el.checked=(snapshot.actions||[]).includes(el.value));window.filterAndSortGallery(false);if(snapshot.accountId&&typeof window.selectRecord==='function')window.selectRecord(snapshot.accountId);requestAnimationFrame(()=>{const list=$('record-gallery-list');if(list)list.scrollTop=Number(snapshot.galleryScroll)||0});return true};
+ const fresh=async()=>{await wait();try{window.clearAllFilters?.()}catch(_){}if($('search-bar'))$('search-bar').value='';if($('sort-dropdown'))$('sort-dropdown').value='company-asc';document.querySelectorAll('input[id^="filter-"][type="checkbox"],.filter-action-chk').forEach(el=>el.checked=false);try{currentRecordId=null;currentSelectedRecord=null;window.currentRecordId=null;window.currentSelectedRecord=null}catch(_){}document.querySelectorAll('.gallery-item.is-selected,.gallery-item.selected').forEach(el=>el.classList.remove('is-selected','selected'));window.filterAndSortGallery(false);const list=$('record-gallery-list');if(list)list.scrollTop=0;sessionStorage.removeItem(KEY)};
+ const close=()=>{$('act-resume-modal')?.remove();promptOpen=false};
+ const show=async snapshot=>{if(promptOpen||!snapshot||Date.now()-snapshot.savedAt>MAX_AGE)return false;promptOpen=true;const modal=document.createElement('div');modal.id='act-resume-modal';modal.setAttribute('role','dialog');modal.setAttribute('aria-modal','true');modal.style.cssText='position:fixed;z-index:2147483000;inset:0;background:rgba(2,6,23,.78);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;padding:20px;font-family:Arial,sans-serif';const when=new Date(snapshot.savedAt).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}),count=Object.values(snapshot.filters||{}).filter(Boolean).length+(snapshot.actions||[]).length;modal.innerHTML=`<div style="width:min(580px,100%);background:#fff;color:#0f172a;border-radius:22px;padding:30px;box-shadow:0 28px 90px rgba(0,0,0,.42);border:2px solid #38bdf8"><div style="font-size:13px;font-weight:900;letter-spacing:.12em;text-transform:uppercase;color:#0369a1">Welcome back</div><h2 style="margin:8px 0 10px;font-size:30px">Continue where you left off?</h2><p style="color:#475569;line-height:1.55">ACT saved your workspace at <strong>${when}</strong>. Continue restores the selected account, search, sort, filters, Action Target selections, and gallery position.</p><div style="background:#f1f5f9;border-radius:12px;padding:12px 14px;margin-bottom:22px"><strong>Saved account:</strong> ${snapshot.accountId||'None'}<br><strong>Active filters:</strong> ${count}<br><strong>Search:</strong> ${snapshot.search||'None'}</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><button id="act-resume-continue" type="button" style="min-height:52px;border:0;border-radius:12px;background:#0284c7;color:#fff;font-weight:900">Continue where I left off</button><button id="act-resume-fresh" type="button" style="min-height:52px;border:2px solid #cbd5e1;border-radius:12px;background:#fff;color:#334155;font-weight:800">Start fresh</button></div></div>`;document.body.appendChild(modal);$('act-resume-continue').onclick=async()=>{await apply(snapshot);close()};$('act-resume-fresh').onclick=async()=>{await fresh();close()};$('act-resume-continue').focus();return true};
+ window.ACTWorkspaceResume={save,read,apply,fresh,show,clear:()=>sessionStorage.removeItem(KEY)};
+ document.addEventListener('visibilitychange',()=>{if(document.hidden){hiddenAt=Date.now();save()}else if(hiddenAt&&Date.now()-hiddenAt>=BREAK_MS){show(read());hiddenAt=0}});window.addEventListener('pagehide',save);window.addEventListener('beforeunload',save);window.addEventListener('pageshow',e=>{const x=read();if(e.persisted&&x)show(x)});document.addEventListener('DOMContentLoaded',()=>{const x=read();if(x&&Date.now()-x.savedAt<=MAX_AGE)setTimeout(()=>show(x),1200)},{once:true});
+})();
+</script>
 </body>
 </html>
