@@ -204,7 +204,7 @@ const timeout=(promise,ms=15000)=>Promise.race([Promise.resolve(promise),new Pro
 const status=(m,k='info')=>{const n=$('#sbs-status');if(n){n.textContent=m;n.dataset.kind=k;n.hidden=false}};
 function ensureSinglePreview(){const shell=$('#page3-stable-shell'),keep=shell?.querySelector(':scope > #summary-preview');if(!shell||!keep)return false;document.querySelectorAll('#panel-3 #summary-preview').forEach(n=>{if(n!==keep)n.remove()});keep.querySelectorAll(':scope > .print-confirmation').forEach(n=>n.remove());return true}
 async function refresh(){if(busy)return{ok:false,reason:'busy'};setBusy(true,'refresh');status('Refreshing KPI data...');try{const engine=window.loadPage2CurrentMonthV399;if(typeof engine!=='function')throw new Error('KPI data engine unavailable.');const r=await timeout(engine('v520-unified-refresh',true),15000);if(!r?.ok)throw new Error('KPI refresh failed: '+(r?.reason||'unknown'));window.applyKpiModeV456?.('v520-refresh');window.dispatchEvent(new CustomEvent('kpi-refresh-complete',{detail:r}));status('KPI data refreshed.','success');return r}catch(e){status(e.message,'error');window.refreshErrorLogV506?.add?.(e,'KPI refresh');console.error('[v520 KPI refresh]',e);return{ok:false,reason:e.code||e.message,error:e}}finally{setBusy(false)}}
-async function action(id,target){if(id==='sbs-refresh')return refresh();if(busy)return{ok:false,reason:'busy'};setBusy(true,id);try{const r=window.__v415KpiRenderer;if(id==='sbs-add-manual-row')return r?.addManual?.();if(id==='sbs-aggregation-mode')return window.KpiRuntimeAuthorityV52416?.toggle?.()||window.__v416Aggregation?.toggle?.();if(id==='sbs-restore-rows')return window.KpiRuntimeAuthorityV52416?.restoreRows?.()||r?.restoreRows?.();if(id==='sbs-export-diagnostic')return window.exportKpiDiagnosticV506?.()||window.KpiTableApi?.exportDiagnostic?.();if(target?.closest?.('.sbs-remove-row'))return window.KpiRuntimeAuthorityV52416?.removeRow?.(target.closest('tr'))||r?.removeRow?.(target.closest('tr'));}finally{setBusy(false)}}
+async function action(id,target){if(id==='sbs-refresh')return refresh();if(busy)return{ok:false,reason:'busy'};setBusy(true,id);try{const r=window.__v415KpiRenderer;if(id==='sbs-add-manual-row')return r?.addManual?.();if(id==='sbs-aggregation-mode')return window.KpiRuntimeAuthorityV52417?.toggle?.()||window.__v416Aggregation?.toggle?.();if(id==='sbs-restore-rows')return window.KpiRuntimeAuthorityV52417?.restoreRows?.()||r?.restoreRows?.();if(id==='sbs-export-diagnostic')return window.exportKpiDiagnosticV506?.()||window.KpiTableApi?.exportDiagnostic?.();if(target?.closest?.('.sbs-remove-row'))return window.KpiRuntimeAuthorityV52417?.removeRow?.(target.closest('tr'))||r?.removeRow?.(target.closest('tr'));}finally{setBusy(false)}}
 let comparisonDelegate=null,pendingComparisonDelegate=null,comparisonRuns=0;
 async function finishComparison(invoke){const result=await invoke();comparisonRuns++;ensureSinglePreview();window.dispatchEvent(new CustomEvent('page3-comparison-rendered',{detail:{runs:comparisonRuns}}));return result}
 async function renderComparison(...args){
@@ -237,7 +237,7 @@ const boot=()=>{ensureSinglePreview();document.documentElement.dataset.controlle
 
 /* ===== source-script: v52412-definitive-kpi-authority ===== */
 (()=>{'use strict';
-if(window.KpiRuntimeAuthorityV52416)return;
+if(window.KpiRuntimeAuthorityV52417)return;
 const MODE_KEY='performanceReview.kpiAggregationMode.v399',MIGRATION_KEY='performanceReview.kpiModeDefault.v52412';
 const clean=v=>String(v??'').trim(),number=v=>{const raw=clean(v);if(raw==='')return null;const n=Number(raw.replace(/,/g,''));return Number.isFinite(n)?n:null},precise=n=>Math.round((n+Math.sign(n||1)*Number.EPSILON)*1e9)/1e9,format=n=>{const rounded=Math.round((n+Math.sign(n||1)*Number.EPSILON)*100)/100;return Number.isInteger(rounded)?String(rounded):String(rounded).replace(/\.0+$/,'')},isIncompleteNumeric=raw=>/^(?:[+-]|[+-]?\.|[+-]?\d+\.)$/.test(String(raw??'').trim()),isBlankNumeric=raw=>String(raw??'').trim()==='';
 const rows=()=>[...document.querySelectorAll('#page2-sbs-grid tbody tr:not(.sbs-loading-row)')],key=row=>(row?.dataset?.columnKey||'').toLowerCase(),find=k=>rows().find(r=>key(r)===k||key(r).startsWith(k));
@@ -249,7 +249,8 @@ function daysWorked(){
  const candidates=[];
  const availability=find('availability');
  if(availability){
-  const prior=previous(availability),now=current(availability);
+  const now=current(availability);
+  const prior=availability.querySelector('.sbs-parsed-value,.sbs-parsed-value-input,input[data-previous-value]');
   for(const source of [now?.value,prior?.value,availability.dataset?.currentValue,availability.dataset?.previousValue]){
    const parts=String(source||'').match(/-?\d+(?:\.\d+)?/g)||[];
    if(parts.length>1){const denominator=Number(parts[1]);if(Number.isFinite(denominator)&&denominator>0)candidates.push(denominator)}
@@ -309,7 +310,7 @@ for(const eventName of ['kpi-table-ready','kpi-refresh-complete','workflow-panel
 window.KPIObserverHub?.subscribe?.('v52414-kpi-normalize',records=>{if(restoring)return;const relevant=records.some(record=>record.type==='event'||record.type==='childList');if(relevant)requestAnimationFrame(()=>initialize('observer-hub'))},records=>records.some(record=>record.type==='event'||record.type==='childList'));
 for(const eventName of ['page3-rendered','page3-preview-updated','review-data-loaded'])window.addEventListener(eventName,()=>requestAnimationFrame(formatPreview),true);
 const boot=()=>{let tries=0;const wait=()=>{if(rows().length){initialize('boot');return}if(++tries<160)setTimeout(wait,25)};wait()};document.readyState==='loading'?document.addEventListener('DOMContentLoaded',boot,{once:true}):boot();
-const api=Object.freeze({toggle,apply:()=>paint(mode(),'api'),initialize,normalizeRows,normalizeDecimalInput,seedInput,removeRow,restoreRows,colorAll,syncWorkingDaysPresent,formatPreview,getState});window.KpiRuntimeAuthorityV52416=api;
+const api=Object.freeze({toggle,apply:()=>paint(mode(),'api'),initialize,normalizeRows,normalizeDecimalInput,seedInput,removeRow,restoreRows,colorAll,syncWorkingDaysPresent,formatPreview,getState});window.KpiRuntimeAuthorityV52417=api;
 const aggregation=window.__v416Aggregation||{};aggregation.toggle=toggle;aggregation.apply=()=>paint(mode(),'external');aggregation.getMode=mode;window.__v416Aggregation=aggregation;
 if(window.KpiTableApi){window.KpiTableApi.toggle=toggle;window.KpiTableApi.remove=removeRow}
 })();
