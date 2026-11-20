@@ -2859,6 +2859,28 @@ if(!window.KPIObserverHub){
       const sectionHtml = (title, htmlValue) => `<div class="summary-section review-print-section"><h3>${esc(title)}</h3>${htmlValue || '—'}</div>`;
       const selectedText = (id) => { const el=document.getElementById(id); if(!el) return ''; if(el.tagName==='SELECT') return el.options[el.selectedIndex]?.text || el.value || ''; return el.value || ''; };
       const rating = (id) => RATING_LABELS[val(id)] || selectedText(id) || '—';
+      const workingDaysPresent = () => {
+        const fieldValue = val('m-days-present');
+        const parsedField = Number(String(fieldValue || '').match(/-?\d+(?:\.\d+)?/)?.[0]);
+        if (Number.isFinite(parsedField) && parsedField > 0) return parsedField;
+        const availabilityRow = [...document.querySelectorAll('#page2-sbs-grid tbody tr')].find(candidate => String(candidate.dataset.columnKey || '').toLowerCase().startsWith('availability'));
+        const sources = [
+          availabilityRow?.querySelector('.sbs-current-value,input[data-current-value],.sbs-current-input')?.value,
+          availabilityRow?.dataset?.currentValue,
+          availabilityRow?.querySelector('.sbs-parsed-value,.sbs-parsed-value-input,input[data-previous-value]')?.value,
+          availabilityRow?.dataset?.previousValue
+        ];
+        for (const source of sources) {
+          const numbers = String(source || '').match(/-?\d+(?:\.\d+)?/g) || [];
+          const candidate = numbers.length > 1 ? Number(numbers[1]) : Number(numbers[0]);
+          if (Number.isFinite(candidate) && candidate > 0) {
+            const field = document.getElementById('m-days-present');
+            if (field) { field.value = String(candidate); field.setAttribute('value', String(candidate)); }
+            return candidate;
+          }
+        }
+        return '';
+      };
       const familiarTitle = currentReviewType === 'eoq' ? 'End of Quarter & Performance Action Plan' : `${REVIEW_LABELS[currentReviewType] || selectedText('review-type') || 'Performance Review'} & Performance Action Plan`;
       let html = `<div class="familiar-review-form review-print-section">
         <div class="familiar-review-title">${esc(familiarTitle)}</div>
@@ -2873,7 +2895,8 @@ if(!window.KPIObserverHub){
         <div class="familiar-review-period">${display((REVIEW_LABELS[currentReviewType] || selectedText('review-type')).toUpperCase())} · ${display(selectedText('review-period'))}</div>`;
       html += section('Employee & Review Details', row('Employee', selectedText('employee-name')) + row('Employee ID', val('employee-id')) + row('Job Title', val('job-title')) + row('Department', val('department')) + row('Manager', val('manager-name')) + row('Supervisor', val('supervisor-name')) + row('SR Manager', val('sr-manager-name')) + row('Hire Date', val('hire-date')) + row('Tenure', val('tenure')) + row('Last Review Completed', val('last-review-date')) + row('Review Type', REVIEW_LABELS[val('review-type')] || selectedText('review-type')) + row('Review Date', val('review-date')) + row('Review Period', selectedText('review-period')) + row('Reviewer / Submitted By', val('reviewer-name')));
       if (currentReviewType === 'eom') {
-        let metricRows = row('Working Days Present', `${val('m-days-present') || '—'} ${document.getElementById('days-present-label')?.textContent || ''}`.trim());
+        const workingDays = workingDaysPresent();
+        let metricRows = row('Working Days Present', workingDays ? `${workingDays} days worked` : '—');
         metricRows += row('Monthly Performance Rating', rating('eom-overall-rating'));
         metricRows += row('Attendance Rating', rating('eom-attendance-rating'));
         html += section('Attendance & Ratings', metricRows);
