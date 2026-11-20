@@ -204,7 +204,7 @@ const timeout=(promise,ms=15000)=>Promise.race([Promise.resolve(promise),new Pro
 const status=(m,k='info')=>{const n=$('#sbs-status');if(n){n.textContent=m;n.dataset.kind=k;n.hidden=false}};
 function ensureSinglePreview(){const shell=$('#page3-stable-shell'),keep=shell?.querySelector(':scope > #summary-preview');if(!shell||!keep)return false;document.querySelectorAll('#panel-3 #summary-preview').forEach(n=>{if(n!==keep)n.remove()});keep.querySelectorAll(':scope > .print-confirmation').forEach(n=>n.remove());return true}
 async function refresh(){if(busy)return{ok:false,reason:'busy'};setBusy(true,'refresh');status('Refreshing KPI data...');try{const engine=window.loadPage2CurrentMonthV399;if(typeof engine!=='function')throw new Error('KPI data engine unavailable.');const r=await timeout(engine('v520-unified-refresh',true),15000);if(!r?.ok)throw new Error('KPI refresh failed: '+(r?.reason||'unknown'));window.applyKpiModeV456?.('v520-refresh');window.dispatchEvent(new CustomEvent('kpi-refresh-complete',{detail:r}));status('KPI data refreshed.','success');return r}catch(e){status(e.message,'error');window.refreshErrorLogV506?.add?.(e,'KPI refresh');console.error('[v520 KPI refresh]',e);return{ok:false,reason:e.code||e.message,error:e}}finally{setBusy(false)}}
-async function action(id,target){if(id==='sbs-refresh')return refresh();if(busy)return{ok:false,reason:'busy'};setBusy(true,id);try{const r=window.__v415KpiRenderer;if(id==='sbs-add-manual-row')return r?.addManual?.();if(id==='sbs-aggregation-mode')return window.KpiRuntimeAuthorityV52414?.toggle?.()||window.__v416Aggregation?.toggle?.();if(id==='sbs-restore-rows')return window.KpiRuntimeAuthorityV52414?.restoreRows?.()||r?.restoreRows?.();if(id==='sbs-export-diagnostic')return window.exportKpiDiagnosticV506?.()||window.KpiTableApi?.exportDiagnostic?.();if(target?.closest?.('.sbs-remove-row'))return window.KpiRuntimeAuthorityV52414?.removeRow?.(target.closest('tr'))||r?.removeRow?.(target.closest('tr'));}finally{setBusy(false)}}
+async function action(id,target){if(id==='sbs-refresh')return refresh();if(busy)return{ok:false,reason:'busy'};setBusy(true,id);try{const r=window.__v415KpiRenderer;if(id==='sbs-add-manual-row')return r?.addManual?.();if(id==='sbs-aggregation-mode')return window.KpiRuntimeAuthorityV52416?.toggle?.()||window.__v416Aggregation?.toggle?.();if(id==='sbs-restore-rows')return window.KpiRuntimeAuthorityV52416?.restoreRows?.()||r?.restoreRows?.();if(id==='sbs-export-diagnostic')return window.exportKpiDiagnosticV506?.()||window.KpiTableApi?.exportDiagnostic?.();if(target?.closest?.('.sbs-remove-row'))return window.KpiRuntimeAuthorityV52416?.removeRow?.(target.closest('tr'))||r?.removeRow?.(target.closest('tr'));}finally{setBusy(false)}}
 let comparisonDelegate=null,pendingComparisonDelegate=null,comparisonRuns=0;
 async function finishComparison(invoke){const result=await invoke();comparisonRuns++;ensureSinglePreview();window.dispatchEvent(new CustomEvent('page3-comparison-rendered',{detail:{runs:comparisonRuns}}));return result}
 async function renderComparison(...args){
@@ -237,23 +237,61 @@ const boot=()=>{ensureSinglePreview();document.documentElement.dataset.controlle
 
 /* ===== source-script: v52412-definitive-kpi-authority ===== */
 (()=>{'use strict';
-if(window.KpiRuntimeAuthorityV52414)return;
+if(window.KpiRuntimeAuthorityV52416)return;
 const MODE_KEY='performanceReview.kpiAggregationMode.v399',MIGRATION_KEY='performanceReview.kpiModeDefault.v52412';
-const clean=v=>String(v??'').trim(),number=v=>{const raw=clean(v);if(raw==='')return null;const n=Number(raw.replace(/,/g,''));return Number.isFinite(n)?n:null},format=n=>Number.isInteger(n)?String(n):String(Math.round(n*100)/100).replace(/\.0+$/,'');
+const clean=v=>String(v??'').trim(),number=v=>{const raw=clean(v);if(raw==='')return null;const n=Number(raw.replace(/,/g,''));return Number.isFinite(n)?n:null},precise=n=>Math.round((n+Math.sign(n||1)*Number.EPSILON)*1e9)/1e9,format=n=>{const rounded=Math.round((n+Math.sign(n||1)*Number.EPSILON)*100)/100;return Number.isInteger(rounded)?String(rounded):String(rounded).replace(/\.0+$/,'')},isIncompleteNumeric=raw=>/^(?:[+-]|[+-]?\.|[+-]?\d+\.)$/.test(String(raw??'').trim()),isBlankNumeric=raw=>String(raw??'').trim()==='';
 const rows=()=>[...document.querySelectorAll('#page2-sbs-grid tbody tr:not(.sbs-loading-row)')],key=row=>(row?.dataset?.columnKey||'').toLowerCase(),find=k=>rows().find(r=>key(r)===k||key(r).startsWith(k));
 function normalizeRows(){let created=0;for(const row of rows()){
  const cells=row.cells;if(cells?.[3]&&!cells[3].querySelector('.sbs-current-value')){let value=clean(cells[3].textContent);if(/^(?:—|-|enter value\.\.\.)$/i.test(value))value='';const input=document.createElement('input');input.type='text';input.className='sbs-current-value';input.value=value;input.setAttribute('value',value);input.placeholder='enter value...';input.autocomplete='off';input.dataset.valueKey=key(row);cells[3].replaceChildren(input);created++}
  for(const el of row.querySelectorAll('input,select,textarea')){el.disabled=false;el.readOnly=false;el.removeAttribute('disabled');el.removeAttribute('readonly');el.removeAttribute('aria-disabled');el.tabIndex=0}row.dataset.editable='true'}return created}
 const current=row=>row?.querySelector('.sbs-current-value'),mode=()=>sessionStorage.getItem(MODE_KEY)==='total'?'total':'daily-average';
-function daysWorked(){const parts=clean(current(find('availability per shift'))?.value).split('/').map(x=>x.trim());const n=number(parts[1]);return n&&n>0?n:1}
+function daysWorked(){
+ const candidates=[];
+ const availability=find('availability');
+ if(availability){
+  const prior=previous(availability),now=current(availability);
+  for(const source of [now?.value,prior?.value,availability.dataset?.currentValue,availability.dataset?.previousValue]){
+   const parts=String(source||'').match(/-?\d+(?:\.\d+)?/g)||[];
+   if(parts.length>1){const denominator=Number(parts[1]);if(Number.isFinite(denominator)&&denominator>0)candidates.push(denominator)}
+  }
+ }
+ for(const selector of ['#m-days-present','[data-days-worked]','[data-working-days]']){
+  for(const el of document.querySelectorAll(selector)){
+   const source=el.dataset?.daysWorked||el.dataset?.workingDays||el.value||el.textContent;
+   const n=number(source);if(n!==null&&n>0)candidates.push(n)
+  }
+ }
+ const days=candidates.find(n=>n>1)||candidates[0];
+ return Number.isFinite(days)&&days>0?days:1
+}
 function syncWorkingDaysPresent(){const value=String(daysWorked()),field=document.getElementById('m-days-present');if(field&&field.value!==value){field.value=value;field.setAttribute('value',value);field.dispatchEvent(new Event('input',{bubbles:true}));field.dispatchEvent(new Event('change',{bubbles:true}))}const label=document.getElementById('days-present-label');if(label)label.textContent='days worked';return value}
 function formatReviewDate(value){const match=String(value||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);if(!match)return value||'—';const date=new Date(Number(match[1]),Number(match[2])-1,Number(match[3]));return date.toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})}
 function formatPreview(){syncWorkingDaysPresent();document.querySelectorAll('#summary-preview .familiar-review-meta>div').forEach(cell=>{const label=clean(cell.querySelector('span')?.textContent).toLowerCase(),value=cell.querySelector('strong');if(label==='date'&&value)value.textContent=formatReviewDate(document.getElementById('review-date')?.value||value.textContent)});return true}
 const colors={EE:['#166534','#fff','#22c55e'],ME:['#854d0e','#fff','#eab308'],BE:['#991b1b','#fff','#ef4444'],'':['','','']};
 function colorRating(select){if(!select)return;const code=clean(select.value).toUpperCase(),c=colors[code]||colors[''];select.dataset.rating=code;select.classList.remove('rating-ee','rating-me','rating-be');if(code)select.classList.add('rating-'+code.toLowerCase());select.style.setProperty('background-color',c[0],'important');select.style.setProperty('color',c[1],'important');select.style.setProperty('border-color',c[2],'important');select.style.setProperty('font-weight',code?'800':'','important');select.closest('td')?.setAttribute('data-rating',code);select.closest('tr')?.setAttribute(select.matches('.sbs-current-rating')?'data-current-rating':'data-previous-rating',code)}
 function colorAll(){for(const select of document.querySelectorAll('#page2-sbs-grid .sbs-previous-rating,#page2-sbs-grid .sbs-current-rating,#page2-sbs-grid select[data-rating-key]'))colorRating(select)}
-function seedFromDisplayed(sourceMode){const days=daysWorked();for(const k of ['inbound','outbound']){const el=current(find(k));if(!el)continue;const n=number(el.value);if(n===null){delete el.dataset.dailyValue;delete el.dataset.monthlyValue;continue}if(sourceMode==='total'){el.dataset.monthlyValue=String(n);el.dataset.dailyValue=String(n/days)}else{el.dataset.dailyValue=String(n);el.dataset.monthlyValue=String(n*days)}}}
-function captureActive(){seedFromDisplayed(mode())}
+function seedInput(input,m=mode()){
+ const shown=number(input?.value),raw=String(input?.value??'');
+ if(isIncompleteNumeric(raw))return{ok:false,reason:'incomplete'};
+ if(shown===null){
+  if(isBlankNumeric(raw)){delete input.dataset.dailyValue;delete input.dataset.monthlyValue;delete input.dataset.aggregationMode;return{ok:true,blank:true}}
+  return{ok:false,reason:'invalid'};
+ }
+ const days=daysWorked(),daily=precise(m==='total'?shown/days:shown),monthly=precise(m==='total'?shown:shown*days);
+ input.dataset.dailyValue=String(daily);input.dataset.monthlyValue=String(monthly);input.dataset.aggregationMode=m;input.dataset.lastValidValue=raw;
+ return{ok:true,daily,monthly};
+}
+function seedFromDisplayed(m){
+ for(const k of ['inbound','outbound']){const input=current(find(k));if(input)seedInput(input,m)}
+}
+function normalizeDecimalInput(input){
+ const raw=String(input?.value??'');
+ if(isBlankNumeric(raw)){seedInput(input,mode());input.value='';input.setAttribute('value','');return{ok:true,blank:true}}
+ if(isIncompleteNumeric(raw))return{ok:false,reason:'incomplete'};
+ const parsed=number(raw);
+ if(parsed===null){const fallback=mode()==='total'?input.dataset.monthlyValue:input.dataset.dailyValue;if(fallback!==undefined&&fallback!=='')input.value=format(Number(fallback));return{ok:false,reason:'invalid'}}
+ const normalized=format(parsed);input.value=normalized;input.setAttribute('value',normalized);seedInput(input,mode());return{ok:true,value:normalized};
+}
 function paint(next,reason='apply'){normalizeRows();const days=daysWorked();for(const k of ['inbound','outbound']){const el=current(find(k));if(!el)continue;let daily=number(el.dataset.dailyValue),monthly=number(el.dataset.monthlyValue);if(daily===null||monthly===null){seedFromDisplayed(mode());daily=number(el.dataset.dailyValue);monthly=number(el.dataset.monthlyValue)}if(daily===null||monthly===null)continue;el.value=format(next==='total'?monthly:daily);el.setAttribute('value',el.value);el.dataset.aggregationMode=next}
  sessionStorage.setItem(MODE_KEY,next);document.documentElement.dataset.kpiAggregationMode=next;const b=document.getElementById('sbs-aggregation-mode');if(b){const total=next==='total';b.disabled=false;b.setAttribute('aria-pressed',String(total));b.innerHTML=`<i class="fas fa-calculator" aria-hidden="true"></i> ${total?'Use Daily Averages':'Use Monthly Totals'}`;b.title=total?'Showing Monthly Totals. Click to use Daily Averages.':'Showing Daily Averages. Click to use Monthly Totals.'}colorAll();window.KpiPageFamilyV5243?.sync?.();window.dispatchEvent(new CustomEvent('kpi-aggregation-mode-changed',{detail:{mode:next,daysWorked:days,reason}}));return{mode:next,daysWorked:days}}
 function toggle(){normalizeRows();captureActive();return paint(mode()==='total'?'daily-average':'total','toggle')}
@@ -265,12 +303,13 @@ function restoreRows(){const snapshot=snapshotRows(),activeMode=mode(),renderer=
 function initialize(reason='initialize'){normalizeRows();syncWorkingDaysPresent();const prior=mode();if(restoring){colorAll();formatPreview();return getState()}if(!sessionStorage.getItem(MIGRATION_KEY)){seedFromDisplayed(prior);sessionStorage.setItem(MODE_KEY,'daily-average');sessionStorage.setItem(MIGRATION_KEY,'done');paint('daily-average','migration')}else{seedFromDisplayed(prior);paint(prior,reason)}colorAll();syncWorkingDaysPresent();formatPreview();return getState()}
 function getState(){return{mode:mode(),daysWorked:daysWorked(),editable:rows().every(r=>[...r.querySelectorAll('input,select,textarea')].every(x=>!x.disabled&&!x.readOnly)),values:Object.fromEntries(['inbound','outbound'].map(k=>[k,current(find(k))?.value||''])),rowCount:rows().length}}
 document.addEventListener('change',e=>{const select=e.target.closest?.('#page2-sbs-grid .sbs-previous-rating,#page2-sbs-grid .sbs-current-rating,#page2-sbs-grid select[data-rating-key]');if(select)colorRating(select)},true);
-document.addEventListener('input',e=>{const el=e.target.closest?.('#page2-sbs-grid .sbs-current-value');if(!el)return;const k=key(el.closest('tr'));if(k==='inbound'||k==='outbound')seedFromDisplayed(mode());if(k.startsWith('availability per shift')){syncWorkingDaysPresent();formatPreview()}},true);
+document.addEventListener('input',e=>{const el=e.target.closest?.('#page2-sbs-grid .sbs-current-value');if(!el)return;const k=key(el.closest('tr'));if(k==='inbound'||k==='outbound')seedInput(el,mode());if(k.startsWith('availability per shift')){syncWorkingDaysPresent();formatPreview()}},true);
+for(const eventName of ['change','focusout'])document.addEventListener(eventName,e=>{const el=e.target.closest?.('#page2-sbs-grid .sbs-current-value');if(!el)return;const k=key(el.closest('tr'));if(k==='inbound'||k==='outbound')normalizeDecimalInput(el)},true);
 for(const eventName of ['kpi-table-ready','kpi-refresh-complete','workflow-panel-changed','page2-opened'])window.addEventListener(eventName,()=>requestAnimationFrame(()=>initialize(eventName)),true);
 window.KPIObserverHub?.subscribe?.('v52414-kpi-normalize',records=>{if(restoring)return;const relevant=records.some(record=>record.type==='event'||record.type==='childList');if(relevant)requestAnimationFrame(()=>initialize('observer-hub'))},records=>records.some(record=>record.type==='event'||record.type==='childList'));
 for(const eventName of ['page3-rendered','page3-preview-updated','review-data-loaded'])window.addEventListener(eventName,()=>requestAnimationFrame(formatPreview),true);
 const boot=()=>{let tries=0;const wait=()=>{if(rows().length){initialize('boot');return}if(++tries<160)setTimeout(wait,25)};wait()};document.readyState==='loading'?document.addEventListener('DOMContentLoaded',boot,{once:true}):boot();
-const api=Object.freeze({toggle,apply:()=>paint(mode(),'api'),initialize,normalizeRows,removeRow,restoreRows,colorAll,syncWorkingDaysPresent,formatPreview,getState});window.KpiRuntimeAuthorityV52414=api;
+const api=Object.freeze({toggle,apply:()=>paint(mode(),'api'),initialize,normalizeRows,normalizeDecimalInput,seedInput,removeRow,restoreRows,colorAll,syncWorkingDaysPresent,formatPreview,getState});window.KpiRuntimeAuthorityV52416=api;
 const aggregation=window.__v416Aggregation||{};aggregation.toggle=toggle;aggregation.apply=()=>paint(mode(),'external');aggregation.getMode=mode;window.__v416Aggregation=aggregation;
 if(window.KpiTableApi){window.KpiTableApi.toggle=toggle;window.KpiTableApi.remove=removeRow}
 })();
