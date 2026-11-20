@@ -22,7 +22,7 @@ function canonicalName(v){let a=clean(v).toLowerCase().replace(/[^a-z0-9, ]/g,' 
 function sameEmployee(row){const wanted=canonicalName(employee()),actual=canonicalName(row?.cr714_agentname);return !!wanted&&wanted===actual}
 function page2Active(){return !!document.getElementById('page2-sbs-grid')}
 function context(){return`${period()}|${canonicalName(employee())}`}
-function mode(){return sessionStorage.getItem(MODE_KEY)==='daily-average'?'daily-average':'total'}
+function mode(){return sessionStorage.getItem(MODE_KEY)==='total'?'total':'daily-average'}
 function setMode(next){next=next==='daily-average'?'daily-average':'total';sessionStorage.setItem(MODE_KEY,next);document.documentElement.dataset.kpiAggregationMode=next;const b=document.getElementById('sbs-aggregation-mode');if(b){const average=next==='daily-average';b.setAttribute('aria-pressed',String(average));b.innerHTML=average?'<i aria-hidden="true" class="fas fa-calculator"></i> Use Monthly Totals':'<i aria-hidden="true" class="fas fa-calculator"></i> Use Daily Averages'}return next}
 function rows(){return [...document.querySelectorAll('#page2-sbs-grid tbody tr:not(.sbs-loading-row)')]}
 function rowLabel(row){return clean(row.querySelector('.sbs-kpi-label-input,.sbs-kpi-label')?.value||row.cells?.[0]?.textContent)}
@@ -233,3 +233,36 @@ const boot=()=>{ensureSinglePreview();document.documentElement.dataset.controlle
 
 /* ===== source-script: v522-component-authority-registry ===== */
 (()=>{'use strict';if(window.ComponentAuthorityRegistry)return;const authorities=Object.freeze({workflow:'performance-review-portal-app-v300',kpiData:'v399-single-kpi-controller',kpiCalculation:'v456-kpi-mode-calculation-authority',kpiRenderer:'v461-kpi-renderer-bootstrap',page3Family:'v521-unified-page3-family-controller',reviewRenderSubmit:'v439-single-renderer-authority',docx:'v429-docx-xml-authority',diagnostics:'v506-refresh-error-log-controller'});window.ComponentAuthorityRegistry={version:'v522',authorities,get:(name)=>authorities[name]||null};document.documentElement.dataset.componentAuthorityRegistry='v522'})();
+
+/* ===== source-script: v5245-final-kpi-runtime-authority ===== */
+(()=>{'use strict';
+if(window.KpiRuntimeAuthorityV5245)return;
+const MODE_KEY='performanceReview.kpiAggregationMode.v399',MIGRATION_KEY='performanceReview.kpiModeDefault.v5245';
+const clean=v=>String(v??'').trim();
+const number=v=>{const raw=clean(v);if(raw==='')return null;const n=Number(raw.replace(/,/g,''));return Number.isFinite(n)?n:null};
+const format=n=>Number.isInteger(n)?String(n):String(Math.round(n*100)/100).replace(/\.0+$/,'');
+const rows=()=>[...document.querySelectorAll('#page2-sbs-grid tbody tr:not(.sbs-loading-row)')];
+const key=row=>(row?.dataset?.columnKey||'').toLowerCase();
+const current=row=>row?.querySelector('.sbs-current-value,input[data-current-value]');
+const ratings=row=>[...row.querySelectorAll('.sbs-previous-rating,.sbs-current-rating,select[data-rating-key]')];
+const find=k=>rows().find(r=>key(r)===k||key(r).startsWith(k));
+function daysWorked(){const el=current(find('availability per shift'));const parts=clean(el?.value).split('/').map(x=>x.trim());const n=number(parts[1]);return n&&n>0?n:1}
+function mode(){return sessionStorage.getItem(MODE_KEY)==='total'?'total':'daily-average'}
+function unlock(){let count=0;for(const row of rows()){row.dataset.editable='true';for(const el of row.querySelectorAll('.sbs-kpi-label-input,.sbs-current-value,.sbs-previous-rating,.sbs-current-rating,input,select,textarea')){el.disabled=false;el.readOnly=false;el.removeAttribute('disabled');el.removeAttribute('readonly');el.removeAttribute('aria-disabled');el.tabIndex=0;count++}}return count}
+const colors={EE:{bg:'#166534',fg:'#ffffff',border:'#22c55e'},ME:{bg:'#854d0e',fg:'#ffffff',border:'#eab308'},BE:{bg:'#991b1b',fg:'#ffffff',border:'#ef4444'},'':{bg:'',fg:'',border:''}};
+function colorRating(select){if(!select)return;const code=clean(select.value).toUpperCase(),c=colors[code]||colors[''];select.dataset.rating=code;select.classList.remove('rating-ee','rating-me','rating-be');if(code)select.classList.add('rating-'+code.toLowerCase());select.style.setProperty('background-color',c.bg);select.style.setProperty('color',c.fg);select.style.setProperty('border-color',c.border);select.style.setProperty('font-weight',code?'800':'');select.closest('td')?.setAttribute('data-rating',code);select.closest('tr')?.setAttribute(select.classList.contains('sbs-current-rating')?'data-current-rating':'data-previous-rating',code)}
+function colorAll(){for(const row of rows())for(const select of ratings(row))colorRating(select)}
+function captureActive(){const days=daysWorked();for(const k of ['inbound','outbound']){const el=current(find(k));if(!el)continue;const n=number(el.value);if(n===null){delete el.dataset.dailyValue;delete el.dataset.monthlyValue;continue}if(mode()==='total'){el.dataset.monthlyValue=String(n);el.dataset.dailyValue=String(n/days)}else{el.dataset.dailyValue=String(n);el.dataset.monthlyValue=String(n*days)}}}
+function paint(next=mode(),reason='apply'){const days=daysWorked();for(const k of ['inbound','outbound']){const el=current(find(k));if(!el)continue;let daily=number(el.dataset.dailyValue),monthly=number(el.dataset.monthlyValue),shown=number(el.value);if(daily===null&&monthly===null&&shown!==null){if(mode()==='total')monthly=shown;else daily=shown}if(daily===null&&monthly!==null)daily=monthly/days;if(monthly===null&&daily!==null)monthly=daily*days;if(daily===null||monthly===null)continue;el.dataset.dailyValue=String(daily);el.dataset.monthlyValue=String(monthly);el.value=format(next==='total'?monthly:daily);el.setAttribute('value',el.value);el.dataset.aggregationMode=next}
+ sessionStorage.setItem(MODE_KEY,next);document.documentElement.dataset.kpiAggregationMode=next;const b=document.getElementById('sbs-aggregation-mode');if(b){const total=next==='total';b.disabled=false;b.setAttribute('aria-pressed',String(total));b.innerHTML=`<i class="fas fa-calculator" aria-hidden="true"></i> ${total?'Use Daily Averages':'Use Monthly Totals'}`;b.title=total?'Showing Monthly Totals. Click to use Daily Averages.':'Showing Daily Averages. Click to use Monthly Totals.'}unlock();colorAll();window.KpiPageFamilyV5243?.sync?.();window.dispatchEvent(new CustomEvent('kpi-aggregation-mode-changed',{detail:{mode:next,daysWorked:days,reason}}));return{mode:next,daysWorked:days}}
+function toggle(){captureActive();return paint(mode()==='total'?'daily-average':'total','toggle')}
+function initialize(reason='initialize'){if(!sessionStorage.getItem(MIGRATION_KEY)){sessionStorage.setItem(MODE_KEY,'daily-average');sessionStorage.setItem(MIGRATION_KEY,'done')}unlock();colorAll();captureActive();return paint(mode(),reason)}
+// Replace every public toggle route with this authority.
+const aggregation=window.__v416Aggregation||{};aggregation.toggle=toggle;aggregation.apply=()=>paint(mode(),'external-apply');aggregation.getMode=mode;aggregation.__v5245Authority=true;window.__v416Aggregation=aggregation;
+if(window.KpiTableApi)window.KpiTableApi.toggle=toggle;
+document.addEventListener('change',event=>{const select=event.target.closest?.('.sbs-previous-rating,.sbs-current-rating,select[data-rating-key]');if(select){colorRating(select);window.KPIObserverHub?.schedule?.('rating-change')}} ,true);
+document.addEventListener('input',event=>{const el=event.target.closest?.('.sbs-current-value');if(!el)return;const row=el.closest('tr'),k=key(row);if(k==='inbound'||k==='outbound'){el.dataset.userEdited='true';captureActive()}},true);
+for(const eventName of ['kpi-table-ready','kpi-refresh-complete','workflow-panel-changed','page2-opened'])window.addEventListener(eventName,()=>requestAnimationFrame(()=>initialize(eventName)),true);
+const boot=()=>{let tries=0;const wait=()=>{if(rows().length){initialize('boot');return}if(++tries<160)setTimeout(wait,25)};wait()};document.readyState==='loading'?document.addEventListener('DOMContentLoaded',boot,{once:true}):boot();
+window.KpiRuntimeAuthorityV5245=Object.freeze({toggle,apply:()=>paint(mode(),'api'),initialize,unlock,colorAll,getState:()=>({mode:mode(),daysWorked:daysWorked(),editable:rows().every(r=>[...r.querySelectorAll('input,select,textarea')].every(x=>!x.disabled&&!x.readOnly)),values:Object.fromEntries(['inbound','outbound'].map(k=>[k,current(find(k))?.value||'']))})});
+})();
