@@ -1,6 +1,26 @@
 /* Performance Review Portal v523 core asset.
    Source: v522. Business logic, embedded payloads, authentication, Dataverse, workflow, and shared utilities. */
 'use strict';
+/* v524.2: one observer authority for all KPI DOM changes. */
+if(!window.KPIObserverHub){
+ window.KPIObserverHub=(()=>{
+  const subscribers=new Map();let observer=null,targets=[];let queued=false,lastRecords=[];
+  const candidateTargets=()=>[
+   document.getElementById('page2-side-by-side-table'),
+   document.getElementById('month-kpi-body')
+  ].filter((node,index,array)=>node&&array.indexOf(node)===index);
+  function flush(){queued=false;const records=lastRecords;lastRecords=[];for(const [name,entry] of subscribers){try{if(!entry.filter||entry.filter(records))entry.callback(records)}catch(error){console.error('[KPIObserverHub]',name,error)}}}
+  function onMutations(records){lastRecords.push(...records);if(!queued){queued=true;requestAnimationFrame(flush)}}
+  function bind(){const next=candidateTargets();if(next.length===targets.length&&next.every((node,index)=>node===targets[index]))return false;observer?.disconnect();observer=new MutationObserver(onMutations);targets=next;for(const target of targets)observer.observe(target,{childList:true,subtree:true,attributes:true,attributeFilter:['value','data-rating','data-status-code']});return true}
+  function subscribe(name,callback,filter){subscribers.set(name,{callback,filter});bind();return()=>subscribers.delete(name)}
+  function schedule(name='manual'){lastRecords.push({type:'event',eventName:name,addedNodes:[],removedNodes:[],target:targets[0]||document});if(!queued){queued=true;requestAnimationFrame(flush)}}
+  function state(){return{observerCount:observer?1:0,targetIds:targets.map(x=>x.id),subscriberCount:subscribers.size,subscribers:[...subscribers.keys()],queued}}
+  for(const eventName of ['DOMContentLoaded','workflow-panel-changed','kpi-table-ready','page2-opened','previous-review-parsed','dataverse-current-month-kpis-applied']){
+   const target=eventName==='DOMContentLoaded'?document:window;target.addEventListener(eventName,()=>{bind();schedule(eventName)},true);
+  }
+  return Object.freeze({bind,subscribe,schedule,getState:state});
+ })();
+}
 
 /* ===== source-script: performance-review-portal-app-v300 ===== */
 'use strict';
@@ -7059,7 +7079,7 @@ function patchOpportunities(root,value){if(!root||!value)return;qa('.eom-feedbac
 function syncOpportunitiesToPrint(){const value=opportunitiesValue();if(!value)return'';if(window.previousReviewSnapshot&&typeof window.previousReviewSnapshot==='object')window.previousReviewSnapshot.opportunities=value;['summary-preview','print-summary','standalone-eom-print-root','eom-template-print-root','submitted-print-root'].forEach(id=>patchOpportunities(q(`#${id}`),value));return value}
 function wrapPrintBuilders(){['buildEomTemplatePrintRoot','buildStandaloneEomPrint','buildSubmittedPrintRoot','prepareTemplatePrint'].forEach(name=>{const fn=window[name];if(typeof fn!=='function'||fn.__v12)return;const wrapped=function(){const result=fn.apply(this,arguments);const finish=v=>{syncOpportunitiesToPrint();return v};if(result&&typeof result.then==='function')return result.then(finish);return finish(result)};wrapped.__v12=true;wrapped.__original=fn;window[name]=wrapped})}
 let kpiQueued=false;function stabilizeKpi(){if(kpiQueued)return;kpiQueued=true;requestAnimationFrame(()=>{kpiQueued=false;const body=q('#month-kpi-body');if(!body)return;const rows=qa(':scope > .exact-kpi-row',body);const seen=new Set();rows.forEach(row=>{const key=row.dataset.rowKey||Array.from(row.querySelectorAll('input,select')).map(x=>`${x.name}:${x.value}`).join('|');if(key&&seen.has(key)&&row.classList.contains('v59-duplicate-row'))row.remove();else if(key)seen.add(key)});body.dataset.reconciling='false'})}
-function installKpiObserver(){const body=q('#month-kpi-body');if(!body||body.__v12Observer)return;body.__v12Observer=true;new MutationObserver(stabilizeKpi).observe(body,{childList:true,subtree:false})}
+function installKpiObserver(){const body=q('#month-kpi-body');if(!body||body.__v12Observer)return;body.__v12Observer=true;window.KPIObserverHub?.subscribe('v12-stabilize-kpi',stabilizeKpi,records=>records.some(r=>r.type==='event'||r.target===body||body.contains(r.target)))}
 function dedupeDomIds(){
  const groups=new Map();qa('[id]').forEach(el=>{if(!groups.has(el.id))groups.set(el.id,[]);groups.get(el.id).push(el)});
  groups.forEach((items,id)=>{if(items.length<2)return;const preferred=items.find(el=>!el.hidden&&getComputedStyle(el).display!=='none'&&!el.closest('.v59-obsolete-block,.pass5-moved-wrap,.pass6-empty-grid'))||items[0];let n=0;items.forEach(el=>{if(el===preferred)return;const old=id;el.id=`${id}--retired-${++n}`;el.dataset.retiredDuplicateId=old;qa(`label[for="${old}"]`).forEach(label=>{if(label.closest('.v59-obsolete-block,.pass5-moved-wrap,.pass6-empty-grid')===el.closest('.v59-obsolete-block,.pass5-moved-wrap,.pass6-empty-grid'))label.htmlFor=el.id})})});
@@ -7908,8 +7928,7 @@ load();
 /* Only trusted user changes become authoritative. Programmatic comparison results are rejected. */
 document.addEventListener('change',function(e){var el=e.target&&e.target.closest?e.target.closest(SELECTOR):null;if(!el)return;if(e.isTrusted){values[key(el)]=clean(el.value);el.dataset.manualRatingSelected='true';save();window.__reviewDocxBlob=null;window.__reviewDocxAttachment=null;}else{applyOne(el);}},true);
 document.addEventListener('input',function(e){var el=e.target&&e.target.closest?e.target.closest(SELECTOR):null;if(el&&!e.isTrusted)applyOne(el);},true);
-var observer=new MutationObserver(function(records){var relevant=false;records.forEach(function(r){if(r.type==='childList'&&r.addedNodes.length)relevant=true;if(r.type==='attributes'&&r.target&&r.target.matches&&r.target.matches(SELECTOR))relevant=true;});if(relevant)schedule(document);});
-observer.observe(document.getElementById('page2-sbs-grid')||document.getElementById('page2-side-by-side-table'),{childList:true,subtree:true,attributes:true,attributeFilter:['value','data-rating','data-status-code']});
+window.KPIObserverHub?.subscribe('legacy-kpi-rating-audit',function(records){var relevant=false;records.forEach(function(r){if(r.type==='event')relevant=true;if(r.type==='childList'&&r.addedNodes.length)relevant=true;if(r.type==='attributes'&&r.target&&r.target.matches&&r.target.matches(SELECTOR)&&['value','data-rating','data-status-code'].includes(r.attributeName))relevant=true;});if(relevant)schedule(document);},function(records){return records.some(function(r){return r.type==='event'||(r.type==='childList'&&r.addedNodes.length)||(r.type==='attributes'&&['value','data-rating','data-status-code'].includes(r.attributeName))})});
 ['pbi-flow-data-loaded','current-month-data-loaded','review-data-loaded','review-type-changed'].forEach(function(name){window.addEventListener(name,function(){setTimeout(function(){apply(document);},0);});});
 document.addEventListener('DOMContentLoaded',function(){apply(document);},{once:true});
 apply(document);
@@ -8292,11 +8311,14 @@ window.commitKpiChangesV105=commit;
  function target(){var d=new Date(),x=new Date(d.getFullYear(),d.getMonth()-1,1);return{label:x.toLocaleDateString('en-US',{month:'long',year:'numeric'}),iso:x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')}}
  function apply(){var s=document.getElementById('review-period');if(!s||manual||s.dataset.userSelected==='true')return false;var t=target(),o=Array.from(s.options).find(function(x){return String(x.value||'').trim()===t.label||String(x.textContent||'').trim()===t.label||String(x.value||'').slice(0,7)===t.iso});if(!o)return false;var changed=s.value!==o.value;s.value=o.value;s.dataset.autoPeriod=t.iso;document.documentElement.dataset.selectedReviewPeriod=o.value;lastApplied=o.value;if(changed)s.dispatchEvent(new Event('change',{bubbles:true}));return true}
  function bind(){var s=document.getElementById('review-period');if(!s)return false;if(s.dataset.v94PeriodBound!=='1'){s.dataset.v94PeriodBound='1';s.addEventListener('change',function(e){if(e.isTrusted){manual=true;s.dataset.userSelected='true'}})}return apply()}
- function settle(){bind();setTimeout(bind,0);setTimeout(bind,100);setTimeout(bind,500)}
+ var settleTimer=0;
+ function settle(){clearTimeout(settleTimer);bind();settleTimer=setTimeout(function(){if(!manual)bind()},0)}
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',settle,{once:true});else settle();
  var original=window.initializeApp;if(typeof original==='function'){window.initializeApp=function(){var r=original.apply(this,arguments);settle();return r}}
- function bindReviewPeriodObserverV440(){var control=document.getElementById('review-period');if(!control||control.dataset.v440Observed==='true')return;control.dataset.v440Observed='true';var parent=control.parentElement||control;new MutationObserver(function(records){if(manual)return;if(records.some(function(record){return record.target===control||record.target?.closest?.('#review-period')}))apply()}).observe(parent,{childList:true,subtree:false,attributes:true,attributeFilter:['value','selected']})}['review-period-options-ready','previous-review-parsed','previous-review-loaded','employee-selection-changed'].forEach(function(name){window.addEventListener(name,function(){bindReviewPeriodObserverV440();if(!manual)apply()},true)});bindReviewPeriodObserverV440();
+ ['review-period-options-ready','previous-review-parsed','previous-review-loaded','employee-selection-changed'].forEach(function(name){window.addEventListener(name,function(){if(!manual)settle()},true)});
+ document.addEventListener('change',function(event){if(event.target?.id==='review-period'&&event.isTrusted){manual=true;event.target.dataset.userSelected='true';clearTimeout(settleTimer)}},true);
  window.applyReviewPeriodAutoSelectV94=apply;
+ window.ReviewPeriodAuthorityV5244=Object.freeze({apply:apply,settle:settle,getState:function(){return{manual:manual,lastApplied:lastApplied,timerActive:!!settleTimer}}});
 })();
 
 
@@ -8342,7 +8364,7 @@ document.addEventListener('input',function(e){if(e.target?.matches?.('#page2-sbs
 document.addEventListener('change',function(e){if(e.target?.closest?.(P2)){capture();window.__reviewDocxBlob=null;window.__reviewDocxFileName=''}},true);
 document.addEventListener('click',function(e){if(e.target?.closest?.('#btn-next-panel2,#btn-show-panel3,[data-panel="3"],#btn-back-to-panel2-top,[onclick*="goToPanel2"],#btn-export-review-docx,#btn-export-review-docx-top'))boundary()},true);
 var g2=window.goToPanel2,g3=window.__legacyV439GoToPanel3;if(typeof g2==='function')window.goToPanel2=function(){capture();var r=g2.apply(this,arguments);boundary();return r};if(typeof g3==='function')window.__legacyV439GoToPanel3=function(){capture();var r=g3.apply(this,arguments);boundary();return r};
-new MutationObserver(function(m){if(applying||!state.size)return;var hit=m.some(function(x){return x.target?.closest?.(P2+','+P3)});if(hit)requestAnimationFrame(applyAll)}).observe(document.getElementById('page2-side-by-side-table')||document.getElementById('panel-2'),{childList:true,subtree:true});
+window.KPIObserverHub?.subscribe('v96-apply-all',function(m){if(applying||!state.size)return;var hit=m.some(function(x){return x.type==='event'||x.target?.closest?.(P2+','+P3)});if(hit)requestAnimationFrame(applyAll)});
 window.captureKpiCrossScreenV97=capture;window.restoreKpiCrossScreenV97=applyAll;
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',load,{once:true});else load();
 })();
@@ -8378,7 +8400,7 @@ document.addEventListener('input',function(e){if(e.target?.matches?.('#page2-sbs
 document.addEventListener('change',function(e){if(e.target?.closest?.(P2+','+P3)){capture(e.target.closest(P3)?P3:P2);window.__reviewDocxBlob=null;window.__reviewDocxFileName=''}},true);
 document.addEventListener('change',function(e){if(e.target?.matches?.('#eom-overall-rating,#eom-attendance-rating')){if(userState)restore(P2);window.colorRating?.(e.target);window.__reviewDocxBlob=null;window.__reviewDocxFileName=''}},true);
 document.addEventListener('click',function(e){if(e.target?.closest?.('#btn-next-panel2,#btn-show-panel3,[data-panel="3"]'))commitPage2();if(e.target?.closest?.('#btn-export-review-docx,#btn-export-review-docx-top,#btn-save-completed-review-v18,#btn-submit-final'))commitPage3()},true);
-new MutationObserver(function(m){if(restoring||!initialized||!userState||!state.size)return;var p2=m.some(function(x){return x.target?.closest?.(P2)}),p3=m.some(function(x){return x.target?.closest?.(P3)});if(p2||p3)queueMicrotask(function(){if(p2)restore(P2);if(p3)restore(P3)})}).observe(document.getElementById('page2-side-by-side-table')||document.getElementById('panel-2'),{childList:true,subtree:true});
+window.KPIObserverHub?.subscribe('v97-restore-state',function(m){if(restoring||!initialized||!userState||!state.size)return;var p2=m.some(function(x){return x.type==='event'||x.target?.closest?.(P2)}),p3=m.some(function(x){return x.type==='event'||x.target?.closest?.(P3)});if(p2||p3)queueMicrotask(function(){if(p2)restore(P2);if(p3)restore(P3)})});
 window.commitPage2KpisV102=commitPage2;window.commitPage3KpisV102=commitPage3;window.restoreKpisInPlaceV102=function(){restore(P2);restore(P3)};window.clearKpiPersistenceStateV102=function(){restoring=true;state.clear();userState=false;try{if(window.__sideBySideValueEdits&&typeof window.__sideBySideValueEdits.clear==='function')window.__sideBySideValueEdits.clear();if(window.__sideBySideRatingEdits&&typeof window.__sideBySideRatingEdits.clear==='function')window.__sideBySideRatingEdits.clear();}finally{restoring=false;}return state.size===0&&!userState;};window.preserveKpisAfterPage2ControlV106=preserveAfterAnyPage2Control;
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
 })();
@@ -8482,7 +8504,7 @@ function installEditors(){document.querySelectorAll('#page2-sbs-grid tbody tr').
 var priorGetter=null;
 function installAuditGetter(){if(priorGetter)return;priorGetter=typeof window.getManualKpiChangeSummary==='function'?window.getManualKpiChangeSummary:null;window.getManualKpiChangeSummary=function(){var parts=[];if(priorGetter){var old=clean(priorGetter());if(old)parts.push(old);}labelChanges.forEach(function(x){parts.push('KPI Name Change | Row: '+x.row+' | Original KPI/Measure: "'+x.originalLabel.replace(/"/g,"'")+'" | Updated KPI/Measure: "'+x.newLabel.replace(/"/g,"'")+'" | Changed: '+x.changedAt);});return parts.join('\n');};window.getManualKpiChanges=window.getManualKpiChangeSummary;}
 function refreshed(){renderReady=false;lock();requestAnimationFrame(function(){requestAnimationFrame(function(){renderReady=true;unlockIfReady();});});}
-function init(){ensureLock();installAuditGetter();lock();previousReady=hasPrevious();datasetReady=hasDataset();renderReady=rowsComplete();unlockIfReady();var body=document.querySelector('#page2-sbs-grid tbody');if(body)new MutationObserver(function(){refreshed();}).observe(body,{childList:true,subtree:false});}
+function init(){ensureLock();installAuditGetter();lock();previousReady=hasPrevious();datasetReady=hasDataset();renderReady=rowsComplete();unlockIfReady();var body=document.querySelector('#page2-sbs-grid tbody');if(body)window.KPIObserverHub?.subscribe('renderer-readiness',function(){refreshed()},records=>records.some(r=>r.type==='event'||r.target===body||body.contains(r.target)));}
 ['previous-review-parsed','previous-review-file-processed','previous-review-pdf-this-month'].forEach(function(n){window.addEventListener(n,function(){previousReady=true;refreshed();},true);});
 window.addEventListener('dataverse-daily-data-loaded',function(){datasetReady=true;refreshed();},true);
 ['dataverse-current-month-kpis-applied','kpi-flow-data-ready','current-month-data-ready'].forEach(function(n){window.addEventListener(n,function(){renderReady=true;unlockIfReady();},true);});
@@ -8585,7 +8607,7 @@ function queue(){if(queued)return;queued=true;requestAnimationFrame(install);}
 var priorGetter=window.getManualKpiChangeSummary;
 window.getManualKpiChangeSummary=function(){var parts=[],old=typeof priorGetter==='function'?clean(priorGetter()):'';if(old)parts.push(old);nameChanges.forEach(function(x){parts.push('KPI Name Change | Row: '+x.row+' | Original KPI/Measure: "'+safe(x.originalLabel)+'" | Updated KPI/Measure: "'+safe(x.newLabel)+'" | Changed: '+x.changedAt);});valueChanges.forEach(function(x){parts.push('This Month KPI Value Change | Row: '+x.row+' | KPI/Measure: "'+safe(x.label)+'" | Original Value: "'+safe(x.originalValue)+'" | Updated Value: "'+safe(x.newValue)+'" | Changed: '+x.changedAt);});return parts.join('\n');};
 window.getManualKpiChanges=window.getManualKpiChangeSummary;
-function start(){install();observer=new MutationObserver(queue);observer.observe(document.getElementById('page2-side-by-side-table')||document.getElementById('panel-2'),{childList:true,subtree:true});['page2-opened','workflow-panel-changed','previous-review-parsed','dataverse-current-month-kpis-applied'].forEach(function(n){window.addEventListener(n,queue,true);});}
+function start(){install();window.KPIObserverHub?.subscribe('manual-kpi-install',queue);['page2-opened','workflow-panel-changed','previous-review-parsed','dataverse-current-month-kpis-applied'].forEach(function(n){window.addEventListener(n,queue,true);});}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});else start();
 })();
 
@@ -9210,6 +9232,7 @@ function addNotes(){
 }
 let queued=false;function schedule(){if(queued)return;queued=true;requestAnimationFrame(()=>{queued=false;addNotes()})}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',addNotes,{once:true});else addNotes();
-new MutationObserver(schedule).observe(document.documentElement,{childList:true,subtree:true});
-window.__v504BlankKpiNote={text:noteText,refresh:addNotes};
+window.KPIObserverHub?.subscribe('blank-kpi-note',schedule,records=>records.some(record=>record.type==='event'||[...record.addedNodes].some(node=>node.nodeType===1&&(node.matches?.('table,tbody,tr,.blank-kpi-note')||node.querySelector?.('table,tbody,tr,.blank-kpi-note')))));
+for(const eventName of ['workflow-panel-changed','kpi-table-ready','page2-opened'])window.addEventListener(eventName,()=>schedule(),true);
+window.__v504BlankKpiNote={text:noteText,refresh:addNotes,rebind:()=>window.KPIObserverHub?.bind?.(),getState:()=>window.KPIObserverHub?.getState?.()||{}};
 })();
