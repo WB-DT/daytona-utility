@@ -1,4 +1,4 @@
-/* Performance Review Portal v524.18 core asset.
+/* Performance Review Portal v524.19 core asset.
    Source: v522. Business logic, embedded payloads, authentication, Dataverse, workflow, and shared utilities. */
 'use strict';
 /* v524.2: one observer authority for all KPI DOM changes. */
