@@ -6933,9 +6933,10 @@ window.addEventListener('pagehide',()=>{try{const c=document.getElementById('com
       const suffix = [monthLabel(period), f.reviewType || '', status].filter(Boolean).join(' | ');
       return `<option value="${id.replace(/"/g,'&quot;')}" ${id===state.selectedFileId?'selected':''}>${fileName(f).replace(/</g,'&lt;')} (${suffix || 'Period not identified'})</option>`;
     }).join('');
-    const summary = box.querySelector('#historical-period-summary');
-    summary.textContent = state.selectedFile ? `${monthLabel(state.parsedPeriod)} parsed review  →  ${monthLabel(state.reportingPeriod)} reporting data` : `Default target: ${monthLabel(target)}`;
-    box.querySelector('#historical-picker-note').textContent = state.selectedFile && state.parsedPeriod !== target
+    const summary = box.querySelector('[data-canonical-field="historical-period-summary"], #historical-period-summary');
+    const note = box.querySelector('[data-canonical-field="historical-picker-note"], #historical-picker-note');
+    if (summary) summary.textContent = state.selectedFile ? `${monthLabel(state.parsedPeriod)} parsed review  →  ${monthLabel(state.reportingPeriod)} reporting data` : `Default target: ${monthLabel(target)}`;
+    if (note) note.textContent = state.selectedFile && state.parsedPeriod !== target
       ? `Manual override selected. Reporting context is now ${monthLabel(state.reportingPeriod)}, the month immediately after the selected review.`
       : `Automatically matched the review immediately before ${monthLabel(normalizeMonthKey(value('review-period') || value('review-date')))}.`;
   }
