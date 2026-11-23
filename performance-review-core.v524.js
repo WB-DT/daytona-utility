@@ -9391,48 +9391,23 @@ window.addEventListener('pageshow',schedule,true);
 window.resumePage2ComparisonPreviewV52439=restore;
 })();
 
-/* ===== source-script: v52444-page2-right-side-workspace ===== */
+/* ===== source-script: v52446-page2-page3-side-workspaces ===== */
 (()=>{'use strict';
-if(window.__v52444Page2RightSideWorkspace)return;window.__v52444Page2RightSideWorkspace=true;
-let shell=null,left=null,viewerWasOpen=false,activating=null;
-function panel(){return document.getElementById('panel-2')}
-function viewer(){return document.getElementById('comparison-modal')}
-function page2Active(){const p=panel();return !!p&&!p.hidden&&!p.hasAttribute('inert')&&getComputedStyle(p).display!=='none'}
-function ensureWorkspace(){
- const p=panel(),v=viewer();if(!p||!v)return null;
- shell=document.getElementById('page2-workspace-shell-v52444');
- left=document.getElementById('page2-existing-content-v52444');
- if(!shell){
-  shell=document.createElement('div');shell.id='page2-workspace-shell-v52444';shell.className='page2-workspace-shell';
-  left=document.createElement('div');left.id='page2-existing-content-v52444';left.className='page2-existing-content';
-  const children=[...p.children].filter(node=>node!==v);
-  p.insertBefore(shell,children[0]||null);shell.appendChild(left);children.forEach(node=>left.appendChild(node));shell.appendChild(v);
- }else{
-  if(!left){left=document.createElement('div');left.id='page2-existing-content-v52444';left.className='page2-existing-content';shell.insertBefore(left,shell.firstChild)}
-  if(v.parentNode!==shell)shell.appendChild(v);
- }
- v.classList.add('comparison-modal-side-pane-v52444');v.removeAttribute('aria-modal');
- return shell;
-}
-function isOpen(){const v=viewer();return !!v&&(v.dataset.open==='true'||v.getAttribute('aria-hidden')==='false')&&v.style.display!=='none'}
-async function openSidePane(){
- if(!page2Active())return false;if(activating)return activating;
- activating=(async()=>{const sh=ensureWorkspace(),v=viewer();if(!sh||!v)return false;viewerWasOpen=true;sh.classList.add('is-viewer-open');v.dataset.open='true';v.setAttribute('aria-hidden','false');v.style.removeProperty('visibility');v.style.display='flex';
-  const frame=document.getElementById('comparison-iframe');if(frame){frame.style.display='block';frame.loading='eager';const src=(frame.getAttribute('src')||'').trim();if((!src||src==='about:blank')&&typeof window.resumePage2ComparisonPreviewV52439==='function')await window.resumePage2ComparisonPreviewV52439()}
-  return true})().finally(()=>activating=null);return activating;
-}
-function closeSidePane(){const sh=ensureWorkspace(),v=viewer();viewerWasOpen=false;sh?.classList.remove('is-viewer-open');if(v){v.dataset.open='false';v.setAttribute('aria-hidden','true');v.style.display='none';v.style.removeProperty('visibility')}}
-function suspend(){const v=viewer();if(!v)return;viewerWasOpen=isOpen()||viewerWasOpen;v.style.visibility='hidden'}
-function resume(){ensureWorkspace();if(viewerWasOpen){setTimeout(openSidePane,0);setTimeout(openSidePane,100)}else closeSidePane()}
-document.addEventListener('click',event=>{
- const target=event.target;
- if(target.closest?.('#comparison-modal-close-v419,[data-comparison-close],#comparison-close')){closeSidePane();return}
- if(target.closest?.('#btn-back-to-panel2,#btn-back-to-panel2-top,[data-ux-stage="2"]'))setTimeout(resume,0);
- if(target.closest?.('#btn-next-panel2,[data-ux-stage="3"]'))suspend();
-},true);
-window.addEventListener('comparison-modal-opened',()=>openSidePane(),true);
-window.addEventListener('comparison-modal-closed',()=>closeSidePane(),true);
-window.addEventListener('workflow-panel-changed',event=>{const page=Number(event?.detail?.panel||event?.detail?.page||0);if(page===2)resume();else if(page===3)suspend()},true);
-document.addEventListener('DOMContentLoaded',()=>{ensureWorkspace();closeSidePane()},{once:true});
-window.openPage2SidePaneV52444=openSidePane;window.closePage2SidePaneV52444=closeSidePane;
+if(window.__v52446Page2Page3SideWorkspaces)return;window.__v52446Page2Page3SideWorkspaces=true;
+let activePage=0,viewerWasOpen={2:false,3:false},activating=null;const byId=id=>document.getElementById(id),viewer=()=>byId('comparison-modal');
+function panel(page){return byId('panel-'+page)}
+function pageActive(page){const p=panel(page);return !!p&&!p.hidden&&!p.hasAttribute('inert')&&getComputedStyle(p).display!=='none'}
+function currentPage(){return pageActive(3)?3:pageActive(2)?2:0}
+function ensureButton(page,left){const id='btn-view-document-side-by-side-page'+page;if(byId(id))return;const row=document.createElement('div');row.className='side-by-side-launch-row-v52446';row.innerHTML='<button class="btn btn-secondary" id="'+id+'" type="button"><i class="fas fa-columns" aria-hidden="true"></i> View Document Side-by-Side</button>';left.insertBefore(row,left.firstChild)}
+function ensureWorkspace(page){const p=panel(page),v=viewer();if(!p||!v)return null;let shell=byId('page'+page+'-workspace-shell-v52446'),left=byId('page'+page+'-existing-content-v52446');if(!shell){shell=document.createElement('div');shell.id='page'+page+'-workspace-shell-v52446';shell.className='review-workspace-shell-v52446';left=document.createElement('div');left.id='page'+page+'-existing-content-v52446';left.className='review-existing-content-v52446';const children=[...p.children].filter(node=>node!==v);p.insertBefore(shell,children[0]||null);shell.appendChild(left);children.forEach(node=>left.appendChild(node))}ensureButton(page,left);return{shell,left}}
+function moveViewerTo(page){const ws=ensureWorkspace(page),v=viewer();if(!ws||!v)return null;if(v.parentNode!==ws.shell)ws.shell.appendChild(v);v.classList.add('comparison-side-pane-v52446');v.removeAttribute('aria-modal');return ws}
+function healthy(){const f=byId('comparison-iframe'),src=(f?.getAttribute('src')||'').trim();return !!f&&!!src&&src!=='about:blank'}
+async function openOn(page){if(!pageActive(page))return false;if(activating)return activating;activating=(async()=>{activePage=page;const ws=moveViewerTo(page),v=viewer();if(!ws||!v)return false;[2,3].forEach(other=>byId('page'+other+'-workspace-shell-v52446')?.classList.toggle('is-viewer-open',other===page));viewerWasOpen[page]=true;v.dataset.open='true';v.setAttribute('aria-hidden','false');v.style.removeProperty('visibility');v.style.display='flex';const f=byId('comparison-iframe');if(f){f.style.display='block';f.loading='eager'}if(!healthy()&&typeof window.resumePage2ComparisonPreviewV52439==='function')await window.resumePage2ComparisonPreviewV52439();return true})().finally(()=>activating=null);return activating}
+function closeOn(page=activePage||currentPage()){const shell=byId('page'+page+'-workspace-shell-v52446'),v=viewer();viewerWasOpen[page]=false;shell?.classList.remove('is-viewer-open');if(v){v.dataset.open='false';v.setAttribute('aria-hidden','true');v.style.display='none';v.style.removeProperty('visibility')}}
+function suspend(page){const v=viewer();viewerWasOpen[page]=!!byId('page'+page+'-workspace-shell-v52446')?.classList.contains('is-viewer-open');if(v)v.style.visibility='hidden'}
+function resume(page){ensureWorkspace(page);if(viewerWasOpen[page]){setTimeout(()=>openOn(page),0);setTimeout(()=>openOn(page),100)}else closeOn(page)}
+document.addEventListener('click',event=>{const launch=event.target.closest?.('[id^="btn-view-document-side-by-side-page"]');if(launch){openOn(Number(launch.id.slice(-1)));return}if(event.target.closest?.('#comparison-modal-close-v419,[data-comparison-close],#comparison-close'))closeOn()},true);
+window.addEventListener('workflow-panel-changed',event=>{const next=Number(event?.detail?.panel||event?.detail?.page||0);if(next!==2&&next!==3)return;const prior=activePage;if(prior&&prior!==next)suspend(prior);activePage=next;resume(next)},true);
+document.addEventListener('DOMContentLoaded',()=>{ensureWorkspace(2);ensureWorkspace(3);closeOn(2);closeOn(3)},{once:true});window.openReviewSideBySideV52446=openOn;window.closeReviewSideBySideV52446=closeOn;
 })();
+
