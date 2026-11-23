@@ -5759,9 +5759,12 @@ const essentials={
 const state={avaya:{rows:[],filter:'',sort:0,dir:1,visible:new Set(essentials.avaya)},login:{rows:[],filter:'',sort:0,dir:1,visible:new Set(essentials.login)}};
 function date(v){const x=new Date(clean(v).slice(0,10)+'T00:00:00');return Number.isNaN(+x)?clean(v):x.toLocaleDateString('en-US',{month:'2-digit',day:'2-digit',year:'numeric'});}function val(r,d){const v=r?.[d[0]];return d[2]==='date'?date(v):(clean(v)||'—');}
 function rowKey(r,type){return clean(r.cr714_recordkey)||defs[type].map(d=>clean(r[d[0]])).join('|');}
+function shiftTypeHtml(value){const raw=clean(value);if(!raw||raw==='—')return esc(raw||'—');let symbol='',cls='';if(/^(extended|over|above|long)$/i.test(raw)){symbol='▲';cls='shift-type-extended'}else if(/^(under|short|shortened|below)$/i.test(raw)){symbol='▼';cls='shift-type-under'}else if(/^(even|normal|on time|standard)$/i.test(raw)){symbol='◆';cls='shift-type-even'}else return esc(raw);return '<span class="shift-type-status '+cls+'"><span class="shift-type-symbol" aria-hidden="true">'+symbol+'</span><span>'+esc(raw)+'</span></span>';}
+function reportCellHtml(type,d,r){const value=val(r,d);return type==='login'&&d[0]==='cr714_shortextshift'?shiftTypeHtml(value):esc(value);}
+
 function normalize(rows,type){const seen=new Set();return (Array.isArray(rows)?rows:[]).filter(r=>{const k=rowKey(r,type);if(!k||seen.has(k))return false;seen.add(k);return true;});}
 function menu(type){const box=document.querySelector('[data-column-menu="'+type+'"]');if(!box)return;box.innerHTML='<div class="column-actions-v225"><button type="button" data-column-action="essentials">Essentials</button><button type="button" data-column-action="all">All fields</button></div>'+defs[type].map(d=>'<label><span>'+esc(d[1])+'</span><input type="checkbox" value="'+d[0]+'" '+(state[type].visible.has(d[0])?'checked':'')+' aria-label="Show '+esc(d[1])+' column"></label>').join('');}
-function render(type){const table=document.querySelector('[data-report-table="'+type+'"]');if(!table)return;const st=state[type],all=defs[type],cols=all.filter(d=>st.visible.has(d[0]));let rows=st.rows.slice();const q=st.filter.toLowerCase();if(q)rows=rows.filter(r=>all.some(d=>val(r,d).toLowerCase().includes(q)));const sd=all[st.sort]||all[0];rows.sort((a,b)=>{let x=val(a,sd),y=val(b,sd);if(sd[2]==='date'){x=new Date(clean(a[sd[0]]));y=new Date(clean(b[sd[0]]));}else if(sd[2]==='number'){x=Number(a[sd[0]])||0;y=Number(b[sd[0]])||0;}return(x<y?-1:x>y?1:0)*st.dir;});table.tHead.innerHTML='<tr>'+cols.map(d=>'<th data-sort-field="'+d[0]+'">'+esc(d[1])+'</th>').join('')+'</tr>';table.tBodies[0].innerHTML=rows.length?rows.map(r=>'<tr>'+cols.map(d=>'<td>'+esc(val(r,d))+'</td>').join('')+'</tr>').join(''):'<tr><td colspan="'+Math.max(1,cols.length)+'">No matching rows found for the selected employee and full month.</td></tr>';const count=document.getElementById('p3-'+type+'-count'),status=document.getElementById('p3-'+type+'-status');if(count)count.textContent=rows.length+' row'+(rows.length===1?'':'s');if(status)status.textContent=rows.length+' displayed of '+st.rows.length+' Dataverse row'+(st.rows.length===1?'':'s')+'.';menu(type);}
+function render(type){const table=document.querySelector('[data-report-table="'+type+'"]');if(!table)return;const st=state[type],all=defs[type],cols=all.filter(d=>st.visible.has(d[0]));let rows=st.rows.slice();const q=st.filter.toLowerCase();if(q)rows=rows.filter(r=>all.some(d=>val(r,d).toLowerCase().includes(q)));const sd=all[st.sort]||all[0];rows.sort((a,b)=>{let x=val(a,sd),y=val(b,sd);if(sd[2]==='date'){x=new Date(clean(a[sd[0]]));y=new Date(clean(b[sd[0]]));}else if(sd[2]==='number'){x=Number(a[sd[0]])||0;y=Number(b[sd[0]])||0;}return(x<y?-1:x>y?1:0)*st.dir;});table.tHead.innerHTML='<tr>'+cols.map(d=>'<th data-sort-field="'+d[0]+'">'+esc(d[1])+'</th>').join('')+'</tr>';table.tBodies[0].innerHTML=rows.length?rows.map(r=>'<tr>'+cols.map(d=>'<td>'+reportCellHtml(type,d,r)+'</td>').join('')+'</tr>').join(''):'<tr><td colspan="'+Math.max(1,cols.length)+'">No matching rows found for the selected employee and full month.</td></tr>';const count=document.getElementById('p3-'+type+'-count'),status=document.getElementById('p3-'+type+'-status');if(count)count.textContent=rows.length+' row'+(rows.length===1?'':'s');if(status)status.textContent=rows.length+' displayed of '+st.rows.length+' Dataverse row'+(st.rows.length===1?'':'s')+'.';menu(type);}
 function apply(detail){const login=detail?.rawLoginRows||detail?.loginRows||[],avaya=detail?.rawAvayaRows||detail?.avayaRows||[];state.login.rows=normalize(login,'login');state.avaya.rows=normalize(avaya,'avaya');render('login');render('avaya');}
 document.addEventListener('input',e=>{const type=e.target?.dataset?.reportFilter;if(!type)return;state[type].filter=e.target.value;render(type);},true);document.addEventListener('change',e=>{const box=e.target?.closest?.('[data-column-menu]');if(!box)return;const type=box.dataset.columnMenu,checks=[...box.querySelectorAll('input:checked')];if(!checks.length){e.target.checked=true;return;}state[type].visible=new Set(checks.map(x=>x.value));render(type);window.dispatchEvent(new CustomEvent('page3-report-columns-changed',{detail:{type,columns:[...state[type].visible]}}));},true);document.addEventListener('click',e=>{const action=e.target?.closest?.('[data-column-action]');if(action){const box=action.closest('[data-column-menu]'),type=box?.dataset.columnMenu;if(type){state[type].visible=action.dataset.columnAction==='all'?new Set(defs[type].map(d=>d[0])):new Set(essentials[type]);render(type);}return;}const clear=e.target?.closest?.('[data-clear-report]');if(clear){const type=clear.dataset.clearReport;state[type].filter='';const i=document.querySelector('[data-report-filter="'+type+'"]');if(i)i.value='';render(type);return;}const th=e.target?.closest?.('[data-report-table] th[data-sort-field]');if(th){const table=th.closest('[data-report-table]'),type=table.dataset.reportTable,index=defs[type].findIndex(d=>d[0]===th.dataset.sortField);state[type].dir=state[type].sort===index?state[type].dir*-1:1;state[type].sort=index;render(type);}},true);
 window.addEventListener('dataverse-daily-data-loaded',e=>apply(e.detail||{}),true);['page3-opened','page3-rendered'].forEach(n=>window.addEventListener(n,()=>{if(window.__latestDataverseDailyData)apply(window.__latestDataverseDailyData);prepareKpis();},true));
@@ -9258,4 +9261,39 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 window.KPIObserverHub?.subscribe('blank-kpi-note',schedule,records=>records.some(record=>record.type==='event'||[...record.addedNodes].some(node=>node.nodeType===1&&(node.matches?.('table,tbody,tr,.blank-kpi-note')||node.querySelector?.('table,tbody,tr,.blank-kpi-note')))));
 for(const eventName of ['workflow-panel-changed','kpi-table-ready','page2-opened'])window.addEventListener(eventName,()=>schedule(),true);
 window.__v504BlankKpiNote={text:noteText,refresh:addNotes,rebind:()=>window.KPIObserverHub?.bind?.(),getState:()=>window.KPIObserverHub?.getState?.()||{}};
+})();
+
+
+/* ===== source-script: v52424-shift-type-status-formatting ===== */
+(()=>{'use strict';
+if(window.__v52424ShiftTypeStatusFormatting)return;window.__v52424ShiftTypeStatusFormatting=true;
+const rules=[
+ {test:/^(extended|over|above|long)$/i,symbol:'▲',cls:'shift-type-extended',label:'Extended'},
+ {test:/^(under|short|shortened|below)$/i,symbol:'▼',cls:'shift-type-under',label:'Under'},
+ {test:/^(even|normal|on time|standard)$/i,symbol:'◆',cls:'shift-type-even',label:'Even'}
+];
+function style(){if(document.getElementById('v52424-shift-type-style'))return;const el=document.createElement('style');el.id='v52424-shift-type-style';el.textContent=`
+.shift-type-status{display:inline-flex;align-items:center;gap:.32em;font-weight:800;white-space:nowrap}
+.shift-type-status .shift-type-symbol{font-weight:900;font-size:1.02em;line-height:1}
+.shift-type-extended{color:#1b5e20}.shift-type-under{color:#9c1c1c}.shift-type-even{color:#333}
+@media print{.shift-type-status{color:#000!important;text-shadow:none!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+`;document.head.appendChild(el)}
+function formatTable(table){
+ const header=[...table.querySelectorAll('thead th')];
+ const index=header.findIndex(th=>/shift\s*type/i.test(th.textContent||''));if(index<0)return;
+ table.querySelectorAll('tbody tr').forEach(row=>{
+  const cell=row.children[index];if(!cell||cell.querySelector('.shift-type-status'))return;
+  const raw=(cell.textContent||'').replace(/[▲▼◆]/g,'').trim();const rule=rules.find(item=>item.test.test(raw));if(!rule)return;
+  cell.textContent='';const span=document.createElement('span');span.className=`shift-type-status ${rule.cls}`;span.dataset.shiftType=raw.toLowerCase();span.setAttribute('aria-label',rule.label);
+  const symbol=document.createElement('span');symbol.className='shift-type-symbol';symbol.setAttribute('aria-hidden','true');symbol.textContent=rule.symbol;
+  const text=document.createElement('span');text.className='shift-type-label';text.textContent=raw;span.append(symbol,text);cell.appendChild(span);
+ });
+}
+function format(root=document){style();root.querySelectorAll('table').forEach(formatTable)}
+function wrapGenerator(){const original=window.generateLoginLogoutTable;if(typeof original!=='function'||original.__v52424Wrapped)return false;const wrapped=function(){const box=document.createElement('div');box.innerHTML=original.apply(this,arguments);format(box);return box.innerHTML};wrapped.__v52424Wrapped=true;wrapped.__original=original;window.generateLoginLogoutTable=wrapped;return true}
+function boot(){style();wrapGenerator();format();let scheduled=false;new MutationObserver(()=>{if(scheduled)return;scheduled=true;requestAnimationFrame(()=>{scheduled=false;wrapGenerator();format()})}).observe(document.body,{childList:true,subtree:true});}
+window.formatShiftTypeStatusesV52424=format;
+window.addEventListener('beforeprint',()=>format(),true);
+document.readyState==='loading'?document.addEventListener('DOMContentLoaded',boot,{once:true}):boot();
+document.documentElement.dataset.shiftTypeStatusFormatting='v524.24';
 })();

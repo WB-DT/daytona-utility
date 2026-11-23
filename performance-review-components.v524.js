@@ -79,13 +79,47 @@ const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
 function availability(){const row=[...document.querySelectorAll('#page2-sbs-grid tbody tr')].find(r=>/availability per shift/i.test(clean(r.querySelector('.sbs-kpi-label-input,.sbs-kpi-label')?.value||r.cells?.[0]?.textContent)));const prev=clean(row?.cells?.[1]?.querySelector('input,textarea')?.value||row?.cells?.[1]?.textContent)||'—',current=clean(row?.cells?.[3]?.querySelector('input,textarea')?.value||row?.cells?.[3]?.textContent)||'—';return{previous:prev,current}}
 function textOf(node){return clean([...node.getElementsByTagNameNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main','t')].map(n=>n.textContent).join(' '))}
 function setText(cell,value){const ns='http://schemas.openxmlformats.org/wordprocessingml/2006/main',texts=[...cell.getElementsByTagNameNS(ns,'t')];if(texts.length){texts[0].textContent=value;texts.slice(1).forEach(n=>n.textContent='')}else{const p=cell.ownerDocument.createElementNS(ns,'w:p'),r=cell.ownerDocument.createElementNS(ns,'w:r'),t=cell.ownerDocument.createElementNS(ns,'w:t');t.textContent=value;r.appendChild(t);p.appendChild(r);cell.appendChild(p)}}
+function styleShiftTypeStatusesV52424(doc,ns){
+ const rules=[
+  {test:/^(extended|over|above|long)$/i,symbol:'▲',color:'1B5E20'},
+  {test:/^(under|short|shortened|below)$/i,symbol:'▼',color:'9C1C1C'},
+  {test:/^(even|normal|on time|standard)$/i,symbol:'◆',color:'333333'}
+ ];
+ const children=(node,name)=>[...node.children].filter(child=>child.localName===name);
+ let tables=0,cells=0;
+ [...doc.getElementsByTagNameNS(ns,'tbl')].forEach(table=>{
+  const rows=children(table,'tr');if(!rows.length)return;
+  const headerCells=children(rows[0],'tc');
+  const headers=headerCells.map(cell=>textOf(cell).trim().toLowerCase());
+  const index=headers.findIndex(value=>value==='shift type'||value.includes('shift type'));
+  if(index<0)return;
+  let changed=false;
+  rows.slice(1).forEach(row=>{
+   const cell=children(row,'tc')[index];if(!cell)return;
+   const raw=textOf(cell).replace(/[▲▼◆]/g,'').trim();
+   const rule=rules.find(item=>item.test.test(raw));if(!rule)return;
+   const runs=[...cell.getElementsByTagNameNS(ns,'r')];
+   const texts=[...cell.getElementsByTagNameNS(ns,'t')];if(!texts.length)return;
+   texts[0].textContent=rule.symbol+' '+raw;texts.slice(1).forEach(node=>node.textContent='');
+   runs.forEach(run=>{
+    let props=children(run,'rPr')[0];if(!props){props=doc.createElementNS(ns,'w:rPr');run.insertBefore(props,run.firstChild)}
+    let color=children(props,'color')[0];if(!color){color=doc.createElementNS(ns,'w:color');props.appendChild(color)}
+    color.setAttributeNS(ns,'w:val',rule.color);
+    if(!children(props,'b').length)props.appendChild(doc.createElementNS(ns,'w:b'));
+   });
+   changed=true;cells++;
+  });
+  if(changed)tables++;
+ });
+ return{tables,cells};
+}
 function sanitizeDocumentXml(xml,v449Snapshot){const parser=new DOMParser(),doc=parser.parseFromString(xml,'application/xml'),ns='http://schemas.openxmlformats.org/wordprocessingml/2006/main',body=doc.getElementsByTagNameNS(ns,'body')[0],a=availability();let tablesChanged=0;
  [...doc.getElementsByTagNameNS(ns,'tbl')].forEach(table=>{const tableText=textOf(table);const obsolete=/Average Lunch/i.test(tableText)&&/Average Personal/i.test(tableText)&&/(?:Availability Per Shift|Days Worked|Average Hours)/i.test(tableText)&&!/\bInbound\b/i.test(tableText)&&!/\bOutbound\b/i.test(tableText)&&!/% Call Linking/i.test(tableText);if(obsolete){table.remove();tablesChanged++}});
  const allText=textOf(body);if(!allText.includes(MASTHEAD)){const p=doc.createElementNS(ns,'w:p'),r=doc.createElementNS(ns,'w:r'),t=doc.createElementNS(ns,'w:t');t.textContent=MASTHEAD;r.appendChild(t);p.appendChild(r);body.insertBefore(p,body.firstChild)}
  const runs=[...doc.getElementsByTagNameNS(ns,'t')];for(let i=0;i<runs.length;i++){if(!/^Days Worked$/i.test(clean(runs[i].textContent)))continue;const avg=runs.slice(i+1,i+5).findIndex(n=>/^Average Hours$/i.test(clean(n.textContent)));if(avg<0)continue;const avgIndex=i+1+avg;runs[i].textContent=AVAILABILITY;runs[avgIndex].textContent='';const values=[];for(let k=avgIndex+1;k<runs.length&&values.length<2;k++){if(clean(runs[k].textContent))values.push(runs[k])}if(values[0])values[0].textContent=(tablesChanged===0?a.previous:a.current);if(values[1])values[1].textContent='';tablesChanged++}[...doc.getElementsByTagNameNS(ns,'tbl')].forEach(tbl=>{const rows=[...tbl.getElementsByTagNameNS(ns,'tr')];if(!rows.length)return;const headers=[...rows[0].children].filter(n=>n.localName==='tc').map(textOf),bad=headers.map((h,i)=>/^(?:Days Worked|Average Hours)$/i.test(clean(h))?i:-1).filter(i=>i>=0);bad.sort((a,b)=>b-a).forEach(index=>rows.forEach(row=>{const cells=[...row.children].filter(n=>n.localName==='tc');cells[index]?.remove()}))});
  const candidates=[...doc.getElementsByTagNameNS(ns,'tbl')].filter(tbl=>{const x=textOf(tbl);return /Days Worked/i.test(x)&&/Average Hours/i.test(x)});
  candidates.forEach((tbl,tableIndex)=>{const rows=[...tbl.getElementsByTagNameNS(ns,'tr')];if(!rows.length)return;const headerCells=[...rows[0].children].filter(n=>n.localName==='tc'),labels=headerCells.map(textOf),day=labels.findIndex(x=>/^Days Worked$/i.test(x)),avg=labels.findIndex(x=>/^Average Hours$/i.test(x));if(day<0||avg<0)return;rows.forEach((row,rowIndex)=>{const cells=[...row.children].filter(n=>n.localName==='tc');if(!cells[day]||!cells[avg])return;if(rowIndex===0)setText(cells[day],AVAILABILITY);else setText(cells[day],tableIndex===0?a.previous:a.current);cells[avg].remove()});tablesChanged++});
- const patchedLiveKpis=applyLiveKpisToDocxV449(doc,ns,v449Snapshot);return{xml:new XMLSerializer().serializeToString(doc),tablesChanged,masthead:true,patchedLiveKpis}}
+ const patchedLiveKpis=applyLiveKpisToDocxV449(doc,ns,v449Snapshot),shiftTypes=styleShiftTypeStatusesV52424(doc,ns);return{xml:new XMLSerializer().serializeToString(doc),tablesChanged,masthead:true,patchedLiveKpis,shiftTypes}}
 async function sanitize(blob,v449Snapshot){if(!(blob instanceof Blob))return blob;if(!window.JSZip)throw new Error('JSZip is unavailable for DOCX sanitization.');const zip=await window.JSZip.loadAsync(blob),file=zip.file('word/document.xml');if(!file)throw new Error('word/document.xml is missing.');const result=sanitizeDocumentXml(await file.async('string'),v449Snapshot);zip.file('word/document.xml',result.xml);const output=await zip.generateAsync({type:'blob',mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',compression:'DEFLATE'});output.__v429Audit={tablesChanged:result.tablesChanged};return output}
 let installed=false,original=null;
 function install(){const candidate=window.exportCompletedReviewDocx;if(typeof candidate!=='function'||candidate.__v429Wrapped)return false;original=candidate;const wrapped=async function(){const v449Snapshot=snapshotLiveKpisV449(),restoreKpiCells=stageKpiRatingCells(),livePreview=document.getElementById('summary-preview'),previewSnapshot=livePreview?.innerHTML||'';let captured=null,capturedName='Performance Review.docx';const create=URL.createObjectURL,click=HTMLAnchorElement.prototype.click;URL.createObjectURL=function(blob){if(blob instanceof Blob)captured=blob;return create.call(URL,blob)};HTMLAnchorElement.prototype.click=function(){if(this.download&&/\.docx$/i.test(this.download)){capturedName=this.download;return}return click.call(this)};try{const result=await original.apply(this,arguments);const source=captured||(result instanceof Blob?result:window.__reviewDocxBlob);const fixed=await sanitize(source,v449Snapshot);window.__reviewDocxBlob=fixed;window.__reviewDocxAttachment=fixed;const url=create.call(URL,fixed),a=document.createElement('a');a.href=url;a.download=capturedName;document.body.appendChild(a);click.call(a);a.remove();setTimeout(()=>URL.revokeObjectURL(url),0);window.__v429LastExport={size:fixed.size,name:capturedName,tablesChanged:fixed.__v429Audit?.tablesChanged||0,liveKpis:v449Snapshot};window.__v449LastSnapshot=v449Snapshot;return fixed}finally{restoreKpiCells();URL.createObjectURL=create;HTMLAnchorElement.prototype.click=click;if(livePreview&&previewSnapshot)livePreview.innerHTML=previewSnapshot;requestAnimationFrame(()=>{window.syncCanonicalPage3KpisV445?.('post-export');window.removeOrphanKpiPreviewV447?.('post-export')})}};wrapped.__v429Wrapped=true;wrapped.__v429Original=original;window.exportCompletedReviewDocx=wrapped;window.generateCompletedReviewDocx=wrapped;installed=true;return true}
