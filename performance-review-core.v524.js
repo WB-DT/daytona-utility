@@ -9391,42 +9391,48 @@ window.addEventListener('pageshow',schedule,true);
 window.resumePage2ComparisonPreviewV52439=restore;
 })();
 
-/* ===== source-script: v52443-on-demand-page2-fifty-fifty-authority ===== */
+/* ===== source-script: v52444-page2-right-side-workspace ===== */
 (()=>{'use strict';
-if(window.__v52443OnDemandPage2FiftyFifty)return;window.__v52443OnDemandPage2FiftyFifty=true;
-let dock=null,viewerWasOpen=false,activating=null;
+if(window.__v52444Page2RightSideWorkspace)return;window.__v52444Page2RightSideWorkspace=true;
+let shell=null,left=null,viewerWasOpen=false,activating=null;
 function panel(){return document.getElementById('panel-2')}
 function viewer(){return document.getElementById('comparison-modal')}
-function tablePane(){const table=document.getElementById('page2-sbs-grid');return table?.closest('.sbs-scroll')||table?.parentElement||null}
 function page2Active(){const p=panel();return !!p&&!p.hidden&&!p.hasAttribute('inert')&&getComputedStyle(p).display!=='none'}
-function ensureDock(){
- const p=panel(),v=viewer(),table=tablePane();if(!p||!v||!table)return null;
- dock=document.getElementById('page2-fifty-fifty-dock-v52443');
- if(!dock){dock=document.createElement('div');dock.id='page2-fifty-fifty-dock-v52443';dock.className='page2-fifty-fifty-dock';table.parentNode.insertBefore(dock,table);dock.append(table,v)}
- else{if(table.parentNode!==dock)dock.appendChild(table);if(v.parentNode!==dock)dock.appendChild(v)}
- v.classList.add('comparison-modal-docked-v52443');v.removeAttribute('aria-modal');
- return dock;
+function ensureWorkspace(){
+ const p=panel(),v=viewer();if(!p||!v)return null;
+ shell=document.getElementById('page2-workspace-shell-v52444');
+ left=document.getElementById('page2-existing-content-v52444');
+ if(!shell){
+  shell=document.createElement('div');shell.id='page2-workspace-shell-v52444';shell.className='page2-workspace-shell';
+  left=document.createElement('div');left.id='page2-existing-content-v52444';left.className='page2-existing-content';
+  const children=[...p.children].filter(node=>node!==v);
+  p.insertBefore(shell,children[0]||null);shell.appendChild(left);children.forEach(node=>left.appendChild(node));shell.appendChild(v);
+ }else{
+  if(!left){left=document.createElement('div');left.id='page2-existing-content-v52444';left.className='page2-existing-content';shell.insertBefore(left,shell.firstChild)}
+  if(v.parentNode!==shell)shell.appendChild(v);
+ }
+ v.classList.add('comparison-modal-side-pane-v52444');v.removeAttribute('aria-modal');
+ return shell;
 }
 function isOpen(){const v=viewer();return !!v&&(v.dataset.open==='true'||v.getAttribute('aria-hidden')==='false')&&v.style.display!=='none'}
-async function openDock(){
+async function openSidePane(){
  if(!page2Active())return false;if(activating)return activating;
- activating=(async()=>{const d=ensureDock(),v=viewer();if(!d||!v)return false;viewerWasOpen=true;d.classList.add('is-viewer-open');v.dataset.open='true';v.setAttribute('aria-hidden','false');v.style.removeProperty('visibility');v.style.display='flex';
+ activating=(async()=>{const sh=ensureWorkspace(),v=viewer();if(!sh||!v)return false;viewerWasOpen=true;sh.classList.add('is-viewer-open');v.dataset.open='true';v.setAttribute('aria-hidden','false');v.style.removeProperty('visibility');v.style.display='flex';
   const frame=document.getElementById('comparison-iframe');if(frame){frame.style.display='block';frame.loading='eager';const src=(frame.getAttribute('src')||'').trim();if((!src||src==='about:blank')&&typeof window.resumePage2ComparisonPreviewV52439==='function')await window.resumePage2ComparisonPreviewV52439()}
   return true})().finally(()=>activating=null);return activating;
 }
-function closeDock(){const d=ensureDock(),v=viewer();viewerWasOpen=false;d?.classList.remove('is-viewer-open');if(v){v.dataset.open='false';v.setAttribute('aria-hidden','true');v.style.display='none';v.style.removeProperty('visibility')}}
-function suspendForPage3(){const v=viewer();if(!v)return;viewerWasOpen=isOpen()||viewerWasOpen;v.style.visibility='hidden'}
-function resumePage2(){ensureDock();if(viewerWasOpen){setTimeout(openDock,0);setTimeout(openDock,100)}else closeDock()}
-// Existing viewer controls remain authoritative; this layer only docks their open/close state.
+function closeSidePane(){const sh=ensureWorkspace(),v=viewer();viewerWasOpen=false;sh?.classList.remove('is-viewer-open');if(v){v.dataset.open='false';v.setAttribute('aria-hidden','true');v.style.display='none';v.style.removeProperty('visibility')}}
+function suspend(){const v=viewer();if(!v)return;viewerWasOpen=isOpen()||viewerWasOpen;v.style.visibility='hidden'}
+function resume(){ensureWorkspace();if(viewerWasOpen){setTimeout(openSidePane,0);setTimeout(openSidePane,100)}else closeSidePane()}
 document.addEventListener('click',event=>{
  const target=event.target;
- if(target.closest?.('#comparison-modal-close-v419,[data-comparison-close],#comparison-close')){closeDock();return}
- if(target.closest?.('#btn-back-to-panel2,#btn-back-to-panel2-top,[data-ux-stage="2"]'))setTimeout(resumePage2,0);
- if(target.closest?.('#btn-next-panel2,[data-ux-stage="3"]'))suspendForPage3();
+ if(target.closest?.('#comparison-modal-close-v419,[data-comparison-close],#comparison-close')){closeSidePane();return}
+ if(target.closest?.('#btn-back-to-panel2,#btn-back-to-panel2-top,[data-ux-stage="2"]'))setTimeout(resume,0);
+ if(target.closest?.('#btn-next-panel2,[data-ux-stage="3"]'))suspend();
 },true);
-window.addEventListener('comparison-modal-opened',()=>openDock(),true);
-window.addEventListener('comparison-modal-closed',()=>closeDock(),true);
-window.addEventListener('workflow-panel-changed',event=>{const page=Number(event?.detail?.panel||event?.detail?.page||0);if(page===2)resumePage2();else if(page===3)suspendForPage3()},true);
-document.addEventListener('DOMContentLoaded',()=>{ensureDock();closeDock()},{once:true});
-window.openPage2FiftyFiftyV52443=openDock;window.closePage2FiftyFiftyV52443=closeDock;
+window.addEventListener('comparison-modal-opened',()=>openSidePane(),true);
+window.addEventListener('comparison-modal-closed',()=>closeSidePane(),true);
+window.addEventListener('workflow-panel-changed',event=>{const page=Number(event?.detail?.panel||event?.detail?.page||0);if(page===2)resume();else if(page===3)suspend()},true);
+document.addEventListener('DOMContentLoaded',()=>{ensureWorkspace();closeSidePane()},{once:true});
+window.openPage2SidePaneV52444=openSidePane;window.closePage2SidePaneV52444=closeSidePane;
 })();
