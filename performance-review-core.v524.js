@@ -3370,6 +3370,13 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
   }
 
   function startOver() {
+    // Reset any prior archive request before clearing the completed review.
+    try { window.__historyRequestController?.abort?.(); } catch (_) {}
+    window.__historyRequestController = null;
+    window.__historyRequestSequence = (Number(window.__historyRequestSequence) || 0) + 1;
+    window.setPanel1ArchiveLock?.(false);
+    document.body.classList.remove('archive-loader-active');
+    window.resetArchiveForNewReviewV52452?.();
     if(typeof window.resetCompleteKpiEditLog==='function')window.resetCompleteKpiEditLog();
     if(typeof window.clearHistoricalReviewSelection==='function') window.clearHistoricalReviewSelection('start-over');
     document.querySelectorAll('input:not([type="checkbox"]):not([readonly]), select, textarea').forEach(el => el.value = '');
@@ -9420,3 +9427,20 @@ document.addEventListener('DOMContentLoaded',()=>{ensureWorkspace(2);ensureWorks
 window.openReviewSideBySideV52447=open;window.closeReviewSideBySideV52447=close;window.getReviewSideBySideStateV52447=()=>JSON.parse(JSON.stringify(state.open));
 })();
 
+
+
+/* ===== v52452-repeat-review-archive-finalizer ===== */
+(()=>{'use strict';
+if(window.__v52452RepeatReviewArchiveFinalizer)return;
+window.__v52452RepeatReviewArchiveFinalizer=true;
+const original=window.fetchSharePointHistory;
+if(typeof original!=='function')return;
+let generation=0;
+const unlock=()=>{window.setPanel1ArchiveLock?.(false);document.body.classList.remove('archive-loader-active');clearTimeout(window.__panel1ArchiveLockFailsafe);['api-loader','iframe-loader'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none'})};
+window.resetArchiveForNewReviewV52452=function(){generation++;try{window.__historyRequestController?.abort?.()}catch(_){}window.__historyRequestController=null;window.__historyRequestSequence=(Number(window.__historyRequestSequence)||0)+1;unlock()};
+window.fetchSharePointHistory=function(employeeName){
+ const mine=++generation,name=String(employeeName||'').trim();
+ if(!name){unlock();return Promise.resolve(null)}
+ return Promise.resolve().then(()=>original.call(window,name)).catch(error=>{if(error?.name!=='AbortError')throw error;return null}).finally(()=>{if(mine===generation&&String(document.getElementById('employee-name')?.value||'').trim()===name)unlock()});
+};
+})();
