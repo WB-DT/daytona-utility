@@ -79,38 +79,13 @@ const clean=v=>String(v??'').replace(/\s+/g,' ').trim();
 function availability(){const row=[...document.querySelectorAll('#page2-sbs-grid tbody tr')].find(r=>/availability per shift/i.test(clean(r.querySelector('.sbs-kpi-label-input,.sbs-kpi-label')?.value||r.cells?.[0]?.textContent)));const prev=clean(row?.cells?.[1]?.querySelector('input,textarea')?.value||row?.cells?.[1]?.textContent)||'—',current=clean(row?.cells?.[3]?.querySelector('input,textarea')?.value||row?.cells?.[3]?.textContent)||'—';return{previous:prev,current}}
 function textOf(node){return clean([...node.getElementsByTagNameNS('http://schemas.openxmlformats.org/wordprocessingml/2006/main','t')].map(n=>n.textContent).join(' '))}
 function setText(cell,value){const ns='http://schemas.openxmlformats.org/wordprocessingml/2006/main',texts=[...cell.getElementsByTagNameNS(ns,'t')];if(texts.length){texts[0].textContent=value;texts.slice(1).forEach(n=>n.textContent='')}else{const p=cell.ownerDocument.createElementNS(ns,'w:p'),r=cell.ownerDocument.createElementNS(ns,'w:r'),t=cell.ownerDocument.createElementNS(ns,'w:t');t.textContent=value;r.appendChild(t);p.appendChild(r);cell.appendChild(p)}}
-function styleDataverseStatArrowsV52423(doc,ns){
- const reportHint=/(?:login|logout|report date|hours worked|staffed|inbound|outbound|break|lunch|personal|adherence|accuracy)/i;
- const kpiHint=/(?:Last|Previous) month/i;
- const colors={'▲':'1B5E20','↑':'1B5E20','▶':'333333','→':'333333','◆':'333333','▼':'9C1C1C','↓':'9C1C1C'};
- let tables=0,runs=0;
- [...doc.getElementsByTagNameNS(ns,'tbl')].forEach(table=>{
-  const value=textOf(table);
-  if(!reportHint.test(value)||kpiHint.test(value))return;
-  let changed=false;
-  [...table.getElementsByTagNameNS(ns,'r')].forEach(run=>{
-   const value=[...run.getElementsByTagNameNS(ns,'t')].map(node=>node.textContent||'').join('');
-   const symbol=Object.keys(colors).find(mark=>value.includes(mark));
-   if(!symbol)return;
-   let props=[...run.children].find(node=>node.localName==='rPr');
-   if(!props){props=doc.createElementNS(ns,'w:rPr');run.insertBefore(props,run.firstChild)}
-   let color=[...props.children].find(node=>node.localName==='color');
-   if(!color){color=doc.createElementNS(ns,'w:color');props.appendChild(color)}
-   color.setAttributeNS(ns,'w:val',colors[symbol]);
-   if(![...props.children].some(node=>node.localName==='b'))props.appendChild(doc.createElementNS(ns,'w:b'));
-   changed=true;runs++;
-  });
-  if(changed)tables++;
- });
- return{tables,runs};
-}
 function sanitizeDocumentXml(xml,v449Snapshot){const parser=new DOMParser(),doc=parser.parseFromString(xml,'application/xml'),ns='http://schemas.openxmlformats.org/wordprocessingml/2006/main',body=doc.getElementsByTagNameNS(ns,'body')[0],a=availability();let tablesChanged=0;
  [...doc.getElementsByTagNameNS(ns,'tbl')].forEach(table=>{const tableText=textOf(table);const obsolete=/Average Lunch/i.test(tableText)&&/Average Personal/i.test(tableText)&&/(?:Availability Per Shift|Days Worked|Average Hours)/i.test(tableText)&&!/\bInbound\b/i.test(tableText)&&!/\bOutbound\b/i.test(tableText)&&!/% Call Linking/i.test(tableText);if(obsolete){table.remove();tablesChanged++}});
  const allText=textOf(body);if(!allText.includes(MASTHEAD)){const p=doc.createElementNS(ns,'w:p'),r=doc.createElementNS(ns,'w:r'),t=doc.createElementNS(ns,'w:t');t.textContent=MASTHEAD;r.appendChild(t);p.appendChild(r);body.insertBefore(p,body.firstChild)}
  const runs=[...doc.getElementsByTagNameNS(ns,'t')];for(let i=0;i<runs.length;i++){if(!/^Days Worked$/i.test(clean(runs[i].textContent)))continue;const avg=runs.slice(i+1,i+5).findIndex(n=>/^Average Hours$/i.test(clean(n.textContent)));if(avg<0)continue;const avgIndex=i+1+avg;runs[i].textContent=AVAILABILITY;runs[avgIndex].textContent='';const values=[];for(let k=avgIndex+1;k<runs.length&&values.length<2;k++){if(clean(runs[k].textContent))values.push(runs[k])}if(values[0])values[0].textContent=(tablesChanged===0?a.previous:a.current);if(values[1])values[1].textContent='';tablesChanged++}[...doc.getElementsByTagNameNS(ns,'tbl')].forEach(tbl=>{const rows=[...tbl.getElementsByTagNameNS(ns,'tr')];if(!rows.length)return;const headers=[...rows[0].children].filter(n=>n.localName==='tc').map(textOf),bad=headers.map((h,i)=>/^(?:Days Worked|Average Hours)$/i.test(clean(h))?i:-1).filter(i=>i>=0);bad.sort((a,b)=>b-a).forEach(index=>rows.forEach(row=>{const cells=[...row.children].filter(n=>n.localName==='tc');cells[index]?.remove()}))});
  const candidates=[...doc.getElementsByTagNameNS(ns,'tbl')].filter(tbl=>{const x=textOf(tbl);return /Days Worked/i.test(x)&&/Average Hours/i.test(x)});
  candidates.forEach((tbl,tableIndex)=>{const rows=[...tbl.getElementsByTagNameNS(ns,'tr')];if(!rows.length)return;const headerCells=[...rows[0].children].filter(n=>n.localName==='tc'),labels=headerCells.map(textOf),day=labels.findIndex(x=>/^Days Worked$/i.test(x)),avg=labels.findIndex(x=>/^Average Hours$/i.test(x));if(day<0||avg<0)return;rows.forEach((row,rowIndex)=>{const cells=[...row.children].filter(n=>n.localName==='tc');if(!cells[day]||!cells[avg])return;if(rowIndex===0)setText(cells[day],AVAILABILITY);else setText(cells[day],tableIndex===0?a.previous:a.current);cells[avg].remove()});tablesChanged++});
- const patchedLiveKpis=applyLiveKpisToDocxV449(doc,ns,v449Snapshot),statArrows=styleDataverseStatArrowsV52423(doc,ns);return{xml:new XMLSerializer().serializeToString(doc),tablesChanged,masthead:true,patchedLiveKpis,statArrows}}
+ const patchedLiveKpis=applyLiveKpisToDocxV449(doc,ns,v449Snapshot);return{xml:new XMLSerializer().serializeToString(doc),tablesChanged,masthead:true,patchedLiveKpis}}
 async function sanitize(blob,v449Snapshot){if(!(blob instanceof Blob))return blob;if(!window.JSZip)throw new Error('JSZip is unavailable for DOCX sanitization.');const zip=await window.JSZip.loadAsync(blob),file=zip.file('word/document.xml');if(!file)throw new Error('word/document.xml is missing.');const result=sanitizeDocumentXml(await file.async('string'),v449Snapshot);zip.file('word/document.xml',result.xml);const output=await zip.generateAsync({type:'blob',mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',compression:'DEFLATE'});output.__v429Audit={tablesChanged:result.tablesChanged};return output}
 let installed=false,original=null;
 function install(){const candidate=window.exportCompletedReviewDocx;if(typeof candidate!=='function'||candidate.__v429Wrapped)return false;original=candidate;const wrapped=async function(){const v449Snapshot=snapshotLiveKpisV449(),restoreKpiCells=stageKpiRatingCells(),livePreview=document.getElementById('summary-preview'),previewSnapshot=livePreview?.innerHTML||'';let captured=null,capturedName='Performance Review.docx';const create=URL.createObjectURL,click=HTMLAnchorElement.prototype.click;URL.createObjectURL=function(blob){if(blob instanceof Blob)captured=blob;return create.call(URL,blob)};HTMLAnchorElement.prototype.click=function(){if(this.download&&/\.docx$/i.test(this.download)){capturedName=this.download;return}return click.call(this)};try{const result=await original.apply(this,arguments);const source=captured||(result instanceof Blob?result:window.__reviewDocxBlob);const fixed=await sanitize(source,v449Snapshot);window.__reviewDocxBlob=fixed;window.__reviewDocxAttachment=fixed;const url=create.call(URL,fixed),a=document.createElement('a');a.href=url;a.download=capturedName;document.body.appendChild(a);click.call(a);a.remove();setTimeout(()=>URL.revokeObjectURL(url),0);window.__v429LastExport={size:fixed.size,name:capturedName,tablesChanged:fixed.__v429Audit?.tablesChanged||0,liveKpis:v449Snapshot};window.__v449LastSnapshot=v449Snapshot;return fixed}finally{restoreKpiCells();URL.createObjectURL=create;HTMLAnchorElement.prototype.click=click;if(livePreview&&previewSnapshot)livePreview.innerHTML=previewSnapshot;requestAnimationFrame(()=>{window.syncCanonicalPage3KpisV445?.('post-export');window.removeOrphanKpiPreviewV447?.('post-export')})}};wrapped.__v429Wrapped=true;wrapped.__v429Original=original;window.exportCompletedReviewDocx=wrapped;window.generateCompletedReviewDocx=wrapped;installed=true;return true}
@@ -340,28 +315,4 @@ const boot=()=>{let tries=0;const wait=()=>{if(rows().length){initialize('boot')
 const api=Object.freeze({captureActive,ensureInitialDatasets,toggle,apply:()=>paint(mode(),'api'),initialize,normalizeRows,normalizeDecimalInput,seedInput,removeRow,restoreRows,colorAll,syncWorkingDaysPresent,formatPreview,getState});window.KpiRuntimeAuthorityV52422=api;
 const aggregation=window.__v416Aggregation||{};aggregation.toggle=toggle;aggregation.apply=()=>paint(mode(),'external');aggregation.getMode=mode;window.__v416Aggregation=aggregation;
 if(window.KpiTableApi){window.KpiTableApi.toggle=toggle;window.KpiTableApi.remove=removeRow}
-})();
-
-
-/* ===== source-script: v52423-dataverse-stat-arrow-formatting ===== */
-(()=>{'use strict';
-if(window.__v52423DataverseStatArrowFormatting)return;window.__v52423DataverseStatArrowFormatting=true;
-const PAGE_SELECTOR=['.template-login-page','.submitted-login-page','.login-print-page','.print-report-attachment.login-report','.template-avaya-page','.submitted-avaya-page','.avaya-print-page','.print-report-attachment.avaya-report','.v92-login-page','.v92-avaya-page'].join(',');
-const arrowInfo={'▲':['over','Over','stat-arrow-over'],'↑':['over','Over','stat-arrow-over'],'▶':['even','Even','stat-arrow-even'],'→':['even','Even','stat-arrow-even'],'◆':['even','Even','stat-arrow-even'],'▼':['under','Under','stat-arrow-under'],'↓':['under','Under','stat-arrow-under']};
-function installStyle(){if(document.getElementById('v52423-dataverse-stat-arrow-style'))return;const style=document.createElement('style');style.id='v52423-dataverse-stat-arrow-style';style.textContent=`
-${PAGE_SELECTOR} .dataverse-stat-arrow{display:inline-block;min-width:1.1em;font-weight:900;line-height:1;color:#333;vertical-align:baseline}
-${PAGE_SELECTOR} .stat-arrow-over{color:#1b5e20}
-${PAGE_SELECTOR} .stat-arrow-even{color:#333}
-${PAGE_SELECTOR} .stat-arrow-under{color:#9c1c1c}
-@media print{${PAGE_SELECTOR} .dataverse-stat-arrow{color:#000!important;text-shadow:none!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}}
-`;document.head.appendChild(style)}
-function format(root=document){installStyle();root.querySelectorAll(`${PAGE_SELECTOR} table td,${PAGE_SELECTOR} table th`).forEach(cell=>{if(cell.querySelector('.dataverse-stat-arrow'))return;const walker=document.createTreeWalker(cell,NodeFilter.SHOW_TEXT);const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);nodes.forEach(node=>{if(node.parentElement?.closest('script,style,select,option,input,textarea'))return;const parts=String(node.nodeValue||'').split(/([▲↑▶→◆▼↓])/);if(parts.length<2)return;const frag=document.createDocumentFragment();parts.forEach(part=>{const info=arrowInfo[part];if(!info){frag.appendChild(document.createTextNode(part));return}const span=document.createElement('span');span.className=`dataverse-stat-arrow ${info[2]}`;span.dataset.trend=info[0];span.setAttribute('aria-label',info[1]);span.title=info[1];span.textContent=part;frag.appendChild(span)});node.replaceWith(frag)})})}
-let queued=false;function schedule(){if(queued)return;queued=true;requestAnimationFrame(()=>{queued=false;format()})}
-window.formatDataverseStatArrowsV52423=format;
-window.addEventListener('beforeprint',()=>format(),true);
-window.addEventListener('workflow-panel-changed',schedule,true);
-window.addEventListener('current-month-data-ready',schedule,true);
-window.addEventListener('dataverse-daily-data-loaded',schedule,true);
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{format();new MutationObserver(schedule).observe(document.body,{childList:true,subtree:true})},{once:true});else{format();new MutationObserver(schedule).observe(document.body,{childList:true,subtree:true})}
-document.documentElement.dataset.dataverseStatArrowFormatting='v524.23-color-and-monochrome';
 })();
