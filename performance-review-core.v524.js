@@ -4225,7 +4225,10 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
       'reporting accuracy': ['reporting accuracy'],
       'working days present': ['working days present', 'days present'],
       'overall performance rating': ['overall performance rating', 'overall rating'],
-      'attendance rating': ['attendance rating']
+      'attendance rating': ['attendance rating'],
+      'call notes': ['call notes','percent call notes','call notes percent','call notes accuracy','call notes compliance','call notes rate'],
+      'call linking': ['call linking','percent call linking','call linking percent','call linkage','call linkage rate'],
+      'acw': ['acw','after call work','average acw'],'log emails assigned':['log emails assigned','log/email assigned'],'log entries completed':['log entries completed','logs completed'],'issues addressed':['issues addressed','number of issues addressed'],'oldest log email date':['oldest log email date','oldest log or email date']
     };
     let candidates = [wanted];
     Object.keys(aliases).forEach(key => {
@@ -4376,6 +4379,33 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
     }
     return raw;
   }
+  function canonicalParsedKpiLabel(label){
+    const raw=clean(label),key=norm(raw).replace(/\bpercent\b/g,'').trim();
+    const rules=[
+      [/^(?:%\s*)?call\s*notes?(?:\s*(?:%|percent|accuracy|compliance|rate))?$/i,'% Call Notes'],
+      [/^(?:%\s*)?call\s*link(?:ing|age)?(?:\s*(?:%|percent|rate))?$/i,'% Call Linking'],
+      [/^(?:inbound|inbound calls?)(?:\s*\d+\+)?$/i,'Inbound'],
+      [/^(?:outbound|outbound calls?)(?:\s*\d+\+)?$/i,'Outbound'],
+      [/^(?:acw|after call work|average acw)(?:\s*(?:time|minutes?))?$/i,'ACW'],
+      [/^aux\s*(?:accuracy|compliance)(?:\s*(?:average|%|percent))?$/i,'AUX Accuracy'],
+      [/^(?:average|avg\.?)[\s-]*break(?:\s*-?\s*\d+\s*minutes?)?$/i,'Average Break'],
+      [/^(?:average|avg\.?)[\s-]*lunch(?:\s*-?\s*\d+\s*minutes?)?$/i,'Average Lunch'],
+      [/^(?:average|avg\.?)[\s-]*personal(?:\s*(?:time)?)?(?:\s*[≤<]?\s*\d+\s*minutes?)?$/i,'Average Personal'],
+      [/^(?:avg\.?|average)\s+talk\s+time$/i,'Average Talk Time'],[/^(?:invoices?|invoice count|call notes invoices?)$/i,'Invoices'],[/^(?:availability per shift|total working days\s*\/\s*days worked\s*\/\s*average hours|working days present)$/i,'Availability Per Shift'],[/^(?:na|n\/a)$/i,'__IGNORE__']
+    ];
+    for(const [pattern,canonical] of rules)if(pattern.test(raw)||pattern.test(key))return canonical;
+    return raw;
+  }
+  function recoverKnownKpiPairs(block,result){
+    const labels=block.map((line,index)=>({index,line:clean(line),canonical:canonicalParsedKpiLabel(line)})).filter(item=>item.canonical!=='__IGNORE__')
+      .filter(item=>item.canonical!==item.line||/(?:call notes|call linking|inbound|outbound|\bACW\b|AUX accuracy|average (?:break|lunch|personal)|availability per shift)/i.test(item.line));
+    if(!labels.length)return result;
+    const firstValue=block.findIndex((line,index)=>index>labels[labels.length-1].index&&looksLikeMetricValue(line));
+    if(firstValue<0)return result;
+    const values=block.slice(firstValue).filter(looksLikeMetricValue);
+    labels.forEach((item,index)=>{if(index>=values.length)return;const value=normalizeParsedKpiValue(item.canonical,values[index]);if(value&&!Object.keys(result).some(key=>norm(key)===norm(item.canonical)))result[item.canonical]=value});
+    return result;
+  }
   function parseMetricBlock(lines,start,end){
     const block=lines.slice(start+1,end).map(clean).filter(Boolean);
     if(block.length<2)return {};
@@ -4395,20 +4425,23 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
     }
     if(!best)return {};
     const result={};
-    best.labels.slice(0,best.values.length).forEach((label,i)=>{
-      const key=clean(label),value=normalizeParsedKpiValue(key,best.values[i]);
+    best.labels.map(label=>({label,key:canonicalParsedKpiLabel(label)})).filter(item=>item.key!=='__IGNORE__').slice(0,best.values.length).forEach((item,i)=>{
+      const label=item.label,key=item.key,value=normalizeParsedKpiValue(key,best.values[i]);
       if(key&&value&&!Object.keys(result).some(existing=>norm(existing)===norm(key)))result[key]=value;
     });
-    return result;
+    return recoverKnownKpiPairs(block,result);
   }
   function addLegacyAliases(metrics){
     const aliases={
       'Outbound Calls':['outbound calls'], 'Inbound Calls':['inbound calls'],
-      'Avg. Talk Time':['avg talk time','average talk time'], 'AUX Accuracy':['aux accuracy'],
+      'Avg. Talk Time':['avg talk time','average talk time'],'Invoices':['invoices','invoice count','call notes invoices'], 'AUX Accuracy':['aux accuracy'],
       'Handle Time':['handle time'], 'QA Score':['qa score','quality score'],
       'Avg. Lunch':['average lunch','avg lunch'], 'Avg. Break':['average break','avg break'],
       'Avg. Personal Time':['average personal','avg personal'], 'Reporting Accuracy':['reporting accuracy'],
-      'Working Days Present':['availability per shift','working days','days worked']
+      'Working Days Present':['availability per shift','working days','days worked'],
+      '% Call Notes':['call notes','percent call notes','call notes percent','call notes accuracy','call notes compliance'],
+      '% Call Linking':['call linking','percent call linking','call linking percent','call linkage'],
+      'ACW':['acw','after call work','average acw'],'Log/Emails Assigned':['log emails assigned','log/email assigned','logs and emails assigned'],'Log Entries Completed':['log entries completed','logs completed'],'# of Issues Addressed':['issues addressed','number of issues addressed'],'Oldest Log/Email Date':['oldest log email date','oldest log or email date']
     };
     Object.entries(aliases).forEach(([canonical,needles])=>{
       if(metrics[canonical]) return;
@@ -4455,7 +4488,7 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
     const snapshot={
       fileName:fileName||'', rawText:String(rawText), previousPeriod, periodKind, metrics,
       opportunities:sectionText(lines,opportunityStart,opportunityStops),
-      parserAudit:{version:'v358-direct-kpi-parser',labelCount:Object.keys(metrics).length,valueBoundary:lastIndex>-1?true:false}
+      parserAudit:{version:'v52441-cell-alignment-parser',labelCount:Object.keys(metrics).length,valueBoundary:lastIndex>-1?true:false}
     };
     window.previousReviewSnapshot=snapshot;
     try{window.dispatchEvent(new CustomEvent('previous-review-parsed',{detail:snapshot}));}catch(_){ }
@@ -9317,4 +9350,43 @@ document.addEventListener('change',event=>{const input=event.target;if(input?.ma
 document.addEventListener('click',event=>{if(event.target?.closest?.('#btn-export-review-docx,#btn-export-review-docx-top,#btn-save-completed-review-v18,#btn-submit-final'))prune()},true);
 window.addEventListener('beforeprint',()=>prune(),true);
 window.pruneUncheckedDocxReportsV52430=prune;
+})();
+
+
+/* ===== source-script: v52439-page2-comparison-preview-resume ===== */
+(()=>{'use strict';
+if(window.__v52439ComparisonPreviewResume)return;window.__v52439ComparisonPreviewResume=true;
+let resumePromise=null,lastGoodSrc='';
+function iframe(){return document.getElementById('comparison-iframe')}
+function remember(){const frame=iframe(),src=frame?.getAttribute('src')||'';if(src&&src!=='about:blank')lastGoodSrc=src}
+function page2Active(){const panel=document.getElementById('panel-2');return !!panel&&!panel.hidden&&!panel.hasAttribute('inert')&&getComputedStyle(panel).display!=='none'}
+function blank(frame){const src=(frame?.getAttribute('src')||'').trim();return !src||src==='about:blank'}
+async function restore(){
+ if(!page2Active())return false;
+ const frame=iframe();if(!frame)return false;
+ remember();
+ if(!blank(frame)){frame.style.display='block';return true}
+ if(resumePromise)return resumePromise;
+ resumePromise=(async()=>{
+  const loader=document.getElementById('iframe-loader');if(loader)loader.style.display='flex';
+  try{
+   if(typeof window.__safeBinaryComparisonRenderV509==='function'&&typeof window.__binaryComparisonRender==='function'){await window.__safeBinaryComparisonRenderV509();}
+   else if(typeof window.openActualSharePointReview==='function'&&window.__currentComparisonFile){await window.openActualSharePointReview(window.__currentComparisonFile,window.__currentComparisonFileName,frame,loader);}
+   else if(typeof window.__pendingComparisonRender==='function'){
+    window.__comparisonPreviewRendered=false;await window.__pendingComparisonRender();window.__comparisonPreviewRendered=true;
+   }else if(lastGoodSrc){frame.src=lastGoodSrc;frame.style.display='block';}
+   remember();
+   if(blank(frame)&&lastGoodSrc){frame.src=lastGoodSrc;frame.style.display='block';}
+   return !blank(frame)||!!document.getElementById('comparison-docx');
+  }catch(error){console.error('Page 2 comparison preview resume failed',error);return false}
+  finally{resumePromise=null;if(loader&&!blank(frame))loader.style.display='none'}
+ })();
+ return resumePromise;
+}
+function schedule(){setTimeout(()=>restore(),0);setTimeout(()=>restore(),120)}
+document.addEventListener('click',event=>{if(event.target.closest?.('#btn-next-panel2,[data-ux-stage="3"]'))remember();if(event.target.closest?.('#btn-back-to-panel2,#btn-back-to-panel2-top,[data-ux-stage="2"]'))schedule()},true);
+window.addEventListener('workflow-panel-changed',event=>{const page=Number(event?.detail?.panel||event?.detail?.page||0);if(page===2)schedule();else if(page===3)remember()},true);
+window.addEventListener('comparison-modal-opened',schedule,true);
+window.addEventListener('pageshow',schedule,true);
+window.resumePage2ComparisonPreviewV52439=restore;
 })();
