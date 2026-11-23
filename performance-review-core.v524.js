@@ -3385,7 +3385,6 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
 
     document.querySelectorAll('#m-lunch-adherence-arrow, #m-break-adherence-arrow, #m-reporting-accuracy-arrow').forEach(el => { el.value = ''; el.style.color = 'inherit'; });
     
-    null.value = '';
     document.getElementById('emp-shift').value = '';
     document.getElementById('emp-break').value = '';
     document.getElementById('special-instructions').value = '';
