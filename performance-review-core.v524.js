@@ -2995,7 +2995,13 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
     function toggleColumnPicker(type) { const menu=document.getElementById(`column-picker-${type}`); if(menu) menu.hidden=!menu.hidden; }
     window.searchReportTable=searchReportTable; window.buildColumnPicker=buildColumnPicker; window.toggleColumnPicker=toggleColumnPicker;
 
+    function optionalReportIncluded(type) {
+      const id=type==='login'?'include-login-report':'include-avaya-report';
+      const checkbox=document.getElementById(id);
+      return checkbox ? checkbox.checked === true : true;
+    }
     function printableReportPage(type, title) {
+      if(!optionalReportIncluded(type)) return '';
       const data=type==='login'?window.pbiCache.loginData:window.pbiCache.avayaData;
       if(!Array.isArray(data)||!data.length) return '';
       const table=generateFormattedHTMLTable([...data],false,type);
@@ -3922,13 +3928,13 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
     const login=window.pbiCache?.loginData;
     const avaya=window.pbiCache?.avayaData;
     let html=`<section class="submitted-print-page submitted-review-page">${reviewHtml}</section>`;
-    if(Array.isArray(login)&&login.length){
+    if((document.getElementById('include-login-report')?.checked ?? true)&&Array.isArray(login)&&login.length){
       const table=typeof window.generateLoginLogoutTable==='function'
         ? window.generateLoginLogoutTable([...login])
         : generateFormattedHTMLTable([...login],false,'login');
       html+=`<section class="submitted-print-page submitted-login-page">${table}</section>`;
     }
-    if(Array.isArray(avaya)&&avaya.length){
+    if((document.getElementById('include-avaya-report')?.checked ?? true)&&Array.isArray(avaya)&&avaya.length){
       const table=generateFormattedHTMLTable([...avaya],false,'avaya').replace('class="report-table"','class="report-table submitted-avaya-table"');
       html+=`<section class="submitted-print-page submitted-avaya-page"><div class="readable-report-scroll">${table}</div></section>`;
     }
@@ -3986,7 +3992,7 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
  function rowSeverity(row){let bad=0,watch=0;Object.keys(row||{}).forEach(k=>{const h=String(k).toLowerCase(),v=unwrapOutputValue(row[k]);if(v==null||v==='')return;if(h.includes('short shift')){const t=String(v).toLowerCase();if(v===true||v===1||t==='true'||t==='yes'||t.includes('short'))bad++;}if(h.includes('worked')||h.includes('hours')){let n=numericFromOutput(v,'number');if(n!=null&&n>100)n/=3600;if(n!=null&&n>0&&n<7)bad++;else if(n!=null&&n>=7&&n<7.5)watch++;}const threshold=getThresholdForColumn(h);if(threshold){const sec=secondsFromDuration(v);if(sec!=null&&sec>threshold.seconds*1.1)bad++;else if(sec!=null&&sec>threshold.seconds)watch++;}if(h.includes('adherence')||h.includes('accuracy')){const p=numericFromOutput(v,'percent');if(p!=null&&p<90)bad++;else if(p!=null&&p<95)watch++;}});return bad?'row-bad':watch?'row-watch':'row-good';}
  function colorRows(tableHtml,data){const box=document.createElement('div');box.innerHTML=tableHtml;const rows=box.querySelectorAll('tbody tr');rows.forEach((tr,i)=>tr.classList.add(rowSeverity(data[i]||{})));return box.innerHTML;}
  function reportPage(type,title,pageClass){const data=type==='login'?window.pbiCache?.loginData:window.pbiCache?.avayaData;if(!Array.isArray(data)||!data.length)return'';let table=type==='login'&&typeof window.generateLoginLogoutTable==='function'?window.generateLoginLogoutTable([...data]):generateFormattedHTMLTable([...data],false,type);table=colorRows(table,data);return `<section class="template-print-page ${pageClass}">${table}</section>`;}
- function buildRoot(conf='DRAFT'){const root=document.getElementById('eom-template-print-root');if(!root)return null;root.innerHTML=buildTemplate(conf)+reportPage('login','Login / Logout Report','template-login-page')+reportPage('avaya','Lunch / Break and Avaya Activity Report','template-avaya-page');root.setAttribute('aria-hidden','false');return root;}
+ function buildRoot(conf='DRAFT'){const root=document.getElementById('eom-template-print-root');if(!root)return null;const includeLogin=document.getElementById('include-login-report')?.checked??true,includeAvaya=document.getElementById('include-avaya-report')?.checked??true;root.innerHTML=buildTemplate(conf)+(includeLogin?reportPage('login','Login / Logout Report','template-login-page'):'')+(includeAvaya?reportPage('avaya','Lunch / Break and Avaya Activity Report','template-avaya-page'):'');root.setAttribute('aria-hidden','false');return root;}
  window.prepareEomTemplatePrint=async function(conf){const active=document.activeElement;const button=active instanceof HTMLElement&&active.matches('button')?active:null,old=button?.innerHTML;if(button){button.disabled=true;button.innerHTML='<div class="spinner"></div> Preparing template...';}try{const emp=val('employee-name'),period=val('review-period'),mismatch=window.pbiCache?.empName!==emp||window.pbiCache?.period!==period;if(emp&&period&&(mismatch||!Array.isArray(window.pbiCache?.loginData)||!Array.isArray(window.pbiCache?.avayaData)))await fetchAllPbiDataInBackground(true,true);const confirmation=conf&&conf!=='AUTO'?conf:(document.getElementById('conf-number')?.textContent||'DRAFT').trim();buildRoot(confirmation);window.synchronizePrintRootKpisV72?.();document.body.classList.add('template-print-active');await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));window.print();}catch(err){console.error(err);showError('Unable to prepare the EOM template: '+(err.message||err));document.body.classList.remove('template-print-active');}finally{if(button){button.disabled=false;button.innerHTML=old;}}};
  window.addEventListener('afterprint',()=>{document.body.classList.remove('template-print-active');document.getElementById('eom-template-print-root')?.setAttribute('aria-hidden','true');});
  document.addEventListener('DOMContentLoaded',()=>{const draft=document.getElementById('legacy-print-preview-removed');if(draft)draft.setAttribute('onclick',"prepareEomTemplatePrint('DRAFT')");const final=document.querySelector('#success-screen .btn-print');if(final){final.setAttribute('onclick',"prepareEomTemplatePrint('AUTO')");final.innerHTML='<i class="fas fa-file-pdf"></i> Print Filled EOM Template';}});
@@ -5271,7 +5277,7 @@ restoreAll();render();
  function lastReviewCandidate(){const snap=window.previousReviewSnapshot||{};const values=[snap.reviewDate,snap.date,snap.completedDate,snap.reviewCompletedDate,snap.fileDate,snap.modified,snap.lastModified];for(const x of values){const d=parsedDate(x);if(d)return d}const fn=String(snap.fileName||'');const m=fn.match(/\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[ _-]*(20\d{2})\b/i);if(m){const d=new Date(`${m[1]} 1, ${m[2]}`);if(!isNaN(d))return d}return null}
  function verifyLastReviewCompleted(){const el=document.getElementById('last-review-date');if(!el)return;const current=parsedDate(val('review-date'));let chosen=lastReviewCandidate()||parsedDate(el.value);if(chosen&&current&&chosen>=current)chosen=null;if(chosen){el.value=chosen.toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})+' (Latest completed archived review)';el.dataset.verified='true';el.title='Verified against the selected archived review.'}else{el.value='';el.dataset.verified='false';el.title='No completed archived review date could be verified.'}}
  function priorSummaryHtml(){const rows=[];document.querySelectorAll('#month-kpi-workspace .exact-kpi-row:not(.v59-duplicate-row)').forEach(row=>{const cards=[...row.querySelectorAll('.exact-kpi-card')],card=cards.find(c=>c.dataset.currentMonth!=='true')||cards[0];if(!card)return;const label=clean(card.querySelector('.exact-kpi-name,.exact-kpi-name-editor')?.value||card.querySelector('.exact-kpi-name,.exact-kpi-name-editor')?.textContent||'KPI');const value=clean(card.querySelector('.exact-kpi-value')?.value||'');if(label&&value)rows.push(`<div class="final-prior-month-item"><strong>${esc(label)}</strong><span>${esc(value)}</span></div>`)});if(!rows.length)return '<div class="final-prior-month-card"><div class="final-prior-month-title"><i class="fas fa-clock-rotate-left"></i>Last Month Data</div><div class="ux-inline-hint">No parsed previous-month KPI values are available.</div></div>';return `<div class="final-prior-month-card"><div class="final-prior-month-title"><i class="fas fa-clock-rotate-left"></i>Last Month Data</div><div class="final-prior-month-grid">${rows.join('')}</div></div>`}
- function injectFinalPriorMonth(){const host=document.getElementById('summary-preview');if(!host)return;host.querySelector('.final-prior-month-card')?.remove();host.insertAdjacentHTML('beforeend',priorSummaryHtml())}
+ function injectFinalPriorMonth(){document.querySelectorAll('.final-prior-month-card').forEach(card=>card.remove())}
  function possibleEmail(v){v=String(v||'').trim();return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)?v:''}
  function recipientData(){const empSel=document.getElementById('employee-name');const opt=empSel?.selectedOptions?.[0];const data=opt?.dataset||{};const managerName=val('manager-name')||'Manager';const seniorName=val('sr-manager-name')||'Senior Manager';const derive=window.managerNameToWBMasonEmail||function(){return''};const managerEmail=possibleEmail(data.managerEmail||data.manageremail||window.selectedEmployee?.managerEmail||window.selectedEmployee?.ManagerEmail||derive(managerName));const seniorEmail=possibleEmail(data.srManagerEmail||data.seniorManagerEmail||data.srmanageremail||window.selectedEmployee?.srManagerEmail||window.selectedEmployee?.SeniorManagerEmail||derive(seniorName));return{managerName,seniorName,managerEmail,seniorEmail}}
  function ensureRoutingCard(){const panel=document.getElementById('panel-3');const buttons=panel?.querySelector('.btn-row');if(!panel||!buttons)return;let card=document.getElementById('manager-notification-routing');if(!card){card=document.createElement('div');card.id='manager-notification-routing';buttons.parentElement.insertBefore(card,buttons)}const r=recipientData();card.innerHTML=`<div><div class="routing-title"><i class="fas fa-paper-plane"></i> Print Preview Notification Routing</div><div class="routing-list">Manager: ${esc(r.managerName)}${r.managerEmail?' · '+esc(r.managerEmail):''}<br>Senior Manager: ${esc(r.seniorName)}${r.seniorEmail?' · '+esc(r.seniorEmail):''}</div></div><button type="button" class="btn btn-secondary" onclick="window.notifyReviewManagers()"><i class="fas fa-envelope"></i> Notify Manager &amp; Senior Manager</button>`}
@@ -9296,4 +9302,18 @@ window.formatShiftTypeStatusesV52424=format;
 window.addEventListener('beforeprint',()=>format(),true);
 document.readyState==='loading'?document.addEventListener('DOMContentLoaded',boot,{once:true}):boot();
 document.documentElement.dataset.shiftTypeStatusFormatting='v524.24';
+})();
+
+
+/* ===== source-script: v52430-optional-docx-report-authority ===== */
+(()=>{'use strict';
+if(window.__v52430OptionalDocxReportAuthority)return;window.__v52430OptionalDocxReportAuthority=true;
+const selectors={login:['.template-login-page','.submitted-login-page','.login-print-page','.print-report-attachment.login-report'],avaya:['.template-avaya-page','.submitted-avaya-page','.avaya-print-page','.print-report-attachment.avaya-report']};
+function included(type){const box=document.getElementById(type==='login'?'include-login-report':'include-avaya-report');return box?box.checked===true:true}
+function prune(root=document){Object.keys(selectors).forEach(type=>{if(included(type))return;root.querySelectorAll(selectors[type].join(',')).forEach(node=>node.remove())});return{login:included('login'),avaya:included('avaya')}}
+function syncChoice(input){const label=input.closest('.optional-report-choice');if(label){label.classList.toggle('is-included',input.checked);label.dataset.included=String(input.checked)}prune()}
+document.addEventListener('change',event=>{const input=event.target;if(input?.matches?.('#include-login-report,#include-avaya-report'))syncChoice(input)},true);
+document.addEventListener('click',event=>{if(event.target?.closest?.('#btn-export-review-docx,#btn-export-review-docx-top,#btn-save-completed-review-v18,#btn-submit-final'))prune()},true);
+window.addEventListener('beforeprint',()=>prune(),true);
+window.pruneUncheckedDocxReportsV52430=prune;
 })();
