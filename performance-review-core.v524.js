@@ -146,6 +146,24 @@ if(!window.KPIObserverHub){
     msalInstance.setActiveAccount?.(account);
     return account;
   }
+  function getCurrentMsalAccountV52464(){
+    // Never enumerate the entire MSAL cache when this session already has an
+    // authoritative account. getAllAccounts() can throw multiple_matching_tokens
+    // when stale duplicate ID-token entries exist for the same corporate user.
+    let account=msalAccount||msalInstance.getActiveAccount?.()||null;
+    if(account)return setCurrentMsalAccount(account);
+    try{
+      const accounts=msalInstance.getAllAccounts();
+      account=accounts.find(a=>a?.tenantId===msalConfig.auth.tenantId)||accounts[0]||null;
+      return account?setCurrentMsalAccount(account):null;
+    }catch(error){
+      if(error?.errorCode==='multiple_matching_tokens'||/multiple_matching_tokens/i.test(String(error?.message||''))){
+        console.warn('[Auth v524.64] Duplicate MSAL cache entries detected. A specific active account is required; avoiding ambiguous cache enumeration.',error);
+        return null;
+      }
+      throw error;
+    }
+  }
   async function resolveCurrentMicrosoftUser(account,tokenResponse){
     account=setCurrentMsalAccount(account);
     if(!account)return '';
@@ -705,8 +723,7 @@ if(!window.KPIObserverHub){
 
     const task = (async () => {
       const isDataverse = scopes.some(scope => /crm\.dynamics\.com/i.test(scope));
-      const accounts = msalInstance.getAllAccounts();
-      let account = msalAccount || msalInstance.getActiveAccount?.() || accounts[0] || null;
+      let account = getCurrentMsalAccountV52464();
       if (!account) {
         window.setConnectionStatus('auth','warning','Auth: Sign-in required','Sign in before requesting Dataverse data.');
         const err = new Error('No signed-in Microsoft account is available.');
@@ -755,7 +772,7 @@ if(!window.KPIObserverHub){
   };
 
   window.connectReportsAndOpenApp = async function() {
-    const account = msalAccount || msalInstance.getActiveAccount?.() || msalInstance.getAllAccounts()[0];
+    const account = getCurrentMsalAccountV52464();
     if (!account) {
       window.showLoginConnectionError('Please sign in with Microsoft first.', false);
       return false;
@@ -830,7 +847,7 @@ if(!window.KPIObserverHub){
   window.logout = async function () {
     try { localStorage.removeItem(VERIFIED_NAME_CACHE_KEY); localStorage.removeItem(DAILY_LOGIN_CACHE_KEY); } catch (_) {}
     window.setConnectionStatus('auth','loading','Auth: Signing out','Signing out of Microsoft.');
-    const account = msalAccount || msalInstance.getActiveAccount?.() || msalInstance.getAllAccounts()[0] || null;
+    const account = getCurrentMsalAccountV52464();
     try {
       await msalInstance.logoutPopup({ account, postLogoutRedirectUri: msalConfig.auth.postLogoutRedirectUri, mainWindowRedirectUri: msalConfig.auth.postLogoutRedirectUri });
     } finally { window.location.reload(); }
@@ -900,7 +917,8 @@ if(!window.KPIObserverHub){
       window.setConnectionStatus('auth','error','Auth: Redirect failed',redirectError.message||'Microsoft redirect sign-in failed.');
     }
     // Keep MSAL account/token state across days. MSAL refreshes expired tokens itself.
-    const accounts = redirectResponse?.account ? [redirectResponse.account] : msalInstance.getAllAccounts();
+    const startupAccount = redirectResponse?.account ? setCurrentMsalAccount(redirectResponse.account) : getCurrentMsalAccountV52464();
+    const accounts = startupAccount ? [startupAccount] : [];
     const overlay = document.getElementById('login-overlay');
     const app = document.getElementById('main-app');
     const showLogin=(message)=>{if(app)app.style.display='none';if(overlay)overlay.style.display='flex';window.setConnectionStatus('auth','pending','Auth: Sign-in required',message||'Sign in with your current Microsoft account.');window.setConnectionStatus('pbi','idle','Metrics: Flow waiting','Power Automate metrics will load after sign-in.');window.setConnectionStatus('archive','idle','Archive: Waiting for sign-in','Archive access will use the signed-in manager.');};
@@ -9513,4 +9531,160 @@ window.fetchSharePointHistory=function(employeeName){
       throw error;
     }
   };
+})();
+
+
+/* ===== v52462 authoritative comparison close + confirmation reveal ===== */
+(() => {
+  'use strict';
+  if (window.__v52462CloseAndConfirmation) return;
+  window.__v52462CloseAndConfirmation = true;
+
+  function closeComparisonV52462() {
+    const viewer = document.getElementById('comparison-modal');
+    const shells = document.querySelectorAll('.review-workspace-shell-v52446');
+    shells.forEach(shell => shell.classList.remove('is-viewer-open'));
+    document.querySelectorAll('.comparison-side-pane-v52446').forEach(pane => pane.classList.remove('comparison-side-pane-v52446'));
+    if (viewer) {
+      viewer.dataset.open = 'false';
+      viewer.setAttribute('aria-hidden', 'true');
+      viewer.style.setProperty('display', 'none', 'important');
+      viewer.style.removeProperty('visibility');
+      document.body.appendChild(viewer);
+    }
+    try { window.__legacyV439ToggleComparisonModal?.(false); } catch (_) {}
+    window.dispatchEvent(new CustomEvent('comparison-modal-closed', { detail: { source: 'v52462-authoritative-close' } }));
+  }
+
+  document.addEventListener('click', event => {
+    const closeButton = event.target.closest?.('#comparison-modal-close-v419,[data-comparison-close],#comparison-close');
+    if (!closeButton) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    closeComparisonV52462();
+  }, true);
+
+  const success = document.getElementById('success-screen');
+  if (success && 'MutationObserver' in window) {
+    new MutationObserver(() => {
+      if (success.style.display !== 'none' && !success.hidden) {
+        closeComparisonV52462();
+        requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: 'auto' }));
+      }
+    }).observe(success, { attributes: true, attributeFilter: ['style', 'hidden', 'aria-hidden'] });
+  }
+})();
+
+
+/* ===== v52463 viewer move runtime logging ===== */
+(() => {
+  'use strict';
+  if (window.__v52463ViewerMoveLogging) return;
+  window.__v52463ViewerMoveLogging = true;
+
+  const MAX_ENTRIES = 250;
+  const logs = window.__viewerMoveLogV52463 = window.__viewerMoveLogV52463 || [];
+  let sequence = logs.length;
+  let lastParent = null;
+  let observer = null;
+
+  function visiblePage() {
+    if (document.getElementById('panel-3')?.classList.contains('active')) return 3;
+    if (document.getElementById('panel-2')?.classList.contains('active')) return 2;
+    return 0;
+  }
+
+  function snapshot(event, detail = {}) {
+    const viewer = document.getElementById('comparison-modal');
+    const parent = viewer?.parentElement || null;
+    const shell = viewer?.closest('.review-workspace-shell-v52446') || null;
+    const entry = {
+      sequence: ++sequence,
+      timestamp: new Date().toISOString(),
+      event,
+      visiblePage: visiblePage(),
+      activePage: window.getReviewSideBySideStateV52447 ? undefined : null,
+      viewerPresent: !!viewer,
+      viewerParentId: parent?.id || '',
+      viewerParentClass: parent?.className || '',
+      workspaceId: shell?.id || '',
+      workspacePage: shell?.dataset?.workspacePage || '',
+      viewerOpen: viewer?.dataset?.open || '',
+      ariaHidden: viewer?.getAttribute('aria-hidden') || '',
+      display: viewer?.style?.display || getComputedStyle(viewer || document.body).display,
+      page2Open: !!document.getElementById('page2-workspace-shell-v52446')?.classList.contains('is-viewer-open'),
+      page3Open: !!document.getElementById('page3-workspace-shell-v52446')?.classList.contains('is-viewer-open'),
+      ...detail
+    };
+    logs.push(entry);
+    if (logs.length > MAX_ENTRIES) logs.splice(0, logs.length - MAX_ENTRIES);
+    console.info('[ViewerMove v524.63]', entry);
+    window.dispatchEvent(new CustomEvent('viewer-move-log-v52463', { detail: entry }));
+    return entry;
+  }
+
+  function inspectParent(reason) {
+    const viewer = document.getElementById('comparison-modal');
+    const parent = viewer?.parentElement || null;
+    if (parent !== lastParent) {
+      const previousParent = lastParent;
+      lastParent = parent;
+      snapshot('viewer-parent-changed', {
+        reason,
+        fromParentId: previousParent?.id || '',
+        fromParentClass: previousParent?.className || '',
+        toParentId: parent?.id || '',
+        toParentClass: parent?.className || ''
+      });
+    }
+  }
+
+  function startObserver() {
+    if (observer) return;
+    lastParent = document.getElementById('comparison-modal')?.parentElement || null;
+    observer = new MutationObserver(records => {
+      if (records.some(record => record.type === 'childList')) inspectParent('dom-mutation');
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    snapshot('logging-started');
+  }
+
+  document.addEventListener('click', event => {
+    const target = event.target.closest?.('#comparison-side-toggle-v52446,#comparison-modal-close-v419,[data-comparison-close],#comparison-close,[data-ux-stage],#btn-back-to-panel2,#btn-back-to-panel2-top,#btn-next-panel2');
+    if (!target) return;
+    snapshot('viewer-control-click', {
+      targetId: target.id || '',
+      targetTag: target.tagName || '',
+      targetStage: target.dataset?.uxStage || '',
+      targetText: String(target.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120)
+    });
+    queueMicrotask(() => inspectParent('after-control-click'));
+  }, true);
+
+  for (const eventName of ['workflow-panel-changed', 'comparison-modal-opened', 'comparison-modal-closed']) {
+    window.addEventListener(eventName, event => {
+      snapshot(eventName, { eventDetail: event.detail || null });
+      queueMicrotask(() => inspectParent(eventName));
+      setTimeout(() => inspectParent(eventName + '-settled'), 150);
+    }, true);
+  }
+
+  window.getViewerMoveLogV52463 = () => logs.map(entry => ({ ...entry }));
+  window.clearViewerMoveLogV52463 = () => { logs.length = 0; sequence = 0; snapshot('log-cleared'); };
+  window.exportViewerMoveLogV52463 = () => {
+    const blob = new Blob([JSON.stringify(logs, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `viewer-move-log-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    snapshot('log-exported', { exportedEntries: logs.length });
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startObserver, { once: true });
+  else startObserver();
 })();
