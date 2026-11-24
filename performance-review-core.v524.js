@@ -9445,3 +9445,36 @@ window.fetchSharePointHistory=function(employeeName){
  return Promise.resolve().then(()=>original.call(window,name)).catch(error=>{if(error?.name!=='AbortError')throw error;return null}).finally(()=>{if(mine===generation&&String(document.getElementById('employee-name')?.value||'').trim()===name)unlock()});
 };
 })();
+
+
+/* ===== v52454-fresh-load-reset-initializer ===== */
+(()=>{'use strict';
+if(window.__v52454FreshLoadResetInitializer)return;
+window.__v52454FreshLoadResetInitializer=true;
+window.reinitializeReviewDefaultsV52454=function(){
+ try{
+  const reviewType=document.getElementById('review-type');
+  if(reviewType && !reviewType.value){
+   const first=[...reviewType.options].find(o=>o.value);
+   if(first) reviewType.value=first.value;
+  }
+  const reviewPeriod=document.getElementById('review-period');
+  if(reviewPeriod){
+   const now=new Date();
+   const v=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+   if(!reviewPeriod.value) reviewPeriod.value=v;
+   reviewPeriod.dispatchEvent(new Event('change',{bubbles:true}));
+  }
+  reviewType?.dispatchEvent(new Event('change',{bubbles:true}));
+  window.dispatchEvent(new CustomEvent('review-context-changed',{detail:{source:'start-new-review'}}));
+ }catch(e){console.error('v52454 init',e)}
+};
+const old=window.startOver;
+if(typeof old==='function'){
+ window.startOver=function(...a){
+  const r=old.apply(this,a);
+  setTimeout(()=>window.reinitializeReviewDefaultsV52454(),50);
+  return r;
+ }
+ }
+})();
