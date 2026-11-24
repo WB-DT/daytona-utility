@@ -9447,3 +9447,135 @@ window.fetchSharePointHistory=function(employeeName){
  return Promise.resolve().then(()=>original.call(window,name)).catch(error=>{if(error?.name!=='AbortError')throw error;return null}).finally(()=>{if(mine===generation&&String(document.getElementById('employee-name')?.value||'').trim()===name)unlock()});
 };
 })();
+
+/* ===== v524.54 report-column-menu-positioning ===== */
+(() => {
+  'use strict';
+  if (window.__reportColumnMenuPositioningV52454) return;
+  window.__reportColumnMenuPositioningV52454 = true;
+
+  const style = document.createElement('style');
+  style.id = 'report-column-menu-positioning-v52454';
+  style.textContent = `
+    .report-card-v224 .page3-table-tools details { position: relative; }
+    .report-card-v224 .page3-table-tools details > summary { cursor: pointer; }
+    .report-card-v224 .column-menu-v224 {
+      position: fixed !important;
+      box-sizing: border-box;
+      z-index: 10020;
+      width: min(22rem, calc(100vw - 24px));
+      min-width: 15rem;
+      max-width: calc(100vw - 24px);
+      max-height: min(22rem, calc(100vh - 24px));
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding: 10px;
+      margin: 0 !important;
+      border: 1px solid #64748b;
+      border-radius: 8px;
+      background: #1e293b;
+      box-shadow: 0 14px 34px rgba(0,0,0,.42);
+    }
+    .report-card-v224 .column-menu-v224 label {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr);
+      align-items: start;
+      gap: 9px;
+      width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
+      padding: 7px 8px;
+      color: #e5edf8;
+      line-height: 1.3;
+      white-space: normal;
+      overflow: visible;
+    }
+    .report-card-v224 .column-menu-v224 label > span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: normal;
+    }
+    .report-card-v224 .column-menu-v224 input[type="checkbox"] {
+      margin: 2px 0 0;
+      flex: 0 0 auto;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const GAP = 6;
+  const INSET = 10;
+  let activeDetails = null;
+  let frame = 0;
+
+  function positionMenu(details) {
+    if (!details?.open || !details.isConnected) return;
+    const summary = details.querySelector(':scope > summary');
+    const menu = details.querySelector(':scope > .column-menu-v224');
+    const card = details.closest('.report-card-v224');
+    if (!summary || !menu || !card) return;
+
+    const buttonRect = summary.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = document.documentElement.clientHeight;
+    const cardLeft = Math.max(INSET, cardRect.left + INSET);
+    const cardRight = Math.min(viewportWidth - INSET, cardRect.right - INSET);
+    const availableWidth = Math.max(0, cardRight - cardLeft);
+    const preferredWidth = Math.min(352, availableWidth);
+
+    menu.style.width = `${preferredWidth}px`;
+    menu.style.minWidth = `${Math.min(240, preferredWidth)}px`;
+
+    const measuredWidth = menu.getBoundingClientRect().width || preferredWidth;
+    const left = Math.min(
+      Math.max(buttonRect.left, cardLeft),
+      Math.max(cardLeft, cardRight - measuredWidth)
+    );
+    const top = buttonRect.bottom + GAP;
+    const availableHeight = Math.max(
+      96,
+      Math.min(viewportHeight - INSET, cardRect.bottom - INSET) - top
+    );
+
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+    menu.style.right = 'auto';
+    menu.style.bottom = 'auto';
+    menu.style.maxHeight = `${Math.floor(Math.min(352, availableHeight))}px`;
+  }
+
+  function queuePosition() {
+    if (!activeDetails?.open) return;
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => positionMenu(activeDetails));
+  }
+
+  document.addEventListener('toggle', event => {
+    const details = event.target;
+    if (!(details instanceof HTMLDetailsElement) || !details.querySelector(':scope > .column-menu-v224')) return;
+    if (details.open) {
+      document.querySelectorAll('.report-card-v224 .page3-table-tools details[open]').forEach(other => {
+        if (other !== details) other.open = false;
+      });
+      activeDetails = details;
+      queuePosition();
+    } else if (activeDetails === details) {
+      activeDetails = null;
+    }
+  }, true);
+
+  document.addEventListener('pointerdown', event => {
+    if (activeDetails?.open && !activeDetails.contains(event.target)) activeDetails.open = false;
+  }, true);
+
+  window.addEventListener('resize', queuePosition, { passive: true });
+  window.addEventListener('scroll', queuePosition, { passive: true, capture: true });
+
+  if ('ResizeObserver' in window) {
+    const observer = new ResizeObserver(queuePosition);
+    const observeReports = () => document.querySelectorAll('.report-card-v224, .report-card-v224 .report-scroll-v224, .report-card-v224 .page3-table-tools').forEach(el => observer.observe(el));
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', observeReports, { once: true });
+    else observeReports();
+  }
+})();
