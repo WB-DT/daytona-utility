@@ -9964,3 +9964,35 @@ window.fetchSharePointHistory=function(employeeName){
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();
 })();
+
+
+/* ===== v52471 half-height side-by-side sizing ===== */
+(() => {
+  'use strict';
+  if (window.__v52471HalfHeightViewer) return;
+  window.__v52471HalfHeightViewer = true;
+  function sizeShell(shell) {
+    if (!shell?.classList.contains('is-viewer-open')) return;
+    const content = shell.querySelector(':scope > .review-existing-content-v52446');
+    const viewer = shell.querySelector(':scope > .comparison-side-pane-v52446');
+    if (!content || !viewer) return;
+    const formHeight = Math.ceil(content.getBoundingClientRect().height);
+    const halfHeight = Math.max(320, Math.round(formHeight * 0.5));
+    viewer.style.setProperty('--comparison-half-height', `${halfHeight}px`);
+    viewer.style.setProperty('height', `${halfHeight}px`, 'important');
+    viewer.style.setProperty('min-height', '320px', 'important');
+    viewer.style.setProperty('max-height', 'none', 'important');
+    console.info('[SideBySideLayout v524.71]', { page: shell.dataset.workspacePage || '', formHeight, viewerHeight: halfHeight });
+  }
+  function sync() { document.querySelectorAll('.review-workspace-shell-v52446').forEach(sizeShell); }
+  const observer = new ResizeObserver(entries => entries.forEach(entry => sizeShell(entry.target.closest('.review-workspace-shell-v52446') || entry.target)));
+  function start() {
+    document.querySelectorAll('.review-workspace-shell-v52446, .review-existing-content-v52446').forEach(el => observer.observe(el));
+    sync();
+  }
+  window.addEventListener('workflow-panel-changed', () => requestAnimationFrame(sync));
+  window.addEventListener('comparison-modal-opened', () => requestAnimationFrame(sync));
+  window.addEventListener('resize', () => requestAnimationFrame(sync), { passive: true });
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+  else start();
+})();
