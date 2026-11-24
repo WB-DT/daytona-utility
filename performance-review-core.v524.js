@@ -9809,3 +9809,84 @@ window.fetchSharePointHistory=function(employeeName){
     }
   };
 })();
+
+
+/* ===== v52467 durable comparison close authority ===== */
+(() => {
+  'use strict';
+  if (window.__v52467DurableComparisonClose) return;
+  window.__v52467DurableComparisonClose = true;
+
+  function hardClose(reason = 'unknown') {
+    const viewer = document.getElementById('comparison-modal');
+    const page = document.getElementById('panel-3')?.classList.contains('active') ? 3 : 2;
+
+    // First update the v52447 controller's private open state through its public API.
+    try { window.closeReviewSideBySideV52447?.(page); } catch (error) {
+      console.warn('[ComparisonClose v524.67] Controller close failed; applying DOM fallback.', error);
+    }
+
+    // Then enforce the resulting DOM state so no later legacy controller can leave the pane visible.
+    document.querySelectorAll('.review-workspace-shell-v52446').forEach(shell => shell.classList.remove('is-viewer-open'));
+    if (viewer) {
+      viewer.dataset.open = 'false';
+      viewer.setAttribute('aria-hidden', 'true');
+      viewer.classList.remove('comparison-side-pane-v52446');
+      viewer.style.setProperty('display', 'none', 'important');
+      viewer.style.setProperty('visibility', 'hidden', 'important');
+      viewer.style.removeProperty('width');
+      viewer.style.removeProperty('height');
+      if (viewer.parentElement !== document.body) document.body.appendChild(viewer);
+    }
+
+    window.dispatchEvent(new CustomEvent('comparison-modal-closed-v52467', { detail: { page, reason } }));
+    console.info('[ComparisonClose v524.67]', {
+      page,
+      reason,
+      viewerHidden: !viewer || getComputedStyle(viewer).display === 'none',
+      page2Open: !!document.getElementById('page2-workspace-shell-v52446')?.classList.contains('is-viewer-open'),
+      page3Open: !!document.getElementById('page3-workspace-shell-v52446')?.classList.contains('is-viewer-open')
+    });
+    return false;
+  }
+
+  function bindCloseButton() {
+    const button = document.getElementById('comparison-modal-close-v419');
+    if (!button || button.dataset.v52467Bound === 'true') return;
+    button.dataset.v52467Bound = 'true';
+    button.type = 'button';
+    button.setAttribute('aria-label', 'Close side-by-side review');
+    button.onclick = event => {
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      return hardClose('direct-button-handler');
+    };
+    button.addEventListener('pointerup', event => {
+      if (event.pointerType === 'touch') {
+        event.preventDefault();
+        hardClose('touch-pointer-handler');
+      }
+    });
+  }
+
+  // Rebind after the shared viewer moves between Page 2 and Page 3.
+  const observer = new MutationObserver(bindCloseButton);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      bindCloseButton();
+      observer.observe(document.body, { childList: true, subtree: true });
+    }, { once: true });
+  } else {
+    bindCloseButton();
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // Keyboard fallback keeps Escape functional regardless of the active page.
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    const viewer = document.getElementById('comparison-modal');
+    if (viewer?.dataset.open === 'true' || viewer?.getAttribute('aria-hidden') === 'false') hardClose('escape-key');
+  }, true);
+
+  window.closeComparisonV52467 = hardClose;
+})();
