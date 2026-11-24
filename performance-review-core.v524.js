@@ -9711,7 +9711,7 @@ window.fetchSharePointHistory=function(employeeName){
     try {
       const token = await window.getToken('https://org23279050.crm.dynamics.com/user_impersonation');
       const id = String(submission.id).replace(/[{}]/g, '');
-      const response = await fetch(`${DATAVERSE_URL}/${submission.entitySet}(${id})?$select=createdon,modifiedon,cr714_employeename,cr714_reviewperiod,cr714_reviewtype`, {
+      const response = await fetch(`${DATAVERSE_URL}/${submission.entitySet}(${id})?$select=createdon,modifiedon`, {
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }
       });
       if (!response.ok) return { ok: false, reason: `Dataverse returned HTTP ${response.status}.` };
