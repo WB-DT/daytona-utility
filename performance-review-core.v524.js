@@ -3310,7 +3310,11 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
         window.lastSubmittedReview = {
           id: createdReviewId,
           entitySet: 'cr714_employeeperformancereviews',
-          submittedAt: new Date().toISOString()
+          submittedAt: new Date().toISOString(),
+          empName: val('employee-name'),
+          employeeId: val('employee-id'),
+          reviewPeriod: val('review-period'),
+          reviewType: currentReviewType || val('review-type')
         };
         if (createdReviewId) {
           try {
@@ -9687,4 +9691,121 @@ window.fetchSharePointHistory=function(employeeName){
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startObserver, { once: true });
   else startObserver();
+})();
+
+
+/* ===== v52466 verify newly submitted review before restart ===== */
+(() => {
+  'use strict';
+  if (window.__v52466VerifyNewReview) return;
+  window.__v52466VerifyNewReview = true;
+
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const norm = value => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+  const fileName = file => String(file?.fileName || file?.['{FilenameWithExtension}'] || file?.FilenameWithExtension || file?.Name || file?.['{Name}'] || '');
+  const fileDate = file => Date.parse(file?.modifiedDate || file?.Modified || file?.createdDate || file?.Created || 0) || 0;
+  const filePeriod = file => String(file?.reviewPeriod || file?.period || file?.ReviewPeriod || '');
+
+  async function verifyDataverseRecord(submission) {
+    if (!submission?.id) return { ok: false, reason: 'Dataverse did not return the submitted review ID.' };
+    try {
+      const token = await window.getToken('https://org23279050.crm.dynamics.com/user_impersonation');
+      const id = String(submission.id).replace(/[{}]/g, '');
+      const response = await fetch(`${DATAVERSE_URL}/${submission.entitySet}(${id})?$select=createdon,modifiedon,cr714_employeename,cr714_reviewperiod,cr714_reviewtype`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }
+      });
+      if (!response.ok) return { ok: false, reason: `Dataverse returned HTTP ${response.status}.` };
+      const record = await response.json();
+      return { ok: true, record };
+    } catch (error) {
+      return { ok: false, reason: error?.message || String(error) };
+    }
+  }
+
+  function verifyNewArchiveFile(submission) {
+    const files = Array.isArray(window.historicalReviewState?.files) ? window.historicalReviewState.files : [];
+    const submittedAt = Date.parse(submission?.submittedAt || 0) || Date.now();
+    const threshold = submittedAt - 120000;
+    const employeeTokens = norm(submission?.empName).split(' ').filter(Boolean);
+    const expectedPeriod = norm(submission?.reviewPeriod);
+    const candidates = files.filter(file => {
+      const name = norm(fileName(file));
+      const period = norm(filePeriod(file));
+      const recent = fileDate(file) >= threshold;
+      const employeeMatch = !employeeTokens.length || employeeTokens.every(token => name.includes(token) || norm(JSON.stringify(file)).includes(token));
+      const periodMatch = !expectedPeriod || period === expectedPeriod || name.includes(expectedPeriod);
+      return recent && employeeMatch && periodMatch;
+    }).sort((a,b) => fileDate(b) - fileDate(a));
+    const matchedFile = candidates[0] || null;
+    return {
+      ok: !!matchedFile,
+      matchedFile,
+      matchedFileName: matchedFile ? fileName(matchedFile) : '',
+      returnedFileCount: files.length,
+      reason: matchedFile ? '' : `The archive returned ${files.length} file(s), but none matched the submitted employee, review period, and submission time.`
+    };
+  }
+
+  window.startNewReviewAfterArchiveV52459 = async function(button) {
+    if (window.__v52466RestartPromise) return window.__v52466RestartPromise;
+    const submission = { ...(window.lastSubmittedReview || {}) };
+    submission.empName = submission.empName || String(document.getElementById('employee-name')?.value || '').trim();
+    submission.reviewPeriod = submission.reviewPeriod || String(document.getElementById('review-period')?.value || '').trim();
+    const originalHtml = button?.innerHTML || '';
+    if (button) {
+      button.disabled = true;
+      button.setAttribute('aria-busy', 'true');
+      button.innerHTML = '<i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i> Verifying submitted review...';
+    }
+
+    window.__v52466RestartPromise = (async () => {
+      const dataverse = await verifyDataverseRecord(submission);
+      if (!dataverse.ok) throw new Error(`The new Dataverse review could not be verified: ${dataverse.reason}`);
+
+      await sleep(8000);
+      const delays = [0, 6000, 9000, 12000];
+      let archive = { ok: false, reason: 'Archive verification has not run.' };
+      for (let attempt = 0; attempt < delays.length; attempt++) {
+        if (delays[attempt]) await sleep(delays[attempt]);
+        if (button) button.innerHTML = `<i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i> Verifying new review ${attempt + 1}/${delays.length}...`;
+        await window.fetchSharePointHistory(submission.empName);
+        archive = verifyNewArchiveFile(submission);
+        console.info('[NewReviewVerification v524.66]', { attempt: attempt + 1, submission, dataverseVerified: dataverse.ok, ...archive });
+        if (archive.ok) break;
+      }
+
+      if (!archive.ok) {
+        throw new Error(`The review exists in Dataverse, but the newly generated archive document was not verified after 4 checks. ${archive.reason}`);
+      }
+
+      const result = {
+        employeeName: submission.empName,
+        submittedReviewId: submission.id || '',
+        submittedAt: submission.submittedAt || '',
+        reviewPeriod: submission.reviewPeriod || '',
+        dataverseVerified: true,
+        archiveVerified: true,
+        matchedArchiveFile: archive.matchedFileName,
+        checkedAt: new Date().toISOString()
+      };
+      try { sessionStorage.setItem('performanceReview.lastArchiveRestart.v52466', JSON.stringify(result)); } catch (_) {}
+      if (button) button.innerHTML = '<i class="fas fa-check" aria-hidden="true"></i> New review verified. Starting fresh...';
+      await sleep(650);
+      window.location.reload();
+    })();
+
+    try { return await window.__v52466RestartPromise; }
+    catch (error) {
+      window.__v52466RestartPromise = null;
+      console.error('[NewReviewVerification v524.66] Restart blocked:', error);
+      if (button) {
+        button.disabled = false;
+        button.removeAttribute('aria-busy');
+        button.innerHTML = originalHtml;
+      }
+      if (typeof window.showError === 'function') window.showError(error.message || String(error));
+      else alert(error.message || String(error));
+      throw error;
+    }
+  };
 })();
