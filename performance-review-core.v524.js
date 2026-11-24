@@ -9447,3 +9447,70 @@ window.fetchSharePointHistory=function(employeeName){
  return Promise.resolve().then(()=>original.call(window,name)).catch(error=>{if(error?.name!=='AbortError')throw error;return null}).finally(()=>{if(mine===generation&&String(document.getElementById('employee-name')?.value||'').trim()===name)unlock()});
 };
 })();
+
+
+/* ===== v52459 archive-safe full-page restart ===== */
+(() => {
+  'use strict';
+  if (window.__v52459ArchiveSafeRestart) return;
+  window.__v52459ArchiveSafeRestart = true;
+
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const archiveReady = () => {
+    const state = window.__connectionState?.archive?.state || '';
+    const fileReady = !!window.__currentComparisonFile;
+    const rendererReady = typeof window.__pendingComparisonRender === 'function' || !!window.__binaryComparisonRender;
+    return state === 'ok' && fileReady && rendererReady;
+  };
+
+  window.startNewReviewAfterArchiveV52459 = async function(button) {
+    if (window.__v52459RestartPromise) return window.__v52459RestartPromise;
+    const employeeName = String(document.getElementById('employee-name')?.value || window.lastSubmittedReview?.empName || '').trim();
+    const originalHtml = button?.innerHTML || '';
+    if (button) {
+      button.disabled = true;
+      button.setAttribute('aria-busy', 'true');
+      button.innerHTML = '<i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i> Finalizing archive...';
+    }
+
+    window.__v52459RestartPromise = (async () => {
+      try {
+        // Give Power Automate/SharePoint time to publish the just-created document before polling.
+        await sleep(8000);
+        if (employeeName && typeof window.fetchSharePointHistory === 'function') {
+          const delays = [0, 6000, 9000, 12000];
+          for (let attempt = 0; attempt < delays.length; attempt++) {
+            if (delays[attempt]) await sleep(delays[attempt]);
+            if (button) button.innerHTML = `<i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i> Checking archive ${attempt + 1}/${delays.length}...`;
+            try { await window.fetchSharePointHistory(employeeName); } catch (error) {
+              if (error?.name !== 'AbortError') console.warn('Archive readiness check failed:', error);
+            }
+            if (archiveReady()) break;
+          }
+        }
+      } finally {
+        // Preserve the requested clean start. Reload only after the archive checks settle.
+        try {
+          sessionStorage.setItem('performanceReview.lastArchiveRestart.v52459', JSON.stringify({
+            employeeName,
+            submittedReviewId: window.lastSubmittedReview?.id || '',
+            checkedAt: new Date().toISOString(),
+            archiveReady: archiveReady()
+          }));
+        } catch (_) {}
+        window.location.reload();
+      }
+    })();
+
+    try { return await window.__v52459RestartPromise; }
+    catch (error) {
+      window.__v52459RestartPromise = null;
+      if (button) {
+        button.disabled = false;
+        button.removeAttribute('aria-busy');
+        button.innerHTML = originalHtml;
+      }
+      throw error;
+    }
+  };
+})();
