@@ -9890,3 +9890,77 @@ window.fetchSharePointHistory=function(employeeName){
 
   window.closeComparisonV52467 = hardClose;
 })();
+
+
+/* ===== v52468 external viewer close + matched form height ===== */
+(() => {
+  'use strict';
+  if (window.__v52468ExternalCloseMatchedHeight) return;
+  window.__v52468ExternalCloseMatchedHeight = true;
+
+  const closeViewer = reason => {
+    if (typeof window.closeComparisonV52467 === 'function') return window.closeComparisonV52467(reason);
+    const page = document.getElementById('panel-3')?.classList.contains('active') ? 3 : 2;
+    window.closeReviewSideBySideV52447?.(page);
+    return false;
+  };
+
+  function ensureExternalClose(shell) {
+    if (!shell) return null;
+    let button = shell.querySelector(':scope > .workspace-viewer-close-v52468');
+    if (!button) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'workspace-viewer-close-v52468';
+      button.setAttribute('aria-label', 'Close side-by-side review');
+      button.setAttribute('title', 'Close side-by-side review');
+      button.innerHTML = '<i class="fas fa-times" aria-hidden="true"></i>';
+      button.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        closeViewer('external-workspace-close');
+      });
+      shell.appendChild(button);
+    }
+    return button;
+  }
+
+  function matchHeight(shell) {
+    if (!shell?.classList.contains('is-viewer-open')) return;
+    const content = shell.querySelector(':scope > .review-existing-content-v52446');
+    const viewer = shell.querySelector(':scope > .comparison-side-pane-v52446');
+    if (!content || !viewer) return;
+    const height = Math.max(640, Math.ceil(content.getBoundingClientRect().height));
+    viewer.style.setProperty('--comparison-matched-height', `${height}px`);
+    viewer.style.height = `${height}px`;
+    viewer.style.maxHeight = 'none';
+    ensureExternalClose(shell);
+    console.info('[SideBySideLayout v524.68]', { page: shell.dataset.workspacePage || '', matchedHeight: height });
+  }
+
+  function sync() {
+    document.querySelectorAll('.review-workspace-shell-v52446').forEach(shell => {
+      ensureExternalClose(shell);
+      matchHeight(shell);
+    });
+  }
+
+  const mutationObserver = new MutationObserver(sync);
+  const resizeObserver = new ResizeObserver(entries => {
+    entries.forEach(entry => matchHeight(entry.target.closest('.review-workspace-shell-v52446') || entry.target));
+  });
+
+  function start() {
+    sync();
+    mutationObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+    document.querySelectorAll('.review-workspace-shell-v52446, .review-existing-content-v52446').forEach(el => resizeObserver.observe(el));
+  }
+
+  window.addEventListener('workflow-panel-changed', () => requestAnimationFrame(sync));
+  window.addEventListener('comparison-modal-opened', () => requestAnimationFrame(sync));
+  window.addEventListener('resize', () => requestAnimationFrame(sync), { passive: true });
+  window.closeSideBySideV52468 = () => closeViewer('public-close-api');
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+  else start();
+})();
