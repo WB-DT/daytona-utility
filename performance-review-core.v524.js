@@ -6438,7 +6438,7 @@ function render(force=false,reason='auto'){
  body.querySelectorAll('[data-remove-key]').forEach(btn=>btn.addEventListener('click',()=>{window.__sbsUserEditingV99=true;window.__removedSideBySideKeys.add(btn.dataset.removeKey);btn.closest('tr')?.remove();validate()}));
  if(source)source.textContent=selected?'Loaded automatically from "'+clean(selected.heading||'This month')+'" on PDF page '+(selected.page||'—')+'. '+rows.length+' KPI rows.':'Showing '+rows.length+' KPI rows from parsed Flow data. The PDF viewer is optional.';
 }
-// v524.86: one rating-change authority for standard and manually added KPI rows.
+// v524.90: one rating-change and immediate visual authority for standard and manually added KPI rows.
 document.addEventListener('change',event=>{
  const select=event.target.closest?.('#page2-sbs-grid select[data-rating-key]');
  if(!select)return;
@@ -6470,8 +6470,23 @@ document.addEventListener('input',event=>{
  const value=clean(el.value);if(value&&value!=='—')window.__sideBySideValueEdits?.set(el.dataset.valueKey,value);
 },true);
 function syncSideBySideRatingStyle(select){
- if(window.PerformanceReviewController?.paintRating){window.PerformanceReviewController.paintRating(select);return}
- if(!select)return;const code=String(select.value||'').trim().toUpperCase();select.dataset.rating=code;select.dataset.statusCode=code;
+ if(!select)return;
+ const code=String(select.value||'').trim().toUpperCase();
+ const colors={EE:['#166534','#ffffff','#22c55e'],ME:['#854d0e','#ffffff','#eab308'],BE:['#991b1b','#ffffff','#ef4444'],'':['','','']};
+ const palette=colors[code]||colors[''];
+ select.dataset.rating=code;select.dataset.statusCode=code;
+ select.classList.remove('rating-ee','rating-me','rating-be');
+ if(code)select.classList.add('rating-'+code.toLowerCase());
+ ['background-color','color','border-color','font-weight'].forEach(name=>select.style.removeProperty(name));
+ if(code){
+  select.style.setProperty('background-color',palette[0],'important');
+  select.style.setProperty('color',palette[1],'important');
+  select.style.setProperty('border-color',palette[2],'important');
+  select.style.setProperty('font-weight','800','important');
+ }
+ const cell=select.closest('td'),row=select.closest('tr');
+ if(cell)cell.dataset.rating=code;
+ if(row)row.dataset[select.matches('.sbs-current-rating')?'currentRating':'previousRating']=code;
 }
 function syncAllSideBySideRatings(root){(root||document).querySelectorAll('#page2-sbs-grid .sbs-parsed-rating,#page2-sbs-grid .sbs-current-rating').forEach(syncSideBySideRatingStyle);}
 function addManualSideBySideRow(){
