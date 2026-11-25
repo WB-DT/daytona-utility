@@ -3517,6 +3517,7 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
     window.__sideBySideLabelEdits?.clear?.();
     window.__removedSideBySideKeys?.clear?.();
     window.__resetKpiRenderGuardsV52496?.();
+    window.clearManualKpiRatingsV139?.();
     if(currentUserRepName) fillReviewerName(currentUserRepName);
     document.getElementById('review-date').value = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0];
     document.getElementById('ack-checkbox').checked = false;
@@ -5710,7 +5711,11 @@ function schedule(){if(queued)return;queued=true;queueMicrotask(()=>{queued=fals
   document.querySelectorAll('#page2-sbs-grid select[data-rating-key]').forEach(select=>{select.value='';select.removeAttribute('data-rating');select.style.removeProperty('color');select.style.removeProperty('background-color');});
  }
  function clearFields(){document.querySelectorAll('#panel-2 input,#panel-2 select,#panel-2 textarea,#panel-2 [contenteditable=true],#panel-3 input,#panel-3 select,#panel-3 textarea,#panel-3 [contenteditable=true]').forEach(el=>{if(['button','submit','hidden','file'].includes(el.type))return;if(el.type==='checkbox'||el.type==='radio')el.checked=false;else if(el.isContentEditable)el.textContent='';else el.value='';el.removeAttribute('data-user-edited');el.removeAttribute('data-kpi-changed');});document.querySelectorAll('[data-report-table] tbody').forEach(x=>x.replaceChildren());}
- function reset(reason,fields=true){clearStorage();clearRuntime();if(fields)clearFields();window.dispatchEvent(new CustomEvent('review-state-reset',{detail:{reason,at:new Date().toISOString()}}));return true;}
+ function reset(reason,fields=true){clearStorage();clearRuntime();if(fields)clearFields();
+  // v524.97: v139 keeps its own in-memory rating copy and re-applies it on KPI table mutations,
+  // so a second review showed the first review's ratings with an empty edit map.
+  window.clearManualKpiRatingsV139?.();
+  window.dispatchEvent(new CustomEvent('review-state-reset',{detail:{reason,at:new Date().toISOString()}}));return true;}
  window.ReviewLifecycleController=Object.freeze({reset});window.clearAllReviewStateV300=reset;
  let identity='';function id(){return ['employee-name','review-period','review-type'].map(x=>String(document.getElementById(x)?.value||'').trim().toLowerCase()).join('|');}
  document.addEventListener('change',e=>{if(!e.target.matches?.('#employee-name,#review-period,#review-type'))return;const n=id();if(identity&&n!==identity)reset('review-selection-changed');identity=n;},true);
