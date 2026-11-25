@@ -6438,22 +6438,65 @@ function render(force=false,reason='auto'){
  body.querySelectorAll('[data-remove-key]').forEach(btn=>btn.addEventListener('click',()=>{window.__sbsUserEditingV99=true;window.__removedSideBySideKeys.add(btn.dataset.removeKey);btn.closest('tr')?.remove();validate()}));
  if(source)source.textContent=selected?'Loaded automatically from "'+clean(selected.heading||'This month')+'" on PDF page '+(selected.page||'—')+'. '+rows.length+' KPI rows.':'Showing '+rows.length+' KPI rows from parsed Flow data. The PDF viewer is optional.';
 }
-// v524.90: one rating-change and immediate visual authority for standard and manually added KPI rows.
-document.addEventListener('change',event=>{
- const select=event.target.closest?.('#page2-sbs-grid select[data-rating-key]');
- if(!select)return;
- const row=select.closest('tr[data-column-key]'),ratingKey=clean(select.dataset.ratingKey);
- if(!row||!ratingKey)return;
- window.__sbsUserEditingV99=true;
- const ratingEdits=window.__sideBySideRatingEdits||(window.__sideBySideRatingEdits=new Map());
- ratingEdits.set(ratingKey,select.value);
- syncSideBySideRatingStyle(select);
- const field=ratingKey.startsWith('parsed:')?'previousRating':'currentRating';
- const id=row.dataset.columnKey;
- if(window.KPIState?.update)window.KPIState.update(id,{[field]:select.value});
- window.__reviewDocxBlob=null;window.__reviewDocxAttachment=null;
- window.dispatchEvent(new CustomEvent('review-file-composition-changed',{detail:{source:'consolidated-kpi-rating-change',id,field,value:select.value}}));
-},true);
+// v524.91: complete two-page rating controller. Replaces all prior rating change/paint logic.
+const SBSRatingController=(()=>{
+ const valid=new Set(['EE','ME','BE']);
+ const palettes={EE:['#166534','#ffffff','#22c55e'],ME:['#854d0e','#ffffff','#eab308'],BE:['#991b1b','#ffffff','#ef4444']};
+ const selector='#panel-2 select[data-rating-key],#panel-3 select[data-rating-key],#page2-sbs-grid select[data-rating-key],#page3-connected-kpi-host select[data-rating-key]';
+ function codeOf(select){const value=String(select?.value||'').trim().toUpperCase();return valid.has(value)?value:''}
+ function setNativeSelection(select,code){
+  if(!select)return;
+  const normalized=valid.has(code)?code:'';
+  let matched=false;
+  [...select.options].forEach(option=>{const selected=String(option.value||'').trim().toUpperCase()===normalized;option.selected=selected;if(selected)matched=true});
+  if(!matched&&normalized){
+   const option=new Option(normalized,normalized,true,true);select.add(option);matched=true;
+  }
+  select.value=normalized;
+  select.selectedIndex=[...select.options].findIndex(option=>option.selected);
+  select.setAttribute('value',normalized);
+ }
+ function paint(select,code=codeOf(select)){
+  if(!select)return;
+  setNativeSelection(select,code);
+  select.dataset.rating=code;select.dataset.statusCode=code;
+  select.classList.remove('rating-ee','rating-me','rating-be');
+  ['background-color','color','border-color','font-weight','opacity','-webkit-text-fill-color'].forEach(name=>select.style.removeProperty(name));
+  if(code){
+   const palette=palettes[code];select.classList.add('rating-'+code.toLowerCase());
+   select.style.setProperty('background-color',palette[0],'important');
+   select.style.setProperty('color',palette[1],'important');
+   select.style.setProperty('-webkit-text-fill-color',palette[1],'important');
+   select.style.setProperty('border-color',palette[2],'important');
+   select.style.setProperty('font-weight','800','important');
+   select.style.setProperty('opacity','1','important');
+  }
+  const cell=select.closest('td'),row=select.closest('tr');if(cell)cell.dataset.rating=code;
+  if(row)row.dataset[select.matches('.sbs-current-rating')?'currentRating':'previousRating']=code;
+ }
+ function matching(key){return [...document.querySelectorAll(selector)].filter(select=>select.dataset.ratingKey===key)}
+ function commit(source){
+  const key=String(source.dataset.ratingKey||''),code=codeOf(source),row=source.closest('tr[data-column-key]');if(!key||!row)return;
+  window.__sbsUserEditingV99=true;
+  const edits=window.__sideBySideRatingEdits||(window.__sideBySideRatingEdits=new Map());edits.set(key,code);
+  // Page 2 and Page 3 are both first-class views. Update every rendered control for this KPI.
+  const controls=matching(key);if(!controls.includes(source))controls.push(source);controls.forEach(select=>paint(select,code));
+  const field=key.startsWith('parsed:')?'previousRating':'currentRating',id=row.dataset.columnKey;
+  window.KPIState?.update?.(id,{[field]:code});
+  window.__reviewDocxBlob=null;window.__reviewDocxAttachment=null;window.__reviewDocxFileName='';
+  window.dispatchEvent(new CustomEvent('review-file-composition-changed',{detail:{source:'two-page-kpi-rating-change',id,field,value:code}}));
+ }
+ function restore(root=document){
+  root.querySelectorAll?.(selector).forEach(select=>{
+   const saved=window.__sideBySideRatingEdits?.get?.(select.dataset.ratingKey);
+   paint(select,valid.has(String(saved||'').toUpperCase())?String(saved).toUpperCase():codeOf(select));
+  });
+ }
+ document.addEventListener('change',event=>{const select=event.target.closest?.(selector);if(select)commit(select)},true);
+ ['workflow-panel-changed','kpi-table-ready','review-data-loaded','review-file-composition-changed'].forEach(name=>window.addEventListener(name,()=>requestAnimationFrame(()=>restore(document))));
+ return Object.freeze({paint,commit,restore});
+})();
+window.SBSRatingController=SBSRatingController;
 function install(){const original=window.extractPdfTableCells;if(typeof original!=='function'||original.__thisMonthWrapped)return;async function wrapped(pdf){const result=await original(pdf),selected=chooseThisMonthTable(result?.periods);if(selected){result.selectedThisMonthTable=selected;result.selectedBottomTable=selected;result.selectedPage=selected.page;result.cells=selected.pairs;}window.__lastCellParseResult=result;queueMicrotask(()=>{render();window.dispatchEvent(new CustomEvent('previous-review-pdf-this-month',{detail:result}))});return result}wrapped.__thisMonthWrapped=true;window.extractPdfTableCells=wrapped}
 function validate(){const rows=[...document.querySelectorAll('#page2-sbs-grid tbody tr')],keys=rows.map(x=>x.dataset.columnKey).filter(Boolean);return window.__sideBySideValidation={checkedAt:new Date().toISOString(),sectionPresent:!!$('page2-side-by-side-table'),tablePresent:!!$('page2-sbs-grid'),renderedRows:rows.length,duplicateColumnKeys:[...new Set(keys.filter((x,i)=>keys.indexOf(x)!==i))],selectedHeading:window.__lastCellParseResult?.selectedThisMonthTable?.heading||'',selectedPage:window.__lastCellParseResult?.selectedThisMonthTable?.page||null,sourceRule:'Use This month table from prior PDF as previous-month data'}}
 function init(){install();/* v55: do not rebuild the KPI table for ordinary clicks, typing, or dropdown changes.
@@ -6469,25 +6512,7 @@ document.addEventListener('input',event=>{
  const el=event.target;if(!el?.matches?.('#page2-sbs-grid .sbs-current-value'))return;
  const value=clean(el.value);if(value&&value!=='—')window.__sideBySideValueEdits?.set(el.dataset.valueKey,value);
 },true);
-function syncSideBySideRatingStyle(select){
- if(!select)return;
- const code=String(select.value||'').trim().toUpperCase();
- const colors={EE:['#166534','#ffffff','#22c55e'],ME:['#854d0e','#ffffff','#eab308'],BE:['#991b1b','#ffffff','#ef4444'],'':['','','']};
- const palette=colors[code]||colors[''];
- select.dataset.rating=code;select.dataset.statusCode=code;
- select.classList.remove('rating-ee','rating-me','rating-be');
- if(code)select.classList.add('rating-'+code.toLowerCase());
- ['background-color','color','border-color','font-weight'].forEach(name=>select.style.removeProperty(name));
- if(code){
-  select.style.setProperty('background-color',palette[0],'important');
-  select.style.setProperty('color',palette[1],'important');
-  select.style.setProperty('border-color',palette[2],'important');
-  select.style.setProperty('font-weight','800','important');
- }
- const cell=select.closest('td'),row=select.closest('tr');
- if(cell)cell.dataset.rating=code;
- if(row)row.dataset[select.matches('.sbs-current-rating')?'currentRating':'previousRating']=code;
-}
+function syncSideBySideRatingStyle(select){window.SBSRatingController?.paint(select)}
 function syncAllSideBySideRatings(root){(root||document).querySelectorAll('#page2-sbs-grid .sbs-parsed-rating,#page2-sbs-grid .sbs-current-rating').forEach(syncSideBySideRatingStyle);}
 function addManualSideBySideRow(){
  const body=document.querySelector('#page2-sbs-grid tbody');
