@@ -365,6 +365,7 @@ if(!window.KPIObserverHub){
   window.resetDocZoom = function() { window.__docZoom = 1; window.applyDocZoom(); };
 
   window.setPanel1ArchiveLock = function(isLocked) {
+    if (!isLocked && window.__employeeLookupLoaderHold === true) return;
     const panel = document.getElementById('panel-1');
     const overlay = document.getElementById('panel1-lock-overlay');
     const nextBtn = document.getElementById('btn-next-panel1');
@@ -2353,6 +2354,13 @@ if(!window.KPIObserverHub){
 
   async function autoFillEmployee() {
     const empName = val('employee-name');
+    const lookupGeneration = window.__employeeLookupGeneration = (window.__employeeLookupGeneration || 0) + 1;
+    if (empName) {
+      window.__employeeLookupLoaderHold = true;
+      window.setPanel1ArchiveLock?.(true);
+      const phaseText = document.getElementById('archive-loader-phase-text');
+      if (phaseText) phaseText.textContent = 'Loading employee, prior review, and performance data...';
+    }
     window.pbiCache = {};
     window.currentMonthMetrics = {};
     
@@ -2387,6 +2395,8 @@ if(!window.KPIObserverHub){
         if (document.getElementById('comparison-docx')) {
             document.getElementById('comparison-docx').innerHTML = '';
         }
+        window.__employeeLookupLoaderHold = false;
+        window.setPanel1ArchiveLock?.(false);
         return;
     }
     
@@ -2490,15 +2500,35 @@ if(!window.KPIObserverHub){
     } catch(e) {
         console.error("Auto-fill API error: ", e);
     } finally {
-        if (val('employee-name') !== empName) { if(loader) loader.style.display = 'none'; return; }
-        updateMetricsUI(); 
-        
-        setLastReviewLoading(true, 'Checking prior review history — please wait before proceeding...');
-        window.fetchSharePointHistory(empName);
+        if (val('employee-name') !== empName || lookupGeneration !== window.__employeeLookupGeneration) {
+          if (loader) loader.style.display = 'none';
+          return;
+        }
+        updateMetricsUI();
+        setLastReviewLoading(true, 'Loading prior review and performance data — please wait before proceeding...');
+        const phaseText = document.getElementById('archive-loader-phase-text');
+        if (phaseText) phaseText.textContent = 'Loading prior review and performance data...';
 
-        fetchAllPbiDataInBackground(false);
-        
-        if(loader) loader.style.display = 'none';
+        const historyPromise = Promise.resolve().then(() => window.fetchSharePointHistory(empName));
+        const metricsPromise = Promise.resolve().then(() => fetchAllPbiDataInBackground(false));
+        const results = await Promise.allSettled([historyPromise, metricsPromise]);
+
+        if (val('employee-name') !== empName || lookupGeneration !== window.__employeeLookupGeneration) {
+          if (loader) loader.style.display = 'none';
+          return;
+        }
+        const rejected = results.filter(result => result.status === 'rejected');
+        rejected.forEach(result => console.error('[EmployeeLookup v524.77] Dependent lookup failed:', result.reason));
+        updateMetricsUI();
+        window.__employeeLookupLoaderHold = false;
+        window.setPanel1ArchiveLock?.(false);
+        if (loader) loader.style.display = 'none';
+        console.info('[EmployeeLookup v524.77] Selection pipeline settled.', {
+          employee: empName,
+          employeeRecordLoaded: !!window.selectedEmployeeRecord,
+          history: results[0].status,
+          metrics: results[1].status
+        });
     }
   }
 
@@ -7042,7 +7072,7 @@ window.addEventListener('pagehide',()=>{try{const c=document.getElementById('com
       const employee=value('employee-name'); if(employee) originalHistoryLoader?.(employee);
     };
     document.getElementById('review-period')?.addEventListener('change', restartHistory);
-    document.getElementById('employee-name')?.addEventListener('change', restartHistory);
+    // Employee changes are owned by autoFillEmployee so history, metrics, and loader settle together.
   });
 })();
 
