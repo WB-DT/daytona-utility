@@ -9930,12 +9930,8 @@ window.fetchSharePointHistory=function(employeeName){
     const content = shell.querySelector(':scope > .review-existing-content-v52446');
     const viewer = shell.querySelector(':scope > .comparison-side-pane-v52446');
     if (!content || !viewer) return;
-    const height = Math.max(640, Math.ceil(content.getBoundingClientRect().height));
-    viewer.style.setProperty('--comparison-matched-height', `${height}px`);
-    viewer.style.height = `${height}px`;
-    viewer.style.maxHeight = 'none';
+    // Height authority moved to v524.72. Preserve only the external close control.
     ensureExternalClose(shell);
-    console.info('[SideBySideLayout v524.68]', { page: shell.dataset.workspacePage || '', matchedHeight: height });
   }
 
   function sync() {
@@ -9993,6 +9989,54 @@ window.fetchSharePointHistory=function(employeeName){
   window.addEventListener('workflow-panel-changed', () => requestAnimationFrame(sync));
   window.addEventListener('comparison-modal-opened', () => requestAnimationFrame(sync));
   window.addEventListener('resize', () => requestAnimationFrame(sync), { passive: true });
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+  else start();
+})();
+
+
+/* ===== v52472 deterministic confirmation visibility + consolidated half-height ===== */
+(() => {
+  'use strict';
+  if (window.__v52472ConsolidatedLayout) return;
+  window.__v52472ConsolidatedLayout = true;
+
+  function syncConfirmation() {
+    const screen = document.getElementById('success-screen');
+    if (!screen) return;
+    const inlineDisplay = String(screen.style.display || '').toLowerCase();
+    const explicitlyHidden = screen.hidden || screen.getAttribute('aria-hidden') === 'true' || inlineDisplay === 'none';
+    screen.classList.toggle('v52472-visible', !explicitlyHidden);
+    if (!explicitlyHidden) {
+      document.querySelectorAll('.review-workspace-shell-v52446').forEach(shell => shell.classList.remove('is-viewer-open'));
+      requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: 'auto' }));
+    }
+  }
+
+  function sizeShell(shell) {
+    if (!shell?.classList.contains('is-viewer-open')) return;
+    const content = shell.querySelector(':scope > .review-existing-content-v52446');
+    const viewer = shell.querySelector(':scope > .comparison-side-pane-v52446');
+    if (!content || !viewer) return;
+    const formHeight = Math.ceil(content.getBoundingClientRect().height);
+    const halfHeight = Math.max(320, Math.round(formHeight / 2));
+    viewer.style.removeProperty('--comparison-matched-height');
+    viewer.style.setProperty('--comparison-half-height', `${halfHeight}px`);
+    viewer.style.setProperty('height', `${halfHeight}px`, 'important');
+    viewer.style.setProperty('min-height', '320px', 'important');
+    viewer.style.setProperty('max-height', `${halfHeight}px`, 'important');
+    console.info('[LayoutAuthority v524.72]', { page: shell.dataset.workspacePage || '', formHeight, viewerHeight: halfHeight });
+  }
+
+  function syncViewers() { document.querySelectorAll('.review-workspace-shell-v52446').forEach(sizeShell); }
+  function start() {
+    const success = document.getElementById('success-screen');
+    if (success) new MutationObserver(syncConfirmation).observe(success, { attributes: true, attributeFilter: ['style','hidden','aria-hidden'] });
+    syncConfirmation();
+    syncViewers();
+  }
+  window.addEventListener('workflow-panel-changed', () => requestAnimationFrame(syncViewers));
+  window.addEventListener('comparison-modal-opened', () => requestAnimationFrame(syncViewers));
+  window.addEventListener('resize', () => requestAnimationFrame(syncViewers), { passive: true });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();
 })();
