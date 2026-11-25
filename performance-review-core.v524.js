@@ -10040,3 +10040,105 @@ window.fetchSharePointHistory=function(employeeName){
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();
 })();
+
+
+/* ===== v52474 Start New Review: verify successful Dataverse create + file PATCH ===== */
+(() => {
+  'use strict';
+  if (window.__v52474DataversePatchRestart) return;
+  window.__v52474DataversePatchRestart = true;
+
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  async function verifyCreatedReviewRecord(submission) {
+    if (!submission?.id) {
+      return { ok: false, reason: 'Dataverse did not return the submitted review record ID.' };
+    }
+    try {
+      const token = await window.getToken('https://org23279050.crm.dynamics.com/user_impersonation');
+      const id = String(submission.id).replace(/[{}]/g, '');
+      const entitySet = submission.entitySet || 'cr714_employeeperformancereviews';
+      const response = await fetch(`${DATAVERSE_URL}/${entitySet}(${id})?$select=createdon,modifiedon`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }
+      });
+      if (!response.ok) return { ok: false, reason: `Dataverse returned HTTP ${response.status}.` };
+      return { ok: true, record: await response.json() };
+    } catch (error) {
+      return { ok: false, reason: error?.message || String(error) };
+    }
+  }
+
+  function verifyDownloadedReviewPatch(submission) {
+    const patch = submission?.downloadedReviewCopy;
+    const patchError = String(submission?.downloadedReviewCopyError || '').trim();
+    if (patchError) return { ok: false, reason: `The completed-review file PATCH failed: ${patchError}` };
+    if (!patch || patch.column !== 'cr714_downloadedreviewcopy') {
+      return { ok: false, reason: 'The completed-review file PATCH did not report success.' };
+    }
+    if (!patch.fileName || !(Number(patch.size) > 0)) {
+      return { ok: false, reason: 'The completed-review file PATCH returned incomplete file details.' };
+    }
+    return { ok: true, column: patch.column, fileName: patch.fileName, size: Number(patch.size) };
+  }
+
+  window.startNewReviewAfterArchiveV52459 = async function(button) {
+    if (window.__v52474RestartPromise) return window.__v52474RestartPromise;
+    const submission = { ...(window.lastSubmittedReview || {}) };
+    const originalHtml = button?.innerHTML || '';
+
+    if (button) {
+      button.disabled = true;
+      button.setAttribute('aria-busy', 'true');
+      button.innerHTML = '<i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i> Confirming Dataverse save...';
+    }
+
+    window.__v52474RestartPromise = (async () => {
+      // The manager uploads the approved copy to the repository later. Do not query
+      // SharePoint or run the archive flow here. The submission gate is the actual
+      // Dataverse record creation and cr714_downloadedreviewcopy PATCH from Page 3.
+      const record = await verifyCreatedReviewRecord(submission);
+      if (!record.ok) throw new Error(`The submitted Dataverse review could not be verified: ${record.reason}`);
+
+      const filePatch = verifyDownloadedReviewPatch(submission);
+      if (!filePatch.ok) throw new Error(filePatch.reason);
+
+      const result = {
+        employeeName: submission.empName || '',
+        submittedReviewId: submission.id || '',
+        submittedAt: submission.submittedAt || '',
+        reviewPeriod: submission.reviewPeriod || '',
+        dataverseRecordVerified: true,
+        downloadedReviewPatchVerified: true,
+        patchedColumn: filePatch.column,
+        patchedFileName: filePatch.fileName,
+        patchedFileSize: filePatch.size,
+        archiveCheckSkipped: true,
+        archiveCheckReason: 'Manager uploads the approved review to the repository manually.',
+        checkedAt: new Date().toISOString()
+      };
+      try { sessionStorage.setItem('performanceReview.lastRestart.v52474', JSON.stringify(result)); } catch (_) {}
+      console.info('[StartNewReview v524.74] Dataverse submission and file PATCH verified.', result);
+
+      if (button) button.innerHTML = '<i class="fas fa-check" aria-hidden="true"></i> Save confirmed. Starting fresh...';
+      await sleep(500);
+      window.location.reload();
+    })();
+
+    try { return await window.__v52474RestartPromise; }
+    catch (error) {
+      window.__v52474RestartPromise = null;
+      console.error('[StartNewReview v524.74] Restart blocked:', error);
+      if (button) {
+        button.disabled = false;
+        button.removeAttribute('aria-busy');
+        button.innerHTML = originalHtml;
+      }
+      if (typeof window.showError === 'function') window.showError(error.message || String(error));
+      else alert(error.message || String(error));
+      throw error;
+    }
+  };
+})();
+
+/* ===== v52475 confirmation ARIA visibility authority ===== */
+(()=>{'use strict';if(window.__v52475ConfirmationAria)return;window.__v52475ConfirmationAria=true;function sync(){const screen=document.getElementById('success-screen');if(!screen)return;const visible=!screen.hidden&&String(screen.style.display||'').toLowerCase()!=='none';screen.setAttribute('aria-hidden',visible?'false':'true');screen.toggleAttribute('inert',!visible);const button=screen.querySelector('[data-v448-start-new-review="true"]');if(button){button.setAttribute('aria-label','Start a new performance review');button.setAttribute('aria-hidden','false');button.removeAttribute('tabindex')}}const screen=document.getElementById('success-screen');if(screen)new MutationObserver(sync).observe(screen,{attributes:true,attributeFilter:['style','hidden','aria-hidden']});document.readyState==='loading'?document.addEventListener('DOMContentLoaded',sync,{once:true}):sync()})();
