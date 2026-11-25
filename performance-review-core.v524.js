@@ -2544,8 +2544,14 @@ if(!window.KPIObserverHub){
         updateMetricsUI();
         window.__employeeLookupLoaderHold = false;
         window.setPanel1ArchiveLock?.(false);
+        document.body.classList.remove('archive-loader-active');
+        clearTimeout(window.__panel1ArchiveLockFailsafe);
+        ['api-loader','iframe-loader'].forEach(id => {
+          const element = document.getElementById(id);
+          if (element) element.style.display = 'none';
+        });
         if (loader) loader.style.display = 'none';
-        console.info('[EmployeeLookup v524.77] Selection pipeline settled.', {
+        console.info('[EmployeeLookup v524.83] Selection pipeline settled and released loader ownership.', {
           employee: empName,
           employeeRecordLoaded: !!window.selectedEmployeeRecord,
           history: results[0].status,
@@ -9515,7 +9521,17 @@ window.__v52452RepeatReviewArchiveFinalizer=true;
 const original=window.fetchSharePointHistory;
 if(typeof original!=='function')return;
 let generation=0;
-const unlock=()=>{window.setPanel1ArchiveLock?.(false);document.body.classList.remove('archive-loader-active');clearTimeout(window.__panel1ArchiveLockFailsafe);['api-loader','iframe-loader'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none'})};
+const unlock=()=>{
+ if(window.__employeeLookupLoaderHold===true){
+  console.info('[EmployeeLookup v524.83] Ignored legacy archive unlock while employee pipeline owns the loader.');
+  return false;
+ }
+ window.setPanel1ArchiveLock?.(false);
+ document.body.classList.remove('archive-loader-active');
+ clearTimeout(window.__panel1ArchiveLockFailsafe);
+ ['api-loader','iframe-loader'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none'});
+ return true;
+};
 window.resetArchiveForNewReviewV52452=function(){generation++;try{window.__historyRequestController?.abort?.()}catch(_){}window.__historyRequestController=null;window.__historyRequestSequence=(Number(window.__historyRequestSequence)||0)+1;unlock()};
 window.fetchSharePointHistory=function(employeeName){
  const mine=++generation,name=String(employeeName||'').trim();
