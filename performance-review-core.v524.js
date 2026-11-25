@@ -3509,6 +3509,14 @@ function __legacyV439BuildSummaryPreview() { queueMicrotask(()=>removeDuplicateK
     if(typeof window.resetCompleteKpiEditLog==='function')window.resetCompleteKpiEditLog();
     if(typeof window.clearHistoricalReviewSelection==='function') window.clearHistoricalReviewSelection('start-over');
     document.querySelectorAll('input:not([type="checkbox"]):not([readonly]), select, textarea').forEach(el => el.value = '');
+    // v524.96: a second consecutive review must not inherit the finished review's KPI edit
+    // guard/maps or its render signature, or the fresh KPI values stay blank until Restore rows.
+    window.__sideBySideRatingEdits?.clear?.();
+    window.__sideBySideValueEdits?.clear?.();
+    window.__sideBySidePreviousValueEdits?.clear?.();
+    window.__sideBySideLabelEdits?.clear?.();
+    window.__removedSideBySideKeys?.clear?.();
+    window.__resetKpiRenderGuardsV52496?.();
     if(currentUserRepName) fillReviewerName(currentUserRepName);
     document.getElementById('review-date').value = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0];
     document.getElementById('ack-checkbox').checked = false;
@@ -6428,10 +6436,14 @@ function selectedRows(){
 let lastRenderedSignature='';
 function render(force=false,reason='auto'){
  const tableBody=document.querySelector('#page2-sbs-grid tbody');
- if(window.__sbsUserEditingV99===true && reason!=='refresh' && reason!=='restore')return;
+ // v524.96: a blank table is always allowed to render. Second consecutive reviews blank the
+ // fields (reset / Start Over) while the edit guard and the previous review's signature are
+ // still set, so skipping here left empty KPI values until the user pressed Restore rows.
+ const hasVisibleValues=!!tableBody&&[...tableBody.querySelectorAll('.sbs-parsed-value-input,.sbs-current-value')].some(el=>{const v=clean(el.value);return v&&v!=='—'});
+ if(window.__sbsUserEditingV99===true && reason!=='refresh' && reason!=='restore' && hasVisibleValues)return;
  const preview=selectedRows();
  const signature=JSON.stringify(preview.rows.map(r=>[canonical(r.label),clean(r.prior)]));
- if(!force&&signature===lastRenderedSignature&&tableBody?.querySelector('tr[data-column-key]'))return;
+ if(!force&&signature===lastRenderedSignature&&tableBody?.querySelector('tr[data-column-key]')&&hasVisibleValues)return;
  lastRenderedSignature=signature;
  const valueEdits=window.__sideBySideValueEdits||(window.__sideBySideValueEdits=new Map());
  const previousValueEdits=window.__sideBySidePreviousValueEdits||(window.__sideBySidePreviousValueEdits=new Map());
@@ -6495,7 +6507,10 @@ const SBSRatingController=(()=>{
   if(!select)return;
   const normalized=valid.has(code)?code:'';
   let matched=false;
-  [...select.options].forEach(option=>{const optionCode=String(option.value||'').trim().toUpperCase();const selected=optionCode===normalized;option.selected=selected;option.defaultSelected=selected;option.hidden=!!normalized&&!optionCode;option.disabled=!!normalized&&!optionCode;if(selected)matched=true});
+  // v524.94: never hide or disable the blank option. It is how a user clears a
+  // rating; hiding it left the control stuck on its first choice (and painted a
+  // blank value onto an invisible option). Painting only moves the selection.
+  [...select.options].forEach(option=>{const optionCode=String(option.value||'').trim().toUpperCase();const selected=optionCode===normalized;option.selected=selected;option.defaultSelected=selected;if(selected)matched=true});
   if(!matched&&normalized){
    const option=new Option(normalized,normalized,true,true);select.add(option);matched=true;
   }
@@ -6597,6 +6612,9 @@ function addManualSideBySideRow(){
 }
 
 window.addManualSideBySideRow=addManualSideBySideRow;
+// v524.96: standalone guard reset (the v461 components module rebuilds __v415KpiRenderer, so a
+// guard helper attached to that object would be dropped).
+window.__resetKpiRenderGuardsV52496=()=>{window.__sbsUserEditingV99=false;lastRenderedSignature='';};
 window.__v415KpiRenderer={refresh:()=>{window.__sbsUserEditingV99=false;lastRenderedSignature='';render(true,'refresh');validate();window.dispatchEvent(new CustomEvent('kpi-table-ready',{detail:{source:'v415-refresh'}}));},restoreRows:()=>{window.__sbsUserEditingV99=false;window.__removedSideBySideKeys?.clear();lastRenderedSignature='';render(true,'restore');validate();window.dispatchEvent(new CustomEvent('kpi-table-ready',{detail:{source:'v415-restore'}}));},addManual:()=>{window.__sbsUserEditingV99=true;const result=addManualSideBySideRow();window.dispatchEvent(new CustomEvent('kpi-table-ready',{detail:{source:'v415-add-manual'}}));return result;}};
 window.validateSideBySideSection=validate;
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init,{once:true});else init();
