@@ -6448,7 +6448,7 @@ const SBSRatingController=(()=>{
   if(!select)return;
   const normalized=valid.has(code)?code:'';
   let matched=false;
-  [...select.options].forEach(option=>{const selected=String(option.value||'').trim().toUpperCase()===normalized;option.selected=selected;if(selected)matched=true});
+  [...select.options].forEach(option=>{const optionCode=String(option.value||'').trim().toUpperCase();const selected=optionCode===normalized;option.selected=selected;option.defaultSelected=selected;option.hidden=!!normalized&&!optionCode;option.disabled=!!normalized&&!optionCode;if(selected)matched=true});
   if(!matched&&normalized){
    const option=new Option(normalized,normalized,true,true);select.add(option);matched=true;
   }
@@ -6482,7 +6482,9 @@ const SBSRatingController=(()=>{
   // Page 2 and Page 3 are both first-class views. Update every rendered control for this KPI.
   const controls=matching(key);if(!controls.includes(source))controls.push(source);controls.forEach(select=>paint(select,code));
   const field=key.startsWith('parsed:')?'previousRating':'currentRating',id=row.dataset.columnKey;
-  window.KPIState?.update?.(id,{[field]:code});
+  // Update KPIState without allowing the legacy cross-page echo to write a blank value back.
+  window.__sbsRatingCommitInProgress=true;
+  try{window.KPIState?.update?.(id,{[field]:code})}finally{queueMicrotask(()=>{window.__sbsRatingCommitInProgress=false})}
   window.__reviewDocxBlob=null;window.__reviewDocxAttachment=null;window.__reviewDocxFileName='';
   window.dispatchEvent(new CustomEvent('review-file-composition-changed',{detail:{source:'two-page-kpi-rating-change',id,field,value:code}}));
  }
@@ -6493,7 +6495,7 @@ const SBSRatingController=(()=>{
   });
  }
  document.addEventListener('change',event=>{const select=event.target.closest?.(selector);if(select)commit(select)},true);
- ['workflow-panel-changed','kpi-table-ready','review-data-loaded','review-file-composition-changed'].forEach(name=>window.addEventListener(name,()=>requestAnimationFrame(()=>restore(document))));
+ ['workflow-panel-changed','kpi-table-ready','review-data-loaded'].forEach(name=>window.addEventListener(name,()=>requestAnimationFrame(()=>restore(document))));
  return Object.freeze({paint,commit,restore});
 })();
 window.SBSRatingController=SBSRatingController;
@@ -8839,6 +8841,7 @@ function clean(v){return String(v==null?'':v).replace(/\s+/g,' ').trim();}
 function rowOnPage2(id){return Array.from(document.querySelectorAll('#page2-sbs-grid tbody tr[data-column-key]')).find(r=>clean(r.dataset.columnKey)===clean(id));}
 function updateMap(name,key,value){const map=window[name]||(window[name]=new Map());map.set(key,value);}
 function applyPage3Edit(detail){
+ if(window.__sbsRatingCommitInProgress)return true;
  const id=clean(detail?.id),field=clean(detail?.field);if(!id||!field)return false;
  const state=window.KPIState?.get?.().find(x=>clean(x.id||x.key)===id);if(!state)return false;
  const value=clean(state[field]);
