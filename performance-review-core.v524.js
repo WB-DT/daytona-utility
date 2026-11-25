@@ -2528,12 +2528,10 @@ if(!window.KPIObserverHub){
         const phaseText = document.getElementById('archive-loader-phase-text');
         if (phaseText) phaseText.textContent = 'Loading prior review and performance data...';
 
-        const historyPromise = Promise.resolve()
-          .then(() => window.fetchSharePointHistory(empName))
-          .then(async result => {
-            const archiveState = await waitForArchiveTerminalStateV52481(empName, lookupGeneration);
-            return { result, archiveState };
-          });
+        // fetchSharePointHistory resolves only after the Flow response has been
+        // parsed and applied to the review-history UI. Do not add a second polling
+        // wait after data arrival; wait for the real data promise and metrics only.
+        const historyPromise = Promise.resolve().then(() => window.fetchSharePointHistory(empName));
         const metricsPromise = Promise.resolve().then(() => fetchAllPbiDataInBackground(false));
         const results = await Promise.allSettled([historyPromise, metricsPromise]);
 
@@ -2551,7 +2549,7 @@ if(!window.KPIObserverHub){
           employee: empName,
           employeeRecordLoaded: !!window.selectedEmployeeRecord,
           history: results[0].status,
-          archiveState: results[0].status === 'fulfilled' ? results[0].value?.archiveState?.status || '' : 'rejected',
+          historyDataApplied: results[0].status === 'fulfilled',
           metrics: results[1].status,
           elapsedMs: Date.now() - (window.__employeeLookupStartedAt || Date.now())
         });
