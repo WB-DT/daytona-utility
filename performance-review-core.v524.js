@@ -9992,86 +9992,8 @@ window.fetchSharePointHistory=function(employeeName){
 })();
 
 
-/* ===== v52471 half-height side-by-side sizing ===== */
-(() => {
-  'use strict';
-  if (window.__v52471HalfHeightViewer) return;
-  window.__v52471HalfHeightViewer = true;
-  function sizeShell(shell) {
-    if (!shell?.classList.contains('is-viewer-open')) return;
-    const content = shell.querySelector(':scope > .review-existing-content-v52446');
-    const viewer = shell.querySelector(':scope > .comparison-side-pane-v52446');
-    if (!content || !viewer) return;
-    const formHeight = Math.ceil(content.getBoundingClientRect().height);
-    const halfHeight = Math.max(320, Math.round(formHeight * 0.5));
-    viewer.style.setProperty('--comparison-half-height', `${halfHeight}px`);
-    viewer.style.setProperty('height', `${halfHeight}px`, 'important');
-    viewer.style.setProperty('min-height', '320px', 'important');
-    viewer.style.setProperty('max-height', 'none', 'important');
-    console.info('[SideBySideLayout v524.71]', { page: shell.dataset.workspacePage || '', formHeight, viewerHeight: halfHeight });
-  }
-  function sync() { document.querySelectorAll('.review-workspace-shell-v52446').forEach(sizeShell); }
-  const observer = new ResizeObserver(entries => entries.forEach(entry => sizeShell(entry.target.closest('.review-workspace-shell-v52446') || entry.target)));
-  function start() {
-    document.querySelectorAll('.review-workspace-shell-v52446, .review-existing-content-v52446').forEach(el => observer.observe(el));
-    sync();
-  }
-  window.addEventListener('workflow-panel-changed', () => requestAnimationFrame(sync));
-  window.addEventListener('comparison-modal-opened', () => requestAnimationFrame(sync));
-  window.addEventListener('resize', () => requestAnimationFrame(sync), { passive: true });
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
-  else start();
-})();
-
-
-/* ===== v52472 deterministic confirmation visibility + consolidated half-height ===== */
-(() => {
-  'use strict';
-  if (window.__v52472ConsolidatedLayout) return;
-  window.__v52472ConsolidatedLayout = true;
-
-  function syncConfirmation() {
-    const screen = document.getElementById('success-screen');
-    if (!screen) return;
-    const inlineDisplay = String(screen.style.display || '').toLowerCase();
-    const explicitlyHidden = screen.hidden || screen.getAttribute('aria-hidden') === 'true' || inlineDisplay === 'none';
-    screen.classList.toggle('v52472-visible', !explicitlyHidden);
-    if (!explicitlyHidden) {
-      document.querySelectorAll('.review-workspace-shell-v52446').forEach(shell => shell.classList.remove('is-viewer-open'));
-      requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: 'auto' }));
-    }
-  }
-
-  function sizeShell(shell) {
-    if (!shell?.classList.contains('is-viewer-open')) return;
-    const content = shell.querySelector(':scope > .review-existing-content-v52446');
-    const viewer = shell.querySelector(':scope > .comparison-side-pane-v52446');
-    if (!content || !viewer) return;
-    const formHeight = Math.ceil(content.getBoundingClientRect().height);
-    const halfHeight = Math.max(320, Math.round(formHeight / 2));
-    viewer.style.removeProperty('--comparison-matched-height');
-    viewer.style.setProperty('--comparison-half-height', `${halfHeight}px`);
-    viewer.style.setProperty('height', `${halfHeight}px`, 'important');
-    viewer.style.setProperty('min-height', '320px', 'important');
-    viewer.style.setProperty('max-height', `${halfHeight}px`, 'important');
-    console.info('[LayoutAuthority v524.72]', { page: shell.dataset.workspacePage || '', formHeight, viewerHeight: halfHeight });
-  }
-
-  function syncViewers() { document.querySelectorAll('.review-workspace-shell-v52446').forEach(sizeShell); }
-  function start() {
-    const success = document.getElementById('success-screen');
-    if (success) new MutationObserver(syncConfirmation).observe(success, { attributes: true, attributeFilter: ['style','hidden','aria-hidden'] });
-    syncConfirmation();
-    syncViewers();
-  }
-  window.addEventListener('workflow-panel-changed', () => requestAnimationFrame(syncViewers));
-  window.addEventListener('comparison-modal-opened', () => requestAnimationFrame(syncViewers));
-  window.addEventListener('resize', () => requestAnimationFrame(syncViewers), { passive: true });
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
-  else start();
-})();
-
-
+/* ===== v52471 half-height sizing superseded by v52479 ===== */
+/* ===== v52472 sizing superseded; existing confirmation behavior retained by CSS authorities ===== */
 /* ===== v52474 Start New Review: verify successful Dataverse create + file PATCH ===== */
 (() => {
   'use strict';
@@ -10168,4 +10090,86 @@ window.fetchSharePointHistory=function(employeeName){
       throw error;
     }
   };
+})();
+
+
+/* ===== v52479 true fresh navigation + stable side-by-side sizing ===== */
+(() => {
+  'use strict';
+  if (window.__v52479FreshStart) return;
+  window.__v52479FreshStart = true;
+  const FRESH_KEY = 'performanceReview.forceFreshStart.v52479';
+
+  function clearTransientReviewState() {
+    try { sessionStorage.removeItem(FRESH_KEY); } catch (_) {}
+    document.querySelectorAll('input:not([type="checkbox"]):not([readonly]), select, textarea').forEach(element => {
+      if (element.id === 'reviewer-name') return;
+      element.value = '';
+    });
+    document.querySelectorAll('input[type="checkbox"]').forEach(element => { element.checked = false; });
+    window.pbiCache = { loginData: null, avayaData: null, empName: null, period: null };
+    window.selectedEmployeeRecord = null;
+    window.__latestPbiMetrics = null;
+    window.__currentComparisonFile = null;
+    window.__currentComparisonFileName = '';
+    window.__pendingComparisonRender = null;
+    window.__binaryComparisonRender = null;
+    document.querySelectorAll('.review-workspace-shell-v52446').forEach(shell => shell.classList.remove('is-viewer-open'));
+    const viewer = document.getElementById('comparison-modal');
+    if (viewer) {
+      viewer.dataset.open = 'false';
+      viewer.setAttribute('aria-hidden', 'true');
+      viewer.style.setProperty('display', 'none', 'important');
+    }
+    console.info('[FreshStart v524.79] Transient review state cleared before initialization.');
+  }
+
+  try {
+    if (sessionStorage.getItem(FRESH_KEY) === '1') clearTransientReviewState();
+  } catch (_) {}
+
+  window.startFreshReviewV52479 = function() {
+    try { sessionStorage.setItem(FRESH_KEY, '1'); } catch (_) {}
+    const url = new URL(window.location.href);
+    url.hash = '';
+    url.search = '';
+    url.searchParams.set('_fresh', String(Date.now()));
+    window.location.replace(url.href);
+  };
+
+  function sizeVisibleViewer(shell) {
+    if (!shell?.classList.contains('is-viewer-open')) return;
+    const content = shell.querySelector(':scope > .review-existing-content-v52446');
+    const viewer = shell.querySelector(':scope > .comparison-side-pane-v52446');
+    if (!content || !viewer) return;
+    const measured = Math.max(content.getBoundingClientRect().height, content.scrollHeight || 0);
+    // Never collapse to the old 320px fallback while a hidden page is being measured.
+    if (measured < 640) return;
+    const height = Math.round(measured / 2);
+    viewer.style.removeProperty('--comparison-matched-height');
+    viewer.style.setProperty('--comparison-half-height', `${height}px`);
+    viewer.style.setProperty('height', `${height}px`, 'important');
+    viewer.style.setProperty('min-height', '480px', 'important');
+    viewer.style.setProperty('max-height', `${height}px`, 'important');
+    console.info('[ViewerSize v524.79]', { page: shell.dataset.workspacePage || '', formHeight: measured, viewerHeight: height });
+  }
+
+  function syncViewers() {
+    document.querySelectorAll('.review-workspace-shell-v52446').forEach(sizeVisibleViewer);
+  }
+  function scheduleSync() {
+    requestAnimationFrame(() => {
+      syncViewers();
+      setTimeout(syncViewers, 120);
+      setTimeout(syncViewers, 500);
+    });
+  }
+
+  window.addEventListener('workflow-panel-changed', scheduleSync);
+  window.addEventListener('comparison-modal-opened', scheduleSync);
+  window.addEventListener('resize', scheduleSync, { passive: true });
+  if ('ResizeObserver' in window) {
+    const observer = new ResizeObserver(scheduleSync);
+    document.querySelectorAll('.review-existing-content-v52446').forEach(element => observer.observe(element));
+  }
 })();
