@@ -2352,11 +2352,30 @@ if(!window.KPIObserverHub){
       }
   };
 
+  async function waitForArchiveTerminalStateV52481(employeeName, generation, timeoutMs = 120000) {
+    const started = Date.now();
+    const terminalStates = new Set(['ok', 'warning', 'error']);
+    while (Date.now() - started < timeoutMs) {
+      if (val('employee-name') !== employeeName || generation !== window.__employeeLookupGeneration) {
+        return { status: 'stale' };
+      }
+      const archive = window.__connectionState?.archive || {};
+      const state = String(archive.state || '').toLowerCase();
+      const loading = state === 'loading' || document.body.classList.contains('archive-loader-active');
+      if (terminalStates.has(state) && !loading) {
+        return { status: state, label: archive.label || '', detail: archive.detail || '' };
+      }
+      await new Promise(resolve => setTimeout(resolve, 125));
+    }
+    return { status: 'timeout' };
+  }
+
   async function autoFillEmployee() {
     const empName = val('employee-name');
     const lookupGeneration = window.__employeeLookupGeneration = (window.__employeeLookupGeneration || 0) + 1;
     if (empName) {
       window.__employeeLookupLoaderHold = true;
+      window.__employeeLookupStartedAt = Date.now();
       window.setPanel1ArchiveLock?.(true);
       const phaseText = document.getElementById('archive-loader-phase-text');
       if (phaseText) phaseText.textContent = 'Loading employee, prior review, and performance data...';
@@ -2509,7 +2528,12 @@ if(!window.KPIObserverHub){
         const phaseText = document.getElementById('archive-loader-phase-text');
         if (phaseText) phaseText.textContent = 'Loading prior review and performance data...';
 
-        const historyPromise = Promise.resolve().then(() => window.fetchSharePointHistory(empName));
+        const historyPromise = Promise.resolve()
+          .then(() => window.fetchSharePointHistory(empName))
+          .then(async result => {
+            const archiveState = await waitForArchiveTerminalStateV52481(empName, lookupGeneration);
+            return { result, archiveState };
+          });
         const metricsPromise = Promise.resolve().then(() => fetchAllPbiDataInBackground(false));
         const results = await Promise.allSettled([historyPromise, metricsPromise]);
 
@@ -2527,7 +2551,9 @@ if(!window.KPIObserverHub){
           employee: empName,
           employeeRecordLoaded: !!window.selectedEmployeeRecord,
           history: results[0].status,
-          metrics: results[1].status
+          archiveState: results[0].status === 'fulfilled' ? results[0].value?.archiveState?.status || '' : 'rejected',
+          metrics: results[1].status,
+          elapsedMs: Date.now() - (window.__employeeLookupStartedAt || Date.now())
         });
     }
   }
@@ -9298,7 +9324,7 @@ window.fetchSharePointHistory=function(employeeName){
  started++;
  let timer=0,record={key,promise:null,result:null};
  const request=Promise.resolve().then(()=>original.call(window,employeeName));
- const deadline=new Promise(resolve=>{timer=setTimeout(()=>{timeouts++;try{window.__historyRequestController?.abort()}catch(_){}window.setPanel1ArchiveLock?.(false);window.setConnectionStatus?.('archive','warning','Archive: Timed Out','Archive lookup exceeded 30 seconds. Continue the review or retry the archive search.');resolve(null)},30000)});
+ const deadline=new Promise(resolve=>{timer=setTimeout(()=>{timeouts++;try{window.__historyRequestController?.abort()}catch(_){}window.setPanel1ArchiveLock?.(false);window.setConnectionStatus?.('archive','warning','Archive: Timed Out','Archive lookup exceeded 120 seconds. Continue the review or retry the archive search.');resolve(null)},120000)});
  record.promise=Promise.race([request,deadline]).then(result=>{record.result=result;return result}).finally(()=>{clearTimeout(timer);window.setPanel1ArchiveLock?.(false);lastCompletedKey=key;lastCompletedAt=Date.now();completed++;if(active===record)active=null});
  active=record;return record.promise;
 };
