@@ -10139,6 +10139,3 @@ window.fetchSharePointHistory=function(employeeName){
     }
   };
 })();
-
-/* ===== v52475 confirmation ARIA visibility authority ===== */
-(()=>{'use strict';if(window.__v52475ConfirmationAria)return;window.__v52475ConfirmationAria=true;function sync(){const screen=document.getElementById('success-screen');if(!screen)return;const visible=!screen.hidden&&String(screen.style.display||'').toLowerCase()!=='none';screen.setAttribute('aria-hidden',visible?'false':'true');screen.toggleAttribute('inert',!visible);const button=screen.querySelector('[data-v448-start-new-review="true"]');if(button){button.setAttribute('aria-label','Start a new performance review');button.setAttribute('aria-hidden','false');button.removeAttribute('tabindex')}}const screen=document.getElementById('success-screen');if(screen)new MutationObserver(sync).observe(screen,{attributes:true,attributeFilter:['style','hidden','aria-hidden']});document.readyState==='loading'?document.addEventListener('DOMContentLoaded',sync,{once:true}):sync()})();
