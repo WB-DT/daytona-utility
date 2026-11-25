@@ -2370,6 +2370,31 @@ if(!window.KPIObserverHub){
     return { status: 'timeout' };
   }
 
+  // v524.93: a stalled Flow or a hung Dataverse page used to keep the Panel 1
+  // archive lock up forever, because nothing bounded the dependent lookups and
+  // the only failsafe was itself ignored while the loader hold was set.
+  // Bound each lookup so the pipeline always reaches its release path.
+  const ARCHIVE_LOOKUP_TIMEOUT_MS = 30000;
+  const METRICS_LOOKUP_TIMEOUT_MS = 45000;
+
+  function boundedLookupV52493(promise, timeoutMs, label, onTimeout) {
+    let timer = 0;
+    const deadline = new Promise(resolve => {
+      timer = setTimeout(() => {
+        try { if (typeof onTimeout === 'function') onTimeout(); } catch (error) { console.warn('[EmployeeLookup v524.93] Timeout cleanup failed:', error); }
+        console.warn(`[EmployeeLookup v524.93] ${label} did not settle within ${timeoutMs} ms; releasing the loader.`);
+        resolve({ status: 'timeout' });
+      }, timeoutMs);
+    });
+    return Promise.race([
+      Promise.resolve(promise).then(
+        value => ({ status: 'fulfilled', value }),
+        reason => ({ status: 'rejected', reason })
+      ),
+      deadline
+    ]).finally(() => clearTimeout(timer));
+  }
+
   async function autoFillEmployee() {
     const empName = val('employee-name');
     const lookupGeneration = window.__employeeLookupGeneration = (window.__employeeLookupGeneration || 0) + 1;
@@ -2519,46 +2544,68 @@ if(!window.KPIObserverHub){
     } catch(e) {
         console.error("Auto-fill API error: ", e);
     } finally {
-        if (val('employee-name') !== empName || lookupGeneration !== window.__employeeLookupGeneration) {
+        // v524.93: the loader hold and Panel 1 lock are released on every exit
+        // path, including the stale-selection exits (Start Over clears the
+        // employee while a lookup is running). A newer lookup keeps ownership:
+        // it bumped the generation and will release its own hold.
+        const releaseLoaderOwnership = () => {
+          if (lookupGeneration !== window.__employeeLookupGeneration) return false;
+          window.__employeeLookupLoaderHold = false;
+          window.setPanel1ArchiveLock?.(false);
+          document.body.classList.remove('archive-loader-active');
+          clearTimeout(window.__panel1ArchiveLockFailsafe);
+          ['api-loader','iframe-loader'].forEach(id => {
+            const element = document.getElementById(id);
+            if (element) element.style.display = 'none';
+          });
           if (loader) loader.style.display = 'none';
-          return;
-        }
-        updateMetricsUI();
-        setLastReviewLoading(true, 'Loading prior review and performance data — please wait before proceeding...');
-        const phaseText = document.getElementById('archive-loader-phase-text');
-        if (phaseText) phaseText.textContent = 'Loading prior review and performance data...';
+          return true;
+        };
+        try {
+          if (val('employee-name') !== empName || lookupGeneration !== window.__employeeLookupGeneration) return;
+          updateMetricsUI();
+          setLastReviewLoading(true, 'Loading prior review and performance data — please wait before proceeding...');
+          const phaseText = document.getElementById('archive-loader-phase-text');
+          if (phaseText) phaseText.textContent = 'Loading prior review and performance data...';
 
-        // fetchSharePointHistory resolves only after the Flow response has been
-        // parsed and applied to the review-history UI. Do not add a second polling
-        // wait after data arrival; wait for the real data promise and metrics only.
-        const historyPromise = Promise.resolve().then(() => window.fetchSharePointHistory(empName));
-        const metricsPromise = Promise.resolve().then(() => fetchAllPbiDataInBackground(false));
-        const results = await Promise.allSettled([historyPromise, metricsPromise]);
+          // fetchSharePointHistory resolves only after the Flow response has been
+          // parsed and applied to the review-history UI. Do not add a second polling
+          // wait after data arrival; wait for the real data promise and metrics only.
+          // Both dependent lookups are bounded so neither can pin the loader.
+          const historyResultPromise = boundedLookupV52493(
+            Promise.resolve().then(() => window.fetchSharePointHistory(empName)),
+            ARCHIVE_LOOKUP_TIMEOUT_MS,
+            'SharePoint history',
+            () => {
+              if (lookupGeneration !== window.__employeeLookupGeneration) return;
+              try { window.__historyRequestController?.abort?.(); } catch (_) {}
+              window.setConnectionStatus?.('archive','warning','Archive: Timed Out','Archive lookup exceeded 30 seconds. Continue the review or retry the lookup.');
+              setLastReviewStatus('warning', 'Prior review search timed out');
+            }
+          );
+          const metricsResultPromise = boundedLookupV52493(
+            Promise.resolve().then(() => fetchAllPbiDataInBackground(false)),
+            METRICS_LOOKUP_TIMEOUT_MS,
+            'Monthly metrics'
+          );
+          const [historyResult, metricsResult] = await Promise.all([historyResultPromise, metricsResultPromise]);
 
-        if (val('employee-name') !== empName || lookupGeneration !== window.__employeeLookupGeneration) {
-          if (loader) loader.style.display = 'none';
-          return;
+          if (val('employee-name') !== empName || lookupGeneration !== window.__employeeLookupGeneration) return;
+          [historyResult, metricsResult]
+            .filter(result => result.status === 'rejected')
+            .forEach(result => console.error('[EmployeeLookup v524.93] Dependent lookup failed:', result.reason));
+          updateMetricsUI();
+          console.info('[EmployeeLookup v524.93] Selection pipeline settled and released loader ownership.', {
+            employee: empName,
+            employeeRecordLoaded: !!window.selectedEmployeeRecord,
+            history: historyResult.status,
+            historyDataApplied: historyResult.status === 'fulfilled',
+            metrics: metricsResult.status,
+            elapsedMs: Date.now() - (window.__employeeLookupStartedAt || Date.now())
+          });
+        } finally {
+          releaseLoaderOwnership();
         }
-        const rejected = results.filter(result => result.status === 'rejected');
-        rejected.forEach(result => console.error('[EmployeeLookup v524.77] Dependent lookup failed:', result.reason));
-        updateMetricsUI();
-        window.__employeeLookupLoaderHold = false;
-        window.setPanel1ArchiveLock?.(false);
-        document.body.classList.remove('archive-loader-active');
-        clearTimeout(window.__panel1ArchiveLockFailsafe);
-        ['api-loader','iframe-loader'].forEach(id => {
-          const element = document.getElementById(id);
-          if (element) element.style.display = 'none';
-        });
-        if (loader) loader.style.display = 'none';
-        console.info('[EmployeeLookup v524.83] Selection pipeline settled and released loader ownership.', {
-          employee: empName,
-          employeeRecordLoaded: !!window.selectedEmployeeRecord,
-          history: results[0].status,
-          historyDataApplied: results[0].status === 'fulfilled',
-          metrics: results[1].status,
-          elapsedMs: Date.now() - (window.__employeeLookupStartedAt || Date.now())
-        });
     }
   }
 
