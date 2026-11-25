@@ -5648,7 +5648,12 @@ function schedule(){if(queued)return;queued=true;queueMicrotask(()=>{queued=fals
  const DB=['PerformanceReviewPortalWorkspace','PerformanceReviewPortalManualReports','PerformanceReviewPortalCache','PerformanceReviewPortalMonthlyDataV222'];
  const keep=new Set(['theme','visualMode']);
  function clearStorage(){try{Object.keys(sessionStorage).forEach(k=>sessionStorage.removeItem(k));}catch(_){}try{Object.keys(localStorage).forEach(k=>{if(!keep.has(k)&&/^performanceReview/i.test(k))localStorage.removeItem(k);});}catch(_){}DB.forEach(n=>{try{indexedDB.deleteDatabase(n);}catch(_){}});}
- function clearRuntime(){['__latestDataverseDailyData','__latestPbiMetrics','__lastMonthlyDataLoad','__dataverseDailyPromise','previousReviewSnapshot','lastParsedPreviousReview','previousReviewData','parsedPreviousReview','__reviewDocxBlob','__reviewDocxAttachment','__reviewDocxFileName'].forEach(k=>{try{delete window[k]}catch(_){window[k]=null}});window.currentMonthMetrics={};window.pbiCache={};window.__parsedKpiRows=[];window.__parsedKpiLabels=[];}
+ function clearRuntime(){['__latestDataverseDailyData','__latestPbiMetrics','__lastMonthlyDataLoad','__dataverseDailyPromise','previousReviewSnapshot','lastParsedPreviousReview','previousReviewData','parsedPreviousReview','__reviewDocxBlob','__reviewDocxAttachment','__reviewDocxFileName'].forEach(k=>{try{delete window[k]}catch(_){window[k]=null}});window.currentMonthMetrics={};window.pbiCache={};window.__parsedKpiRows=[];window.__parsedKpiLabels=[];
+  // Fresh reviews must never inherit saved rating/value edits from the submitted review.
+  ['__sideBySideRatingEdits','__sideBySideValueEdits','__sideBySideLabelEdits','__sideBySidePreviousValueEdits'].forEach(k=>{const value=window[k];if(value&&typeof value.clear==='function')value.clear();else try{delete window[k]}catch(_){window[k]=null}});
+  window.__removedSideBySideKeys?.clear?.();window.__sbsUserEditingV99=false;window.__comparisonPreviewRendered=false;
+  document.querySelectorAll('#page2-sbs-grid select[data-rating-key]').forEach(select=>{select.value='';select.removeAttribute('data-rating');select.style.removeProperty('color');select.style.removeProperty('background-color');});
+ }
  function clearFields(){document.querySelectorAll('#panel-2 input,#panel-2 select,#panel-2 textarea,#panel-2 [contenteditable=true],#panel-3 input,#panel-3 select,#panel-3 textarea,#panel-3 [contenteditable=true]').forEach(el=>{if(['button','submit','hidden','file'].includes(el.type))return;if(el.type==='checkbox'||el.type==='radio')el.checked=false;else if(el.isContentEditable)el.textContent='';else el.value='';el.removeAttribute('data-user-edited');el.removeAttribute('data-kpi-changed');});document.querySelectorAll('[data-report-table] tbody').forEach(x=>x.replaceChildren());}
  function reset(reason,fields=true){clearStorage();clearRuntime();if(fields)clearFields();window.dispatchEvent(new CustomEvent('review-state-reset',{detail:{reason,at:new Date().toISOString()}}));return true;}
  window.ReviewLifecycleController=Object.freeze({reset});window.clearAllReviewStateV300=reset;
@@ -6433,6 +6438,22 @@ function render(force=false,reason='auto'){
  body.querySelectorAll('[data-remove-key]').forEach(btn=>btn.addEventListener('click',()=>{window.__sbsUserEditingV99=true;window.__removedSideBySideKeys.add(btn.dataset.removeKey);btn.closest('tr')?.remove();validate()}));
  if(source)source.textContent=selected?'Loaded automatically from "'+clean(selected.heading||'This month')+'" on PDF page '+(selected.page||'—')+'. '+rows.length+' KPI rows.':'Showing '+rows.length+' KPI rows from parsed Flow data. The PDF viewer is optional.';
 }
+// v524.86: one rating-change authority for standard and manually added KPI rows.
+document.addEventListener('change',event=>{
+ const select=event.target.closest?.('#page2-sbs-grid select[data-rating-key]');
+ if(!select)return;
+ const row=select.closest('tr[data-column-key]'),ratingKey=clean(select.dataset.ratingKey);
+ if(!row||!ratingKey)return;
+ window.__sbsUserEditingV99=true;
+ const ratingEdits=window.__sideBySideRatingEdits||(window.__sideBySideRatingEdits=new Map());
+ ratingEdits.set(ratingKey,select.value);
+ syncSideBySideRatingStyle(select);
+ const field=ratingKey.startsWith('parsed:')?'previousRating':'currentRating';
+ const id=row.dataset.columnKey;
+ if(window.KPIState?.update)window.KPIState.update(id,{[field]:select.value});
+ window.__reviewDocxBlob=null;window.__reviewDocxAttachment=null;
+ window.dispatchEvent(new CustomEvent('review-file-composition-changed',{detail:{source:'consolidated-kpi-rating-change',id,field,value:select.value}}));
+},true);
 function install(){const original=window.extractPdfTableCells;if(typeof original!=='function'||original.__thisMonthWrapped)return;async function wrapped(pdf){const result=await original(pdf),selected=chooseThisMonthTable(result?.periods);if(selected){result.selectedThisMonthTable=selected;result.selectedBottomTable=selected;result.selectedPage=selected.page;result.cells=selected.pairs;}window.__lastCellParseResult=result;queueMicrotask(()=>{render();window.dispatchEvent(new CustomEvent('previous-review-pdf-this-month',{detail:result}))});return result}wrapped.__thisMonthWrapped=true;window.extractPdfTableCells=wrapped}
 function validate(){const rows=[...document.querySelectorAll('#page2-sbs-grid tbody tr')],keys=rows.map(x=>x.dataset.columnKey).filter(Boolean);return window.__sideBySideValidation={checkedAt:new Date().toISOString(),sectionPresent:!!$('page2-side-by-side-table'),tablePresent:!!$('page2-sbs-grid'),renderedRows:rows.length,duplicateColumnKeys:[...new Set(keys.filter((x,i)=>keys.indexOf(x)!==i))],selectedHeading:window.__lastCellParseResult?.selectedThisMonthTable?.heading||'',selectedPage:window.__lastCellParseResult?.selectedThisMonthTable?.page||null,sourceRule:'Use This month table from prior PDF as previous-month data'}}
 function init(){install();/* v55: do not rebuild the KPI table for ordinary clicks, typing, or dropdown changes.
@@ -6479,7 +6500,7 @@ function addManualSideBySideRow(){
   if(auto&&!ratingEdits.has('current:'+key)){ratings[1].value=auto;syncSideBySideRatingStyle(ratings[1]);}
   valueEdits.set(key,current.value);
  }));
- ratings.forEach(el=>{syncSideBySideRatingStyle(el);el.addEventListener('change',()=>{const ratingEdits=window.__sideBySideRatingEdits||(window.__sideBySideRatingEdits=new Map());ratingEdits.set(el.dataset.ratingKey,el.value);syncSideBySideRatingStyle(el);});});
+ ratings.forEach(syncSideBySideRatingStyle);
  row.querySelector('.sbs-remove-row').addEventListener('click',()=>{window.__sbsUserEditingV99=true;row.remove();validate();});
  label.focus();
  validate();
@@ -9809,69 +9830,89 @@ window.openReviewSideBySideV52447=open;window.closeReviewSideBySideV52447=close;
 /* ===== v52472 sizing superseded; existing confirmation behavior retained by CSS authorities ===== */
 /* consolidated: obsolete controller removed */
 
-/* ===== v52479 true fresh navigation + stable side-by-side sizing ===== */
+/* ===== v52488 canonical fresh review + cross-page SBS sizing ===== */
 (() => {
   'use strict';
-  if (window.__v52479FreshStart) return;
-  window.__v52479FreshStart = true;
-  const FRESH_KEY = 'performanceReview.forceFreshStart.v52479';
+  if (window.__v52488FreshStart) return;
+  window.__v52488FreshStart = true;
+  const FRESH_KEY = 'performanceReview.forceFreshStart.v52488';
 
-  function clearTransientReviewState() {
-    try { sessionStorage.removeItem(FRESH_KEY); } catch (_) {}
-    document.querySelectorAll('input:not([type="checkbox"]):not([readonly]), select, textarea').forEach(element => {
-      if (element.id === 'reviewer-name') return;
-      element.value = '';
-    });
-    document.querySelectorAll('input[type="checkbox"]').forEach(element => { element.checked = false; });
-    window.pbiCache = { loginData: null, avayaData: null, empName: null, period: null };
+  function finishFreshReview() {
+    let requested = false;
+    try {
+      requested = sessionStorage.getItem(FRESH_KEY) === '1';
+      if (requested) sessionStorage.removeItem(FRESH_KEY);
+    } catch (_) {}
+    if (!requested) return;
+    window.ReviewLifecycleController?.reset?.('start-new-review-reload', true);
     window.selectedEmployeeRecord = null;
-    window.__latestPbiMetrics = null;
+    window.__comparisonPreviewRendered = false;
     window.__currentComparisonFile = null;
     window.__currentComparisonFileName = '';
-    window.__pendingComparisonRender = null;
-    window.__binaryComparisonRender = null;
     document.querySelectorAll('.review-workspace-shell-v52446').forEach(shell => shell.classList.remove('is-viewer-open'));
     const viewer = document.getElementById('comparison-modal');
     if (viewer) {
       viewer.dataset.open = 'false';
       viewer.setAttribute('aria-hidden', 'true');
-      viewer.style.setProperty('display', 'none', 'important');
+      viewer.style.removeProperty('height');
+      viewer.style.removeProperty('min-height');
+      viewer.style.removeProperty('max-height');
+      viewer.style.removeProperty('--comparison-half-height');
     }
-    console.info('[FreshStart v524.79] Transient review state cleared before initialization.');
+    window.goToPanel1?.();
+    document.documentElement.dataset.activeWorkflowPage = '1';
+    window.dispatchEvent(new CustomEvent('fresh-review-ready', { detail: { source: 'v52488' } }));
+    console.info('[FreshStart v524.88] Canonical reset completed on Page 1.');
   }
-
-  try {
-    if (sessionStorage.getItem(FRESH_KEY) === '1') clearTransientReviewState();
-  } catch (_) {}
 
   window.startFreshReviewV52479 = function() {
     try { sessionStorage.setItem(FRESH_KEY, '1'); } catch (_) {}
-    const url = new URL(window.location.href);
-    url.hash = '';
-    url.search = '';
-    url.searchParams.set('_fresh', String(Date.now()));
-    window.location.replace(url.href);
+    window.location.reload();
   };
+  window.startFreshReviewV52488 = window.startFreshReviewV52479;
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', finishFreshReview, { once: true });
+  else queueMicrotask(finishFreshReview);
+
+  let canonicalPage2ViewerHeight = 0;
+
+  function applyViewerHeight(viewer, height) {
+    if (!viewer || !Number.isFinite(height) || height < 480) return false;
+    const pixels = `${Math.round(height)}px`;
+    viewer.style.removeProperty('--comparison-matched-height');
+    viewer.style.setProperty('--comparison-half-height', pixels);
+    viewer.style.setProperty('height', pixels, 'important');
+    viewer.style.setProperty('min-height', pixels, 'important');
+    viewer.style.setProperty('max-height', pixels, 'important');
+    return true;
+  }
 
   function sizeVisibleViewer(shell) {
     if (!shell?.classList.contains('is-viewer-open')) return;
     const content = shell.querySelector(':scope > .review-existing-content-v52446');
     const viewer = shell.querySelector(':scope > .comparison-side-pane-v52446');
     if (!content || !viewer) return;
+    const page = shell.closest('#panel-2') ? 2 : shell.closest('#panel-3') ? 3 : 0;
     const measured = Math.max(content.getBoundingClientRect().height, content.scrollHeight || 0);
-    // Never collapse to the old 320px fallback while a hidden page is being measured.
-    if (measured < 640) return;
-    const height = Math.round(measured / 2);
-    viewer.style.removeProperty('--comparison-matched-height');
-    viewer.style.setProperty('--comparison-half-height', `${height}px`);
-    viewer.style.setProperty('height', `${height}px`, 'important');
-    viewer.style.setProperty('min-height', '480px', 'important');
-    viewer.style.setProperty('max-height', `${height}px`, 'important');
-    console.info('[ViewerSize v524.79]', { page: shell.dataset.workspacePage || '', formHeight: measured, viewerHeight: height });
+
+    // Page 2 is the sizing authority. Its exact applied height survives the move to Page 3.
+    if (page === 2 && measured >= 640) {
+      canonicalPage2ViewerHeight = Math.max(480, Math.round(measured / 2));
+      viewer.dataset.page2ViewerHeight = String(canonicalPage2ViewerHeight);
+    }
+    if (!canonicalPage2ViewerHeight) canonicalPage2ViewerHeight = Number(viewer.dataset.page2ViewerHeight || 0);
+    const height = page === 3
+      ? (canonicalPage2ViewerHeight || Math.max(480, Math.round(measured / 2)))
+      : Math.max(480, Math.round(measured / 2));
+    if (!applyViewerHeight(viewer, height)) return;
+    console.info('[ViewerSize v524.88]', { page, formHeight: measured, viewerHeight: height, authority: page === 3 ? 'page-2' : 'measured-page-2' });
   }
 
   function syncViewers() {
-    document.querySelectorAll('.review-workspace-shell-v52446').forEach(sizeVisibleViewer);
+    const page2 = document.querySelector('#panel-2 .review-workspace-shell-v52446.is-viewer-open');
+    const page3 = document.querySelector('#panel-3 .review-workspace-shell-v52446.is-viewer-open');
+    if (page2) sizeVisibleViewer(page2);
+    if (page3) sizeVisibleViewer(page3);
   }
   function scheduleSync() {
     requestAnimationFrame(() => {
